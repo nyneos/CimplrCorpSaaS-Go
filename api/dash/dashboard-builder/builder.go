@@ -215,7 +215,7 @@ func GetDashboardByID(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		id := strings.TrimSpace(body.ID)
 		if id == "" {
-			respondBuilderError(w, http.StatusBadRequest, "id is required")
+			respondBuilderError(w, http.StatusBadRequest, constants.ErrIDRequired)
 			return
 		}
 
@@ -242,7 +242,7 @@ func GetDashboardByID(pool *pgxpool.Pool) http.HandlerFunc {
 			   )
 		`, id, userID).Scan(&name, &isDefault, &configRaw, &createdAt, &updatedAt, &ownerUserID)
 		if err != nil {
-			respondBuilderError(w, http.StatusNotFound, "dashboard not found")
+			respondBuilderError(w, http.StatusNotFound, constants.ErrDashboardNotFound)
 			return
 		}
 
@@ -285,7 +285,7 @@ func GetDashboardAssignees(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		id := strings.TrimSpace(body.ID)
 		if id == "" {
-			respondBuilderError(w, http.StatusBadRequest, "id is required")
+			respondBuilderError(w, http.StatusBadRequest, constants.ErrIDRequired)
 			return
 		}
 
@@ -294,7 +294,7 @@ func GetDashboardAssignees(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT user_id FROM public.user_dashboards WHERE id = $1
 		`, id).Scan(&ownerID)
 		if err != nil || ownerID != userID {
-			respondBuilderError(w, http.StatusNotFound, "dashboard not found")
+			respondBuilderError(w, http.StatusNotFound, constants.ErrDashboardNotFound)
 			return
 		}
 
@@ -354,7 +354,7 @@ func AssignDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		id := strings.TrimSpace(body.ID)
 		if id == "" {
-			respondBuilderError(w, http.StatusBadRequest, "id is required")
+			respondBuilderError(w, http.StatusBadRequest, constants.ErrIDRequired)
 			return
 		}
 
@@ -363,7 +363,7 @@ func AssignDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT user_id FROM public.user_dashboards WHERE id = $1
 		`, id).Scan(&ownerID)
 		if err != nil || ownerID != userID {
-			respondBuilderError(w, http.StatusNotFound, "dashboard not found")
+			respondBuilderError(w, http.StatusNotFound, constants.ErrDashboardNotFound)
 			return
 		}
 
@@ -384,7 +384,7 @@ func AssignDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			respondBuilderError(w, http.StatusInternalServerError, "failed to assign dashboard")
+			respondBuilderError(w, http.StatusInternalServerError, constants.ErrFailedToAssignDashboard)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -394,7 +394,7 @@ func AssignDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			 WHERE dashboard_id = $1 AND owner_user_id = $2
 		`, id, userID); err != nil {
 			logger.LogError("dashboard-builder AssignDashboard delete: %v", err)
-			respondBuilderError(w, http.StatusInternalServerError, "failed to assign dashboard")
+			respondBuilderError(w, http.StatusInternalServerError, constants.ErrFailedToAssignDashboard)
 			return
 		}
 
@@ -406,13 +406,13 @@ func AssignDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				ON CONFLICT (dashboard_id, assigned_user_id) DO NOTHING
 			`, id, userID, assignedID); err != nil {
 				logger.LogError("dashboard-builder AssignDashboard insert: %v", err)
-				respondBuilderError(w, http.StatusInternalServerError, "failed to assign dashboard")
+				respondBuilderError(w, http.StatusInternalServerError, constants.ErrFailedToAssignDashboard)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondBuilderError(w, http.StatusInternalServerError, "failed to assign dashboard")
+			respondBuilderError(w, http.StatusInternalServerError, constants.ErrFailedToAssignDashboard)
 			return
 		}
 
@@ -449,7 +449,7 @@ func DeleteDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(body.ID) == "" {
-			respondBuilderError(w, http.StatusBadRequest, "id is required")
+			respondBuilderError(w, http.StatusBadRequest, constants.ErrIDRequired)
 			return
 		}
 
@@ -463,7 +463,7 @@ func DeleteDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if tag.RowsAffected() == 0 {
-			respondBuilderError(w, http.StatusNotFound, "dashboard not found")
+			respondBuilderError(w, http.StatusNotFound, constants.ErrDashboardNotFound)
 			return
 		}
 

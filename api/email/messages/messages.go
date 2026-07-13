@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/services/mailruntime"
@@ -52,7 +53,7 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 			FilterMatchedOnly *bool  `json:"filter_matched_only"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 
@@ -184,7 +185,7 @@ func HandleMessageGet(pool *pgxpool.Pool) http.HandlerFunc {
 			MessageID string `json:"message_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		messageID := strings.TrimSpace(req.MessageID)
@@ -197,9 +198,9 @@ func HandleMessageGet(pool *pgxpool.Pool) http.HandlerFunc {
 
 		var (
 			s3RawKey, s3ParsedKey, fromAddr, subject, module, entityID, preview, status, mailDirection string
-			envelopeTo                                                                                   []string
-			receivedAt                                                                                   *time.Time
-			extractedMeta                                                                                []byte
+			envelopeTo                                                                                 []string
+			receivedAt                                                                                 *time.Time
+			extractedMeta                                                                              []byte
 		)
 		err := pool.QueryRow(r.Context(), `
 			SELECT COALESCE(s3_raw_key,''), COALESCE(s3_parsed_key,''), COALESCE(envelope_from,''), COALESCE(subject,''),
@@ -348,7 +349,7 @@ func HandleMessageExtract(pool *pgxpool.Pool) http.HandlerFunc {
 			Module    string `json:"module"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		if strings.TrimSpace(req.MessageID) == "" {
@@ -452,7 +453,7 @@ func HandleMessageLink(pool *pgxpool.Pool) http.HandlerFunc {
 			EntityID  string `json:"entity_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		if strings.TrimSpace(req.MessageID) == "" || strings.TrimSpace(req.EntityID) == "" {
@@ -486,7 +487,7 @@ func HandleAttachmentDownload(pool *pgxpool.Pool) http.HandlerFunc {
 			Preview      bool   `json:"preview"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		attachmentID := strings.TrimSpace(req.AttachmentID)

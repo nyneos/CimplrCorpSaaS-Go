@@ -21,9 +21,9 @@ type txTableConfig struct {
 // whenever a new transaction type is introduced in any module.
 var txTypeRegistry = map[string]txTableConfig{
 	// ── Email Inbox configuration ─────────────────────────────────────────
-	"EMAIL_INBOX_CREATE": {AuditTable: "email_svc.inbox_audit", AuditIDColumn: "inbox_id"},
-	"EMAIL_INBOX_EDIT":   {AuditTable: "email_svc.inbox_audit", AuditIDColumn: "inbox_id"},
-	"EMAIL_INBOX_DELETE": {AuditTable: "email_svc.inbox_audit", AuditIDColumn: "inbox_id"},
+	"EMAIL_INBOX_CREATE": {AuditTable: constants.EmailSvcInboxAudit, AuditIDColumn: "inbox_id"},
+	"EMAIL_INBOX_EDIT":   {AuditTable: constants.EmailSvcInboxAudit, AuditIDColumn: "inbox_id"},
+	"EMAIL_INBOX_DELETE": {AuditTable: constants.EmailSvcInboxAudit, AuditIDColumn: "inbox_id"},
 
 	// ── FD Booking Workbench ──────────────────────────────────────────────
 	"FD_BOOKING":        {AuditTable: constants.QuerryAuditBookingRequest, AuditIDColumn: "booking_id"},

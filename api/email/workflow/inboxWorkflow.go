@@ -105,15 +105,27 @@ func HandleWorkflowMeta(pool *pgxpool.Pool) http.HandlerFunc {
 			googleLabel = "default"
 		}
 		emailcommon.RespondPayload(w, "inbox/workflow/meta", map[string]interface{}{
-			"allowed_domains":                        domains,
-			"default_mailbox_domain":                 defaultDomain,
-			"default_graph_tenant_label":             graphLabel,
-			"default_google_workspace_tenant_label":  googleLabel,
+			"allowed_domains":                       domains,
+			"default_mailbox_domain":                defaultDomain,
+			"default_graph_tenant_label":            graphLabel,
+			"default_google_workspace_tenant_label": googleLabel,
 		})
 	}
 }
 
-func logInboxAudit(ctx context.Context, pool *pgxpool.Pool, inboxID, action, status, userID, comment string, detail map[string]interface{}) {
+// inboxAuditEntry groups the fields logged by logInboxAudit, keeping the
+// function signature under the project's parameter-count limit.
+type inboxAuditEntry struct {
+	InboxID string
+	Action  string
+	Status  string
+	UserID  string
+	Comment string
+	Detail  map[string]interface{}
+}
+
+func logInboxAudit(ctx context.Context, pool *pgxpool.Pool, entry inboxAuditEntry) {
+	detail := entry.Detail
 	if detail == nil {
 		detail = map[string]interface{}{}
 	}
@@ -121,34 +133,48 @@ func logInboxAudit(ctx context.Context, pool *pgxpool.Pool, inboxID, action, sta
 	_, _ = pool.Exec(ctx, `
 		INSERT INTO email_svc.inbox_audit (inbox_id, action_type, status, processing_status, performed_by, comment, detail)
 		VALUES ($1::uuid, $2, $3, $3, NULLIF($4,''), NULLIF($5,''), $6::jsonb)
-	`, inboxID, action, status, userID, comment, string(b))
+	`, entry.InboxID, entry.Action, entry.Status, entry.UserID, entry.Comment, string(b))
 }
 
-func submitInboxApproval(ctx context.Context, pool *pgxpool.Pool, inboxID, entityID, txType, actionType, userID, userEmail string) (string, error) {
+// inboxApprovalRequest groups the fields submitted to the approval engine by
+// submitInboxApproval, keeping the function signature under the project's
+// parameter-count limit.
+type inboxApprovalRequest struct {
+	InboxID    string
+	EntityID   string
+	TxType     string
+	ActionType string
+	UserID     string
+	UserEmail  string
+}
+
+func submitInboxApproval(ctx context.Context, pool *pgxpool.Pool, req inboxApprovalRequest) (string, error) {
+	userEmail := req.UserEmail
 	if userEmail == "" {
-		userEmail = userID
+		userEmail = req.UserID
 	}
-	if err := approvalengine.CancelPendingInstances(ctx, pool, emailInboxModuleCode, inboxID, userEmail); err != nil {
+	if err := approvalengine.CancelPendingInstances(ctx, pool, emailInboxModuleCode, req.InboxID, userEmail); err != nil {
 		return "", err
 	}
 	return approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
 		ModuleCode:       emailInboxModuleCode,
-		EntityCode:       entityID,
-		TransactionType:  txType,
-		RecordID:         inboxID,
+		EntityCode:       req.EntityID,
+		TransactionType:  req.TxType,
+		RecordID:         req.InboxID,
 		RecordTable:      emailInboxRecordTable,
 		AuditTable:       emailInboxAuditTable,
 		AuditIDColumn:    "inbox_id",
-		ActionType:       actionType,
+		ActionType:       req.ActionType,
 		Amount:           0,
-		SubmittedBy:      userID,
+		SubmittedBy:      req.UserID,
 		SubmittedByEmail: userEmail,
 	})
 }
 
 func finalizeEmailInboxApproval(ctx context.Context, pool *pgxpool.Pool, recordID, transactionType, finalStatus, actorEmail, comment string) {
 	_ = applyInboxDecision(ctx, pool, recordID, transactionType, finalStatus, actorEmail, comment)
-	if finalStatus == approvalengine.InstStatusApproved {
+	// SES sync is for create/edit approvals only — delete must not re-sync rules.
+	if finalStatus == approvalengine.InstStatusApproved && transactionType != "EMAIL_INBOX_DELETE" {
 		result, err := SyncApprovedInboxesToSES(ctx, pool)
 		ApplyInboundRuleSyncResult(ctx, pool, result, err)
 	}
@@ -160,17 +186,25 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 		case "EMAIL_INBOX_CREATE":
 			_, err := pool.Exec(ctx, `
 				UPDATE email_svc.inbox_config
-				SET processing_status = $2, checker_comment = $3, is_active = false, updated_at = now()
+				SET processing_status = $2,
+				    checker_comment = $3,
+				    is_active = false,
+				    is_deleted = false,
+				    updated_at = now()
 				WHERE inbox_id = $1::uuid
 			`, inboxID, constants.StatusRejected, comment)
 			return err
-		case "EMAIL_INBOX_EDIT", "EMAIL_INBOX_DELETE":
+		case "EMAIL_INBOX_EDIT":
 			_, err := pool.Exec(ctx, `
 				UPDATE email_svc.inbox_config
 				SET processing_status = $2, pending_edit_json = NULL, checker_comment = $3, updated_at = now()
 				WHERE inbox_id = $1::uuid
+				  AND is_deleted = false
 			`, inboxID, constants.StatusApproved, comment)
 			return err
+		case "EMAIL_INBOX_DELETE":
+			// Reject delete request → restore prior status (never soft-delete).
+			return restoreStatusAfterDeleteReject(ctx, pool, inboxID, comment)
 		}
 		return nil
 	}
@@ -259,17 +293,41 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 			constants.StatusApproved, actorID, comment)
 		return err
 	case "EMAIL_INBOX_DELETE":
-		if err := emailcommon.DeleteMessagesForInbox(ctx, pool, inboxID); err != nil {
-			return err
-		}
-		_, err := pool.Exec(ctx, `
-			UPDATE email_svc.inbox_config
-			SET processing_status = 'DELETED', is_deleted = true, is_active = false,
-			    deleted_at = now(), deleted_by = $2, approved_by = $2,
-			    checker_comment = $3, updated_at = now()
-			WHERE inbox_id = $1::uuid
-		`, inboxID, actorID, comment)
+		return applyApprovedInboxDelete(ctx, pool, inboxID, actorID, comment)
+	}
+	return nil
+}
+
+// applyApprovedInboxDelete soft-deletes the mailbox (row kept for audit), removes
+// its messages, and drops any SES inbound rule. Reject of a delete request must
+// NOT call this — reject restores APPROVED without touching is_deleted.
+func applyApprovedInboxDelete(ctx context.Context, pool *pgxpool.Pool, inboxID, actorID, comment string) error {
+	var ruleName string
+	_ = pool.QueryRow(ctx, `
+		SELECT COALESCE(ses_rule_name,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
+	`, inboxID).Scan(&ruleName)
+
+	if err := emailcommon.DeleteMessagesForInbox(ctx, pool, inboxID); err != nil {
 		return err
+	}
+	_, err := pool.Exec(ctx, `
+		UPDATE email_svc.inbox_config
+		SET processing_status = 'DELETED', is_deleted = true, is_active = false,
+		    deleted_at = now(), deleted_by = $2, approved_by = $2,
+		    pending_edit_json = NULL,
+		    checker_comment = $3, updated_at = now()
+		WHERE inbox_id = $1::uuid
+		  AND is_deleted = false
+	`, inboxID, actorID, comment)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(ruleName) != "" {
+		client := mailruntime.NewRuntime()
+		if client.Ready() {
+			ruleSet := strings.TrimSpace(os.Getenv("EMAIL_SES_RULE_SET_NAME"))
+			_ = client.RemoveInboundRule(ctx, ruleSet, ruleName)
+		}
 	}
 	return nil
 }
@@ -521,7 +579,7 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			SharedUserIDs []string        `json:"shared_user_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		if len(req.Items) == 0 {
@@ -574,7 +632,7 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			if strings.EqualFold(sourceType, "IMAP") {
 				merged, mergeErr := emailmailbox.MergeIMAPFields(emailmailbox.MailboxIMAPFields{}, imapFields, addr)
 				if mergeErr != nil {
-					errors = append(errors, addr+": imap: "+mergeErr.Error())
+					errors = append(errors, addr+constants.ErrImapPrefix+mergeErr.Error())
 					continue
 				}
 				imapFields = merged
@@ -599,7 +657,7 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			if strings.EqualFold(sourceType, "OUTLOOK_GRAPH") && emailmailbox.GraphFieldsConfigured(graphFields) {
 				merged, mergeErr := emailmailbox.MergeGraphFields(emailmailbox.MailboxGraphFields{}, graphFields)
 				if mergeErr != nil {
-					errors = append(errors, addr+": graph: "+mergeErr.Error())
+					errors = append(errors, addr+constants.ErrGraphPrefix+mergeErr.Error())
 					continue
 				}
 				graphFields = merged
@@ -607,7 +665,7 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			if strings.EqualFold(sourceType, "GOOGLE_WORKSPACE") && emailmailbox.GoogleWorkspaceFieldsConfigured(googleFields) {
 				merged, mergeErr := emailmailbox.MergeGoogleWorkspaceFields(emailmailbox.MailboxGoogleWorkspaceFields{}, googleFields)
 				if mergeErr != nil {
-					errors = append(errors, addr+": google workspace: "+mergeErr.Error())
+					errors = append(errors, addr+constants.ErrGoogleWorkspacePrefix+mergeErr.Error())
 					continue
 				}
 				googleFields = merged
@@ -692,9 +750,13 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 					ON CONFLICT DO NOTHING
 				`, inboxID, uid)
 			}
-			logInboxAudit(r.Context(), pool, inboxID, "CREATE", constants.StatusPendingApproval, userID, "", map[string]interface{}{"mailbox": addr})
-			if _, err := submitInboxApproval(r.Context(), pool, inboxID, entityID, "EMAIL_INBOX_CREATE", "CREATE", userID, userEmail); err != nil {
-				errors = append(errors, addr+": approval instance: "+err.Error())
+			logInboxAudit(r.Context(), pool, inboxAuditEntry{
+				InboxID: inboxID, Action: "CREATE", Status: constants.StatusPendingApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{"mailbox": addr},
+			})
+			if _, err := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
+				InboxID: inboxID, EntityID: entityID, TxType: "EMAIL_INBOX_CREATE", ActionType: "CREATE", UserID: userID, UserEmail: userEmail,
+			}); err != nil {
+				errors = append(errors, addr+constants.ErrApprovalInstancePrefix+err.Error())
 			}
 			created = append(created, inboxID)
 		}
@@ -715,7 +777,7 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			Items    []workflowInbox `json:"items"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 
@@ -738,7 +800,7 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			if err := pool.QueryRow(r.Context(), `
 				SELECT processing_status, COALESCE(entity_id,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid AND is_deleted = false
 			`, inboxID).Scan(&status, &inboxEntityID); err != nil {
-				errors = append(errors, inboxID+": not found")
+				errors = append(errors, inboxID+constants.ErrNotFoundSuffix)
 				continue
 			}
 
@@ -756,7 +818,7 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 					}
 					merged, mergeErr := emailmailbox.MergeIMAPFields(existing, item.MailboxIMAPFields, mailbox)
 					if mergeErr != nil {
-						errors = append(errors, inboxID+": imap: "+mergeErr.Error())
+						errors = append(errors, inboxID+constants.ErrImapPrefix+mergeErr.Error())
 						continue
 					}
 					extraSQL = fmt.Sprintf(`,
@@ -778,7 +840,7 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 					}
 					merged, mergeErr := emailmailbox.MergeGraphFields(existing, item.MailboxGraphFields)
 					if mergeErr != nil {
-						errors = append(errors, inboxID+": graph: "+mergeErr.Error())
+						errors = append(errors, inboxID+constants.ErrGraphPrefix+mergeErr.Error())
 						continue
 					}
 					extraSQL += fmt.Sprintf(`,
@@ -798,7 +860,7 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 					}
 					merged, mergeErr := emailmailbox.MergeGoogleWorkspaceFields(existing, item.MailboxGoogleWorkspaceFields)
 					if mergeErr != nil {
-						errors = append(errors, inboxID+": google workspace: "+mergeErr.Error())
+						errors = append(errors, inboxID+constants.ErrGoogleWorkspacePrefix+mergeErr.Error())
 						continue
 					}
 					extraSQL += fmt.Sprintf(`,
@@ -826,8 +888,10 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, inboxID+": "+err.Error())
 					continue
 				}
-				if _, instErr := submitInboxApproval(r.Context(), pool, inboxID, inboxEntityID, "EMAIL_INBOX_CREATE", "CREATE", userID, userEmail); instErr != nil {
-					errors = append(errors, inboxID+": approval instance: "+instErr.Error())
+				if _, instErr := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
+					InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_CREATE", ActionType: "CREATE", UserID: userID, UserEmail: userEmail,
+				}); instErr != nil {
+					errors = append(errors, inboxID+constants.ErrApprovalInstancePrefix+instErr.Error())
 				}
 			case constants.StatusApproved:
 				_, err := pool.Exec(r.Context(), `
@@ -843,9 +907,13 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, inboxID+": "+err.Error())
 					continue
 				}
-				logInboxAudit(r.Context(), pool, inboxID, "EDIT", constants.StatusPendingEditApproval, userID, "", map[string]interface{}{"pending": item})
-				if _, instErr := submitInboxApproval(r.Context(), pool, inboxID, inboxEntityID, "EMAIL_INBOX_EDIT", "EDIT", userID, userEmail); instErr != nil {
-					errors = append(errors, inboxID+": approval instance: "+instErr.Error())
+				logInboxAudit(r.Context(), pool, inboxAuditEntry{
+					InboxID: inboxID, Action: "EDIT", Status: constants.StatusPendingEditApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{"pending": item},
+				})
+				if _, instErr := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
+					InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_EDIT", ActionType: "EDIT", UserID: userID, UserEmail: userEmail,
+				}); instErr != nil {
+					errors = append(errors, inboxID+constants.ErrApprovalInstancePrefix+instErr.Error())
 				}
 			default:
 				errors = append(errors, inboxID+": cannot edit in status "+status)
@@ -869,7 +937,7 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			InboxIDs []string `json:"inbox_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		userID, userEmail, _, entityIDs := emailcommon.RequestIdentity(r, req.UserID, req.EntityID)
@@ -889,50 +957,114 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			if err := pool.QueryRow(r.Context(), `
 				SELECT processing_status, COALESCE(entity_id,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid AND is_deleted = false
 			`, inboxID).Scan(&status, &inboxEntityID); err != nil {
-				errors = append(errors, inboxID+": not found")
+				errors = append(errors, inboxID+constants.ErrNotFoundSuffix)
 				continue
 			}
 
-			// Approved mailbox → maker-checker delete (not REJECTED)
-			if strings.EqualFold(status, constants.StatusApproved) {
+			statusNorm := strings.ToUpper(strings.TrimSpace(status))
+
+			// Maker delete request — stay visible as PENDING_DELETE_APPROVAL until checker approves.
+			// Soft-delete (is_deleted=true) happens only on approve-delete, never here.
+			switch statusNorm {
+			case constants.StatusApproved, constants.StatusPendingApproval, constants.StatusPendingEditApproval:
+				priorPayload, _ := json.Marshal(map[string]string{
+					"__prior_status": statusNorm,
+				})
 				_, err := pool.Exec(r.Context(), `
 					UPDATE email_svc.inbox_config
 					SET processing_status = 'PENDING_DELETE_APPROVAL',
 					    submitted_by = $2,
+					    pending_edit_json = $3::jsonb,
 					    checker_comment = '',
 					    updated_at = now()
 					WHERE inbox_id = $1::uuid
-				`, inboxID, userID)
+					  AND is_deleted = false
+				`, inboxID, userID, string(priorPayload))
 				if err != nil {
 					errors = append(errors, inboxID+": "+err.Error())
 					continue
 				}
-				logInboxAudit(r.Context(), pool, inboxID, "DELETE", constants.StatusPendingDeleteApproval, userID, "", nil)
-				if _, instErr := submitInboxApproval(r.Context(), pool, inboxID, inboxEntityID, "EMAIL_INBOX_DELETE", "DELETE", userID, userEmail); instErr != nil {
-					errors = append(errors, inboxID+": approval instance: "+instErr.Error())
+				// Cancel any open create/edit approval instances; submit a delete instance.
+				_ = approvalengine.CancelPendingInstances(r.Context(), pool, emailInboxModuleCode, inboxID, userEmail)
+				logInboxAudit(r.Context(), pool, inboxAuditEntry{
+					InboxID: inboxID, Action: "DELETE", Status: constants.StatusPendingDeleteApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{
+						"prior_status": statusNorm,
+					},
+				})
+				if _, instErr := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
+					InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_DELETE", ActionType: "DELETE", UserID: userID, UserEmail: userEmail,
+				}); instErr != nil {
+					errors = append(errors, inboxID+constants.ErrApprovalInstancePrefix+instErr.Error())
 				}
 				updated = append(updated, inboxID)
-				continue
+			case constants.StatusPendingDeleteApproval:
+				errors = append(errors, inboxID+": already pending delete approval")
+			default:
+				errors = append(errors, inboxID+": delete only from APPROVED, PENDING_APPROVAL, or PENDING_EDIT_APPROVAL")
 			}
-
-			// Draft not yet approved — withdraw (do not mark REJECTED)
-			if strings.EqualFold(status, constants.StatusPendingApproval) {
-				_, _ = pool.Exec(r.Context(), `
-					UPDATE email_svc.inbox_config
-					SET processing_status = 'DELETED', is_active = false, is_deleted = true,
-					    deleted_at = now(), deleted_by = $2,
-					    checker_comment = 'Withdrawn before approval', updated_at = now()
-					WHERE inbox_id = $1::uuid
-				`, inboxID, userID)
-				_ = approvalengine.CancelPendingInstances(r.Context(), pool, emailInboxModuleCode, inboxID, userEmail)
-				logInboxAudit(r.Context(), pool, inboxID, "DELETE", "WITHDRAWN", userID, "", nil)
-				updated = append(updated, inboxID)
-				continue
-			}
-
-			errors = append(errors, inboxID+": delete only from APPROVED or PENDING_APPROVAL")
 		}
 		emailcommon.RespondBulk(w, "inbox/workflow/update", "updated", updated, errors)
+	}
+}
+
+func priorStatusFromPendingEdit(pendingEdit string, fallback string) string {
+	if pendingEdit == "" || pendingEdit == "null" {
+		return fallback
+	}
+	var meta map[string]interface{}
+	if json.Unmarshal([]byte(pendingEdit), &meta) != nil {
+		return fallback
+	}
+	if v, ok := meta["__prior_status"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.ToUpper(strings.TrimSpace(v))
+	}
+	return fallback
+}
+
+func restoreStatusAfterDeleteReject(ctx context.Context, pool *pgxpool.Pool, inboxID, comment string) error {
+	var pendingEdit string
+	_ = pool.QueryRow(ctx, `
+		SELECT COALESCE(pending_edit_json::text,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
+	`, inboxID).Scan(&pendingEdit)
+	prior := priorStatusFromPendingEdit(pendingEdit, constants.StatusApproved)
+	switch prior {
+	case constants.StatusPendingApproval:
+		_, err := pool.Exec(ctx, `
+			UPDATE email_svc.inbox_config
+			SET processing_status = $2,
+			    pending_edit_json = NULL,
+			    checker_comment = $3,
+			    is_active = false,
+			    is_deleted = false,
+			    updated_at = now()
+			WHERE inbox_id = $1::uuid
+			  AND is_deleted = false
+		`, inboxID, constants.StatusPendingApproval, comment)
+		return err
+	case constants.StatusPendingEditApproval:
+		_, err := pool.Exec(ctx, `
+			UPDATE email_svc.inbox_config
+			SET processing_status = $2,
+			    pending_edit_json = NULL,
+			    checker_comment = $3,
+			    is_deleted = false,
+			    updated_at = now()
+			WHERE inbox_id = $1::uuid
+			  AND is_deleted = false
+		`, inboxID, constants.StatusPendingEditApproval, comment)
+		return err
+	default:
+		_, err := pool.Exec(ctx, `
+			UPDATE email_svc.inbox_config
+			SET processing_status = $2,
+			    pending_edit_json = NULL,
+			    checker_comment = $3,
+			    is_deleted = false,
+			    updated_at = now()
+			WHERE inbox_id = $1::uuid
+			  AND is_deleted = false
+		`, inboxID, constants.StatusApproved, comment)
+		return err
 	}
 }
 
@@ -959,7 +1091,7 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		userID, userEmail, _, entityIDs := emailcommon.RequestIdentity(r, req.UserID, req.EntityID)
@@ -968,14 +1100,14 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, inboxID := range req.InboxIDs {
 			inboxID = strings.TrimSpace(inboxID)
-			var status, submittedBy, entityID, ruleName, pendingEdit string
+			var status, submittedBy, entityID, pendingEdit string
 			err := pool.QueryRow(r.Context(), `
 				SELECT processing_status, COALESCE(submitted_by,''), COALESCE(entity_id,''),
-				       COALESCE(ses_rule_name,''), COALESCE(pending_edit_json::text,'')
+				       COALESCE(pending_edit_json::text,'')
 				FROM email_svc.inbox_config WHERE inbox_id = $1::uuid AND is_deleted = false
-			`, inboxID).Scan(&status, &submittedBy, &entityID, &ruleName, &pendingEdit)
+			`, inboxID).Scan(&status, &submittedBy, &entityID, &pendingEdit)
 			if err != nil {
-				errors = append(errors, inboxID+": not found")
+				errors = append(errors, inboxID+constants.ErrNotFoundSuffix)
 				continue
 			}
 			if !admin && !checkerCanAct(submittedBy, userID, entityID, entityIDs) {
@@ -1013,7 +1145,15 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 							errors = append(errors, inboxID+": "+err.Error())
 							continue
 						}
-						logInboxAudit(r.Context(), pool, inboxID, "APPROVE", constants.StatusApproved, userID, req.Comment, map[string]interface{}{"engine_instance": actionRes.InstanceID})
+						auditAction, auditStatus := "APPROVE", constants.StatusApproved
+						if txType == "EMAIL_INBOX_DELETE" {
+							auditAction, auditStatus = "APPROVE_DELETE", "DELETED"
+						} else if txType == "EMAIL_INBOX_EDIT" {
+							auditAction = "APPROVE_EDIT"
+						}
+						logInboxAudit(r.Context(), pool, inboxAuditEntry{
+							InboxID: inboxID, Action: auditAction, Status: auditStatus, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{"engine_instance": actionRes.InstanceID},
+						})
 						approved = append(approved, inboxID)
 						if txType != "EMAIL_INBOX_DELETE" {
 							OnInboxApproved(pool, inboxID)
@@ -1035,7 +1175,9 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 					    is_active = true, updated_at = now()
 					WHERE inbox_id = $1::uuid
 				`, inboxID, constants.StatusApproved, userID, req.Comment)
-				logInboxAudit(r.Context(), pool, inboxID, "APPROVE", constants.StatusApproved, userID, req.Comment, nil)
+				logInboxAudit(r.Context(), pool, inboxAuditEntry{
+					InboxID: inboxID, Action: "APPROVE", Status: constants.StatusApproved, UserID: userID, Comment: req.Comment, Detail: nil,
+				})
 
 			case constants.StatusPendingEditApproval:
 				if err := emailmailbox.ValidateMailboxReady(r.Context(), pool, inboxID); err != nil {
@@ -1054,7 +1196,7 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 						if strings.EqualFold(edit.SourceType, "IMAP") && emailmailbox.IMAPPatchPresent(edit.MailboxIMAPFields) {
 							merged, mergeErr := emailmailbox.MergeIMAPFields(existingIMAP, edit.MailboxIMAPFields, mailbox)
 							if mergeErr != nil {
-								errors = append(errors, inboxID+": imap: "+mergeErr.Error())
+								errors = append(errors, inboxID+constants.ErrImapPrefix+mergeErr.Error())
 								continue
 							}
 							imapFinal = merged
@@ -1062,7 +1204,7 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 						if emailmailbox.GraphPatchPresent(edit.MailboxGraphFields) {
 							merged, mergeErr := emailmailbox.MergeGraphFields(existingGraph, edit.MailboxGraphFields)
 							if mergeErr != nil {
-								errors = append(errors, inboxID+": graph: "+mergeErr.Error())
+								errors = append(errors, inboxID+constants.ErrGraphPrefix+mergeErr.Error())
 								continue
 							}
 							graphFinal = merged
@@ -1070,7 +1212,7 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 						if emailmailbox.GoogleWorkspacePatchPresent(edit.MailboxGoogleWorkspaceFields) {
 							merged, mergeErr := emailmailbox.MergeGoogleWorkspaceFields(existingGoogle, edit.MailboxGoogleWorkspaceFields)
 							if mergeErr != nil {
-								errors = append(errors, inboxID+": google workspace: "+mergeErr.Error())
+								errors = append(errors, inboxID+constants.ErrGoogleWorkspacePrefix+mergeErr.Error())
 								continue
 							}
 							googleFinal = merged
@@ -1116,30 +1258,20 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 						WHERE inbox_id = $1::uuid
 					`, inboxID, constants.StatusApproved, userID, req.Comment)
 				}
-				logInboxAudit(r.Context(), pool, inboxID, "APPROVE_EDIT", constants.StatusApproved, userID, req.Comment, nil)
+				logInboxAudit(r.Context(), pool, inboxAuditEntry{
+					InboxID: inboxID, Action: "APPROVE_EDIT", Status: constants.StatusApproved, UserID: userID, Comment: req.Comment, Detail: nil,
+				})
 
 			case constants.StatusPendingDeleteApproval:
 				var mailbox string
 				_ = pool.QueryRow(r.Context(), `SELECT mailbox_address FROM email_svc.inbox_config WHERE inbox_id = $1::uuid`, inboxID).Scan(&mailbox)
-				if err := emailcommon.DeleteMessagesForInbox(r.Context(), pool, inboxID); err != nil {
+				if err = applyApprovedInboxDelete(r.Context(), pool, inboxID, userID, req.Comment); err != nil {
 					errors = append(errors, inboxID+": "+err.Error())
 					continue
 				}
-				_, err = pool.Exec(r.Context(), `
-					UPDATE email_svc.inbox_config
-					SET processing_status = 'DELETED', is_deleted = true, is_active = false,
-					    deleted_at = now(), deleted_by = $2, approved_by = $2,
-					    checker_comment = $3, updated_at = now()
-					WHERE inbox_id = $1::uuid
-				`, inboxID, userID, req.Comment)
-				if ruleName != "" {
-					client := mailruntime.NewRuntime()
-					if client.Ready() {
-						ruleSet := strings.TrimSpace(os.Getenv("EMAIL_SES_RULE_SET_NAME"))
-						_ = client.RemoveInboundRule(r.Context(), ruleSet, ruleName)
-					}
-				}
-				logInboxAudit(r.Context(), pool, inboxID, "APPROVE_DELETE", "DELETED", userID, req.Comment, map[string]interface{}{"mailbox": mailbox})
+				logInboxAudit(r.Context(), pool, inboxAuditEntry{
+					InboxID: inboxID, Action: "APPROVE_DELETE", Status: "DELETED", UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{"mailbox": mailbox},
+				})
 				approved = append(approved, inboxID)
 				continue
 
@@ -1172,7 +1304,7 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		userID, userEmail, _, entityIDs := emailcommon.RequestIdentity(r, req.UserID, req.EntityID)
@@ -1187,7 +1319,7 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM email_svc.inbox_config WHERE inbox_id = $1::uuid AND is_deleted = false
 			`, inboxID).Scan(&status, &submittedBy, &entityID)
 			if err != nil {
-				errors = append(errors, inboxID+": not found")
+				errors = append(errors, inboxID+constants.ErrNotFoundSuffix)
 				continue
 			}
 			if !admin && !checkerCanAct(submittedBy, userID, entityID, entityIDs) {
@@ -1214,11 +1346,27 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				if actionRes.Acted {
+					auditStatus := constants.StatusRejected
+					if txType == "EMAIL_INBOX_EDIT" {
+						auditStatus = constants.StatusApproved
+					} else if txType == "EMAIL_INBOX_DELETE" {
+						var pendingEdit string
+						_ = pool.QueryRow(r.Context(), `
+							SELECT COALESCE(pending_edit_json::text,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
+						`, inboxID).Scan(&pendingEdit)
+						auditStatus = priorStatusFromPendingEdit(pendingEdit, constants.StatusApproved)
+					}
 					if err := applyInboxDecision(r.Context(), pool, inboxID, txType, approvalengine.InstStatusRejected, userID, req.Comment); err != nil {
 						errors = append(errors, inboxID+": "+err.Error())
 						continue
 					}
-					logInboxAudit(r.Context(), pool, inboxID, "REJECT", status, userID, req.Comment, map[string]interface{}{"engine_instance": actionRes.InstanceID})
+					logInboxAudit(r.Context(), pool, inboxAuditEntry{
+						InboxID: inboxID, Action: "REJECT", Status: auditStatus, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{
+							"engine_instance": actionRes.InstanceID,
+							"rejected_tx":     txType,
+							"prior_status":    status,
+						},
+					})
 					rejected = append(rejected, inboxID)
 					continue
 				}
@@ -1226,23 +1374,41 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 
 			switch status {
 			case constants.StatusPendingApproval:
+				// Reject create → REJECTED (row kept, is_deleted stays false)
 				_, err = pool.Exec(r.Context(), `
 					UPDATE email_svc.inbox_config
-					SET processing_status = 'REJECTED', checker_comment = $2, is_active = false, updated_at = now()
+					SET processing_status = 'REJECTED',
+					    checker_comment = $2,
+					    is_active = false,
+					    is_deleted = false,
+					    updated_at = now()
 					WHERE inbox_id = $1::uuid
 				`, inboxID, req.Comment)
 			case constants.StatusPendingEditApproval:
+				// Reject edit → back to APPROVED, discard pending edit
 				_, err = pool.Exec(r.Context(), `
 					UPDATE email_svc.inbox_config
 					SET processing_status = $2, pending_edit_json = NULL, checker_comment = $3, updated_at = now()
 					WHERE inbox_id = $1::uuid
 				`, inboxID, constants.StatusApproved, req.Comment)
 			case constants.StatusPendingDeleteApproval:
-				_, err = pool.Exec(r.Context(), `
-					UPDATE email_svc.inbox_config
-					SET processing_status = $2, checker_comment = $3, updated_at = now()
-					WHERE inbox_id = $1::uuid
-				`, inboxID, constants.StatusApproved, req.Comment)
+				var pendingEdit string
+				_ = pool.QueryRow(r.Context(), `
+					SELECT COALESCE(pending_edit_json::text,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
+				`, inboxID).Scan(&pendingEdit)
+				restoredTo := priorStatusFromPendingEdit(pendingEdit, constants.StatusApproved)
+				if err = restoreStatusAfterDeleteReject(r.Context(), pool, inboxID, req.Comment); err != nil {
+					errors = append(errors, inboxID+": "+err.Error())
+					continue
+				}
+				logInboxAudit(r.Context(), pool, inboxAuditEntry{
+					InboxID: inboxID, Action: "REJECT", Status: restoredTo, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{
+						"prior_status": status,
+						"restored_to":  restoredTo,
+					},
+				})
+				rejected = append(rejected, inboxID)
+				continue
 			default:
 				errors = append(errors, inboxID+": not pending approval")
 				continue
@@ -1251,7 +1417,15 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, inboxID+": "+err.Error())
 				continue
 			}
-			logInboxAudit(r.Context(), pool, inboxID, "REJECT", status, userID, req.Comment, nil)
+			auditStatus := constants.StatusRejected
+			if status == constants.StatusPendingEditApproval {
+				auditStatus = constants.StatusApproved
+			}
+			logInboxAudit(r.Context(), pool, inboxAuditEntry{
+				InboxID: inboxID, Action: "REJECT", Status: auditStatus, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{
+					"prior_status": status,
+				},
+			})
 			rejected = append(rejected, inboxID)
 		}
 		emailcommon.RespondBulk(w, "inbox/workflow/reject", "rejected", rejected, errors)
@@ -1321,7 +1495,7 @@ func HandlePollTrigger(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		userID, _, _, _ := emailcommon.RequestIdentity(r, req.UserID, "")
 		if !emailcommon.IsEmailAdmin(r.Context(), userID) {
-			emailcommon.RespondForbidden(w, "manual poll is admin/QA only — mailboxes poll automatically after approval")
+			emailcommon.RespondForbidden(w, constants.ErrManualPollAdminOnly)
 			return
 		}
 		started := emailjobs.StartInboundPollAsync(pool)
@@ -1353,7 +1527,7 @@ func HandleGraphPollTrigger(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		userID, _, _, _ := emailcommon.RequestIdentity(r, req.UserID, "")
 		if !emailcommon.IsEmailAdmin(r.Context(), userID) {
-			emailcommon.RespondForbidden(w, "manual poll is admin/QA only — mailboxes poll automatically after approval")
+			emailcommon.RespondForbidden(w, constants.ErrManualPollAdminOnly)
 			return
 		}
 		started := emailjobs.StartGraphPollAsync(pool)
@@ -1381,7 +1555,7 @@ func HandleIMAPPollTrigger(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		userID, _, _, _ := emailcommon.RequestIdentity(r, req.UserID, "")
 		if !emailcommon.IsEmailAdmin(r.Context(), userID) {
-			emailcommon.RespondForbidden(w, "manual poll is admin/QA only — mailboxes poll automatically after approval")
+			emailcommon.RespondForbidden(w, constants.ErrManualPollAdminOnly)
 			return
 		}
 		started := emailjobs.StartIMAPPollAsync(pool)

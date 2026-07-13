@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	emailjobs "CimplrCorpSaas/internal/jobs/email"
 	"CimplrCorpSaas/internal/services/mailruntime"
@@ -41,10 +42,10 @@ func (f MailboxOAuthFields) ToRuntimeOAuth(accessToken string) mailruntime.OAuth
 func (f MailboxOAuthFields) redacted() MailboxOAuthFields {
 	out := f
 	if out.OAuthRefreshToken != "" {
-		out.OAuthRefreshToken = "********"
+		out.OAuthRefreshToken = constants.RedactedPlaceholder
 	}
 	if out.OAuthAccessToken != "" {
-		out.OAuthAccessToken = "********"
+		out.OAuthAccessToken = constants.RedactedPlaceholder
 	}
 	return out
 }
@@ -52,7 +53,7 @@ func (f MailboxOAuthFields) redacted() MailboxOAuthFields {
 func OAuthPatchPresent(p MailboxOAuthFields) bool {
 	return strings.TrimSpace(p.OAuthProvider) != "" ||
 		strings.TrimSpace(p.OAuthMailTransport) != "" ||
-		(strings.TrimSpace(p.OAuthRefreshToken) != "" && p.OAuthRefreshToken != "********")
+		(strings.TrimSpace(p.OAuthRefreshToken) != "" && p.OAuthRefreshToken != constants.RedactedPlaceholder)
 }
 
 func LoadMailboxOAuthFields(ctx context.Context, pool *pgxpool.Pool, inboxID string) (MailboxOAuthFields, error) {
@@ -73,7 +74,17 @@ func LoadMailboxOAuthFields(ctx context.Context, pool *pgxpool.Pool, inboxID str
 	return fields, nil
 }
 
-func SaveMailboxOAuthTokens(ctx context.Context, pool *pgxpool.Pool, inboxID, provider, refreshToken, accessToken, scopes string, expiresAt time.Time) error {
+// OAuthTokenSet groups the OAuth token fields persisted by SaveMailboxOAuthTokens,
+// keeping the function signature under the project's parameter-count limit.
+type OAuthTokenSet struct {
+	Provider     string
+	RefreshToken string
+	AccessToken  string
+	Scopes       string
+	ExpiresAt    time.Time
+}
+
+func SaveMailboxOAuthTokens(ctx context.Context, pool *pgxpool.Pool, inboxID string, tokens OAuthTokenSet) error {
 	_, err := pool.Exec(ctx, `
 		UPDATE email_svc.inbox_config
 		SET oauth_provider = $2,
@@ -84,7 +95,7 @@ func SaveMailboxOAuthTokens(ctx context.Context, pool *pgxpool.Pool, inboxID, pr
 		    oauth_connected_at = COALESCE(oauth_connected_at, now()),
 		    updated_at = now()
 		WHERE inbox_id = $1::uuid
-	`, inboxID, provider, refreshToken, accessToken, scopes, expiresAt.UTC())
+	`, inboxID, tokens.Provider, tokens.RefreshToken, tokens.AccessToken, tokens.Scopes, tokens.ExpiresAt.UTC())
 	return err
 }
 
@@ -155,7 +166,7 @@ func HandleOAuthStart(pool *pgxpool.Pool) http.HandlerFunc {
 			RedirectPath string `json:"redirect_path"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		provider, err := normalizeOAuthProvider(req.Provider)
@@ -172,7 +183,7 @@ func HandleOAuthStart(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rt := mailruntime.NewRuntime()
 		if !rt.Ready() {
-			emailcommon.RespondFailPayload(w, "oauth/start", "mail processing unavailable", map[string]interface{}{"ok": false})
+			emailcommon.RespondFailPayload(w, constants.RouteOAuthStart, constants.ErrMailProcessingUnavailable, map[string]interface{}{"ok": false})
 			return
 		}
 
@@ -194,11 +205,11 @@ func HandleOAuthStart(pool *pgxpool.Pool) http.HandlerFunc {
 
 		authURL, err := rt.OAuthAuthorizeURL(r.Context(), provider, transport, redirectURI, state)
 		if err != nil {
-			emailcommon.RespondFailPayload(w, "oauth/start", err.Error(), map[string]interface{}{"ok": false})
+			emailcommon.RespondFailPayload(w, constants.RouteOAuthStart, err.Error(), map[string]interface{}{"ok": false})
 			return
 		}
 
-		emailcommon.RespondPayload(w, "oauth/start", map[string]interface{}{
+		emailcommon.RespondPayload(w, constants.RouteOAuthStart, map[string]interface{}{
 			"authorize_url": authURL,
 			"provider":      provider,
 			"transport":     transport,
@@ -265,7 +276,7 @@ func HandleOAuthCallback(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rt := mailruntime.NewRuntime()
 		if !rt.Ready() {
-			redirectFail("mail processing unavailable")
+			redirectFail(constants.ErrMailProcessingUnavailable)
 			return
 		}
 
@@ -306,7 +317,9 @@ func HandleOAuthCallback(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if inboxID != "" {
-			_ = SaveMailboxOAuthTokens(r.Context(), pool, inboxID, provider, exchanged.RefreshToken, exchanged.AccessToken, exchanged.Scope, expires)
+			_ = SaveMailboxOAuthTokens(r.Context(), pool, inboxID, OAuthTokenSet{
+				Provider: provider, RefreshToken: exchanged.RefreshToken, AccessToken: exchanged.AccessToken, Scopes: exchanged.Scope, ExpiresAt: expires,
+			})
 			_, _ = pool.Exec(r.Context(), `
 				UPDATE email_svc.inbox_config
 				SET source_type = 'OAUTH',
@@ -353,7 +366,7 @@ func HandleOAuthStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			InboxID string `json:"inbox_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		fields, err := LoadMailboxOAuthFields(r.Context(), pool, strings.TrimSpace(req.InboxID))
@@ -379,13 +392,13 @@ func HandleOAuthTest(pool *pgxpool.Pool) http.HandlerFunc {
 			AccessToken string `json:"oauth_access_token"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 
 		rt := mailruntime.NewRuntime()
 		if !rt.Ready() {
-			emailcommon.RespondFailPayload(w, "oauth/test", "mail processing unavailable", map[string]interface{}{"ok": false})
+			emailcommon.RespondFailPayload(w, constants.RouteOAuthTest, constants.ErrMailProcessingUnavailable, map[string]interface{}{"ok": false})
 			return
 		}
 
@@ -407,12 +420,14 @@ func HandleOAuthTest(pool *pgxpool.Pool) http.HandlerFunc {
 			if accessToken == "" {
 				refreshed, rErr := rt.OAuthRefresh(r.Context(), fields.OAuthProvider, fields.OAuthMailTransport, fields.OAuthRefreshToken)
 				if rErr != nil {
-					emailcommon.RespondFailPayload(w, "oauth/test", rErr.Error(), map[string]interface{}{"ok": false})
+					emailcommon.RespondFailPayload(w, constants.RouteOAuthTest, rErr.Error(), map[string]interface{}{"ok": false})
 					return
 				}
 				accessToken = refreshed.AccessToken
 				exp := time.Now().UTC().Add(time.Duration(refreshed.ExpiresIn) * time.Second)
-				_ = SaveMailboxOAuthTokens(r.Context(), pool, inboxID, fields.OAuthProvider, refreshed.RefreshToken, refreshed.AccessToken, refreshed.Scope, exp)
+				_ = SaveMailboxOAuthTokens(r.Context(), pool, inboxID, OAuthTokenSet{
+					Provider: fields.OAuthProvider, RefreshToken: refreshed.RefreshToken, AccessToken: refreshed.AccessToken, Scopes: refreshed.Scope, ExpiresAt: exp,
+				})
 			}
 			if strings.EqualFold(transport, "imap") {
 				var loadErr error
@@ -432,16 +447,16 @@ func HandleOAuthTest(pool *pgxpool.Pool) http.HandlerFunc {
 			imapPayload.AuthMode = "oauth"
 			imapPayload.AccessToken = accessToken
 			if err := rt.VerifyIMAP(r.Context(), mailbox, imapPayload); err != nil {
-				emailcommon.RespondFailPayload(w, "oauth/test", err.Error(), map[string]interface{}{"ok": false})
+				emailcommon.RespondFailPayload(w, constants.RouteOAuthTest, err.Error(), map[string]interface{}{"ok": false})
 				return
 			}
 		} else {
 			if err := rt.VerifyOAuth(r.Context(), provider, accessToken); err != nil {
-				emailcommon.RespondFailPayload(w, "oauth/test", err.Error(), map[string]interface{}{"ok": false})
+				emailcommon.RespondFailPayload(w, constants.RouteOAuthTest, err.Error(), map[string]interface{}{"ok": false})
 				return
 			}
 		}
-		emailcommon.RespondPayload(w, "oauth/test", map[string]interface{}{
+		emailcommon.RespondPayload(w, constants.RouteOAuthTest, map[string]interface{}{
 			"ok":       true,
 			"provider": provider,
 			"message":  "OAuth connection successful",

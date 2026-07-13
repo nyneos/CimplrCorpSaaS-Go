@@ -550,10 +550,10 @@ const (
 )
 
 var (
-	Nifty50  = "NIFTY 50"
-	Nifty100 = "NIFTY 100"
+	Nifty50   = "NIFTY 50"
+	Nifty100  = "NIFTY 100"
 	NiftyBank = "NIFTY BANK"
-	NiftyIT  = "NIFTY IT"
+	NiftyIT   = "NIFTY IT"
 )
 
 // Investment source/suite labels
@@ -574,4 +574,59 @@ const (
 const (
 	NoDataTable = "<table><tr><td>No data</td></tr></table>"
 	BgcolorF9   = "#f9f9f9"
+)
+
+// Email service audit / workflow constants
+const (
+	EmailSvcInboxAudit = "email_svc.inbox_audit"
+)
+
+// Dashboard builder error messages
+const (
+	ErrIDRequired              = "id is required"
+	ErrDashboardNotFound       = "dashboard not found"
+	ErrFailedToAssignDashboard = "failed to assign dashboard"
+)
+
+// Email mailbox test/route names and shared messages
+const (
+	RouteGoogleWorkspaceTest     = "google-workspace/test"
+	RouteGraphTest               = "graph/test"
+	RouteIMAPTest                = "imap/test"
+	RouteOAuthStart              = "oauth/start"
+	RouteOAuthTest               = "oauth/test"
+	ErrMailProcessingUnavailable = "mail processing unavailable"
+	ErrInvalidBody               = "invalid body"
+	RedactedPlaceholder          = "********"
+)
+
+// Email inbox workflow error prefixes/suffixes
+const (
+	ErrImapPrefix             = ": imap: "
+	ErrGraphPrefix            = ": graph: "
+	ErrGoogleWorkspacePrefix  = ": google workspace: "
+	ErrApprovalInstancePrefix = ": approval instance: "
+	ErrNotFoundSuffix         = ": not found"
+	ErrManualPollAdminOnly    = "manual poll is admin/QA only — mailboxes poll automatically after approval"
+)
+
+// FX v91 batch upload error messages
+const (
+	ErrBatchIDRequired = "batch_id is required"
+	ErrInvalidBatchID  = "invalid batch_id"
+	ErrBatchNotFound   = "batch not found"
+)
+
+// Master bulk-upload module keys and error prefixes
+const (
+	ModuleMasterDemat   = "master-demat"
+	ModuleMasterDP      = "master-dp"
+	ModuleMasterFolio   = "master-folio"
+	ErrInsertPrefix     = "insert: "
+	ErrAuditColonPrefix = "audit: "
+)
+
+// Master data validation messages
+const (
+	ErrHolidayAlreadyExists = "A holiday with this name already exists for the selected calendar."
 )

@@ -6,8 +6,8 @@ import (
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/internal/ctxutil"
-	"context"
 	"CimplrCorpSaas/internal/logger"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -520,7 +520,9 @@ func LinkExposureHedge(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			"link": linkMap,
 		})
 
-		payload := fxnotif.BuildExposureBulkActionPayload(r.Context(), pool, []string{req.ExposureHeaderID}, fxnotif.ActionLink, req.UserID, "", nil, nil, nil)
+		payload := fxnotif.BuildExposureBulkActionPayload(r.Context(), pool, fxnotif.ExposureBulkActionInput{
+			ExposureIDs: []string{req.ExposureHeaderID}, Action: fxnotif.ActionLink, RequestedBy: req.UserID,
+		})
 		payloadMap := payload.ToMap()
 		payloadMap["UserID"] = req.UserID
 		payloadMap["BookingID"] = req.BookingID

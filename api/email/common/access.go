@@ -233,15 +233,25 @@ func FilterMatchInput(msg mailruntime.ParsedEmail) emailjobs.FilterMatchInput {
 	}
 }
 
+// ManualUploadIdentity carries the requesting user's identity/scope for
+// ResolveManualUploadInbox, keeping the function signature under the
+// project's parameter-count limit.
+type ManualUploadIdentity struct {
+	UserID           string
+	UserEmail        string
+	EntityIDs        []string
+	Admin            bool
+	SkipInboxFilters bool
+}
+
 func ResolveManualUploadInbox(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	msg mailruntime.ParsedEmail,
-	userID, userEmail string,
-	entityIDs []string,
-	admin bool,
-	skipInboxFilters bool,
+	identity ManualUploadIdentity,
 ) (*approvedInbox, string, error) {
+	userID, userEmail, entityIDs, admin, skipInboxFilters :=
+		identity.UserID, identity.UserEmail, identity.EntityIDs, identity.Admin, identity.SkipInboxFilters
 	inboxes, err := loadApprovedInboxes(ctx, pool)
 	if err != nil {
 		return nil, "", err

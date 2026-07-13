@@ -95,8 +95,11 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			"updated": updated,
 		})
 
-		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.SourceRouteV91BulkUpdateValueDate, fxnotif.ActionUpdate, req.UserID, requester, "", updated, map[string][]string{
-			"updated": updated,
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: fxnotif.SourceRouteV91BulkUpdateValueDate, Action: fxnotif.ActionUpdate, UserID: req.UserID, RequestedBy: requester, CheckerComment: "",
+			ExposureIDs: updated, ResultBuckets: map[string][]string{
+				"updated": updated,
+			},
 		})
 	}
 }
@@ -274,9 +277,12 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		resp := map[string]interface{}{"approved": approvedIDs, "deleted": deletedIDs}
 		respondEnvelopeSuccess(w, "Exposures approved successfully", resp)
 
-		fxnotif.NotifyExposureBulkAction(ctx, pool, v91ExposureActionSourceRoute(r, fxnotif.SourceRouteV91BulkApprove), fxnotif.ActionApprove, req.UserID, approver, req.Comment, req.ExposureIDs, map[string][]string{
-			"approved": approvedIDs,
-			"deleted":  deletedIDs,
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: v91ExposureActionSourceRoute(r, fxnotif.SourceRouteV91BulkApprove), Action: fxnotif.ActionApprove, UserID: req.UserID, RequestedBy: approver, CheckerComment: req.Comment,
+			ExposureIDs: req.ExposureIDs, ResultBuckets: map[string][]string{
+				"approved": approvedIDs,
+				"deleted":  deletedIDs,
+			},
 		})
 	}
 }
@@ -331,8 +337,11 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			"rejected": updated,
 		})
 
-		fxnotif.NotifyExposureBulkAction(ctx, pool, v91ExposureActionSourceRoute(r, fxnotif.SourceRouteV91BulkReject), fxnotif.ActionReject, req.UserID, rejector, req.Comment, req.ExposureIDs, map[string][]string{
-			"rejected": updated,
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: v91ExposureActionSourceRoute(r, fxnotif.SourceRouteV91BulkReject), Action: fxnotif.ActionReject, UserID: req.UserID, RequestedBy: rejector, CheckerComment: req.Comment,
+			ExposureIDs: req.ExposureIDs, ResultBuckets: map[string][]string{
+				"rejected": updated,
+			},
 		})
 	}
 }
@@ -389,8 +398,11 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			"deleted": deleted,
 		})
 
-		fxnotif.NotifyExposureBulkAction(ctx, pool, v91ExposureActionSourceRoute(r, fxnotif.SourceRouteV91BulkDelete), fxnotif.ActionDelete, req.UserID, deleter, req.Comment, req.ExposureIDs, map[string][]string{
-			"deleted": deleted,
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: v91ExposureActionSourceRoute(r, fxnotif.SourceRouteV91BulkDelete), Action: fxnotif.ActionDelete, UserID: req.UserID, RequestedBy: deleter, CheckerComment: req.Comment,
+			ExposureIDs: req.ExposureIDs, ResultBuckets: map[string][]string{
+				"deleted": deleted,
+			},
 		})
 	}
 }

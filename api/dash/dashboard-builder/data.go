@@ -41,13 +41,13 @@ type dataRequest struct {
 	// ParentID filters child sources by their parent row (e.g. bank_statement_id, run_id, proposal_id).
 	ParentID string `json:"parent_id"`
 	// Dashboard-builder filter band — populated by the frontend "Generate" button.
-	BankIDs        []string               `json:"bank_ids"`
-	AccountNumbers []string               `json:"account_numbers"`
+	BankIDs          []string               `json:"bank_ids"`
+	AccountNumbers   []string               `json:"account_numbers"`
 	BankAccountScope []bankAccountScopePair `json:"bank_account_scope"`
 	ProposalIDs      []string               `json:"proposal_ids"`
-	AsOfDate       string                 `json:"as_of_date"`
-	AsOnDate       string                 `json:"as_on_date"`
-	ViewType       string                 `json:"view_type"`
+	AsOfDate         string                 `json:"as_of_date"`
+	AsOnDate         string                 `json:"as_on_date"`
+	ViewType         string                 `json:"view_type"`
 }
 
 type bankAccountScopePair struct {
@@ -58,12 +58,12 @@ type bankAccountScopePair struct {
 // Context keys for dashboard-builder filter values stashed by GetDataSource so
 // that helper functions can read them without changing every query signature.
 const (
-	ctxKeyReqBankIDs         = "reqBankIDs"
-	ctxKeyReqBankNamesNorm   = "reqBankNamesNorm"
-	ctxKeyReqAccountNumbers  = "reqAccountNumbers"
-	ctxKeyReqAsOfDate        = "reqAsOfDate"
-	ctxKeyReqAsOnDate        = "reqAsOnDate"
-	ctxKeyReqViewType        = "reqViewType"
+	ctxKeyReqBankIDs        = "reqBankIDs"
+	ctxKeyReqBankNamesNorm  = "reqBankNamesNorm"
+	ctxKeyReqAccountNumbers = "reqAccountNumbers"
+	ctxKeyReqAsOfDate       = "reqAsOfDate"
+	ctxKeyReqAsOnDate       = "reqAsOnDate"
+	ctxKeyReqViewType       = "reqViewType"
 )
 
 type dataSourceFn func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error)
@@ -510,7 +510,9 @@ func accountNumberFilter(ctx context.Context, alias string, colName string, argO
 	return fmt.Sprintf("AND %s.%s = ANY($%d)", alias, colName, argOffset), []any{nums}
 }
 
-func normalizeAccountNumbers(values []string) []string {
+// dedupeTrimmedStrings trims each value, drops blanks, and removes duplicates
+// while preserving first-seen order.
+func dedupeTrimmedStrings(values []string) []string {
 	out := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, raw := range values {
@@ -527,21 +529,12 @@ func normalizeAccountNumbers(values []string) []string {
 	return out
 }
 
+func normalizeAccountNumbers(values []string) []string {
+	return dedupeTrimmedStrings(values)
+}
+
 func normalizeBankIDs(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := make(map[string]struct{}, len(values))
-	for _, raw := range values {
-		s := strings.TrimSpace(raw)
-		if s == "" {
-			continue
-		}
-		if _, dup := seen[s]; dup {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	return out
+	return dedupeTrimmedStrings(values)
 }
 
 // bankStatementScopeFilter builds bank+account pair filters for bank statement queries.
@@ -646,20 +639,7 @@ func resolveBankStatementScopePairs(req dataRequest) []bankAccountScopePair {
 }
 
 func normalizeProposalIDs(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := make(map[string]struct{}, len(values))
-	for _, raw := range values {
-		s := strings.TrimSpace(raw)
-		if s == "" {
-			continue
-		}
-		if _, dup := seen[s]; dup {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	return out
+	return dedupeTrimmedStrings(values)
 }
 
 func resolveProjectionProposalIDs(req dataRequest) []string {

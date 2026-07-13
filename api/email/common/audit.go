@@ -28,14 +28,25 @@ func LogProcessing(ctx context.Context, pool *pgxpool.Pool, messageID, step, sta
 	`, messageID, step, status, detailJSON)
 }
 
-func LogAttachmentIngest(ctx context.Context, pool *pgxpool.Pool, messageID, attachmentID, source, filename, contentType, s3Key string, fileSize int64) {
+// AttachmentIngestInfo groups the attachment metadata logged by LogAttachmentIngest,
+// keeping the function signature under the project's parameter-count limit.
+type AttachmentIngestInfo struct {
+	AttachmentID string
+	Source       string
+	Filename     string
+	ContentType  string
+	S3Key        string
+	FileSize     int64
+}
+
+func LogAttachmentIngest(ctx context.Context, pool *pgxpool.Pool, messageID string, info AttachmentIngestInfo) {
 	LogProcessing(ctx, pool, messageID, "ATTACHMENT_INGEST", "OK", map[string]interface{}{
-		"attachment_id": attachmentID,
-		"filename":      filename,
-		"s3_key":        s3Key,
-		"source":        source,
-		"content_type":  contentType,
-		"file_size":     fileSize,
+		"attachment_id": info.AttachmentID,
+		"filename":      info.Filename,
+		"s3_key":        info.S3Key,
+		"source":        info.Source,
+		"content_type":  info.ContentType,
+		"file_size":     info.FileSize,
 		"uploaded_by":   "Email parser",
 	})
 }

@@ -4,8 +4,8 @@ import (
 	"CimplrCorpSaas/api"
 
 	"CimplrCorpSaas/api/constants"
-	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
+	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/dependency"
 	"context"
@@ -432,7 +432,7 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// uniqueness pre-check
-			
+
 			// in-file duplicate check
 			minAmtVal, maxAmtVal := "null", "null"
 			if input.MinAmount != nil {
@@ -451,7 +451,7 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			seenKeysInFile[key] = ri + 2
-			
+
 			exists, err := rateCardExists(ctx, pgxPool, input)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())

@@ -399,16 +399,26 @@ func (r *Runtime) VerifyGmailDWD(ctx context.Context, mailbox string, cfg GmailD
 	}, &out, 0)
 }
 
-func (r *Runtime) PullIMAPMessages(ctx context.Context, inboxID, mailbox, folder, direction string, lastUID uint32, pageSize int, cfg IMAPConnection) (*IMAPPullResult, error) {
+type IMAPPullRequest struct {
+	InboxID   string
+	Mailbox   string
+	Folder    string
+	Direction string
+	LastUID   uint32
+	PageSize  int
+	Conn      IMAPConnection
+}
+
+func (r *Runtime) PullIMAPMessages(ctx context.Context, req IMAPPullRequest) (*IMAPPullResult, error) {
 	var out IMAPPullResult
 	err := r.invoke(ctx, "/v1/imap/poll-folder", map[string]interface{}{
-		"inbox_id":        inboxID,
-		"mailbox_address": mailbox,
-		"folder":          folder,
-		"direction":       direction,
-		"last_uid":        lastUID,
-		"batch":           pageSize,
-		"imap":            cfg,
+		"inbox_id":        req.InboxID,
+		"mailbox_address": req.Mailbox,
+		"folder":          req.Folder,
+		"direction":       req.Direction,
+		"last_uid":        req.LastUID,
+		"batch":           req.PageSize,
+		"imap":            req.Conn,
 	}, &out, pullTimeout())
 	if err != nil {
 		return nil, err
@@ -499,16 +509,26 @@ func (r *Runtime) VerifyOAuth(ctx context.Context, provider, accessToken string)
 	}, &out, 0)
 }
 
-func (r *Runtime) PullOAuthMessages(ctx context.Context, inboxID, mailbox, provider string, sentFolder bool, since string, pageSize int, conn OAuthConnection) (*OAuthPullResult, error) {
+type OAuthPullRequest struct {
+	InboxID    string
+	Mailbox    string
+	Provider   string
+	SentFolder bool
+	Since      string
+	PageSize   int
+	Conn       OAuthConnection
+}
+
+func (r *Runtime) PullOAuthMessages(ctx context.Context, req OAuthPullRequest) (*OAuthPullResult, error) {
 	var out OAuthPullResult
 	err := r.invoke(ctx, "/v1/oauth/poll-page", map[string]interface{}{
-		"inbox_id":        inboxID,
-		"mailbox_address": mailbox,
-		"provider":        provider,
-		"sent_folder":     sentFolder,
-		"since":           since,
-		"batch":           pageSize,
-		"access_token":    conn.AccessToken,
+		"inbox_id":        req.InboxID,
+		"mailbox_address": req.Mailbox,
+		"provider":        req.Provider,
+		"sent_folder":     req.SentFolder,
+		"since":           req.Since,
+		"batch":           req.PageSize,
+		"access_token":    req.Conn.AccessToken,
 	}, &out, pullTimeout())
 	if err != nil {
 		return nil, err

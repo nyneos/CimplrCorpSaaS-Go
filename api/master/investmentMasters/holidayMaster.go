@@ -676,7 +676,7 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				)
 			`)
 			if err != nil {
-				api.RespondWithError(w, 500, "insert: "+err.Error())
+				api.RespondWithError(w, 500, constants.ErrInsertPrefix+err.Error())
 				return
 			}
 
@@ -690,7 +690,7 @@ func UploadCalendarBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND is_deleted=false
 			`, userEmail)
 			if err != nil {
-				api.RespondWithError(w, 500, "audit: "+err.Error())
+				api.RespondWithError(w, 500, constants.ErrAuditColonPrefix+err.Error())
 				return
 			}
 
@@ -924,7 +924,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RETURNING holiday_id::text, calendar_id::text;
 			`)
 			if err != nil {
-				api.RespondWithError(w, 500, "insert: "+err.Error())
+				api.RespondWithError(w, 500, constants.ErrInsertPrefix+err.Error())
 				return
 			}
 			var uplHolIDs, uplHolCalIDs []string
@@ -940,7 +940,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			uplRows.Close()
 			if err := uplRows.Err(); err != nil {
-				api.RespondWithError(w, 500, "insert: "+err.Error())
+				api.RespondWithError(w, 500, constants.ErrInsertPrefix+err.Error())
 				return
 			}
 
@@ -953,7 +953,7 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					FROM unnest($1::text[], $2::text[]) AS t(hid, cid)
 				`, uplHolIDs, uplHolCalIDs, userEmail)
 				if err != nil {
-					api.RespondWithError(w, 500, "audit: "+err.Error())
+					api.RespondWithError(w, 500, constants.ErrAuditColonPrefix+err.Error())
 					return
 				}
 			}
@@ -2147,7 +2147,7 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, 400, "no valid editable fields")
 			return
 		}
-		
+
 		if toDateStr(newDateVal) != toDateStr(oldVals["holiday_date"]) ||
 			newName != fmt.Sprint(oldVals["holiday_name"]) ||
 			newType != fmt.Sprint(oldVals["holiday_type"]) {
@@ -2445,7 +2445,7 @@ func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			hExecArgs := append([]interface{}{holidayID, req.CalendarID, req.Reason, userEmail}, hArgs...)
 			if _, err := tx.Exec(ctx, hAuditQuery, hExecArgs...); err != nil {
 				holidayResults = append(holidayResults, map[string]string{
-					"id": holidayID, constants.KeyStatus: "failed", constants.ValueError: "audit: " + err.Error(),
+					"id": holidayID, constants.KeyStatus: "failed", constants.ValueError: constants.ErrAuditColonPrefix + err.Error(),
 				})
 				continue
 			}
@@ -2455,7 +2455,6 @@ func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-	
 		if len(calSets) > 0 {
 			calOld, calNew := buildCalendarAuditSnapshot(oldVals, req.CalendarFields)
 			cCols, cPlaceholders, cArgs := buildAuditValueColumns(calOld, calNew, 4)

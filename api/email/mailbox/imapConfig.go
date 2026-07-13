@@ -18,19 +18,9 @@ func IsValidMailboxAddress(addr string) bool {
 func MailboxAddressAllowed(addr, sourceType string, customCreds bool) bool {
 	addr = strings.TrimSpace(addr)
 	switch strings.ToUpper(strings.TrimSpace(sourceType)) {
-	case "IMAP":
+	case "IMAP", "OAUTH":
 		return IsValidMailboxAddress(addr)
-	case "OAUTH":
-		return IsValidMailboxAddress(addr)
-	case "OUTLOOK_GRAPH":
-		if !IsValidMailboxAddress(addr) {
-			return false
-		}
-		if customCreds {
-			return true
-		}
-		return MailboxDomainAllowed(addr)
-	case "GOOGLE_WORKSPACE":
+	case "OUTLOOK_GRAPH", "GOOGLE_WORKSPACE":
 		if !IsValidMailboxAddress(addr) {
 			return false
 		}

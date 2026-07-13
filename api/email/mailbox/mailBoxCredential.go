@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"CimplrCorpSaas/api/constants"
 	emailjobs "CimplrCorpSaas/internal/jobs/email"
 	"CimplrCorpSaas/internal/services/graphmail"
 	"CimplrCorpSaas/internal/services/imapmail"
@@ -62,7 +63,7 @@ func ResolveGoogleWorkspaceForMailbox(ctx context.Context, pool *pgxpool.Pool, f
 func (f MailboxGoogleWorkspaceFields) redacted() MailboxGoogleWorkspaceFields {
 	out := f
 	if out.WorkspacePrivateKey != "" {
-		out.WorkspacePrivateKey = "********"
+		out.WorkspacePrivateKey = constants.RedactedPlaceholder
 	}
 	return out
 }
@@ -70,7 +71,7 @@ func (f MailboxGoogleWorkspaceFields) redacted() MailboxGoogleWorkspaceFields {
 func GoogleWorkspaceFieldsConfigured(f MailboxGoogleWorkspaceFields) bool {
 	return strings.TrimSpace(f.WorkspaceServiceAccountEmail) != "" &&
 		strings.TrimSpace(f.WorkspacePrivateKey) != "" &&
-		f.WorkspacePrivateKey != "********"
+		f.WorkspacePrivateKey != constants.RedactedPlaceholder
 }
 
 func GoogleWorkspacePatchPresent(p MailboxGoogleWorkspaceFields) bool {
@@ -78,7 +79,7 @@ func GoogleWorkspacePatchPresent(p MailboxGoogleWorkspaceFields) bool {
 		strings.TrimSpace(p.WorkspaceTenantLabel) != "" ||
 		strings.TrimSpace(p.WorkspaceServiceAccountEmail) != "" ||
 		strings.TrimSpace(p.WorkspaceClientID) != "" ||
-		(strings.TrimSpace(p.WorkspacePrivateKey) != "" && p.WorkspacePrivateKey != "********")
+		(strings.TrimSpace(p.WorkspacePrivateKey) != "" && p.WorkspacePrivateKey != constants.RedactedPlaceholder)
 }
 
 func MergeGoogleWorkspaceFields(existing MailboxGoogleWorkspaceFields, patch MailboxGoogleWorkspaceFields) (MailboxGoogleWorkspaceFields, error) {
@@ -95,7 +96,7 @@ func MergeGoogleWorkspaceFields(existing MailboxGoogleWorkspaceFields, patch Mai
 	if strings.TrimSpace(patch.WorkspaceClientID) != "" {
 		out.WorkspaceClientID = strings.TrimSpace(patch.WorkspaceClientID)
 	}
-	if strings.TrimSpace(patch.WorkspacePrivateKey) != "" && patch.WorkspacePrivateKey != "********" {
+	if strings.TrimSpace(patch.WorkspacePrivateKey) != "" && patch.WorkspacePrivateKey != constants.RedactedPlaceholder {
 		out.WorkspacePrivateKey = strings.TrimSpace(patch.WorkspacePrivateKey)
 	}
 	return out, nil
@@ -149,7 +150,7 @@ func (f MailboxGraphFields) toGraphConfig() graphmail.Config {
 func (f MailboxGraphFields) redacted() MailboxGraphFields {
 	out := f
 	if out.ClientSecret != "" {
-		out.ClientSecret = "********"
+		out.ClientSecret = constants.RedactedPlaceholder
 	}
 	return out
 }
@@ -199,7 +200,7 @@ func (f MailboxIMAPFields) toIMAPConfig(mailbox string) imapmail.Config {
 func (f MailboxIMAPFields) redacted() MailboxIMAPFields {
 	out := f
 	if out.Password != "" {
-		out.Password = "********"
+		out.Password = constants.RedactedPlaceholder
 	}
 	return out
 }
@@ -218,7 +219,7 @@ func MergeGraphFields(existing MailboxGraphFields, patch MailboxGraphFields) (Ma
 	if strings.TrimSpace(patch.ClientID) != "" {
 		out.ClientID = strings.TrimSpace(patch.ClientID)
 	}
-	if strings.TrimSpace(patch.ClientSecret) != "" && patch.ClientSecret != "********" {
+	if strings.TrimSpace(patch.ClientSecret) != "" && patch.ClientSecret != constants.RedactedPlaceholder {
 		out.ClientSecret = strings.TrimSpace(patch.ClientSecret)
 	}
 	cfg := out.toGraphConfig()
@@ -244,7 +245,7 @@ func MergeIMAPFields(existing MailboxIMAPFields, patch MailboxIMAPFields, mailbo
 	if strings.TrimSpace(patch.Username) != "" {
 		out.Username = strings.TrimSpace(patch.Username)
 	}
-	if strings.TrimSpace(patch.Password) != "" && patch.Password != "********" {
+	if strings.TrimSpace(patch.Password) != "" && patch.Password != constants.RedactedPlaceholder {
 		out.Password = strings.TrimSpace(patch.Password)
 	}
 	if strings.TrimSpace(patch.InboxFolder) != "" {
@@ -317,7 +318,7 @@ func IMAPPatchPresent(p MailboxIMAPFields) bool {
 	return strings.TrimSpace(p.Provider) != "" ||
 		strings.TrimSpace(p.Host) != "" ||
 		strings.TrimSpace(p.Username) != "" ||
-		(strings.TrimSpace(p.Password) != "" && p.Password != "********") ||
+		(strings.TrimSpace(p.Password) != "" && p.Password != constants.RedactedPlaceholder) ||
 		p.Port > 0 ||
 		strings.TrimSpace(p.InboxFolder) != "" ||
 		strings.TrimSpace(p.SentFolder) != ""
@@ -328,7 +329,7 @@ func GraphPatchPresent(p MailboxGraphFields) bool {
 		strings.TrimSpace(p.TenantLabel) != "" ||
 		strings.TrimSpace(p.TenantID) != "" ||
 		strings.TrimSpace(p.ClientID) != "" ||
-		(strings.TrimSpace(p.ClientSecret) != "" && p.ClientSecret != "********")
+		(strings.TrimSpace(p.ClientSecret) != "" && p.ClientSecret != constants.RedactedPlaceholder)
 }
 
 func LoadMailboxIMAPFields(ctx context.Context, pool *pgxpool.Pool, inboxID string) (mailbox string, fields MailboxIMAPFields, err error) {

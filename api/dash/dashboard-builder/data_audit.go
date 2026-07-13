@@ -8,37 +8,30 @@ import (
 )
 
 type auditTableConfig struct {
-	Table, ParentCol, ParentID string
+	Table, ParentCol, ParentID  string
 	PKCol, ActionCol, ExtraCols string
 }
 
+// auditSource identifies the table/column pair an audit helper reads from.
+type auditSource struct {
+	Table     string
+	ParentCol string
+	ExtraCols string
+}
+
 // auditQuery — for FD investment audit tables that use (audit_id, action_type).
-func auditQuery(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	limit int,
-	offset int,
-	table, parentCol, parentID string,
-	extraCols string,
-) ([]map[string]any, error) {
+func auditQuery(ctx context.Context, pool *pgxpool.Pool, limit, offset int, parentID string, src auditSource) ([]map[string]any, error) {
 	return auditQueryInner(ctx, pool, limit, offset, auditTableConfig{
-		Table: table, ParentCol: parentCol, ParentID: parentID,
-		PKCol: "audit_id", ActionCol: "action_type", ExtraCols: extraCols,
+		Table: src.Table, ParentCol: src.ParentCol, ParentID: parentID,
+		PKCol: "audit_id", ActionCol: "action_type", ExtraCols: src.ExtraCols,
 	})
 }
 
 // stdAuditQuery — for standard cimplr audit tables that use (action_id, actiontype).
-func stdAuditQuery(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	entityIDs []string,
-	limit int,
-	offset int,
-	table, parentCol, parentID string,
-) ([]map[string]any, error) {
+func stdAuditQuery(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit, offset int, parentID string, src auditSource) ([]map[string]any, error) {
 	_ = entityIDs
 	return auditQueryInner(ctx, pool, limit, offset, auditTableConfig{
-		Table: table, ParentCol: parentCol, ParentID: parentID,
+		Table: src.Table, ParentCol: src.ParentCol, ParentID: parentID,
 		PKCol: "action_id", ActionCol: "actiontype",
 	})
 }
@@ -91,74 +84,74 @@ func auditQueryInner(
 
 // ── FD Booking Audit ──────────────────────────────────────────────────────────
 func queryFDBookingAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset,
-		"investment.fd_audit_booking_request", "booking_id", parentID, "")
+	return auditQuery(ctx, pool, limit, offset, parentID,
+		auditSource{Table: "investment.fd_audit_booking_request", ParentCol: "booking_id"})
 }
 
 // ── FD Confirmation Audit ─────────────────────────────────────────────────────
 func queryFDConfirmationAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset,
-		"investment.fd_audit_confirmation", "confirmation_id", parentID, "")
+	return auditQuery(ctx, pool, limit, offset, parentID,
+		auditSource{Table: "investment.fd_audit_confirmation", ParentCol: "confirmation_id"})
 }
 
 // ── FD Activation (Master) Audit ──────────────────────────────────────────────
 func queryFDActivationAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset,
-		"investment.fd_audit_master", "fd_id", parentID, "")
+	return auditQuery(ctx, pool, limit, offset, parentID,
+		auditSource{Table: "investment.fd_audit_master", ParentCol: "fd_id"})
 }
 
 // ── FD Cashflow Audit ─────────────────────────────────────────────────────────
 func queryFDCashflowAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset,
-		"investment.fd_audit_cashflow_schedule", "cashflow_id", parentID, "")
+	return auditQuery(ctx, pool, limit, offset, parentID,
+		auditSource{Table: "investment.fd_audit_cashflow_schedule", ParentCol: "cashflow_id"})
 }
 
 // ── FD Closure Initiate Audit ─────────────────────────────────────────────────
 func queryFDClosureInitiateAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset,
-		"cimplr.fd_closure_initiate_audit", "closure_initiate_id", parentID, "")
+	return auditQuery(ctx, pool, limit, offset, parentID,
+		auditSource{Table: "cimplr.fd_closure_initiate_audit", ParentCol: "closure_initiate_id"})
 }
 
 // ── FD Closure Confirm Audit ──────────────────────────────────────────────────
 func queryFDClosureConfirmAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset,
-		"cimplr.fd_closure_confirm_audit", "closure_confirm_id", parentID, "")
+	return auditQuery(ctx, pool, limit, offset, parentID,
+		auditSource{Table: "cimplr.fd_closure_confirm_audit", ParentCol: "closure_confirm_id"})
 }
 
 // ── FD TDS Receipt Audit ──────────────────────────────────────────────────────
 func queryFDTdsAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset,
-		"investment.fd_tds_receipt_audit", "tds_id", parentID, "")
+	return auditQuery(ctx, pool, limit, offset, parentID,
+		auditSource{Table: "investment.fd_tds_receipt_audit", ParentCol: "tds_id"})
 }
 
 // ── FD Interest Receipt Audit ─────────────────────────────────────────────────
 func queryFDReceiptAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset,
-		"investment.fd_interest_receipt_audit", "receipt_id", parentID, "")
+	return auditQuery(ctx, pool, limit, offset, parentID,
+		auditSource{Table: "investment.fd_interest_receipt_audit", ParentCol: "receipt_id"})
 }
 
 // ── FD Receipt Exception Audit ────────────────────────────────────────────────
 func queryFDExceptionAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset,
-		"investment.fd_receipt_exception_audit", "exception_id", parentID, "")
+	return auditQuery(ctx, pool, limit, offset, parentID,
+		auditSource{Table: "investment.fd_receipt_exception_audit", ParentCol: "exception_id"})
 }
 
 // ── Bank Statement Audit ──────────────────────────────────────────────────────
 func queryCashBankStatementAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return stdAuditQuery(ctx, pool, entityIDs, limit, offset,
-		"cimplrcorpsaas.auditactionbankstatement", "bankstatementid", parentID)
+	return stdAuditQuery(ctx, pool, entityIDs, limit, offset, parentID,
+		auditSource{Table: "cimplrcorpsaas.auditactionbankstatement", ParentCol: "bankstatementid"})
 }
 
 // ── Sweep Config Audit ────────────────────────────────────────────────────────
 func queryCashSweepConfigAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return stdAuditQuery(ctx, pool, entityIDs, limit, offset,
-		"cimplrcorpsaas.auditactionsweepconfiguration", "sweep_id", parentID)
+	return stdAuditQuery(ctx, pool, entityIDs, limit, offset, parentID,
+		auditSource{Table: "cimplrcorpsaas.auditactionsweepconfiguration", ParentCol: "sweep_id"})
 }
 
 // ── Sweep Initiation Audit ────────────────────────────────────────────────────
 func queryCashSweepInitiationAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return stdAuditQuery(ctx, pool, entityIDs, limit, offset,
-		"cimplrcorpsaas.auditactionsweepinitiation", "initiation_id", parentID)
+	return stdAuditQuery(ctx, pool, entityIDs, limit, offset, parentID,
+		auditSource{Table: "cimplrcorpsaas.auditactionsweepinitiation", ParentCol: "initiation_id"})
 }
 
 // ── Cashflow Projection Audit ─────────────────────────────────────────────────
@@ -236,44 +229,44 @@ func queryCashFundPlanAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 
 // ── Investment Proposal Audit ─────────────────────────────────────────────────
 func queryInvestmentProposalAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return stdAuditQuery(ctx, pool, entityIDs, limit, offset,
-		"investment.auditactionproposal", "proposal_id", parentID)
+	return stdAuditQuery(ctx, pool, entityIDs, limit, offset, parentID,
+		auditSource{Table: "investment.auditactionproposal", ParentCol: "proposal_id"})
 }
 
 // ── Investment Initiation Audit ───────────────────────────────────────────────
 func queryInvestmentInitiationAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return stdAuditQuery(ctx, pool, entityIDs, limit, offset,
-		"investment.auditactioninitiation", "initiation_id", parentID)
+	return stdAuditQuery(ctx, pool, entityIDs, limit, offset, parentID,
+		auditSource{Table: "investment.auditactioninitiation", ParentCol: "initiation_id"})
 }
 
 // ── Investment Confirmation Audit ─────────────────────────────────────────────
 func queryInvestmentConfirmationAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return stdAuditQuery(ctx, pool, entityIDs, limit, offset,
-		"investment.auditactioninvestmentconfirmation", "confirmation_id", parentID)
+	return stdAuditQuery(ctx, pool, entityIDs, limit, offset, parentID,
+		auditSource{Table: "investment.auditactioninvestmentconfirmation", ParentCol: "confirmation_id"})
 }
 
 // ── Redemption Audit ──────────────────────────────────────────────────────────
 func queryInvestmentRedemptionAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return stdAuditQuery(ctx, pool, entityIDs, limit, offset,
-		"investment.auditactionredemption", "redemption_id", parentID)
+	return stdAuditQuery(ctx, pool, entityIDs, limit, offset, parentID,
+		auditSource{Table: "investment.auditactionredemption", ParentCol: "redemption_id"})
 }
 
 // ── Redemption Confirm Audit ──────────────────────────────────────────────────
 func queryInvestmentRedemptionConfirmAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return stdAuditQuery(ctx, pool, entityIDs, limit, offset,
-		"investment.auditactionredemptionconfirmation", "redemption_confirm_id", parentID)
+	return stdAuditQuery(ctx, pool, entityIDs, limit, offset, parentID,
+		auditSource{Table: "investment.auditactionredemptionconfirmation", ParentCol: "redemption_confirm_id"})
 }
 
 // ── FX Forward Booking Audit ──────────────────────────────────────────────────
 func queryFXForwardBookingAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return stdAuditQuery(ctx, pool, entityIDs, limit, offset,
-		"public.auditactionforwardbooking", "system_transaction_id", parentID)
+	return stdAuditQuery(ctx, pool, entityIDs, limit, offset, parentID,
+		auditSource{Table: "public.auditactionforwardbooking", ParentCol: "system_transaction_id"})
 }
 
 // ── FX Exposure Audit ─────────────────────────────────────────────────────────
 func queryFXExposureAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return stdAuditQuery(ctx, pool, entityIDs, limit, offset,
-		"public.auditactionexposure", "exposure_header_id", parentID)
+	return stdAuditQuery(ctx, pool, entityIDs, limit, offset, parentID,
+		auditSource{Table: "public.auditactionexposure", ParentCol: "exposure_header_id"})
 }
 
 // ── Onboard Batch Info (summary with record counts per entity type) ────────────

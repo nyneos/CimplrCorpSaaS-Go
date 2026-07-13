@@ -376,7 +376,10 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 			"updated": updated,
 		})
 
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteBucketingUpdate, fxnotif.ActionUpdate, req.UserID, actor, reason, []string{req.ExposureHeaderID}, nil)
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: fxnotif.SourceRouteBucketingUpdate, Action: fxnotif.ActionUpdate, UserID: req.UserID, RequestedBy: actor, CheckerComment: reason,
+			ExposureIDs: []string{req.ExposureHeaderID}, ResultBuckets: nil,
+		})
 	}
 }
 
@@ -593,8 +596,11 @@ func DeleteBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			"deleted": deleted,
 		})
 
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteBucketingDelete, fxnotif.ActionDelete, req.UserID, requestedBy, deleteComment, req.ExposureHeaderIds, map[string][]string{
-			"deleted": deleted,
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: fxnotif.SourceRouteBucketingDelete, Action: fxnotif.ActionDelete, UserID: req.UserID, RequestedBy: requestedBy, CheckerComment: deleteComment,
+			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
+				"deleted": deleted,
+			},
 		})
 	}
 }
@@ -750,9 +756,12 @@ func ApproveBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				approvedIDs = append(approvedIDs, fmt.Sprint(id))
 			}
 		}
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteBucketingApprove, fxnotif.ActionApprove, req.UserID, updatedBy, req.Comments, req.ExposureHeaderIds, map[string][]string{
-			"approved": approvedIDs,
-			"deleted":  deleted,
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: fxnotif.SourceRouteBucketingApprove, Action: fxnotif.ActionApprove, UserID: req.UserID, RequestedBy: updatedBy, CheckerComment: req.Comments,
+			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
+				"approved": approvedIDs,
+				"deleted":  deleted,
+			},
 		})
 	}
 }
@@ -826,8 +835,11 @@ func RejectBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				rejectedIDs = append(rejectedIDs, fmt.Sprint(id))
 			}
 		}
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteBucketingReject, fxnotif.ActionReject, req.UserID, updatedBy, req.Comments, req.ExposureHeaderIds, map[string][]string{
-			"rejected": rejectedIDs,
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: fxnotif.SourceRouteBucketingReject, Action: fxnotif.ActionReject, UserID: req.UserID, RequestedBy: updatedBy, CheckerComment: req.Comments,
+			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
+				"rejected": rejectedIDs,
+			},
 		})
 	}
 }

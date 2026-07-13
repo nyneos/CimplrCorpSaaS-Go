@@ -138,7 +138,9 @@ func ValidateMailboxReady(ctx context.Context, pool *pgxpool.Pool, inboxID strin
 			}
 		}
 		exp := time.Now().UTC().Add(time.Duration(refreshed.ExpiresIn) * time.Second)
-		_ = SaveMailboxOAuthTokens(ctx, pool, inboxID, oauthFields.OAuthProvider, refreshed.RefreshToken, refreshed.AccessToken, refreshed.Scope, exp)
+		_ = SaveMailboxOAuthTokens(ctx, pool, inboxID, OAuthTokenSet{
+			Provider: oauthFields.OAuthProvider, RefreshToken: refreshed.RefreshToken, AccessToken: refreshed.AccessToken, Scopes: refreshed.Scope, ExpiresAt: exp,
+		})
 	default:
 		graphFields.TenantKey = graphTenantKey
 		payload, err := ResolveGraphForMailbox(ctx, pool, graphFields)

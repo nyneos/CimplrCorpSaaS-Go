@@ -69,9 +69,9 @@ var uniqueMessages = map[string]string{
 	"unique_calendar_code_not_deleted":        "Calendar code already exists. Please use a different code.",
 	"unique_calendar_name_not_deleted":        "Calendar name already exists. Please use a different name.",
 	"ux_calendar_code_active":                 "Calendar code already exists. Please use a different code.",
-	"unique_holiday_per_calendar_not_deleted": "A holiday with this name already exists for the selected calendar.",
-	"ux_holiday_unique_active":                "A holiday with this name already exists for the selected calendar.",
-	"ux_holiday_name_per_calendar_active":     "A holiday with this name already exists for the selected calendar.",
+	"unique_holiday_per_calendar_not_deleted": constants.ErrHolidayAlreadyExists,
+	"ux_holiday_unique_active":                constants.ErrHolidayAlreadyExists,
+	"ux_holiday_name_per_calendar_active":     constants.ErrHolidayAlreadyExists,
 
 	// Bank account
 	"unique_account_number_not_deleted":                      "Account number already exists. Please use a different account number.",

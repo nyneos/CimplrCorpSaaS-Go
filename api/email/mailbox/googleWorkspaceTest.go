@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
@@ -23,7 +24,7 @@ func HandleGoogleWorkspaceTest(pool *pgxpool.Pool) http.HandlerFunc {
 			MailboxGoogleWorkspaceFields
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		fields := req.MailboxGoogleWorkspaceFields
@@ -55,11 +56,11 @@ func HandleGoogleWorkspaceTest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rt := mailruntime.NewRuntime()
 		if !rt.Ready() {
-			emailcommon.RespondFailPayload(w, "google-workspace/test", "mail processing unavailable", map[string]interface{}{"ok": false})
+			emailcommon.RespondFailPayload(w, constants.RouteGoogleWorkspaceTest, constants.ErrMailProcessingUnavailable, map[string]interface{}{"ok": false})
 			return
 		}
 		if err := rt.VerifyGmailDWD(r.Context(), mailbox, payload); err != nil {
-			emailcommon.RespondFailPayload(w, "google-workspace/test", err.Error(), map[string]interface{}{"ok": false})
+			emailcommon.RespondFailPayload(w, constants.RouteGoogleWorkspaceTest, err.Error(), map[string]interface{}{"ok": false})
 			return
 		}
 		label := strings.TrimSpace(payload.TenantLabel)
@@ -69,7 +70,7 @@ func HandleGoogleWorkspaceTest(pool *pgxpool.Pool) http.HandlerFunc {
 		if label == "" {
 			label = "default"
 		}
-		emailcommon.RespondPayload(w, "google-workspace/test", map[string]interface{}{
+		emailcommon.RespondPayload(w, constants.RouteGoogleWorkspaceTest, map[string]interface{}{
 			"ok":                    true,
 			"label":                 label,
 			"service_account_email": payload.ServiceAccountEmail,

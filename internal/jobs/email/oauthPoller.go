@@ -289,7 +289,10 @@ func pollOAuthMailboxFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 
 	var totalIngested int
 	for {
-		resp, err := rt.PullOAuthMessages(ctx, inbox.InboxID, inbox.MailboxAddress, inbox.Provider, folder.sentFolder, sinceStr, oauthPullPageSize, conn)
+		resp, err := rt.PullOAuthMessages(ctx, mailruntime.OAuthPullRequest{
+			InboxID: inbox.InboxID, Mailbox: inbox.MailboxAddress, Provider: inbox.Provider,
+			SentFolder: folder.sentFolder, Since: sinceStr, PageSize: oauthPullPageSize, Conn: conn,
+		})
 		if err != nil {
 			return totalIngested, err
 		}

@@ -284,7 +284,10 @@ func pollIMAPFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Run
 	lastUID := *folder.lastUID
 
 	for {
-		resp, err := rt.PullIMAPMessages(ctx, inbox.InboxID, inbox.MailboxAddress, folder.folder, folder.direction, lastUID, imapPullPageSize, inbox.IMAP.toPayload())
+		resp, err := rt.PullIMAPMessages(ctx, mailruntime.IMAPPullRequest{
+			InboxID: inbox.InboxID, Mailbox: inbox.MailboxAddress, Folder: folder.folder,
+			Direction: folder.direction, LastUID: lastUID, PageSize: imapPullPageSize, Conn: inbox.IMAP.toPayload(),
+		})
 		if err != nil {
 			return totalIngested, err
 		}
@@ -441,7 +444,10 @@ func ingestIMAPMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow, 
 		if err != nil {
 			return err
 		}
-		logAttachmentIngest(ctx, pool, messageID, attachmentID, "IMAP", att.Filename, att.ContentType, att.S3Key, att.SizeBytes)
+		logAttachmentIngest(ctx, pool, attachmentIngestInfo{
+			MessageID: messageID, AttachmentID: attachmentID, Source: "IMAP",
+			Filename: att.Filename, ContentType: att.ContentType, S3Key: att.S3Key, FileSize: att.SizeBytes,
+		})
 	}
 
 	detail, _ := json.Marshal(map[string]string{

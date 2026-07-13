@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
@@ -23,7 +24,7 @@ func HandleIMAPTest(pool *pgxpool.Pool) http.HandlerFunc {
 			MailboxIMAPFields
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		addr := strings.ToLower(strings.TrimSpace(req.MailboxAddress))
@@ -50,12 +51,12 @@ func HandleIMAPTest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		emailClient := mailruntime.NewRuntime()
 		if !emailClient.Ready() {
-			emailcommon.RespondFailPayload(w, "imap/test", "mail processing unavailable", map[string]interface{}{"ok": false})
+			emailcommon.RespondFailPayload(w, constants.RouteIMAPTest, constants.ErrMailProcessingUnavailable, map[string]interface{}{"ok": false})
 			return
 		}
 		payload := fields.ToRuntimeIMAP()
 		if err := emailClient.VerifyIMAP(r.Context(), addr, payload); err != nil {
-			emailcommon.RespondFailPayload(w, "imap/test", err.Error(), map[string]interface{}{"ok": false})
+			emailcommon.RespondFailPayload(w, constants.RouteIMAPTest, err.Error(), map[string]interface{}{"ok": false})
 			return
 		}
 		host := strings.TrimSpace(payload.Host)
@@ -66,7 +67,7 @@ func HandleIMAPTest(pool *pgxpool.Pool) http.HandlerFunc {
 		if provider == "" {
 			provider = strings.TrimSpace(fields.Provider)
 		}
-		emailcommon.RespondPayload(w, "imap/test", map[string]interface{}{
+		emailcommon.RespondPayload(w, constants.RouteIMAPTest, map[string]interface{}{
 			"ok":       true,
 			"host":     host,
 			"provider": provider,

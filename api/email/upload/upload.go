@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
-	apipreval "CimplrCorpSaas/api/middlewares"
 	emailcommon "CimplrCorpSaas/api/email/common"
+	apipreval "CimplrCorpSaas/api/middlewares"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	emailjobs "CimplrCorpSaas/internal/jobs/email"
 	"CimplrCorpSaas/internal/logger"
@@ -100,13 +100,17 @@ func HandleUploadEml(pool *pgxpool.Pool) http.HandlerFunc {
 		_, _, _, entityIDs := emailcommon.RequestIdentity(r, "", "")
 		admin := emailcommon.IsEmailAdmin(r.Context(), userID)
 
-		inbox, mailDirection, err := emailcommon.ResolveManualUploadInbox(r.Context(), pool, msg, userID, userEmail, entityIDs, admin, true)
+		inbox, mailDirection, err := emailcommon.ResolveManualUploadInbox(r.Context(), pool, msg, emailcommon.ManualUploadIdentity{
+			UserID: userID, UserEmail: userEmail, EntityIDs: entityIDs, Admin: admin, SkipInboxFilters: true,
+		})
 		if err != nil {
 			emailcommon.RespondBadRequest(w, err.Error())
 			return
 		}
 
-		messageID, err := ingestParsedMessage(r.Context(), pool, msg, "MANUAL_UPLOAD", inbox.InboxID, inbox.Module, inbox.EntityID, mailDirection)
+		messageID, err := ingestParsedMessage(r.Context(), pool, msg, ingestMessageInfo{
+			Status: "MANUAL_UPLOAD", InboxID: inbox.InboxID, Module: inbox.Module, EntityID: inbox.EntityID, MailDirection: mailDirection,
+		})
 		if err != nil {
 			emailcommon.RespondInternal(w, err.Error())
 			return
@@ -117,10 +121,10 @@ func HandleUploadEml(pool *pgxpool.Pool) http.HandlerFunc {
 			uploadedBy = userEmail
 		}
 		emailcommon.LogProcessing(r.Context(), pool, messageID, "UPLOAD_EML", "OK", map[string]interface{}{
-			"s3_raw_key":    s3Key,
-			"filename":      safeName,
-			"uploaded_by":   uploadedBy,
-			"source":        "manual",
+			"s3_raw_key":  s3Key,
+			"filename":    safeName,
+			"uploaded_by": uploadedBy,
+			"source":      "manual",
 		})
 
 		logger.LogInfo("[email-upload] ingested manual .eml message_id=%s key=%s", messageID, s3Key)
@@ -228,7 +232,17 @@ func HandleAttachmentUpload(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func ingestParsedMessage(ctx context.Context, pool *pgxpool.Pool, msg mailruntime.ParsedEmail, status, inboxID, module, entityID, mailDirection string) (string, error) {
+type ingestMessageInfo struct {
+	Status        string
+	InboxID       string
+	Module        string
+	EntityID      string
+	MailDirection string
+}
+
+func ingestParsedMessage(ctx context.Context, pool *pgxpool.Pool, msg mailruntime.ParsedEmail, info ingestMessageInfo) (string, error) {
+	status, inboxID, module, entityID, mailDirection :=
+		info.Status, info.InboxID, info.Module, info.EntityID, info.MailDirection
 	var exists bool
 	if err := pool.QueryRow(ctx, `
 		SELECT EXISTS(SELECT 1 FROM email_svc.message WHERE s3_raw_key = $1)

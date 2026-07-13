@@ -273,7 +273,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Duplicate-upload guard: reject a byte-identical file already uploaded for this module.
 			sum := sha256.Sum256(fileBytes)
 			fileHash := hex.EncodeToString(sum[:])
-			if dup, derr := bulkuploadaudit.ExistsByHash(ctx, pgxPool, "master-demat", fileHash); derr != nil {
+			if dup, derr := bulkuploadaudit.ExistsByHash(ctx, pgxPool, constants.ModuleMasterDemat, fileHash); derr != nil {
 				api.LogError("demat duplicate-file check failed: %v", derr)
 			} else if dup {
 				api.RespondWithError(w, http.StatusConflict, "This file has already been uploaded. Please upload a different file.")
@@ -416,7 +416,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// S3 upload before opening transaction
 			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-demat")
+				folder := s3storage.GetStoragePrefix(constants.ModuleMasterDemat)
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
@@ -509,7 +509,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			committed = true
 			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
-				ModuleKey:        "master-demat",
+				ModuleKey:        constants.ModuleMasterDemat,
 				OriginalFileName: fh.Filename,
 				StoredFileName:   storedFileName,
 				UploadS3Key:      s3Key,
@@ -860,7 +860,7 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var sets []string
 		var args []interface{}
 		pos := 1
-		
+
 		auditOldValues := map[string]interface{}{}
 		auditNewValues := map[string]interface{}{}
 

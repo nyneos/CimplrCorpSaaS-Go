@@ -188,7 +188,6 @@ func queryFDAccrualLedgerAudit(ctx context.Context, pool *pgxpool.Pool, entityID
 	return scanRows(r)
 }
 
-
 func queryFDAccrualScheduleAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "s")
 

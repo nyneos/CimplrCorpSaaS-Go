@@ -158,7 +158,7 @@ var nonMonetaryPrefixes = []string{
 }
 
 var nonMonetaryExact = map[string]bool{
-	"divisor":                true,
+	"divisor":               true,
 	"total_records":         true,
 	"total_cashflow_events": true,
 	"total_groups":          true,

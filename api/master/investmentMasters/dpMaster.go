@@ -214,7 +214,7 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Duplicate-upload guard.
 			sum := sha256.Sum256(fileBytes)
 			fileHash := hex.EncodeToString(sum[:])
-			if dup, derr := bulkuploadaudit.ExistsByHash(ctx, pgxPool, "master-dp", fileHash); derr != nil {
+			if dup, derr := bulkuploadaudit.ExistsByHash(ctx, pgxPool, constants.ModuleMasterDP, fileHash); derr != nil {
 				api.LogError("dp duplicate-file check failed: %v", derr)
 			} else if dup {
 				api.RespondWithError(w, http.StatusConflict, "This file has already been uploaded. Please upload a different file.")
@@ -291,7 +291,7 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// S3 upload before opening transaction
 			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-dp")
+				folder := s3storage.GetStoragePrefix(constants.ModuleMasterDP)
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
@@ -391,7 +391,7 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			committed = true
 			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
-				ModuleKey:        "master-dp",
+				ModuleKey:        constants.ModuleMasterDP,
 				OriginalFileName: fh.Filename,
 				StoredFileName:   storedFileName,
 				UploadS3Key:      s3Key,

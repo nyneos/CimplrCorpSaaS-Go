@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
@@ -22,7 +23,7 @@ func HandleGraphTest(pool *pgxpool.Pool) http.HandlerFunc {
 			MailboxGraphFields
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			emailcommon.RespondBadRequest(w, "invalid body")
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
 		fields := req.MailboxGraphFields
@@ -46,11 +47,11 @@ func HandleGraphTest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rt := mailruntime.NewRuntime()
 		if !rt.Ready() {
-			emailcommon.RespondFailPayload(w, "graph/test", "mail processing unavailable", map[string]interface{}{"ok": false})
+			emailcommon.RespondFailPayload(w, constants.RouteGraphTest, constants.ErrMailProcessingUnavailable, map[string]interface{}{"ok": false})
 			return
 		}
 		if err := rt.VerifyGraph(r.Context(), payload); err != nil {
-			emailcommon.RespondFailPayload(w, "graph/test", err.Error(), map[string]interface{}{"ok": false})
+			emailcommon.RespondFailPayload(w, constants.RouteGraphTest, err.Error(), map[string]interface{}{"ok": false})
 			return
 		}
 		label := strings.TrimSpace(payload.TenantLabel)
@@ -60,7 +61,7 @@ func HandleGraphTest(pool *pgxpool.Pool) http.HandlerFunc {
 		if label == "" {
 			label = "default"
 		}
-		emailcommon.RespondPayload(w, "graph/test", map[string]interface{}{
+		emailcommon.RespondPayload(w, constants.RouteGraphTest, map[string]interface{}{
 			"ok":        true,
 			"tenant_id": payload.TenantID,
 			"label":     label,

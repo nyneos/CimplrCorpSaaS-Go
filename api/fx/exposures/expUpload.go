@@ -605,7 +605,10 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.Han
 		}
 		auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: exposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: strings.TrimSpace(req.Reason), RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValues, NewValues: newValues})
 
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteLegacyEdit, fxnotif.ActionEdit, req.UserID, auditutil.Actor(req.UserID), strings.TrimSpace(req.Reason), []string{exposureHeaderID}, nil)
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: fxnotif.SourceRouteLegacyEdit, Action: fxnotif.ActionEdit, UserID: req.UserID, RequestedBy: auditutil.Actor(req.UserID), CheckerComment: strings.TrimSpace(req.Reason),
+			ExposureIDs: []string{exposureHeaderID}, ResultBuckets: nil,
+		})
 	}
 }
 
@@ -788,8 +791,11 @@ func DeleteExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: deleteComment, RequestedBy: requestedBy, OldValues: nil, NewValues: nil})
 		}
 
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteLegacyDeleteMultiple, fxnotif.ActionDelete, req.UserID, requestedBy, deleteComment, req.ExposureHeaderIds, map[string][]string{
-			"deleted": req.ExposureHeaderIds,
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: fxnotif.SourceRouteLegacyDeleteMultiple, Action: fxnotif.ActionDelete, UserID: req.UserID, RequestedBy: requestedBy, CheckerComment: deleteComment,
+			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
+				"deleted": req.ExposureHeaderIds,
+			},
 		})
 	}
 }
@@ -881,8 +887,11 @@ func RejectMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 				rejectedIDs = append(rejectedIDs, fmt.Sprint(id))
 			}
 		}
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteLegacyRejectMultiple, fxnotif.ActionReject, req.UserID, rejectedBy, rejectionComment, req.ExposureHeaderIds, map[string][]string{
-			"rejected": rejectedIDs,
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: fxnotif.SourceRouteLegacyRejectMultiple, Action: fxnotif.ActionReject, UserID: req.UserID, RequestedBy: rejectedBy, CheckerComment: rejectionComment,
+			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
+				"rejected": rejectedIDs,
+			},
 		})
 	}
 }
@@ -1203,9 +1212,12 @@ func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.Handler
 				}
 			}
 		}
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteLegacyApproveMultiple, fxnotif.ActionApprove, req.UserID, approvedBy, approvalComment, req.ExposureHeaderIds, map[string][]string{
-			"approved": approvedIDs,
-			"deleted":  deletedIDs,
+		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: fxnotif.SourceRouteLegacyApproveMultiple, Action: fxnotif.ActionApprove, UserID: req.UserID, RequestedBy: approvedBy, CheckerComment: approvalComment,
+			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
+				"approved": approvedIDs,
+				"deleted":  deletedIDs,
+			},
 		})
 	}
 }
@@ -1293,7 +1305,10 @@ func BatchUploadStagingData(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			if len(exposureIDs) == 0 {
 				continue
 			}
-			fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.SourceRouteLegacyBatchUpload, fxnotif.ActionUpload, userID, session.Name, "", exposureIDs, nil)
+			fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+				SourceRoute: fxnotif.SourceRouteLegacyBatchUpload, Action: fxnotif.ActionUpload, UserID: userID, RequestedBy: session.Name, CheckerComment: "",
+				ExposureIDs: exposureIDs, ResultBuckets: nil,
+			})
 		}
 
 	}

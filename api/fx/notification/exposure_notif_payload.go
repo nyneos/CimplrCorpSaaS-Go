@@ -104,31 +104,38 @@ func BuildExposureUploadPayload(ctx context.Context, pool *pgxpool.Pool, batchID
 	return p
 }
 
-func BuildExposureBulkActionPayload(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	exposureIDs []string,
-	action, requestedBy, checkerComment string,
-	approvedIDs, rejectedIDs, deletedIDs []string,
-) ExposureBulkActionPayload {
+// ExposureBulkActionInput groups the fields needed to build a bulk-action
+// notification payload, keeping the function signature under the project's
+// parameter-count limit.
+type ExposureBulkActionInput struct {
+	ExposureIDs    []string
+	Action         string
+	RequestedBy    string
+	CheckerComment string
+	ApprovedIDs    []string
+	RejectedIDs    []string
+	DeletedIDs     []string
+}
+
+func BuildExposureBulkActionPayload(ctx context.Context, pool *pgxpool.Pool, in ExposureBulkActionInput) ExposureBulkActionPayload {
 	p := ExposureBulkActionPayload{
-		Action:         action,
-		ExposureIDs:    exposureIDs,
-		ApprovedIDs:    approvedIDs,
-		RejectedIDs:    rejectedIDs,
-		DeletedIDs:     deletedIDs,
-		Count:          len(exposureIDs),
-		RequestedBy:    requestedBy,
-		CheckerComment: checkerComment,
+		Action:         in.Action,
+		ExposureIDs:    in.ExposureIDs,
+		ApprovedIDs:    in.ApprovedIDs,
+		RejectedIDs:    in.RejectedIDs,
+		DeletedIDs:     in.DeletedIDs,
+		Count:          len(in.ExposureIDs),
+		RequestedBy:    in.RequestedBy,
+		CheckerComment: in.CheckerComment,
 		Exposures:      []ExposureRow{},
 	}
-	if pool == nil || len(exposureIDs) == 0 {
+	if pool == nil || len(in.ExposureIDs) == 0 {
 		return p
 	}
 
-	rows, err := fetchExposureRows(ctx, pool, `h.exposure_header_id::text = ANY($1)`, exposureIDs)
+	rows, err := fetchExposureRows(ctx, pool, `h.exposure_header_id::text = ANY($1)`, in.ExposureIDs)
 	if err != nil {
-		fmt.Printf("[ERROR] BuildExposureBulkActionPayload action=%s ids=%v: %v\n", action, exposureIDs, err)
+		fmt.Printf("[ERROR] BuildExposureBulkActionPayload action=%s ids=%v: %v\n", in.Action, in.ExposureIDs, err)
 		return p
 	}
 	p.Exposures = rows

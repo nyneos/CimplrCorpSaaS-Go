@@ -1960,13 +1960,13 @@ func GetExposureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 
 		batchID := strings.TrimSpace(req.BatchID)
 		if batchID == "" {
-			httpError(w, http.StatusBadRequest, "batch_id is required")
+			httpError(w, http.StatusBadRequest, constants.ErrBatchIDRequired)
 			return
 		}
 
 		batchUUID, err := uuid.Parse(batchID)
 		if err != nil {
-			httpError(w, http.StatusBadRequest, "invalid batch_id")
+			httpError(w, http.StatusBadRequest, constants.ErrInvalidBatchID)
 			return
 		}
 
@@ -1980,7 +1980,7 @@ func GetExposureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 		`, batchUUID).Scan(&uploadS3Key)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				httpError(w, http.StatusNotFound, "batch not found")
+				httpError(w, http.StatusNotFound, constants.ErrBatchNotFound)
 				return
 			}
 			httpError(w, http.StatusInternalServerError, "failed to fetch batch")
@@ -2465,7 +2465,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		batchUUID, err := uuid.Parse(req.BatchID)
 		if err != nil {
-			httpError(w, http.StatusBadRequest, "invalid batch_id")
+			httpError(w, http.StatusBadRequest, constants.ErrInvalidBatchID)
 			return
 		}
 
@@ -2492,7 +2492,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		var fileHash sql.NullString
 		if err := tx.QueryRow(ctx, `SELECT status,file_hash FROM public.staging_batches_exposures WHERE batch_id=$1`, batchUUID).Scan(&batchStatus, &fileHash); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				httpError(w, 404, "batch not found")
+				httpError(w, 404, constants.ErrBatchNotFound)
 				return
 			}
 			httpError(w, 500, "batch lookup: "+err.Error())
@@ -3121,7 +3121,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now(),now(),$16,$17)
 		})
 
 		exposureIDs := fxnotif.FetchExposureIDsByBatch(ctx, pool, batchUUID.String())
-		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.SourceRouteV91EditAllocation, fxnotif.ActionUpdate, req.UserID, userName, "", exposureIDs, nil)
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
+			SourceRoute: fxnotif.SourceRouteV91EditAllocation, Action: fxnotif.ActionUpdate, UserID: req.UserID, RequestedBy: userName, CheckerComment: "",
+			ExposureIDs: exposureIDs, ResultBuckets: nil,
+		})
 	}
 }
 
@@ -4051,12 +4054,12 @@ func GetBatchDetailV91(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		var req BatchDetailRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.BatchID) == "" {
-			respondEnvelopeError(w, http.StatusBadRequest, "batch_id is required", v91ErrorCode(http.StatusBadRequest))
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrBatchIDRequired, v91ErrorCode(http.StatusBadRequest))
 			return
 		}
 		batchUUID, err := uuid.Parse(strings.TrimSpace(req.BatchID))
 		if err != nil {
-			respondEnvelopeError(w, http.StatusBadRequest, "invalid batch_id", v91ErrorCode(http.StatusBadRequest))
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidBatchID, v91ErrorCode(http.StatusBadRequest))
 			return
 		}
 
@@ -4075,7 +4078,7 @@ func GetBatchDetailV91(pool *pgxpool.Pool) http.HandlerFunc {
 			&uploadedBy, &uploadedAt, &meta.S3Key)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				respondEnvelopeError(w, http.StatusNotFound, "batch not found", v91ErrorCode(http.StatusNotFound))
+				respondEnvelopeError(w, http.StatusNotFound, constants.ErrBatchNotFound, v91ErrorCode(http.StatusNotFound))
 				return
 			}
 			respondEnvelopeError(w, http.StatusInternalServerError, "batch lookup: "+err.Error(), v91ErrorCode(http.StatusInternalServerError))
@@ -4243,12 +4246,12 @@ func GetBatchExposureAuditV91(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		var req BatchDetailRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.BatchID) == "" {
-			respondEnvelopeError(w, http.StatusBadRequest, "batch_id is required", v91ErrorCode(http.StatusBadRequest))
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrBatchIDRequired, v91ErrorCode(http.StatusBadRequest))
 			return
 		}
 		batchUUID, err := uuid.Parse(strings.TrimSpace(req.BatchID))
 		if err != nil {
-			respondEnvelopeError(w, http.StatusBadRequest, "invalid batch_id", v91ErrorCode(http.StatusBadRequest))
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidBatchID, v91ErrorCode(http.StatusBadRequest))
 			return
 		}
 		batchIDStr := batchUUID.String()

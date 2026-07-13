@@ -160,7 +160,7 @@ func createInvestmentAdditionalFile(ctx context.Context, tx pgx.Tx, input additi
 	if err != nil {
 		return "", err
 	}
-	
+
 	if err := storeParentUploadKeyIfEmpty(ctx, tx, parentTable, parentCol, input.ParentID, input.UploadS3Key); err != nil {
 		return "", err
 	}

@@ -24,6 +24,13 @@ const (
 	// outputDir is relative to the binary's working directory at runtime.
 	// At dev time this resolves to internal/pdfco/output/ from the repo root.
 	outputDir = "internal/pdfco/output"
+
+	errPDFCOAPIKeyNotSet = "PDFCO_API_KEY environment variable not set"
+	errBuildRequest      = "build request: %w"
+	errDoRequest         = "do request: %w"
+	errDecodeResponse    = "decode response: %w"
+	headerAPIKey         = "x-api-key"
+	headerContentType    = "Content-Type"
 )
 
 type uploadResponse struct {
@@ -55,7 +62,7 @@ func ConvertPDFToCSV(ctx context.Context, pdfBytes []byte, originalFilename, pas
 
 	apiKey := os.Getenv("PDFCO_API_KEY")
 	if apiKey == "" {
-		return nil, ConvertMeta{}, fmt.Errorf("PDFCO_API_KEY environment variable not set")
+		return nil, ConvertMeta{}, fmt.Errorf(errPDFCOAPIKeyNotSet)
 	}
 	logger.LogInfo("[PDFCO] api key   : set (length=%d)", len(apiKey))
 
@@ -102,7 +109,7 @@ func ConvertPDFToXLSX(ctx context.Context, pdfBytes []byte, originalFilename, pa
 
 	apiKey := os.Getenv("PDFCO_API_KEY")
 	if apiKey == "" {
-		return nil, ConvertMeta{}, fmt.Errorf("PDFCO_API_KEY environment variable not set")
+		return nil, ConvertMeta{}, fmt.Errorf(errPDFCOAPIKeyNotSet)
 	}
 	logger.LogInfo("[PDFCO] api key   : set (length=%d)", len(apiKey))
 
@@ -161,14 +168,14 @@ func uploadFile(ctx context.Context, apiKey string, data []byte, filename string
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+uploadPath, &buf)
 	if err != nil {
-		return "", fmt.Errorf("build request: %w", err)
+		return "", fmt.Errorf(errBuildRequest, err)
 	}
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerAPIKey, apiKey)
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("do request: %w", err)
+		return "", fmt.Errorf(errDoRequest, err)
 	}
 	defer resp.Body.Close()
 	logger.LogInfo("[PDFCO] upload    : HTTP %d", resp.StatusCode)
@@ -178,7 +185,7 @@ func uploadFile(ctx context.Context, apiKey string, data []byte, filename string
 
 	var result uploadResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
+		return "", fmt.Errorf(errDecodeResponse, err)
 	}
 	if result.Error {
 		return "", fmt.Errorf("pdf.co returned error status=%d", result.Status)
@@ -206,14 +213,14 @@ func convertToXLSX(ctx context.Context, apiKey, fileURL, password string) (strin
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+xlsxPath, bytes.NewReader(payloadBytes))
 	if err != nil {
-		return "", ConvertMeta{}, fmt.Errorf("build request: %w", err)
+		return "", ConvertMeta{}, fmt.Errorf(errBuildRequest, err)
 	}
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerAPIKey, apiKey)
+	req.Header.Set(headerContentType, "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", ConvertMeta{}, fmt.Errorf("do request: %w", err)
+		return "", ConvertMeta{}, fmt.Errorf(errDoRequest, err)
 	}
 	defer resp.Body.Close()
 	logger.LogInfo("[PDFCO] convert   : HTTP %d", resp.StatusCode)
@@ -223,7 +230,7 @@ func convertToXLSX(ctx context.Context, apiKey, fileURL, password string) (strin
 
 	var result convertResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", ConvertMeta{}, fmt.Errorf("decode response: %w", err)
+		return "", ConvertMeta{}, fmt.Errorf(errDecodeResponse, err)
 	}
 	if result.Error {
 		return "", ConvertMeta{}, fmt.Errorf("pdf.co convert failed (status %d): %s", result.Status, result.Message)
@@ -251,14 +258,14 @@ func convertToCSV(ctx context.Context, apiKey, fileURL, password string) (string
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+csvPath, bytes.NewReader(payloadBytes))
 	if err != nil {
-		return "", ConvertMeta{}, fmt.Errorf("build request: %w", err)
+		return "", ConvertMeta{}, fmt.Errorf(errBuildRequest, err)
 	}
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerAPIKey, apiKey)
+	req.Header.Set(headerContentType, "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", ConvertMeta{}, fmt.Errorf("do request: %w", err)
+		return "", ConvertMeta{}, fmt.Errorf(errDoRequest, err)
 	}
 	defer resp.Body.Close()
 	logger.LogInfo("[PDFCO] convert   : HTTP %d", resp.StatusCode)
@@ -268,7 +275,7 @@ func convertToCSV(ctx context.Context, apiKey, fileURL, password string) (string
 
 	var result convertResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", ConvertMeta{}, fmt.Errorf("decode response: %w", err)
+		return "", ConvertMeta{}, fmt.Errorf(errDecodeResponse, err)
 	}
 	if result.Error {
 		return "", ConvertMeta{}, fmt.Errorf("pdf.co convert failed (status %d): %s", result.Status, result.Message)
@@ -283,16 +290,16 @@ func convertToCSV(ctx context.Context, apiKey, fileURL, password string) (string
 func GetRemainingCredits(ctx context.Context) (int, error) {
 	apiKey := os.Getenv("PDFCO_API_KEY")
 	if apiKey == "" {
-		return 0, fmt.Errorf("PDFCO_API_KEY environment variable not set")
+		return 0, fmt.Errorf(errPDFCOAPIKeyNotSet)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1/account/credit/balance", nil)
 	if err != nil {
-		return 0, fmt.Errorf("build request: %w", err)
+		return 0, fmt.Errorf(errBuildRequest, err)
 	}
-	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set(headerAPIKey, apiKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("do request: %w", err)
+		return 0, fmt.Errorf(errDoRequest, err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -304,7 +311,7 @@ func GetRemainingCredits(ctx context.Context) (int, error) {
 		Message          string `json:"message"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return 0, fmt.Errorf("decode response: %w", err)
+		return 0, fmt.Errorf(errDecodeResponse, err)
 	}
 	if result.Error {
 		return 0, fmt.Errorf("pdf.co error: %s", result.Message)
@@ -319,11 +326,11 @@ func downloadFile(ctx context.Context, fileURL string) ([]byte, error) {
 	logger.LogInfo("[PDFCO] download  : GET %s", fileURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf(errBuildRequest, err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("do request: %w", err)
+		return nil, fmt.Errorf(errDoRequest, err)
 	}
 	defer resp.Body.Close()
 	logger.LogInfo("[PDFCO] download  : HTTP %d", resp.StatusCode)

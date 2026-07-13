@@ -291,7 +291,10 @@ func ingestMessage(ctx context.Context, pool *pgxpool.Pool, inboxes []inboxRow, 
 		if err != nil {
 			return err
 		}
-		logAttachmentIngest(ctx, pool, messageID, attachmentID, "SES", att.Filename, att.ContentType, att.S3Key, att.SizeBytes)
+		logAttachmentIngest(ctx, pool, attachmentIngestInfo{
+			MessageID: messageID, AttachmentID: attachmentID, Source: "SES",
+			Filename: att.Filename, ContentType: att.ContentType, S3Key: att.S3Key, FileSize: att.SizeBytes,
+		})
 	}
 
 	ingestDetail, _ := json.Marshal(map[string]string{

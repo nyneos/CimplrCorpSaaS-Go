@@ -208,10 +208,9 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
 
-			
 			sum := sha256.Sum256(fileBytes)
 			fileHash := hex.EncodeToString(sum[:])
-			if dup, derr := bulkuploadaudit.ExistsByHash(ctx, pgxPool, "master-folio", fileHash); derr != nil {
+			if dup, derr := bulkuploadaudit.ExistsByHash(ctx, pgxPool, constants.ModuleMasterFolio, fileHash); derr != nil {
 				api.LogError("folio duplicate-file check failed: %v", derr)
 			} else if dup {
 				api.RespondWithError(w, http.StatusConflict, "This file has already been uploaded. Please upload a different file.")
@@ -406,7 +405,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// S3 upload before opening transaction
 			s3Key, storedFileName := "", ""
 			if s3storage.IsS3UploadEnabled() {
-				folder := s3storage.GetStoragePrefix("master-folio")
+				folder := s3storage.GetStoragePrefix(constants.ModuleMasterFolio)
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
@@ -553,7 +552,6 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			
 			if s3Key != "" {
 				if _, err := tx.Exec(ctx, `
 					UPDATE investment.masterfolio m
@@ -571,9 +569,9 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, status, msg)
 				return
 			}
-			committed = true 
+			committed = true
 			bulkuploadaudit.Record(ctx, pgxPool, bulkuploadaudit.Entry{
-				ModuleKey:        "master-folio",
+				ModuleKey:        constants.ModuleMasterFolio,
 				OriginalFileName: fh.Filename,
 				StoredFileName:   storedFileName,
 				UploadS3Key:      s3Key,
@@ -836,7 +834,6 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-
 func insertFolioDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, folioID, userID, requestedIP string) {
 	folioID = strings.TrimSpace(folioID)
 	if folioID == "" {
@@ -907,7 +904,6 @@ func GetFolioDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
-
 
 func GetFolioBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
