@@ -183,9 +183,10 @@ func finalizeEmailInboxApproval(ctx context.Context, pool *pgxpool.Pool, recordI
 func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transactionType, finalStatus, actorID, comment string) error {
 	if finalStatus == approvalengine.InstStatusRejected {
 		switch transactionType {
-		case "EMAIL_INBOX_CREATE", "EMAIL_INBOX_EDIT":
-			// Reject create or edit → REJECTED, discarding any staged edit. The row is
-			// kept (is_deleted stays false) so it stays visible and can be deleted.
+		case "EMAIL_INBOX_CREATE", "EMAIL_INBOX_EDIT", "EMAIL_INBOX_DELETE":
+			// Reject create, edit, or delete → REJECTED (never restored to the prior
+			// status, never soft-deleted). The row is kept (is_deleted stays false) so
+			// it stays visible.
 			_, err := pool.Exec(ctx, `
 				UPDATE email_svc.inbox_config
 				SET processing_status = $2,
@@ -197,9 +198,6 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 				WHERE inbox_id = $1::uuid
 			`, inboxID, constants.StatusRejected, comment)
 			return err
-		case "EMAIL_INBOX_DELETE":
-			// Reject delete request → restore prior status (never soft-delete).
-			return restoreStatusAfterDeleteReject(ctx, pool, inboxID, comment)
 		}
 		return nil
 	}
@@ -297,7 +295,7 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 
 // applyApprovedInboxDelete soft-deletes the mailbox (row kept for audit), removes
 // its messages, and drops any SES inbound rule. Reject of a delete request must
-// NOT call this — reject restores APPROVED without touching is_deleted.
+// NOT call this — reject sets REJECTED without touching is_deleted.
 func applyApprovedInboxDelete(ctx context.Context, pool *pgxpool.Pool, inboxID, actorID, comment string) error {
 	var ruleName string
 	_ = pool.QueryRow(ctx, `
@@ -804,9 +802,11 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			// Every edit is staged, never applied in place: the live config keeps running
 			// on its current values until a checker approves. The staged payload lands in
 			// pending_edit_json and applyInboxDecision merges it in on approve.
-			switch strings.ToUpper(strings.TrimSpace(status)) {
+			statusNorm := strings.ToUpper(strings.TrimSpace(status))
+			switch statusNorm {
 			case constants.StatusPendingApproval, constants.StatusApproved,
-				constants.StatusPendingEditApproval, constants.StatusRejected:
+				constants.StatusPendingEditApproval, constants.StatusRejected,
+				constants.StatusPendingDeleteApproval:
 			default:
 				errors = append(errors, inboxID+": cannot edit in status "+status)
 				continue
@@ -828,7 +828,10 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			logInboxAudit(r.Context(), pool, inboxAuditEntry{
-				InboxID: inboxID, Action: "EDIT", Status: constants.StatusPendingEditApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{"pending": item},
+				InboxID: inboxID, Action: "EDIT", Status: constants.StatusPendingEditApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{
+					"pending":      item,
+					"prior_status": statusNorm,
+				},
 			})
 			if _, instErr := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
 				InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_EDIT", ActionType: "EDIT", UserID: userID, UserEmail: userEmail,
@@ -881,61 +884,19 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 
 			// Maker delete request — stay visible as PENDING_DELETE_APPROVAL until checker approves.
 			// Soft-delete (is_deleted=true) happens only on approve-delete, never here.
+			// APPROVED (live) mailboxes cannot be deleted at all.
 			switch statusNorm {
-			case constants.StatusRejected:
-				// REJECTED is terminal and the mailbox never went live — nothing for a
-				// checker to weigh in on, so remove it right away (soft-delete: the row
-				// stays for audit but drops out of the list).
-				if err := emailcommon.DeleteMessagesForInbox(r.Context(), pool, inboxID); err != nil {
-					errors = append(errors, inboxID+": "+err.Error())
-					continue
-				}
-				_, err := pool.Exec(r.Context(), `
-					UPDATE email_svc.inbox_config
-					SET processing_status = 'DELETED',
-					    is_deleted = true,
-					    is_active = false,
-					    pending_edit_json = NULL,
-					    deleted_at = now(),
-					    deleted_by = $2,
-					    updated_at = now()
-					WHERE inbox_id = $1::uuid
-					  AND is_deleted = false
-				`, inboxID, userID)
-				if err != nil {
-					errors = append(errors, inboxID+": "+err.Error())
-					continue
-				}
-				_ = approvalengine.CancelPendingInstances(r.Context(), pool, emailInboxModuleCode, inboxID, userEmail)
-				logInboxAudit(r.Context(), pool, inboxAuditEntry{
-					InboxID: inboxID, Action: "DELETE", Status: "DELETED", UserID: userID, Comment: "", Detail: map[string]interface{}{
-						"prior_status": statusNorm,
-					},
-				})
-				updated = append(updated, inboxID)
-			case constants.StatusApproved, constants.StatusPendingApproval, constants.StatusPendingEditApproval:
-				// Keep any staged edit intact — stash the prior status alongside it so a
-				// rejected delete request can restore both.
-				var existingPending string
-				_ = pool.QueryRow(r.Context(), `
-					SELECT COALESCE(pending_edit_json::text,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
-				`, inboxID).Scan(&existingPending)
-				payload := map[string]interface{}{}
-				if existingPending != "" && existingPending != "null" {
-					_ = json.Unmarshal([]byte(existingPending), &payload)
-				}
-				payload["__prior_status"] = statusNorm
-				priorPayload, _ := json.Marshal(payload)
+			case constants.StatusPendingApproval, constants.StatusPendingEditApproval, constants.StatusRejected:
 				_, err := pool.Exec(r.Context(), `
 					UPDATE email_svc.inbox_config
 					SET processing_status = 'PENDING_DELETE_APPROVAL',
 					    submitted_by = $2,
-					    pending_edit_json = $3::jsonb,
+					    pending_edit_json = NULL,
 					    checker_comment = '',
 					    updated_at = now()
 					WHERE inbox_id = $1::uuid
 					  AND is_deleted = false
-				`, inboxID, userID, string(priorPayload))
+				`, inboxID, userID)
 				if err != nil {
 					errors = append(errors, inboxID+": "+err.Error())
 					continue
@@ -955,76 +916,16 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				updated = append(updated, inboxID)
 			case constants.StatusPendingDeleteApproval:
 				errors = append(errors, inboxID+": already pending delete approval")
+			case constants.StatusApproved:
+				errors = append(errors, inboxID+": approved mailboxes cannot be deleted")
 			default:
-				errors = append(errors, inboxID+": delete only from APPROVED, PENDING_APPROVAL, PENDING_EDIT_APPROVAL, or REJECTED")
+				errors = append(errors, inboxID+": delete only from PENDING_APPROVAL, PENDING_EDIT_APPROVAL, or REJECTED")
 			}
 		}
 		emailcommon.RespondBulk(w, "inbox/workflow/update", "updated", updated, errors)
 	}
 }
 
-func priorStatusFromPendingEdit(pendingEdit string, fallback string) string {
-	if pendingEdit == "" || pendingEdit == "null" {
-		return fallback
-	}
-	var meta map[string]interface{}
-	if json.Unmarshal([]byte(pendingEdit), &meta) != nil {
-		return fallback
-	}
-	if v, ok := meta["__prior_status"].(string); ok && strings.TrimSpace(v) != "" {
-		return strings.ToUpper(strings.TrimSpace(v))
-	}
-	return fallback
-}
-
-func restoreStatusAfterDeleteReject(ctx context.Context, pool *pgxpool.Pool, inboxID, comment string) error {
-	var pendingEdit string
-	_ = pool.QueryRow(ctx, `
-		SELECT COALESCE(pending_edit_json::text,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
-	`, inboxID).Scan(&pendingEdit)
-	prior := priorStatusFromPendingEdit(pendingEdit, constants.StatusApproved)
-	switch prior {
-	case constants.StatusPendingApproval:
-		_, err := pool.Exec(ctx, `
-			UPDATE email_svc.inbox_config
-			SET processing_status = $2,
-			    pending_edit_json = NULL,
-			    checker_comment = $3,
-			    is_active = false,
-			    is_deleted = false,
-			    updated_at = now()
-			WHERE inbox_id = $1::uuid
-			  AND is_deleted = false
-		`, inboxID, constants.StatusPendingApproval, comment)
-		return err
-	case constants.StatusPendingEditApproval:
-		// Keep the staged edit that was in flight before the delete request — strip only
-		// the prior-status marker we stashed next to it.
-		_, err := pool.Exec(ctx, `
-			UPDATE email_svc.inbox_config
-			SET processing_status = $2,
-			    pending_edit_json = NULLIF(pending_edit_json - '__prior_status', '{}'::jsonb),
-			    checker_comment = $3,
-			    is_deleted = false,
-			    updated_at = now()
-			WHERE inbox_id = $1::uuid
-			  AND is_deleted = false
-		`, inboxID, constants.StatusPendingEditApproval, comment)
-		return err
-	default:
-		_, err := pool.Exec(ctx, `
-			UPDATE email_svc.inbox_config
-			SET processing_status = $2,
-			    pending_edit_json = NULL,
-			    checker_comment = $3,
-			    is_deleted = false,
-			    updated_at = now()
-			WHERE inbox_id = $1::uuid
-			  AND is_deleted = false
-		`, inboxID, constants.StatusApproved, comment)
-		return err
-	}
-}
 
 func checkerCanAct(submittedBy, checkerUserID, inboxEntityID string, entityIDs []string) bool {
 	if submittedBy == checkerUserID {
@@ -1306,22 +1207,14 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				if actionRes.Acted {
-					// Rejecting a create or an edit lands on REJECTED. Rejecting a delete
-					// request only cancels the request, restoring the pre-delete status.
-					auditStatus := constants.StatusRejected
-					if txType == "EMAIL_INBOX_DELETE" {
-						var pendingEdit string
-						_ = pool.QueryRow(r.Context(), `
-							SELECT COALESCE(pending_edit_json::text,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
-						`, inboxID).Scan(&pendingEdit)
-						auditStatus = priorStatusFromPendingEdit(pendingEdit, constants.StatusApproved)
-					}
+					// Rejecting a create, edit, or delete request always lands on REJECTED —
+					// never restored to the pre-request status.
 					if err := applyInboxDecision(r.Context(), pool, inboxID, txType, approvalengine.InstStatusRejected, userID, req.Comment); err != nil {
 						errors = append(errors, inboxID+": "+err.Error())
 						continue
 					}
 					logInboxAudit(r.Context(), pool, inboxAuditEntry{
-						InboxID: inboxID, Action: "REJECT", Status: auditStatus, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{
+						InboxID: inboxID, Action: "REJECT", Status: constants.StatusRejected, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{
 							"engine_instance": actionRes.InstanceID,
 							"rejected_tx":     txType,
 							"prior_status":    status,
@@ -1358,23 +1251,18 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 					WHERE inbox_id = $1::uuid
 				`, inboxID, constants.StatusRejected, req.Comment)
 			case constants.StatusPendingDeleteApproval:
-				var pendingEdit string
-				_ = pool.QueryRow(r.Context(), `
-					SELECT COALESCE(pending_edit_json::text,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
-				`, inboxID).Scan(&pendingEdit)
-				restoredTo := priorStatusFromPendingEdit(pendingEdit, constants.StatusApproved)
-				if err = restoreStatusAfterDeleteReject(r.Context(), pool, inboxID, req.Comment); err != nil {
-					errors = append(errors, inboxID+": "+err.Error())
-					continue
-				}
-				logInboxAudit(r.Context(), pool, inboxAuditEntry{
-					InboxID: inboxID, Action: "REJECT", Status: restoredTo, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{
-						"prior_status": status,
-						"restored_to":  restoredTo,
-					},
-				})
-				rejected = append(rejected, inboxID)
-				continue
+				// Reject delete request → REJECTED, discarding the staged prior-status
+				// marker. Row is kept (is_deleted stays false) so it stays visible.
+				_, err = pool.Exec(r.Context(), `
+					UPDATE email_svc.inbox_config
+					SET processing_status = $2,
+					    pending_edit_json = NULL,
+					    checker_comment = $3,
+					    is_active = false,
+					    is_deleted = false,
+					    updated_at = now()
+					WHERE inbox_id = $1::uuid
+				`, inboxID, constants.StatusRejected, req.Comment)
 			default:
 				errors = append(errors, inboxID+": not pending approval")
 				continue
