@@ -170,8 +170,8 @@ func queryFXHedgeLinksDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs
 	return scanRows(r)
 }
 
-// ── Forward MTM ────────────────────────────────────────────────────────────
-func queryFXForwardMTM(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+// ── MTM Management ─────────────────────────────────────────────────────────
+func queryFXMtmManagement(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "fm", "entity")
 
 	q := fmt.Sprintf(`
@@ -188,6 +188,11 @@ func queryFXForwardMTM(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 			COALESCE(fm.mtm_id::text, '') AS mtm_id,
 			COALESCE(fm.booking_id::text, '') AS booking_id,
 			COALESCE(fm.entity, '') AS entity_id,
+			COALESCE(fm.entity, '') AS entity,
+			COALESCE(fm.internal_reference_id, '') AS internal_reference_id,
+			COALESCE(fm.days_to_maturity, 0) AS days_to_maturity,
+			fm.calculated_at,
+			COALESCE(fm.upload_s3_key, '') AS upload_s3_key,
 			fm.deal_date,
 			fm.maturity_date,
 			COALESCE(fm.currency_pair, '') AS currency_pair,
@@ -218,29 +223,49 @@ func queryFXForwardBookings(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "fb", "entity_level_0")
 
 	q := fmt.Sprintf(`
-		WITH latest_audit AS (
-			SELECT DISTINCT ON (system_transaction_id)
-				system_transaction_id,
-				processing_status,
-				requested_at,
-				checker_at
-			FROM public.auditactionforwardbooking
-			ORDER BY system_transaction_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
-		)
 		SELECT
-			COALESCE(fb.system_transaction_id::text, '') AS booking_id,
-			COALESCE(fb.internal_reference_id, '') AS internal_reference_id,
-			COALESCE(fb.entity_level_0, '') AS entity_id,
-			COALESCE(fb.currency_pair, '') AS currency_pair,
-			COALESCE(fb.order_type, '') AS order_type,
-			COALESCE(fb.booking_amount, 0) AS booking_amount,
-			COALESCE(fb.total_rate, 0) AS total_rate,
+			fb.actual_value_base_currency,
+			fb.add_date,
+			fb.additional_bank_details::text AS additional_bank_details,
+			fb.bank_confirmation_date,
+			fb.bank_margin,
+			fb.bank_transaction_id,
+			fb.base_currency,
+			fb.booking_amount,
+			fb.counterparty,
+			fb.counterparty_dealer,
+			fb.currency_pair,
+			fb.delivery_date,
+			fb.delivery_period,
+			fb.entity_level_0,
+			fb.entity_level_1,
+			fb.entity_level_2,
+			fb.entity_level_3,
+			fb.forward_points,
+			fb.internal_dealer,
+			fb.internal_reference_id,
+			fb.intervening_rate_quote_to_local,
+			fb.local_currency,
 			fb.maturity_date,
-			COALESCE(fb.status, '') AS status,
-			COALESCE(fb.processing_status, '') AS parent_processing_status,
-			COALESCE(a.processing_status, '') AS processing_status
+			fb.mode_of_delivery,
+			fb.narration,
+			fb.order_type,
+			fb.processing_status,
+			fb.quote_currency,
+			fb.remarks,
+			fb.settlement_date,
+			fb.spot_rate,
+			fb.status,
+			fb.swift_unique_id,
+			fb.system_transaction_id::text AS system_transaction_id,
+			fb.system_transaction_id::text AS booking_id,
+			fb.total_rate,
+			fb.transaction_timestamp,
+			fb.transaction_type,
+			fb.value_local_currency,
+			fb.value_quote_currency,
+			fb.value_type
 		FROM public.forward_bookings fb
-		LEFT JOIN latest_audit a ON a.system_transaction_id = fb.system_transaction_id::text
 		WHERE COALESCE(fb.is_deleted, false) = false %s
 		ORDER BY fb.transaction_timestamp DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
@@ -256,4 +281,115 @@ func queryFXForwardBookings(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 func queryFXEntityRelevantForwardBookings(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	// This uses the exact same extraction query logic.
 	return queryFXForwardBookings(ctx, pool, entityIDs, limit, offset)
+}
+
+func queryFXCancellation(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "fb", "entity_level_0")
+
+	q := fmt.Sprintf(`
+		SELECT
+			'cancellation' AS request_type,
+			COALESCE(fc.booking_id::text, '') AS booking_id,
+			COALESCE(fb.entity_level_0, '') AS business_unit,
+			COALESCE(fc.amount_cancelled, 0) AS amount,
+			fc.cancellation_date AS request_date,
+			COALESCE(fc.status, '') AS status,
+			COALESCE(fc.cancellation_rate, 0) AS cancellation_rate,
+			COALESCE(fc.realized_gain_loss, 0) AS realized_gain_loss,
+			COALESCE(fc.cancellation_reason, '') AS cancellation_reason,
+			NULL::numeric AS rollover_cost,
+			NULL::text AS fx_pair
+		FROM public.forward_cancellations fc
+		LEFT JOIN public.forward_bookings fb ON fc.booking_id = fb.system_transaction_id
+		WHERE COALESCE(fc.is_deleted, false) = false %s
+		ORDER BY fc.cancellation_date DESC NULLS LAST, fc.booking_id
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef)
+
+	r, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanRows(r)
+}
+
+func queryFXRollover(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "fb", "entity_level_0")
+
+	q := fmt.Sprintf(`
+		SELECT
+			'rollover' AS request_type,
+			COALESCE(fr.booking_id::text, '') AS booking_id,
+			COALESCE(fb.entity_level_0, '') AS business_unit,
+			COALESCE(fr.amount_rolled_over, 0) AS amount,
+			fr.rollover_date AS request_date,
+			COALESCE(fr.status, '') AS status,
+			NULL::numeric AS cancellation_rate,
+			NULL::numeric AS realized_gain_loss,
+			NULL::text AS cancellation_reason,
+			COALESCE(fr.rollover_cost, 0) AS rollover_cost,
+			COALESCE(fr.fx_pair, '') AS fx_pair
+		FROM public.forward_rollovers fr
+		LEFT JOIN public.forward_bookings fb ON fr.booking_id = fb.system_transaction_id
+		WHERE COALESCE(fr.is_deleted, false) = false %s
+		ORDER BY fr.rollover_date DESC NULLS LAST, fr.booking_id
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef)
+
+	r, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanRows(r)
+}
+
+func queryFXCancellationRollover(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "fb", "entity_level_0")
+
+	q := fmt.Sprintf(`
+		SELECT * FROM (
+			SELECT
+				'cancellation' AS request_type,
+				COALESCE(fc.booking_id::text, '') AS booking_id,
+				COALESCE(fb.entity_level_0, '') AS business_unit,
+				COALESCE(fb.entity_level_0, '') AS entity_level_0,
+				COALESCE(fc.amount_cancelled, 0) AS amount,
+				fc.cancellation_date AS request_date,
+				COALESCE(fc.status, '') AS status,
+				COALESCE(fc.cancellation_rate, 0) AS cancellation_rate,
+				COALESCE(fc.realized_gain_loss, 0) AS realized_gain_loss,
+				COALESCE(fc.cancellation_reason, '') AS cancellation_reason,
+				NULL::numeric AS rollover_cost,
+				NULL::text AS fx_pair
+			FROM public.forward_cancellations fc
+			LEFT JOIN public.forward_bookings fb ON fc.booking_id = fb.system_transaction_id
+			WHERE COALESCE(fc.is_deleted, false) = false
+			UNION ALL
+			SELECT
+				'rollover' AS request_type,
+				COALESCE(fr.booking_id::text, '') AS booking_id,
+				COALESCE(fb.entity_level_0, '') AS business_unit,
+				COALESCE(fb.entity_level_0, '') AS entity_level_0,
+				COALESCE(fr.amount_rolled_over, 0) AS amount,
+				fr.rollover_date AS request_date,
+				COALESCE(fr.status, '') AS status,
+				NULL::numeric AS cancellation_rate,
+				NULL::numeric AS realized_gain_loss,
+				NULL::text AS cancellation_reason,
+				COALESCE(fr.rollover_cost, 0) AS rollover_cost,
+				COALESCE(fr.fx_pair, '') AS fx_pair
+			FROM public.forward_rollovers fr
+			LEFT JOIN public.forward_bookings fb ON fr.booking_id = fb.system_transaction_id
+			WHERE COALESCE(fr.is_deleted, false) = false
+		) fb
+		WHERE 1=1 %s
+		ORDER BY request_date DESC NULLS LAST, booking_id
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef)
+
+	r, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanRows(r)
 }

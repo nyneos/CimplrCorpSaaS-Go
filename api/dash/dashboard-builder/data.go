@@ -295,14 +295,23 @@ var dataSources = map[string]dataSourceFn{
 	"fxHedgeLinksDetails": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryFXHedgeLinksDetails(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
-	"fxForwardMTM": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryFXForwardMTM(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	"fxMtmManagement": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXMtmManagement(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 	"fxForwardBookingList": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryFXForwardBookings(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 	"fxEntityRelevantForwardBookings": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryFXEntityRelevantForwardBookings(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fxCancellation": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXCancellation(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fxRollover": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXRollover(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fxCancellationRollover": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryFXCancellationRollover(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 }
 

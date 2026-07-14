@@ -58,7 +58,7 @@ var sourceCurrencyConfig = map[string]currencyNormConfig{
 			"line_item_amount":      {},
 		},
 	},
-	"fxForwardMTM": {
+	"fxMtmManagement": {
 		currencyPairField: "currency_pair",
 		amountFields: map[string]struct{}{
 			"notional_amount": {},
@@ -72,6 +72,28 @@ var sourceCurrencyConfig = map[string]currencyNormConfig{
 	"fxEntityRelevantForwardBookings": {
 		currencyPairField: "currency_pair",
 		amountFields:      map[string]struct{}{"booking_amount": {}},
+	},
+	"fxCancellation": {
+		currencyPairField: "fx_pair",
+		amountFields: map[string]struct{}{
+			"amount":             {},
+			"realized_gain_loss": {},
+		},
+	},
+	"fxRollover": {
+		currencyPairField: "fx_pair",
+		amountFields: map[string]struct{}{
+			"amount":        {},
+			"rollover_cost": {},
+		},
+	},
+	"fxCancellationRollover": {
+		currencyPairField: "fx_pair",
+		amountFields: map[string]struct{}{
+			"amount":             {},
+			"realized_gain_loss": {},
+			"rollover_cost":      {},
+		},
 	},
 }
 
