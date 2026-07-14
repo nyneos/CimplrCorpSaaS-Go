@@ -183,24 +183,19 @@ func finalizeEmailInboxApproval(ctx context.Context, pool *pgxpool.Pool, recordI
 func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transactionType, finalStatus, actorID, comment string) error {
 	if finalStatus == approvalengine.InstStatusRejected {
 		switch transactionType {
-		case "EMAIL_INBOX_CREATE":
+		case "EMAIL_INBOX_CREATE", "EMAIL_INBOX_EDIT":
+			// Reject create or edit → REJECTED, discarding any staged edit. The row is
+			// kept (is_deleted stays false) so it stays visible and can be deleted.
 			_, err := pool.Exec(ctx, `
 				UPDATE email_svc.inbox_config
 				SET processing_status = $2,
+				    pending_edit_json = NULL,
 				    checker_comment = $3,
 				    is_active = false,
 				    is_deleted = false,
 				    updated_at = now()
 				WHERE inbox_id = $1::uuid
 			`, inboxID, constants.StatusRejected, comment)
-			return err
-		case "EMAIL_INBOX_EDIT":
-			_, err := pool.Exec(ctx, `
-				UPDATE email_svc.inbox_config
-				SET processing_status = $2, pending_edit_json = NULL, checker_comment = $3, updated_at = now()
-				WHERE inbox_id = $1::uuid
-				  AND is_deleted = false
-			`, inboxID, constants.StatusApproved, comment)
 			return err
 		case "EMAIL_INBOX_DELETE":
 			// Reject delete request → restore prior status (never soft-delete).
@@ -229,7 +224,8 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 			_, err := pool.Exec(ctx, `
 				UPDATE email_svc.inbox_config
 				SET processing_status = $2, pending_edit_json = NULL,
-				    approved_by = $3, checker_comment = $4, updated_at = now()
+				    approved_by = $3, checker_comment = $4,
+				    is_active = true, updated_at = now()
 				WHERE inbox_id = $1::uuid
 			`, inboxID, constants.StatusApproved, actorID, comment)
 			return err
@@ -280,6 +276,7 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 			    pending_edit_json = NULL,
 			    approved_by = $25,
 			    checker_comment = $26,
+			    is_active = true,
 			    updated_at = now()
 			WHERE inbox_id = $1::uuid
 		`, inboxID, edit.DisplayName, emailcommon.NullableJSON(edit.FiltersJSON), edit.PollIntervalSecs,
@@ -804,120 +801,39 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			pending, _ := json.Marshal(item)
-			switch status {
-			case constants.StatusPendingApproval:
-				extraSQL := ""
-				extraArgs := []interface{}{}
-				argN := 6
-				if strings.EqualFold(item.SourceType, "IMAP") && emailmailbox.IMAPPatchPresent(item.MailboxIMAPFields) {
-					mailbox, existing, loadErr := emailmailbox.LoadMailboxIMAPFields(r.Context(), pool, inboxID)
-					if loadErr != nil {
-						errors = append(errors, inboxID+": "+loadErr.Error())
-						continue
-					}
-					merged, mergeErr := emailmailbox.MergeIMAPFields(existing, item.MailboxIMAPFields, mailbox)
-					if mergeErr != nil {
-						errors = append(errors, inboxID+constants.ErrImapPrefix+mergeErr.Error())
-						continue
-					}
-					extraSQL = fmt.Sprintf(`,
-					    imap_provider = $%d, imap_host = $%d, imap_port = $%d,
-					    imap_username = $%d, imap_password = $%d,
-					    imap_inbox_folder = $%d, imap_sent_folder = $%d, imap_use_tls = $%d`,
-						argN, argN+1, argN+2, argN+3, argN+4, argN+5, argN+6, argN+7)
-					extraArgs = append(extraArgs,
-						merged.Provider, merged.Host, merged.Port,
-						merged.Username, merged.Password,
-						merged.InboxFolder, merged.SentFolder, merged.UseTLS)
-					argN += 8
-				}
-				if strings.EqualFold(item.SourceType, "OUTLOOK_GRAPH") && emailmailbox.GraphPatchPresent(item.MailboxGraphFields) {
-					existing, loadErr := emailmailbox.LoadMailboxGraphFields(r.Context(), pool, inboxID)
-					if loadErr != nil {
-						errors = append(errors, inboxID+": "+loadErr.Error())
-						continue
-					}
-					merged, mergeErr := emailmailbox.MergeGraphFields(existing, item.MailboxGraphFields)
-					if mergeErr != nil {
-						errors = append(errors, inboxID+constants.ErrGraphPrefix+mergeErr.Error())
-						continue
-					}
-					extraSQL += fmt.Sprintf(`,
-					    graph_tenant_key = $%d,
-					    graph_tenant_label = $%d, graph_tenant_id = $%d,
-					    graph_client_id = $%d, graph_client_secret = $%d`,
-						argN, argN+1, argN+2, argN+3, argN+4)
-					extraArgs = append(extraArgs,
-						merged.TenantKey, merged.TenantLabel, merged.TenantID, merged.ClientID, merged.ClientSecret)
-					argN += 5
-				}
-				if strings.EqualFold(item.SourceType, "GOOGLE_WORKSPACE") && emailmailbox.GoogleWorkspacePatchPresent(item.MailboxGoogleWorkspaceFields) {
-					existing, loadErr := emailmailbox.LoadMailboxGoogleWorkspaceFields(r.Context(), pool, inboxID)
-					if loadErr != nil {
-						errors = append(errors, inboxID+": "+loadErr.Error())
-						continue
-					}
-					merged, mergeErr := emailmailbox.MergeGoogleWorkspaceFields(existing, item.MailboxGoogleWorkspaceFields)
-					if mergeErr != nil {
-						errors = append(errors, inboxID+constants.ErrGoogleWorkspacePrefix+mergeErr.Error())
-						continue
-					}
-					extraSQL += fmt.Sprintf(`,
-					    google_workspace_tenant_key = $%d,
-					    google_workspace_tenant_label = $%d,
-					    google_workspace_service_account_email = $%d,
-					    google_workspace_client_id = $%d,
-					    google_workspace_private_key = $%d`,
-						argN, argN+1, argN+2, argN+3, argN+4)
-					extraArgs = append(extraArgs,
-						merged.WorkspaceTenantKey, merged.WorkspaceTenantLabel, merged.WorkspaceServiceAccountEmail,
-						merged.WorkspaceClientID, merged.WorkspacePrivateKey)
-					argN += 5
-				}
-				_, err := pool.Exec(r.Context(), fmt.Sprintf(`
-					UPDATE email_svc.inbox_config
-					SET display_name = COALESCE(NULLIF($2,''), display_name),
-					    filters_json = COALESCE($3::jsonb, filters_json),
-					    poll_interval_secs = CASE WHEN $4 > 0 THEN $4 ELSE poll_interval_secs END,
-					    module = COALESCE(NULLIF($5,''), module),
-					    updated_at = now()%s
-					WHERE inbox_id = $1::uuid
-				`, extraSQL), append([]interface{}{inboxID, item.DisplayName, emailcommon.NullableJSON(item.FiltersJSON), item.PollIntervalSecs, item.Module}, extraArgs...)...)
-				if err != nil {
-					errors = append(errors, inboxID+": "+err.Error())
-					continue
-				}
-				if _, instErr := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
-					InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_CREATE", ActionType: "CREATE", UserID: userID, UserEmail: userEmail,
-				}); instErr != nil {
-					errors = append(errors, inboxID+constants.ErrApprovalInstancePrefix+instErr.Error())
-				}
-			case constants.StatusApproved:
-				_, err := pool.Exec(r.Context(), `
-					UPDATE email_svc.inbox_config
-					SET processing_status = $2,
-					    pending_edit_json = $3::jsonb,
-					    submitted_by = $4,
-					    checker_comment = '',
-					    updated_at = now()
-					WHERE inbox_id = $1::uuid
-				`, inboxID, constants.StatusPendingEditApproval, string(pending), userID)
-				if err != nil {
-					errors = append(errors, inboxID+": "+err.Error())
-					continue
-				}
-				logInboxAudit(r.Context(), pool, inboxAuditEntry{
-					InboxID: inboxID, Action: "EDIT", Status: constants.StatusPendingEditApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{"pending": item},
-				})
-				if _, instErr := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
-					InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_EDIT", ActionType: "EDIT", UserID: userID, UserEmail: userEmail,
-				}); instErr != nil {
-					errors = append(errors, inboxID+constants.ErrApprovalInstancePrefix+instErr.Error())
-				}
+			// Every edit is staged, never applied in place: the live config keeps running
+			// on its current values until a checker approves. The staged payload lands in
+			// pending_edit_json and applyInboxDecision merges it in on approve.
+			switch strings.ToUpper(strings.TrimSpace(status)) {
+			case constants.StatusPendingApproval, constants.StatusApproved,
+				constants.StatusPendingEditApproval, constants.StatusRejected:
 			default:
 				errors = append(errors, inboxID+": cannot edit in status "+status)
 				continue
+			}
+
+			pending, _ := json.Marshal(item)
+			_, err := pool.Exec(r.Context(), `
+				UPDATE email_svc.inbox_config
+				SET processing_status = $2,
+				    pending_edit_json = $3::jsonb,
+				    submitted_by = $4,
+				    checker_comment = '',
+				    updated_at = now()
+				WHERE inbox_id = $1::uuid
+				  AND is_deleted = false
+			`, inboxID, constants.StatusPendingEditApproval, string(pending), userID)
+			if err != nil {
+				errors = append(errors, inboxID+": "+err.Error())
+				continue
+			}
+			logInboxAudit(r.Context(), pool, inboxAuditEntry{
+				InboxID: inboxID, Action: "EDIT", Status: constants.StatusPendingEditApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{"pending": item},
+			})
+			if _, instErr := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
+				InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_EDIT", ActionType: "EDIT", UserID: userID, UserEmail: userEmail,
+			}); instErr != nil {
+				errors = append(errors, inboxID+constants.ErrApprovalInstancePrefix+instErr.Error())
 			}
 			updated = append(updated, inboxID)
 		}
@@ -966,10 +882,50 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			// Maker delete request — stay visible as PENDING_DELETE_APPROVAL until checker approves.
 			// Soft-delete (is_deleted=true) happens only on approve-delete, never here.
 			switch statusNorm {
-			case constants.StatusApproved, constants.StatusPendingApproval, constants.StatusPendingEditApproval:
-				priorPayload, _ := json.Marshal(map[string]string{
-					"__prior_status": statusNorm,
+			case constants.StatusRejected:
+				// REJECTED is terminal and the mailbox never went live — nothing for a
+				// checker to weigh in on, so remove it right away (soft-delete: the row
+				// stays for audit but drops out of the list).
+				if err := emailcommon.DeleteMessagesForInbox(r.Context(), pool, inboxID); err != nil {
+					errors = append(errors, inboxID+": "+err.Error())
+					continue
+				}
+				_, err := pool.Exec(r.Context(), `
+					UPDATE email_svc.inbox_config
+					SET processing_status = 'DELETED',
+					    is_deleted = true,
+					    is_active = false,
+					    pending_edit_json = NULL,
+					    deleted_at = now(),
+					    deleted_by = $2,
+					    updated_at = now()
+					WHERE inbox_id = $1::uuid
+					  AND is_deleted = false
+				`, inboxID, userID)
+				if err != nil {
+					errors = append(errors, inboxID+": "+err.Error())
+					continue
+				}
+				_ = approvalengine.CancelPendingInstances(r.Context(), pool, emailInboxModuleCode, inboxID, userEmail)
+				logInboxAudit(r.Context(), pool, inboxAuditEntry{
+					InboxID: inboxID, Action: "DELETE", Status: "DELETED", UserID: userID, Comment: "", Detail: map[string]interface{}{
+						"prior_status": statusNorm,
+					},
 				})
+				updated = append(updated, inboxID)
+			case constants.StatusApproved, constants.StatusPendingApproval, constants.StatusPendingEditApproval:
+				// Keep any staged edit intact — stash the prior status alongside it so a
+				// rejected delete request can restore both.
+				var existingPending string
+				_ = pool.QueryRow(r.Context(), `
+					SELECT COALESCE(pending_edit_json::text,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
+				`, inboxID).Scan(&existingPending)
+				payload := map[string]interface{}{}
+				if existingPending != "" && existingPending != "null" {
+					_ = json.Unmarshal([]byte(existingPending), &payload)
+				}
+				payload["__prior_status"] = statusNorm
+				priorPayload, _ := json.Marshal(payload)
 				_, err := pool.Exec(r.Context(), `
 					UPDATE email_svc.inbox_config
 					SET processing_status = 'PENDING_DELETE_APPROVAL',
@@ -1000,7 +956,7 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			case constants.StatusPendingDeleteApproval:
 				errors = append(errors, inboxID+": already pending delete approval")
 			default:
-				errors = append(errors, inboxID+": delete only from APPROVED, PENDING_APPROVAL, or PENDING_EDIT_APPROVAL")
+				errors = append(errors, inboxID+": delete only from APPROVED, PENDING_APPROVAL, PENDING_EDIT_APPROVAL, or REJECTED")
 			}
 		}
 		emailcommon.RespondBulk(w, "inbox/workflow/update", "updated", updated, errors)
@@ -1042,10 +998,12 @@ func restoreStatusAfterDeleteReject(ctx context.Context, pool *pgxpool.Pool, inb
 		`, inboxID, constants.StatusPendingApproval, comment)
 		return err
 	case constants.StatusPendingEditApproval:
+		// Keep the staged edit that was in flight before the delete request — strip only
+		// the prior-status marker we stashed next to it.
 		_, err := pool.Exec(ctx, `
 			UPDATE email_svc.inbox_config
 			SET processing_status = $2,
-			    pending_edit_json = NULL,
+			    pending_edit_json = NULLIF(pending_edit_json - '__prior_status', '{}'::jsonb),
 			    checker_comment = $3,
 			    is_deleted = false,
 			    updated_at = now()
@@ -1238,6 +1196,7 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 							    pending_edit_json = NULL,
 							    approved_by = $25,
 							    checker_comment = $26,
+							    is_active = true,
 							    updated_at = now()
 							WHERE inbox_id = $1::uuid
 						`, inboxID, edit.DisplayName, emailcommon.NullableJSON(edit.FiltersJSON), edit.PollIntervalSecs,
@@ -1254,7 +1213,8 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 					_, err = pool.Exec(r.Context(), `
 						UPDATE email_svc.inbox_config
 						SET processing_status = $2, pending_edit_json = NULL,
-						    approved_by = $3, checker_comment = $4, updated_at = now()
+						    approved_by = $3, checker_comment = $4,
+						    is_active = true, updated_at = now()
 						WHERE inbox_id = $1::uuid
 					`, inboxID, constants.StatusApproved, userID, req.Comment)
 				}
@@ -1346,10 +1306,10 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				if actionRes.Acted {
+					// Rejecting a create or an edit lands on REJECTED. Rejecting a delete
+					// request only cancels the request, restoring the pre-delete status.
 					auditStatus := constants.StatusRejected
-					if txType == "EMAIL_INBOX_EDIT" {
-						auditStatus = constants.StatusApproved
-					} else if txType == "EMAIL_INBOX_DELETE" {
+					if txType == "EMAIL_INBOX_DELETE" {
 						var pendingEdit string
 						_ = pool.QueryRow(r.Context(), `
 							SELECT COALESCE(pending_edit_json::text,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
@@ -1385,12 +1345,18 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 					WHERE inbox_id = $1::uuid
 				`, inboxID, req.Comment)
 			case constants.StatusPendingEditApproval:
-				// Reject edit → back to APPROVED, discard pending edit
+				// Reject edit → REJECTED, discard the staged edit. Row is kept so it stays
+				// visible and can be deleted.
 				_, err = pool.Exec(r.Context(), `
 					UPDATE email_svc.inbox_config
-					SET processing_status = $2, pending_edit_json = NULL, checker_comment = $3, updated_at = now()
+					SET processing_status = $2,
+					    pending_edit_json = NULL,
+					    checker_comment = $3,
+					    is_active = false,
+					    is_deleted = false,
+					    updated_at = now()
 					WHERE inbox_id = $1::uuid
-				`, inboxID, constants.StatusApproved, req.Comment)
+				`, inboxID, constants.StatusRejected, req.Comment)
 			case constants.StatusPendingDeleteApproval:
 				var pendingEdit string
 				_ = pool.QueryRow(r.Context(), `
@@ -1417,12 +1383,8 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, inboxID+": "+err.Error())
 				continue
 			}
-			auditStatus := constants.StatusRejected
-			if status == constants.StatusPendingEditApproval {
-				auditStatus = constants.StatusApproved
-			}
 			logInboxAudit(r.Context(), pool, inboxAuditEntry{
-				InboxID: inboxID, Action: "REJECT", Status: auditStatus, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{
+				InboxID: inboxID, Action: "REJECT", Status: constants.StatusRejected, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{
 					"prior_status": status,
 				},
 			})
