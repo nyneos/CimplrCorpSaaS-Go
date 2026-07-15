@@ -156,6 +156,12 @@ var dataSources = map[string]dataSourceFn{
 	"investmentRedemptionConfirmAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryInvestmentRedemptionConfirmAll(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
+	"investmentAccountingActivityAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentAccountingActivityAll(ctx, pool, req.Limit, req.Offset)
+	},
+	"investmentJournalEntryAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
+		return queryInvestmentJournalEntryAll(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
 	// ── Cash Module ────────────────────────────────────────────────────────────
 	"cashBankStatements": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		pairs := resolveBankStatementScopePairs(req)

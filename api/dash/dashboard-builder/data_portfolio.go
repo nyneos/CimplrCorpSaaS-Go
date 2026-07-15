@@ -254,3 +254,74 @@ func queryInvestmentRedemptionConfirmAll(ctx context.Context, pool *pgxpool.Pool
 	}
 	return scanRows(r)
 }
+
+// ─── Accounting Workbench ─────────────────────────────────────────────────────
+//
+// These two sources are exposed by the frontend (DATA_SOURCE_SCHEMAS) but had no
+// query registered here, so any widget using them failed with
+// "unknown data source: <key>".
+
+// queryInvestmentAccountingActivityAll — Financial Closing Workbench activities.
+// investment.accounting_activity carries no entity column, so the entity filter band
+// does not apply to it.
+func queryInvestmentAccountingActivityAll(ctx context.Context, pool *pgxpool.Pool, limit int, offset int) ([]map[string]any, error) {
+	args := limitOffsetArgs(limit, offset)
+
+	q := `
+		SELECT
+			COALESCE(a.activity_id::text, '')     AS activity_id,
+			COALESCE(a.activity_type, '')         AS activity_type,
+			COALESCE(a.activity_subtype, '')      AS activity_subtype,
+			COALESCE(a.accounting_period, '')     AS accounting_period,
+			COALESCE(a.data_source, '')           AS data_source,
+			COALESCE(a.status, '')                AS status,
+			COALESCE(a.is_deleted, false)         AS is_deleted,
+			a.effective_date,
+			a.updated_at
+		FROM investment.accounting_activity a
+		WHERE COALESCE(a.is_deleted, false) = false
+		ORDER BY a.updated_at DESC NULLS LAST
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`
+
+	r, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanRows(r)
+}
+
+// queryInvestmentJournalEntryAll — journal entry headers (line items excluded, so the
+// row grain stays one row per entry).
+func queryInvestmentJournalEntryAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "je")
+
+	q := fmt.Sprintf(`
+		SELECT
+			COALESCE(je.entry_id::text, '')       AS entry_id,
+			COALESCE(je.activity_id::text, '')    AS activity_id,
+			COALESCE(je.entity_id::text, '')      AS entity_id,
+			COALESCE(je.entity_name, '')          AS entity_name,
+			COALESCE(je.entry_type, '')           AS entry_type,
+			COALESCE(je.description, '')          AS description,
+			COALESCE(je.accounting_period, '')    AS accounting_period,
+			COALESCE(je.status, '')               AS status,
+			COALESCE(je.created_by, '')           AS created_by,
+			COALESCE(je.folio_id::text, '')       AS folio_id,
+			COALESCE(je.demat_id::text, '')       AS demat_id,
+			je.entry_date,
+			je.created_at,
+			COALESCE(je.total_debit, 0)           AS total_debit,
+			COALESCE(je.total_credit, 0)          AS total_credit
+		FROM investment.accounting_journal_entry je
+		WHERE COALESCE(je.is_deleted, false) = false %s
+		ORDER BY je.created_at DESC NULLS LAST
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef)
+
+	r, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanRows(r)
+}
