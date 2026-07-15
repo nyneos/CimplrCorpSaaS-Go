@@ -101,11 +101,7 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 		constants.StatusPendingEditApproval,
 	)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // parentID = bank_statement_id to drill into a specific statement's transactions.
@@ -163,11 +159,7 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, extraFilters, stmtFilter)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── Payable / Receivable ───────────────────────────────────────────────────
@@ -198,11 +190,7 @@ func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := scanRows(r)
+	rows, err := runSourceQuery(ctx, pool, q, args)
 	if err != nil {
 		return nil, err
 	}
@@ -237,11 +225,7 @@ func queryCashReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := scanRows(r)
+	rows, err := runSourceQuery(ctx, pool, q, args)
 	if err != nil {
 		return nil, err
 	}
@@ -387,11 +371,7 @@ func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // parentID = plan_id from /cash/fund-planning/summary (e.g. "plan-1783403924162").
@@ -421,11 +401,7 @@ func queryCashFundPlanDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, planFilter)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── Sweep Configuration & Execution ────────────────────────────────────────
@@ -458,11 +434,7 @@ func queryCashSweepConfig(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -509,11 +481,7 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -535,11 +503,7 @@ func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── Projections ────────────────────────────────────────────────────────────
@@ -637,11 +601,7 @@ func queryCashProjectionDetail(ctx context.Context, pool *pgxpool.Pool, entityID
 		proposalFilter,
 	)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func projectionItemColumns(ctx context.Context, pool *pgxpool.Pool, names []string) (map[string]bool, error) {
@@ -700,11 +660,7 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, bf, df)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryCashFundAvailability(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -780,11 +736,7 @@ func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // Dashboard builder exposes only these utilization columns (see CI_DSAHBOARD dataSourceFields cashUtilizations).

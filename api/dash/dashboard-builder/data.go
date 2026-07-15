@@ -48,6 +48,15 @@ type dataRequest struct {
 	AsOfDate         string                 `json:"as_of_date"`
 	AsOnDate         string                 `json:"as_on_date"`
 	ViewType         string                 `json:"view_type"`
+	// Per-widget filter/sort/row-limit push-down — populated by the dashboard
+	// view page so the DB returns only the rows a widget actually renders,
+	// instead of the whole source (up to the page cap) filtered in the browser.
+	// See runSourceQuery / buildWidgetFilterSQL in data_filterpush.go.
+	Filters   []widgetFilterRule `json:"filters"`
+	SortField string             `json:"sort_field"`
+	SortDir   string             `json:"sort_dir"`
+	SortType  string             `json:"sort_type"`
+	RowLimit  int                `json:"row_limit"`
 }
 
 type bankAccountScopePair struct {
@@ -396,6 +405,24 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx = context.WithValue(ctx, ctxKeyReqAsOfDate, strings.TrimSpace(req.AsOfDate))
 		ctx = context.WithValue(ctx, ctxKeyReqAsOnDate, strings.TrimSpace(req.AsOnDate))
 		ctx = context.WithValue(ctx, ctxKeyReqViewType, strings.ToLower(strings.TrimSpace(req.ViewType)))
+
+		// ── Per-widget filter/sort/row-limit push-down ────────────────────
+		// Stashed for runSourceQuery to consume without changing every query
+		// signature. RowLimit is clamped to the page limit so it can only ever
+		// narrow, never widen, the result window.
+		if req.RowLimit < 0 {
+			req.RowLimit = 0
+		}
+		if req.RowLimit > req.Limit {
+			req.RowLimit = req.Limit
+		}
+		ctx = context.WithValue(ctx, ctxKeyReqWidgetFilters, req.Filters)
+		ctx = context.WithValue(ctx, ctxKeyReqSortField, strings.TrimSpace(req.SortField))
+		ctx = context.WithValue(ctx, ctxKeyReqSortDir, strings.ToLower(strings.TrimSpace(req.SortDir)))
+		ctx = context.WithValue(ctx, ctxKeyReqSortType, strings.ToLower(strings.TrimSpace(req.SortType)))
+		ctx = context.WithValue(ctx, ctxKeyReqRowLimit, req.RowLimit)
+		ctx = context.WithValue(ctx, ctxKeyReqLimit, req.Limit)
+		ctx = context.WithValue(ctx, ctxKeyReqOffset, req.Offset)
 
 		fn, ok := dataSources[req.Source]
 		if !ok {
@@ -764,11 +791,7 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ─── fdConfirmation ───────────────────────────────────────────────────────────
@@ -847,11 +870,7 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ─── fdActivation ─────────────────────────────────────────────────────────────
@@ -937,11 +956,7 @@ func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ─── fdCashflowGroup ──────────────────────────────────────────────────────────
@@ -994,11 +1009,7 @@ func queryFDCashflowGroup(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ─── fdCashflows ──────────────────────────────────────────────────────────────
@@ -1053,11 +1064,7 @@ func queryFDCashflows(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, fdFilter)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ─── fdClosureInitiateAll ─────────────────────────────────────────────────────
@@ -1129,11 +1136,7 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := scanRows(r)
+	rows, err := runSourceQuery(ctx, pool, q, args)
 	if err != nil {
 		return nil, err
 	}
@@ -1227,11 +1230,7 @@ func queryFDClosureConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ─── fdClosurePrematureAll ────────────────────────────────────────────────────
@@ -1288,9 +1287,5 @@ func queryFDClosurePrematureAll(ctx context.Context, pool *pgxpool.Pool, entityI
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }

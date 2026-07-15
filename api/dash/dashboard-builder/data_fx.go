@@ -43,11 +43,7 @@ func queryFXExposureHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, en
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── Exposure Bucketing ─────────────────────────────────────────────────────
@@ -83,11 +79,7 @@ func queryFXExposureBucketing(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── Hedging Proposals ──────────────────────────────────────────────────────
@@ -124,11 +116,7 @@ func queryFXHedgingProposals(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── Hedge Links Details ────────────────────────────────────────────────────
@@ -163,11 +151,7 @@ func queryFXHedgeLinksDetails(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── MTM Management ─────────────────────────────────────────────────────────
@@ -210,11 +194,7 @@ func queryFXMtmManagement(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── Forward Bookings ───────────────────────────────────────────────────────
@@ -271,11 +251,7 @@ func queryFXForwardBookings(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryFXEntityRelevantForwardBookings(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -306,11 +282,7 @@ func queryFXCancellation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryFXRollover(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -336,11 +308,7 @@ func queryFXRollover(ctx context.Context, pool *pgxpool.Pool, entityIDs []string
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryFXCancellationRollover(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -387,9 +355,5 @@ func queryFXCancellationRollover(ctx context.Context, pool *pgxpool.Pool, entity
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }

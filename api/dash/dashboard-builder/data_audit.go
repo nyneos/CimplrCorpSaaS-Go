@@ -75,11 +75,7 @@ func auditQueryInner(
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, cfg.PKCol, cfg.ParentCol, cfg.ActionCol, extra, cfg.Table, parentFilter)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── FD Booking Audit ──────────────────────────────────────────────────────────
@@ -180,11 +176,7 @@ func queryCashProjectionAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		ORDER BY requested_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, parentFilter)
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── Fund Plan Audit ───────────────────────────────────────────────────────────
@@ -220,11 +212,7 @@ func queryCashFundPlanAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, planFilter)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── Investment Proposal Audit ─────────────────────────────────────────────────
@@ -303,9 +291,5 @@ func queryInvestmentOnboardBatchInfo(ctx context.Context, pool *pgxpool.Pool, en
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, parentFilter)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }

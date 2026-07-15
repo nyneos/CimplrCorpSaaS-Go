@@ -54,11 +54,7 @@ func queryFDAccrualRunAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, accrualRunStatusSQL)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryFDAccrualLedger(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -103,11 +99,7 @@ func queryFDAccrualLedger(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryFDAccrualExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -131,11 +123,7 @@ func queryFDAccrualExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityI
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryFDAccrualRunAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -156,11 +144,7 @@ func queryFDAccrualRunAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryFDAccrualLedgerAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -181,11 +165,7 @@ func queryFDAccrualLedgerAudit(ctx context.Context, pool *pgxpool.Pool, entityID
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryFDAccrualScheduleAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -223,11 +203,7 @@ func queryFDAccrualScheduleAll(ctx context.Context, pool *pgxpool.Pool, entityID
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryFDAccrualScheduleExecutionLog(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
@@ -281,9 +257,5 @@ func queryFDAccrualScheduleExecutionLog(ctx context.Context, pool *pgxpool.Pool,
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, parentFilter)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }

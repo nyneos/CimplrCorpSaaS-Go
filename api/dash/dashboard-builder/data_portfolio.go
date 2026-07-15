@@ -28,11 +28,7 @@ func queryInvestmentOnboardBatch(ctx context.Context, pool *pgxpool.Pool, entity
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`
 
-	r, err := pool.Query(ctx, q, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, []any{limit, offset})
 }
 
 func queryInvestmentProposalMeta(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -60,11 +56,7 @@ func queryInvestmentProposalMeta(ctx context.Context, pool *pgxpool.Pool, entity
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryInvestmentInitiationAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -95,11 +87,7 @@ func queryInvestmentInitiationAll(ctx context.Context, pool *pgxpool.Pool, entit
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryInvestmentConfirmationAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -109,17 +97,58 @@ func queryInvestmentConfirmationAll(ctx context.Context, pool *pgxpool.Pool, ent
 		SELECT
 			COALESCE(c.confirmation_id::text, '') AS confirmation_id,
 			COALESCE(c.initiation_id::text, '') AS initiation_id,
-			COALESCE(i.entity_name, '') AS entity_name,
-			COALESCE(c.allotted_units, 0) AS allotted_units,
-			COALESCE(c.net_amount, 0) AS confirmed_amount,
-			c.nav_date,
+
+			-- initiation / scheme / folio / demat joins
+			COALESCE(i.entity_name, '') AS initiation_entity_name,
+			COALESCE(s.amc_name, '') AS initiation_amc_name,
+			COALESCE(s.scheme_id::text, i.scheme_id::text, '') AS initiation_scheme_id,
+			COALESCE(s.scheme_name, i.scheme_id, '') AS initiation_scheme_name,
+			COALESCE(f.folio_id::text, '') AS initiation_folio_id,
+			COALESCE(f.folio_number, '') AS initiation_folio_number,
+			COALESCE(d.demat_id::text, '') AS initiation_demat_id,
+			COALESCE(d.demat_account_number, '') AS initiation_demat_number,
+			COALESCE(i.amount, 0) AS initiation_amount,
+			i.transaction_date AS initiation_transaction_date,
+
+			-- confirmation business fields
 			COALESCE(c.status, '') AS status,
-			COALESCE(a.processing_status, '') AS processing_status
+			COALESCE(a.processing_status, '') AS processing_status,
+			COALESCE(c.confirmed_by, '') AS confirmed_by,
+			COALESCE(c.resolution_comment, '') AS resolution_comment,
+			COALESCE(c.resolution_variance, '') AS resolution_variance,
+			COALESCE(c.is_deleted, false) AS is_deleted,
+			c.nav_date,
+			c.confirmed_at,
+			c.updated_at,
+
+			-- numeric fields
+			(COALESCE(c.net_amount, 0) + COALESCE(c.stamp_duty, 0)) AS gross_amount,
+			COALESCE(c.net_amount, 0) AS net_amount,
+			COALESCE(c.allotted_units, 0) AS allotted_units,
+			COALESCE(c.actual_allotted_units, 0) AS actual_allotted_units,
+			COALESCE(c.nav, 0) AS nav,
+			COALESCE(c.actual_nav, 0) AS actual_nav,
+			COALESCE(c.stamp_duty, 0) AS stamp_duty,
+			COALESCE(c.variance_nav, 0) AS variance_nav,
+			COALESCE(c.variance_units, 0) AS variance_units
 		FROM investment.investment_confirmation c
 		LEFT JOIN investment.investment_initiation i ON c.initiation_id = i.initiation_id
+		LEFT JOIN investment.masterscheme s ON (
+			COALESCE(s.is_deleted, false) = false AND NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND (
+				s.scheme_id::text = TRIM(i.scheme_id)
+				OR s.internal_scheme_code = TRIM(i.scheme_id)
+				OR s.amfi_scheme_code = TRIM(i.scheme_id)
+			)
+		)
+		LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+		LEFT JOIN investment.masterdemataccount d ON (
+			d.demat_id::text = i.demat_id
+			OR d.default_settlement_account = i.demat_id
+			OR d.demat_account_number = i.demat_id
+		)
 		LEFT JOIN LATERAL (
-			SELECT processing_status 
-			FROM investment.auditactioninvestmentconfirmation 
+			SELECT processing_status
+			FROM investment.auditactioninvestmentconfirmation
 			WHERE confirmation_id = c.confirmation_id::text
 			ORDER BY GREATEST(requested_at, checker_at) DESC NULLS LAST
 			LIMIT 1
@@ -129,11 +158,7 @@ func queryInvestmentConfirmationAll(ctx context.Context, pool *pgxpool.Pool, ent
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryInvestmentPortfolioGet(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -173,11 +198,7 @@ func queryInvestmentPortfolioGet(ctx context.Context, pool *pgxpool.Pool, entity
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryInvestmentRedemptionInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -212,11 +233,7 @@ func queryInvestmentRedemptionInitiateAll(ctx context.Context, pool *pgxpool.Poo
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryInvestmentRedemptionConfirmAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
@@ -248,11 +265,7 @@ func queryInvestmentRedemptionConfirmAll(ctx context.Context, pool *pgxpool.Pool
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ─── Accounting Workbench ─────────────────────────────────────────────────────
@@ -284,11 +297,7 @@ func queryInvestmentAccountingActivityAll(ctx context.Context, pool *pgxpool.Poo
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // queryInvestmentJournalEntryAll — journal entry headers (line items excluded, so the
@@ -319,9 +328,5 @@ func queryInvestmentJournalEntryAll(ctx context.Context, pool *pgxpool.Pool, ent
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }

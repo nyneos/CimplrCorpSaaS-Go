@@ -42,11 +42,7 @@ func queryFDMaturitySummary(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── TDS Register ─────────────────────────────────────────────────────────────
@@ -80,11 +76,7 @@ func queryFDTDSRegister(ctx context.Context, pool *pgxpool.Pool, entityIDs []str
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── Receipt All ──────────────────────────────────────────────────────────────
@@ -123,11 +115,7 @@ func queryFDReceiptAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── Reconcile Results ────────────────────────────────────────────────────────
@@ -161,11 +149,7 @@ func queryFDReconcileResults(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
 
 // ── Exceptions ───────────────────────────────────────────────────────────────
@@ -205,9 +189,5 @@ func queryFDExceptions(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
-	r, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanRows(r)
+	return runSourceQuery(ctx, pool, q, args)
 }
