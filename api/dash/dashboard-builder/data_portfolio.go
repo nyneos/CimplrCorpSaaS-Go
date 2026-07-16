@@ -37,9 +37,11 @@ func queryInvestmentProposalMeta(ctx context.Context, pool *pgxpool.Pool, entity
 	q := fmt.Sprintf(`
 		SELECT
 			COALESCE(p.proposal_id::text, '') AS proposal_id,
+			COALESCE(p.batch_id::text, '') AS batch_id,
 			COALESCE(p.entity_name, '') AS entity_name,
 			COALESCE(p.proposal_name, '') AS proposal_name,
 			COALESCE(p.total_amount, 0) AS total_amount,
+			COALESCE(p.horizon_days, 0) AS horizon_days,
 			COALESCE(p.source, '') AS source,
 			p.updated_at,
 			COALESCE(a.processing_status, '') AS processing_status
@@ -240,19 +242,73 @@ func queryInvestmentRedemptionConfirmAll(ctx context.Context, pool *pgxpool.Pool
 	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "i", "entity_name")
 
 	q := fmt.Sprintf(`
+		WITH resolved_folio AS (
+			SELECT DISTINCT ON (i.redemption_id)
+				i.redemption_id,
+				f.folio_number,
+				f.folio_id::text AS folio_id_text
+			FROM investment.redemption_initiation i
+			LEFT JOIN investment.masterfolio f ON (
+				(f.folio_id::text = i.folio_id) OR 
+				(i.folio_id IS NOT NULL AND f.folio_number = i.folio_id)
+			)
+			ORDER BY i.redemption_id, f.folio_id
+		),
+		resolved_demat AS (
+			SELECT DISTINCT ON (i.redemption_id)
+				i.redemption_id,
+				d.demat_account_number,
+				d.demat_id::text AS demat_id_text
+			FROM investment.redemption_initiation i
+			LEFT JOIN investment.masterdemataccount d ON (
+				(d.demat_id::text = i.demat_id) OR 
+				(i.demat_id IS NOT NULL AND d.default_settlement_account = i.demat_id) OR 
+				(i.demat_id IS NOT NULL AND d.demat_account_number = i.demat_id)
+			)
+			ORDER BY i.redemption_id, d.demat_id
+		)
 		SELECT
+			COALESCE(c.redemption_confirm_id::text, '') AS redemption_confirm_id,
 			COALESCE(c.redemption_confirm_id::text, '') AS confirmation_id,
 			COALESCE(c.redemption_id::text, '') AS redemption_id,
+			COALESCE(i.entity_name, '') AS initiation_entity_name,
 			COALESCE(i.entity_name, '') AS entity_name,
+			COALESCE(s.amc_name, '') AS initiation_amc_name,
+			COALESCE(s.scheme_id::text, i.scheme_id::text, '') AS initiation_scheme_id,
+			COALESCE(s.scheme_name, i.scheme_id, '') AS initiation_scheme_name,
+			COALESCE(s.internal_scheme_code, '') AS initiation_scheme_code,
+			COALESCE(s.isin, '') AS initiation_isin,
+			COALESCE(rf.folio_id_text, '') AS initiation_folio_id,
+			COALESCE(rf.folio_number, '') AS initiation_folio_number,
+			COALESCE(rd.demat_id_text, '') AS initiation_demat_id,
+			COALESCE(rd.demat_account_number, '') AS initiation_demat_number,
+			COALESCE(c.status, '') AS status,
+			COALESCE(a.processing_status, '') AS processing_status,
+			COALESCE(c.confirmed_by, '') AS confirmed_by,
+			COALESCE(c.resolution_variance, '') AS resolution_variance,
+			TO_CHAR(i.requested_date, 'YYYY-MM-DD') AS initiation_requested_date,
 			c.confirmed_at,
+
+			COALESCE(i.by_amount, 0) AS initiation_by_amount,
+			COALESCE(i.by_units, 0) AS initiation_by_units,
 			COALESCE(c.actual_nav, 0) AS actual_nav,
 			COALESCE(c.actual_units, 0) AS actual_units,
 			COALESCE(c.gross_proceeds, 0) AS gross_proceeds,
+			COALESCE(c.net_credited, 0) AS net_credited,
 			COALESCE(c.net_credited, 0) AS confirmed_amount,
-			COALESCE(c.status, '') AS status,
-			COALESCE(a.processing_status, '') AS processing_status
+			COALESCE(c.exit_load, 0) AS exit_load,
+			COALESCE(c.final_realised_capital_gain_loss, 0) AS final_realised_capital_gain_loss,
+			COALESCE(c.stt_charges, 0) AS stt_charges,
+			COALESCE(c.tds, 0) AS tds,
+			COALESCE(c.variance_proceeds, 0) AS variance_proceeds
 		FROM investment.redemption_confirmation c
 		LEFT JOIN investment.redemption_initiation i ON c.redemption_id = i.redemption_id
+		LEFT JOIN investment.masterscheme s ON (
+			s.scheme_id::text = i.scheme_id
+			OR s.internal_scheme_code = i.scheme_id
+		)
+		LEFT JOIN resolved_folio rf ON rf.redemption_id = i.redemption_id
+		LEFT JOIN resolved_demat rd ON rd.redemption_id = i.redemption_id
 		LEFT JOIN LATERAL (
 			SELECT processing_status 
 			FROM investment.auditactionredemptionconfirmation 
