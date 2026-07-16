@@ -854,10 +854,16 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			UserID   string   `json:"user_id"`
 			EntityID string   `json:"entity_id"`
 			InboxIDs []string `json:"inbox_ids"`
+			Comment  string   `json:"comment"`
+			Reason   string   `json:"reason"` // alias (FD-style delete reason)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
+		}
+		deleteReason := strings.TrimSpace(req.Comment)
+		if deleteReason == "" {
+			deleteReason = strings.TrimSpace(req.Reason)
 		}
 		userID, userEmail, _, entityIDs := emailcommon.RequestIdentity(r, req.UserID, req.EntityID)
 		admin := emailcommon.IsEmailAdmin(r.Context(), userID)
@@ -892,11 +898,11 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 					SET processing_status = 'PENDING_DELETE_APPROVAL',
 					    submitted_by = $2,
 					    pending_edit_json = NULL,
-					    checker_comment = '',
+					    checker_comment = $3,
 					    updated_at = now()
 					WHERE inbox_id = $1::uuid
 					  AND is_deleted = false
-				`, inboxID, userID)
+				`, inboxID, userID, deleteReason)
 				if err != nil {
 					errors = append(errors, inboxID+": "+err.Error())
 					continue
@@ -904,8 +910,9 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				// Cancel any open create/edit approval instances; submit a delete instance.
 				_ = approvalengine.CancelPendingInstances(r.Context(), pool, emailInboxModuleCode, inboxID, userEmail)
 				logInboxAudit(r.Context(), pool, inboxAuditEntry{
-					InboxID: inboxID, Action: "DELETE", Status: constants.StatusPendingDeleteApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{
+					InboxID: inboxID, Action: "DELETE", Status: constants.StatusPendingDeleteApproval, UserID: userID, Comment: deleteReason, Detail: map[string]interface{}{
 						"prior_status": statusNorm,
+						"reason":       deleteReason,
 					},
 				})
 				if _, instErr := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
@@ -925,7 +932,6 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		emailcommon.RespondBulk(w, "inbox/workflow/update", "updated", updated, errors)
 	}
 }
-
 
 func checkerCanAct(submittedBy, checkerUserID, inboxEntityID string, entityIDs []string) bool {
 	if submittedBy == checkerUserID {

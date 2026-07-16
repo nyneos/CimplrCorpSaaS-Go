@@ -295,6 +295,9 @@ func ingestMessage(ctx context.Context, pool *pgxpool.Pool, inboxes []inboxRow, 
 			MessageID: messageID, AttachmentID: attachmentID, Source: "SES",
 			Filename: att.Filename, ContentType: att.ContentType, S3Key: att.S3Key, FileSize: att.SizeBytes,
 		})
+
+		// Trigger transformation rules worker
+		go ProcessAttachmentRules(context.Background(), pool, matchedInboxID, messageID, attachmentID, att.Filename, att.S3Key)
 	}
 
 	ingestDetail, _ := json.Marshal(map[string]string{

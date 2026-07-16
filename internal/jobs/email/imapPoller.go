@@ -448,6 +448,9 @@ func ingestIMAPMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow, 
 			MessageID: messageID, AttachmentID: attachmentID, Source: "IMAP",
 			Filename: att.Filename, ContentType: att.ContentType, S3Key: att.S3Key, FileSize: att.SizeBytes,
 		})
+
+		// Trigger transformation rules worker
+		go ProcessAttachmentRules(context.Background(), pool, inbox.InboxID, messageID, attachmentID, att.Filename, att.S3Key)
 	}
 
 	detail, _ := json.Marshal(map[string]string{

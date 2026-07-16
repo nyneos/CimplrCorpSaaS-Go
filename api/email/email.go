@@ -12,11 +12,12 @@ import (
 	emailinbox "CimplrCorpSaas/api/email/inbox"
 	emailmailbox "CimplrCorpSaas/api/email/mailbox"
 	emailmessages "CimplrCorpSaas/api/email/messages"
+	emailtransformrules "CimplrCorpSaas/api/email/transformrules"
 	emailupload "CimplrCorpSaas/api/email/upload"
 	emailworkflow "CimplrCorpSaas/api/email/workflow"
 	middlewares "CimplrCorpSaas/api/middlewares"
-	emailjobs "CimplrCorpSaas/internal/jobs/email"
 	"CimplrCorpSaas/internal/dbutil"
+	emailjobs "CimplrCorpSaas/internal/jobs/email"
 	"CimplrCorpSaas/internal/observability"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -71,6 +72,7 @@ func NewEmailServer(pool *pgxpool.Pool, db *sql.DB, port string) (*http.Server, 
 	emailworkflow.RegisterWorkflowRoutes(mux, pool, chain)
 	emailmailbox.RegisterMailboxRoutes(mux, pool, chain)
 	emailupload.RegisterUploadRoutes(mux, pool, chain)
+	emailtransformrules.RegisterTransformRuleRoutes(mux, pool, chain)
 
 	mux.Handle("/email/metrics", observability.MetricsHandler(serviceName))
 

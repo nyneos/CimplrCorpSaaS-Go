@@ -55,13 +55,19 @@ func RespondPayload(w http.ResponseWriter, logLabel string, payload interface{})
 }
 
 func RespondList(w http.ResponseWriter, logLabel string, rows interface{}, count int) {
-	api.LogInfo("email %s: rows=%d", logLabel, count)
+	RespondListPaged(w, logLabel, rows, count, count)
+}
+
+// RespondListPaged returns rows with page count and total_count for server-side pagination.
+func RespondListPaged(w http.ResponseWriter, logLabel string, rows interface{}, count, totalCount int) {
+	api.LogInfo("email %s: rows=%d total=%d", logLabel, count, totalCount)
 	if rows == nil {
 		rows = []interface{}{}
 	}
 	respondSuccess(w, http.StatusOK, "OK", map[string]interface{}{
-		"rows":  rows,
-		"count": count,
+		"rows":         rows,
+		"count":        count,
+		"total_count":  totalCount,
 	})
 }
 

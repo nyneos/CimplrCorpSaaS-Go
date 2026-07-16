@@ -211,6 +211,11 @@ func HandleAttachmentUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		var inboxID string
+		_ = pool.QueryRow(r.Context(), `
+			SELECT COALESCE(inbox_id::text, '') FROM email_svc.message WHERE message_id = $1::uuid
+		`, messageID).Scan(&inboxID)
+
 		_, _ = pool.Exec(r.Context(), `
 			UPDATE email_svc.message SET has_attachments = true, updated_at = now()
 			WHERE message_id = $1::uuid
@@ -224,6 +229,10 @@ func HandleAttachmentUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			"uploaded_by":   uploadedBy,
 			"source":        "manual_dms",
 		})
+
+		if inboxID != "" {
+			go emailjobs.ProcessAttachmentRules(context.Background(), pool, inboxID, messageID, attachmentID, filename, s3Key)
+		}
 
 		emailcommon.RespondPayload(w, "attachments/upload", map[string]interface{}{
 			"attachment_id": attachmentID,
@@ -288,13 +297,18 @@ func ingestParsedMessage(ctx context.Context, pool *pgxpool.Pool, msg mailruntim
 	}
 
 	for _, att := range msg.Attachments {
-		_, err := pool.Exec(ctx, `
+		var attachmentID string
+		err := pool.QueryRow(ctx, `
 			INSERT INTO email_svc.message_attachment (
 				message_id, filename, content_type, file_size, s3_key, file_hash
 			) VALUES ($1::uuid, $2, $3, $4, $5, $6)
-		`, messageID, att.Filename, att.ContentType, att.SizeBytes, att.S3Key, att.SHA256)
+			RETURNING attachment_id::text
+		`, messageID, att.Filename, att.ContentType, att.SizeBytes, att.S3Key, att.SHA256).Scan(&attachmentID)
 		if err != nil {
 			return "", err
+		}
+		if inboxID != "" && attachmentID != "" && att.S3Key != "" {
+			go emailjobs.ProcessAttachmentRules(context.Background(), pool, inboxID, messageID, attachmentID, att.Filename, att.S3Key)
 		}
 	}
 

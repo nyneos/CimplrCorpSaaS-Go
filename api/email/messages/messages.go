@@ -114,11 +114,37 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 			` + emailcommon.ListMessageScopedToUserSQL + `
 			ORDER BY CASE WHEN m.processing_status = 'MANUAL_UPLOAD' THEN m.created_at ELSE COALESCE(m.received_at, m.created_at) END DESC`
 
-		args := []interface{}{module, entityID, status, dateFrom, dateTo, inboxID, filterMatchedOnly, admin, userID, userEmail}
-		if req.Limit > 0 {
-			query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
-			args = append(args, req.Limit, offset)
+		limit := req.Limit
+		if limit <= 0 {
+			limit = 50
 		}
+		if limit > 200 {
+			limit = 200
+		}
+
+		countQuery := `
+			SELECT COUNT(*)
+			FROM email_svc.message m
+			WHERE ($1 = '' OR m.module = $1)
+			  AND ($2 = '' OR m.entity_id = $2)
+			  AND ($3 = '' OR m.processing_status = $3)
+			  AND ($4 = '' OR COALESCE(m.received_at, m.created_at) >= $4::date)
+			  AND ($5 = '' OR COALESCE(m.received_at, m.created_at) < ($5::date + interval '1 day'))
+			  AND ($6 = '' OR m.inbox_id::text = $6)
+			  AND (NOT $7 OR m.filter_matched = true OR m.processing_status = 'MANUAL_UPLOAD')
+			` + emailcommon.ActiveInboxMessageSQL + `
+			` + emailcommon.ListMessageScopedToUserSQL
+
+		countArgs := []interface{}{module, entityID, status, dateFrom, dateTo, inboxID, filterMatchedOnly, admin, userID, userEmail}
+		var totalCount int
+		if err := pool.QueryRow(r.Context(), countQuery, countArgs...).Scan(&totalCount); err != nil {
+			emailcommon.RespondInternal(w, err.Error())
+			return
+		}
+
+		args := []interface{}{module, entityID, status, dateFrom, dateTo, inboxID, filterMatchedOnly, admin, userID, userEmail}
+		query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+		args = append(args, limit, offset)
 
 		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {
@@ -164,7 +190,7 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			items = append(items, item)
 		}
-		emailcommon.RespondList(w, "messages/list", items, len(items))
+		emailcommon.RespondListPaged(w, "messages/list", items, len(items), totalCount)
 	}
 }
 
