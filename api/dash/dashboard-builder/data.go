@@ -156,9 +156,6 @@ var dataSources = map[string]dataSourceFn{
 	"investmentConfirmationAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryInvestmentConfirmationAll(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
-	"investmentPortfolioGet": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
-		return queryInvestmentPortfolioGet(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
-	},
 	"investmentRedemptionInitiateAll": func(ctx context.Context, pool *pgxpool.Pool, req dataRequest) ([]map[string]any, error) {
 		return queryInvestmentRedemptionInitiateAll(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},

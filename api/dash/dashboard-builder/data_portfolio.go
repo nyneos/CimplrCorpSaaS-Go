@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"CimplrCorpSaas/api/investment/schemejoin"
-
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -163,56 +161,50 @@ func queryInvestmentConfirmationAll(ctx context.Context, pool *pgxpool.Pool, ent
 	return runSourceQuery(ctx, pool, q, args)
 }
 
-func queryInvestmentPortfolioGet(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "p", "entity_name")
-
-	q := fmt.Sprintf(`
-		SELECT
-			COALESCE(p.id::text, '') AS portfolio_id,
-			COALESCE(p.batch_id::text, '') AS batch_id,
-			COALESCE(p.entity_name, '') AS entity_name,
-			COALESCE(p.folio_number, '') AS folio_number,
-			COALESCE(p.demat_acc_number, '') AS demat_acc_number,
-			COALESCE(p.folio_id::text, '') AS folio_id,
-			COALESCE(p.demat_id::text, '') AS demat_id,
-			COALESCE(p.scheme_id::text, '') AS scheme_id,
-			COALESCE(p.scheme_name, '') AS scheme_name,
-			COALESCE(p.isin, '') AS isin,
-			COALESCE(p.total_units, 0) AS total_units,
-			COALESCE(p.avg_nav, 0) AS avg_nav,
-			COALESCE(ln.nav_value, 0) AS current_nav,
-			COALESCE(p.total_units, 0) * COALESCE(ln.nav_value, 0) AS current_value,
-			COALESCE(p.total_invested_amount, 0) AS total_invested_amount,
-			(COALESCE(p.total_units, 0) * COALESCE(ln.nav_value, 0)) - COALESCE(p.total_invested_amount, 0) AS gain_loss,
-			CASE WHEN COALESCE(p.total_invested_amount, 0) > 0
-				THEN (((COALESCE(p.total_units, 0) * COALESCE(ln.nav_value, 0)) - COALESCE(p.total_invested_amount, 0)) / COALESCE(p.total_invested_amount, 0)) * 100
-				ELSE 0 END AS gain_loss_percent,
-			p.created_at
-		FROM (
-			SELECT DISTINCT ON (entity_name, folio_number, COALESCE(demat_acc_number, ''), scheme_id)
-				p.*
-			FROM investment.portfolio_snapshot p
-			WHERE 1=1 %s
-			ORDER BY entity_name, folio_number, COALESCE(demat_acc_number, ''), scheme_id, created_at DESC, id DESC
-		) p
-		`+schemejoin.NavLateralJoin("p", "")+`
-		ORDER BY p.created_at DESC NULLS LAST
-		LIMIT NULLIF($1, 0) OFFSET $2
-	`, ef)
-
-	return runSourceQuery(ctx, pool, q, args)
-}
-
 func queryInvestmentRedemptionInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "r", "entity_name")
 
 	q := fmt.Sprintf(`
+		WITH resolved_folio AS (
+			SELECT DISTINCT ON (ri.redemption_id)
+				ri.redemption_id,
+				f.folio_number,
+				f.folio_id::text AS folio_id_text
+			FROM investment.redemption_initiation ri
+			LEFT JOIN investment.masterfolio f ON (
+				(f.folio_id::text = ri.folio_id) OR 
+				(ri.folio_id IS NOT NULL AND f.folio_number = ri.folio_id)
+			)
+			ORDER BY ri.redemption_id, f.folio_id
+		),
+		resolved_demat AS (
+			SELECT DISTINCT ON (ri.redemption_id)
+				ri.redemption_id,
+				d.demat_account_number,
+				d.demat_id::text AS demat_id_text
+			FROM investment.redemption_initiation ri
+			LEFT JOIN investment.masterdemataccount d ON (
+				(d.demat_id::text = ri.demat_id) OR 
+				(ri.demat_id IS NOT NULL AND d.default_settlement_account = ri.demat_id) OR 
+				(ri.demat_id IS NOT NULL AND d.demat_account_number = ri.demat_id)
+			)
+			ORDER BY ri.redemption_id, d.demat_id
+		)
 		SELECT
 			COALESCE(r.redemption_id::text, '') AS redemption_id,
 			COALESCE(r.entity_name, '') AS entity_name,
-			COALESCE(r.scheme_id::text, '') AS scheme_id,
+			COALESCE(s.scheme_id::text, r.scheme_id::text, '') AS scheme_id,
+			COALESCE(s.scheme_id::text, r.scheme_id::text, '') AS resolved_scheme_id,
+			COALESCE(s.scheme_name, r.scheme_id, '') AS scheme_name,
+			COALESCE(s.internal_scheme_code, '') AS scheme_code,
+			COALESCE(s.amc_name, '') AS amc_name,
+			COALESCE(s.isin, '') AS isin,
 			COALESCE(r.folio_id::text, '') AS folio_id,
+			COALESCE(rf.folio_id_text, '') AS folio_id_text,
+			COALESCE(rf.folio_number, '') AS folio_number,
 			COALESCE(r.demat_id::text, '') AS demat_id,
+			COALESCE(rd.demat_id_text, '') AS demat_id_text,
+			COALESCE(rd.demat_account_number, '') AS demat_number,
 			COALESCE(r.requested_by, '') AS requested_by,
 			r.requested_date,
 			r.transaction_date,
@@ -223,6 +215,12 @@ func queryInvestmentRedemptionInitiateAll(ctx context.Context, pool *pgxpool.Poo
 			COALESCE(r.gain_loss, 0) AS gain_loss,
 			COALESCE(a.processing_status, '') AS processing_status
 		FROM investment.redemption_initiation r
+		LEFT JOIN investment.masterscheme s ON (
+			s.scheme_id::text = r.scheme_id
+			OR s.internal_scheme_code = r.scheme_id
+		)
+		LEFT JOIN resolved_folio rf ON rf.redemption_id = r.redemption_id
+		LEFT JOIN resolved_demat rd ON rd.redemption_id = r.redemption_id
 		LEFT JOIN LATERAL (
 			SELECT processing_status 
 			FROM investment.auditactionredemption 
