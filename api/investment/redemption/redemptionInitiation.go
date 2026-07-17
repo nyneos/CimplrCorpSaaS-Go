@@ -1535,7 +1535,8 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		resolved_folio AS (
 			SELECT DISTINCT ON (m.redemption_id)
 				m.redemption_id,
-				f.folio_number
+				f.folio_number,
+				f.folio_id::text AS folio_id_text
 			FROM investment.redemption_initiation m
 			LEFT JOIN investment.masterfolio f ON (
 				(f.folio_id::text = m.folio_id) OR 
@@ -1546,7 +1547,8 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		resolved_demat AS (
 			SELECT DISTINCT ON (m.redemption_id)
 				m.redemption_id,
-				d.demat_account_number
+				d.demat_account_number,
+				d.demat_id::text AS demat_id_text
 			FROM investment.redemption_initiation m
 			LEFT JOIN investment.masterdemataccount d ON (
 				(d.demat_id::text = m.demat_id) OR 
@@ -1567,7 +1569,9 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			COALESCE(s.isin,'') AS isin,
 			COALESCE(s.amc_name,'') AS amc_name,
 			COALESCE(rf.folio_number,'') AS folio_number,
+			COALESCE(rf.folio_id_text,'') AS folio_id_text,
 			COALESCE(rd.demat_account_number,'') AS demat_number,
+			COALESCE(rd.demat_id_text,'') AS demat_id_text,
 			m.requested_by,
 			TO_CHAR(m.requested_date, 'YYYY-MM-DD') AS requested_date,
 			TO_CHAR(m.transaction_date, 'YYYY-MM-DD') AS transaction_date,
@@ -1576,7 +1580,8 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			COALESCE(s.method, 'FIFO') AS method,
 			m.estimated_proceeds,
 			m.gain_loss,
-			DATE_PART('day', now()::timestamp - COALESCE(m.transaction_date, m.requested_date)::timestamp)::int AS age_days
+			DATE_PART('day', now()::timestamp - COALESCE(m.transaction_date, m.requested_date)::timestamp)::int AS age_days,
+			COALESCE(l.processing_status, '') AS processing_status
 		FROM investment.redemption_initiation m
 		JOIN latest l ON l.redemption_id = m.redemption_id
 		LEFT JOIN investment.masterscheme s ON (
