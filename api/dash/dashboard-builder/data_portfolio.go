@@ -67,14 +67,31 @@ func queryInvestmentInitiationAll(ctx context.Context, pool *pgxpool.Pool, entit
 			COALESCE(i.initiation_id::text, '') AS initiation_id,
 			COALESCE(i.proposal_id::text, '') AS proposal_id,
 			COALESCE(i.entity_name, '') AS entity_name,
-			COALESCE(i.scheme_id::text, '') AS scheme_id,
-			COALESCE(i.folio_id::text, '') AS folio_id,
-			COALESCE(i.demat_id::text, '') AS demat_id,
+			COALESCE(s.scheme_id::text, i.scheme_id::text, '') AS scheme_id,
+			COALESCE(s.scheme_name, i.scheme_id, '') AS scheme_name,
+			COALESCE(s.amc_name, '') AS amc_name,
+			COALESCE(f.folio_id::text, '') AS folio_id,
+			COALESCE(f.folio_number, '') AS folio_number,
+			COALESCE(d.demat_id::text, '') AS demat_id,
+			COALESCE(d.demat_account_number, d.default_settlement_account, '') AS demat_number,
 			COALESCE(i.amount, 0) AS amount,
 			COALESCE(i.source, '') AS source,
 			i.transaction_date,
 			COALESCE(a.processing_status, '') AS processing_status
 		FROM investment.investment_initiation i
+		LEFT JOIN investment.masterscheme s ON (
+			COALESCE(s.is_deleted, false) = false AND NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND (
+				s.scheme_id::text = TRIM(i.scheme_id)
+				OR s.internal_scheme_code = TRIM(i.scheme_id)
+				OR s.amfi_scheme_code = TRIM(i.scheme_id)
+			)
+		)
+		LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+		LEFT JOIN investment.masterdemataccount d ON (
+			d.demat_id::text = i.demat_id
+			OR d.default_settlement_account = i.demat_id
+			OR d.demat_account_number = i.demat_id
+		)
 		LEFT JOIN LATERAL (
 			SELECT processing_status 
 			FROM investment.auditactioninitiation 
