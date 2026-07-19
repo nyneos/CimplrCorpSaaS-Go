@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -60,6 +61,34 @@ func normalizeExt(v string) string {
 		v = "." + v
 	}
 	return v
+}
+
+// matchByMode applies PREFIX / SUFFIX / EXACT / CONTAINS / GLOB against value.
+// Case-insensitive. Empty pattern never matches.
+func matchByMode(value, pattern, mode string) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	p := strings.ToLower(strings.TrimSpace(pattern))
+	if p == "" {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(mode)) {
+	case "PREFIX":
+		return strings.HasPrefix(v, p)
+	case "SUFFIX":
+		return strings.HasSuffix(v, p)
+	case "EXACT":
+		return v == p
+	case "GLOB":
+		if p == "*" {
+			return true
+		}
+		ok, _ := path.Match(p, v)
+		return ok
+	case "CONTAINS", "":
+		return strings.Contains(v, p)
+	default:
+		return strings.Contains(v, p)
+	}
 }
 
 // directionMatches maps UI values (INBOUND/OUTBOUND) to DB mail_direction (RECEIVED/SENT).
@@ -165,7 +194,9 @@ func ProcessAttachmentRules(ctx context.Context, pool *pgxpool.Pool, inboxID, me
 	log.Printf("[TransformWorker] Checking rules for attachment %s (%s) in inbox %s", attachmentID, filename, inboxID)
 
 	query := `
-		SELECT rule_id::text, condition_type, condition_value, mapping_id, COALESCE(rule_name, '')
+		SELECT rule_id::text, condition_type, condition_value,
+		       COALESCE(NULLIF(match_mode, ''), 'CONTAINS'),
+		       mapping_id, COALESCE(rule_name, '')
 		FROM email_svc.transformation_rules
 		WHERE inbox_id = $1::uuid
 		  AND is_active = true
@@ -180,12 +211,13 @@ func ProcessAttachmentRules(ctx context.Context, pool *pgxpool.Pool, inboxID, me
 	defer rows.Close()
 
 	ext := normalizeExt(filepath.Ext(filename))
+	baseName := filepath.Base(filename)
 	checked := 0
 	matchedCount := 0
 
 	for rows.Next() {
-		var ruleID, condType, condVal, mappingID, ruleName string
-		if err := rows.Scan(&ruleID, &condType, &condVal, &mappingID, &ruleName); err != nil {
+		var ruleID, condType, condVal, matchMode, mappingID, ruleName string
+		if err := rows.Scan(&ruleID, &condType, &condVal, &matchMode, &mappingID, &ruleName); err != nil {
 			continue
 		}
 		checked++
@@ -194,6 +226,8 @@ func ProcessAttachmentRules(ctx context.Context, pool *pgxpool.Pool, inboxID, me
 		switch strings.ToUpper(strings.TrimSpace(condType)) {
 		case "FILE_EXTENSION":
 			matched = normalizeExt(condVal) == ext && ext != ""
+		case "ATTACHMENT_NAME":
+			matched = matchByMode(baseName, condVal, matchMode)
 		default:
 			var sender, subject, direction string
 			var receivers []string
@@ -212,8 +246,8 @@ func ProcessAttachmentRules(ctx context.Context, pool *pgxpool.Pool, inboxID, me
 						break
 					}
 				}
-			case "SUBJECT_CONTAINS":
-				matched = strings.Contains(strings.ToLower(subject), strings.ToLower(condVal))
+			case "SUBJECT_CONTAINS", "SUBJECT":
+				matched = matchByMode(subject, condVal, matchMode)
 			case "EMAIL_DIRECTION":
 				matched = directionMatches(direction, condVal)
 			}
@@ -230,6 +264,7 @@ func ProcessAttachmentRules(ctx context.Context, pool *pgxpool.Pool, inboxID, me
 				"filename":      filename,
 				"s3_key":        s3Key,
 				"condition":     condType + "=" + condVal,
+				"match_mode":    matchMode,
 			})
 			markTransformPending(ctx, pool, attachmentID, ruleID)
 			enqueueTransformation(pool, messageID, attachmentID, ruleID, mappingID, s3Key)

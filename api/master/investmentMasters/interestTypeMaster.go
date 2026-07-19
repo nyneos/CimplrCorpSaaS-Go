@@ -1376,11 +1376,7 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(deleteBlockers) > 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusConflict)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   "Cannot request deletion: one or more items are referenced by live FD bookings.",
+			api.RespondEnvelopeFailureWithData(w, http.StatusConflict, "Cannot request deletion: one or more items are referenced by live FD bookings.", "", map[string]interface{}{
 				"blocked": deleteBlockers,
 			})
 			return
@@ -1805,11 +1801,7 @@ func GetInterestTypesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"rows":                 out,
-		})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
 		api.LogInfo("Retrieved %d interest types with audit data", len(out))
 	}
 }

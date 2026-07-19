@@ -17,9 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	// "github.com/lib/pq"
 	"CimplrCorpSaas/api/constants"
 )
 
@@ -97,10 +96,10 @@ func isUUIDValue(value string) bool {
 	return true
 }
 
-func resolveForwardBookingID(ctx context.Context, db *sql.DB, bookingOrReferenceID string, buNames []string) (string, error) {
+func resolveForwardBookingID(ctx context.Context, pool *pgxpool.Pool, bookingOrReferenceID string, buNames []string) (string, error) {
 	bookingOrReferenceID = strings.TrimSpace(bookingOrReferenceID)
 	if bookingOrReferenceID == "" {
-		return "", sql.ErrNoRows
+		return "", pgx.ErrNoRows
 	}
 	if isUUIDValue(bookingOrReferenceID) {
 		return bookingOrReferenceID, nil
@@ -108,17 +107,17 @@ func resolveForwardBookingID(ctx context.Context, db *sql.DB, bookingOrReference
 
 	var systemTransactionID string
 	if len(buNames) > 0 {
-		err := db.QueryRowContext(ctx, `
+		err := pool.QueryRow(ctx, `
 			SELECT system_transaction_id::text
 			FROM forward_bookings
 			WHERE internal_reference_id = $1
 			  AND entity_level_0 = ANY($2)
 			LIMIT 1
-		`, bookingOrReferenceID, pq.Array(buNames)).Scan(&systemTransactionID)
+		`, bookingOrReferenceID, buNames).Scan(&systemTransactionID)
 		return systemTransactionID, err
 	}
 
-	err := db.QueryRowContext(ctx, `
+	err := pool.QueryRow(ctx, `
 		SELECT system_transaction_id::text
 		FROM forward_bookings
 		WHERE internal_reference_id = $1
@@ -134,8 +133,8 @@ func cancelRollRequestLabel(requestType string) string {
 	return "Cancellation"
 }
 
-func cancelRollRowSnapshot(ctx context.Context, db *sql.DB, requestType, bookingID, requestDate string) map[string]interface{} {
-	snapshot := auditutil.FetchRowSnapshot(ctx, db, cancelRollMainTable(requestType), "booking_id", bookingID)
+func cancelRollRowSnapshot(ctx context.Context, pool *pgxpool.Pool, requestType, bookingID, requestDate string) map[string]interface{} {
+	snapshot := auditutil.FetchRowSnapshotPGX(ctx, pool, cancelRollMainTable(requestType), "booking_id", bookingID)
 	if snapshot == nil {
 		snapshot = map[string]interface{}{}
 	}
@@ -155,8 +154,8 @@ type cancelRollStatusActionParams struct {
 	Comment     string
 }
 
-func recordCancelRollStatusAction(ctx context.Context, db *sql.DB, params cancelRollStatusActionParams) {
-	auditutil.RecordAction(ctx, db, auditutil.ActionParams{
+func recordCancelRollStatusAction(ctx context.Context, pool *pgxpool.Pool, params cancelRollStatusActionParams) {
+	auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{
 		TableName:      cancelRollAuditTable(params.RequestType),
 		ParentColumn:   "booking_id",
 		ParentID:       params.BookingID,
@@ -171,10 +170,10 @@ func recordCancelRollStatusAction(ctx context.Context, db *sql.DB, params cancel
 	})
 }
 
-func executeCancellationApproval(ctx context.Context, db *sql.DB, userID, bookingID, requestDate, comment string) error {
+func executeCancellationApproval(ctx context.Context, pool *pgxpool.Pool, userID, bookingID, requestDate, comment string) error {
 	var amountCancelled, cancellationRate, realizedGainLoss float64
 	var cancellationReason string
-	err := db.QueryRowContext(ctx, `
+	err := pool.QueryRow(ctx, `
 		SELECT amount_cancelled, cancellation_rate, realized_gain_loss, COALESCE(cancellation_reason, '')
 		FROM forward_cancellations
 		WHERE booking_id = $1
@@ -191,9 +190,9 @@ func executeCancellationApproval(ctx context.Context, db *sql.DB, userID, bookin
 
 	var openAmount float64
 	var ledgerSeq int
-	err = db.QueryRowContext(ctx, `SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bookingID).Scan(&openAmount, &ledgerSeq)
-	if err == sql.ErrNoRows {
-		err = db.QueryRowContext(ctx, `SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bookingID).Scan(&openAmount)
+	err = pool.QueryRow(ctx, `SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bookingID).Scan(&openAmount, &ledgerSeq)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = pool.QueryRow(ctx, `SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bookingID).Scan(&openAmount)
 		if err != nil {
 			return err
 		}
@@ -209,52 +208,52 @@ func executeCancellationApproval(ctx context.Context, db *sql.DB, userID, bookin
 		newOpenAmount = 0
 		actionType = "Cancellation"
 	}
-	if _, err = db.ExecContext(ctx, `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+	if _, err = pool.Exec(ctx, `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		bookingID, ledgerSeq, actionType, bookingID, requestDate, -amountCancelled, newOpenAmount); err != nil {
 		return err
 	}
-	result, err := db.ExecContext(ctx, `UPDATE forward_cancellations SET status = 'Approved' WHERE booking_id = $1 AND cancellation_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bookingID, requestDate)
+	result, err := pool.Exec(ctx, `UPDATE forward_cancellations SET status = 'Approved' WHERE booking_id = $1 AND cancellation_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bookingID, requestDate)
 	if err != nil {
 		return err
 	}
-	if affected, _ := result.RowsAffected(); affected == 0 {
+	if affected := result.RowsAffected(); affected == 0 {
 		return fmt.Errorf(constants.ErrPendingCancellationNotUpdated)
 	}
-	auditutil.RecordDecision(ctx, db, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(userID), Comment: cancellationReason})
-	recordCancelRollStatusAction(ctx, db, cancelRollStatusActionParams{RequestType: cancelRollTypeCancellation, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(userID), Comment: cancellationReason})
+	auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(userID), Comment: cancellationReason})
+	recordCancelRollStatusAction(ctx, pool, cancelRollStatusActionParams{RequestType: cancelRollTypeCancellation, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(userID), Comment: cancellationReason})
 	if newOpenAmount == 0 {
-		if _, err = db.ExecContext(ctx, `UPDATE forward_bookings SET status = 'Cancelled' WHERE system_transaction_id = $1`, bookingID); err == nil {
-			_ = DeactivateExposureHedgeLinks(db, []string{bookingID})
+		if _, err = pool.Exec(ctx, `UPDATE forward_bookings SET status = 'Cancelled' WHERE system_transaction_id = $1`, bookingID); err == nil {
+			_ = DeactivateExposureHedgeLinks(ctx, pool, []string{bookingID})
 		}
 	} else {
-		_, _ = db.ExecContext(ctx, `UPDATE forward_bookings SET status = 'Partiallu Cancelled' WHERE system_transaction_id = $1`, bookingID)
+		_, _ = pool.Exec(ctx, `UPDATE forward_bookings SET status = 'Partiallu Cancelled' WHERE system_transaction_id = $1`, bookingID)
 	}
 	_ = cancellationRate
 	_ = realizedGainLoss
 	return nil
 }
 
-func executeRolloverApproval(ctx context.Context, db *sql.DB, userID, bookingID, requestDate, comment string) error {
+func executeRolloverApproval(ctx context.Context, pool *pgxpool.Pool, userID, bookingID, requestDate, comment string) error {
 	var cancellationDate, origMaturityDate, newMaturityDate, fxPair, orderType, amount, spotRate, premiumDiscount, marginRate, netRate string
 	var amountRolledOver float64
 	var realizedGainLoss sql.NullFloat64
-	err := db.QueryRowContext(ctx, `SELECT rollover_date, original_maturity_date, new_maturity_date, fx_pair, order_type, new_forward_amount, new_forward_spot_rate, new_forward_premium_discount, new_forward_margin_rate, new_forward_net_rate, rollover_cost, amount_rolled_over FROM forward_rollovers WHERE booking_id = $1 AND rollover_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bookingID, requestDate).
+	err := pool.QueryRow(ctx, `SELECT rollover_date, original_maturity_date, new_maturity_date, fx_pair, order_type, new_forward_amount, new_forward_spot_rate, new_forward_premium_discount, new_forward_margin_rate, new_forward_net_rate, rollover_cost, amount_rolled_over FROM forward_rollovers WHERE booking_id = $1 AND rollover_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bookingID, requestDate).
 		Scan(&cancellationDate, &origMaturityDate, &newMaturityDate, &fxPair, &orderType, &amount, &spotRate, &premiumDiscount, &marginRate, &netRate, &realizedGainLoss, &amountRolledOver)
 	if err != nil {
 		return err
 	}
 
 	var currentStatus string
-	err = db.QueryRowContext(ctx, `SELECT status FROM forward_bookings WHERE system_transaction_id = $1`, bookingID).Scan(&currentStatus)
+	err = pool.QueryRow(ctx, `SELECT status FROM forward_bookings WHERE system_transaction_id = $1`, bookingID).Scan(&currentStatus)
 	if err != nil {
 		return fmt.Errorf("forward booking not found for rollover request")
 	}
 
 	var openAmount float64
 	var ledgerSeq int
-	err = db.QueryRowContext(ctx, `SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bookingID).Scan(&openAmount, &ledgerSeq)
-	if err == sql.ErrNoRows {
-		err = db.QueryRowContext(ctx, `SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bookingID).Scan(&openAmount)
+	err = pool.QueryRow(ctx, `SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bookingID).Scan(&openAmount, &ledgerSeq)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = pool.QueryRow(ctx, `SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bookingID).Scan(&openAmount)
 		if err != nil {
 			return err
 		}
@@ -269,29 +268,29 @@ func executeRolloverApproval(ctx context.Context, db *sql.DB, userID, bookingID,
 		newOpenAmount = 0
 		actionType = "Rollover"
 	}
-	if _, err = db.ExecContext(ctx, `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+	if _, err = pool.Exec(ctx, `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		bookingID, ledgerSeq, actionType, bookingID, cancellationDate, -amountRolledOver, newOpenAmount); err != nil {
 		return err
 	}
-	result, err := db.ExecContext(ctx, `UPDATE forward_rollovers SET status = 'Approved' WHERE booking_id = $1 AND rollover_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bookingID, cancellationDate)
+	result, err := pool.Exec(ctx, `UPDATE forward_rollovers SET status = 'Approved' WHERE booking_id = $1 AND rollover_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bookingID, cancellationDate)
 	if err != nil {
 		return err
 	}
-	if affected, _ := result.RowsAffected(); affected == 0 {
+	if affected := result.RowsAffected(); affected == 0 {
 		return fmt.Errorf(constants.ErrPendingRolloverNotUpdated)
 	}
-	auditutil.RecordDecision(ctx, db, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(userID), Comment: comment})
-	recordCancelRollStatusAction(ctx, db, cancelRollStatusActionParams{RequestType: cancelRollTypeRollover, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(userID), Comment: comment})
+	auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(userID), Comment: comment})
+	recordCancelRollStatusAction(ctx, pool, cancelRollStatusActionParams{RequestType: cancelRollTypeRollover, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(userID), Comment: comment})
 	if newOpenAmount == 0 {
-		_, _ = db.ExecContext(ctx, `UPDATE forward_bookings SET status = 'Rolled Over' WHERE system_transaction_id = $1`, bookingID)
+		_, _ = pool.Exec(ctx, `UPDATE forward_bookings SET status = 'Rolled Over' WHERE system_transaction_id = $1`, bookingID)
 	} else {
-		_, _ = db.ExecContext(ctx, `UPDATE forward_bookings SET processing_status = 'Partially Rollovered' WHERE system_transaction_id = $1`, bookingID)
+		_, _ = pool.Exec(ctx, `UPDATE forward_bookings SET processing_status = 'Partially Rollovered' WHERE system_transaction_id = $1`, bookingID)
 	}
 
 	randomRef := GenerateFXRef()
 	var entityLevel0, localCurrency, counterparty string
 	var entityLevel1, entityLevel2, entityLevel3 sql.NullString
-	err = db.QueryRowContext(ctx, `SELECT entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, counterparty FROM forward_bookings WHERE system_transaction_id::text = $1`, bookingID).Scan(&entityLevel0, &entityLevel1, &entityLevel2, &entityLevel3, &localCurrency, &counterparty)
+	err = pool.QueryRow(ctx, `SELECT entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, counterparty FROM forward_bookings WHERE system_transaction_id::text = $1`, bookingID).Scan(&entityLevel0, &entityLevel1, &entityLevel2, &entityLevel3, &localCurrency, &counterparty)
 	if err != nil {
 		return err
 	}
@@ -306,7 +305,7 @@ func executeRolloverApproval(ctx context.Context, db *sql.DB, userID, bookingID,
 		entityLevel3Val = &entityLevel3.String
 	}
 	var newBookingID string
-	err = db.QueryRowContext(ctx, `INSERT INTO forward_bookings (
+	err = pool.QueryRow(ctx, `INSERT INTO forward_bookings (
 			internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, status, processing_status
 		) VALUES (
 			$1,$2,$3,$4,$5,$6,$7,NULL,$8,NULL,NULL,$9,$10,$11,NULL,$12,NULL,$13,$14,NULL,NULL,$15,$16,$17,$18,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'Pending Confirmation','pending'
@@ -317,15 +316,15 @@ func executeRolloverApproval(ctx context.Context, db *sql.DB, userID, bookingID,
 		return err
 	}
 	var newLedgerSeq int
-	_ = db.QueryRowContext(ctx, `SELECT COALESCE(MAX(ledger_sequence),0) FROM forward_booking_ledger WHERE booking_id = $1`, newBookingID).Scan(&newLedgerSeq)
+	_ = pool.QueryRow(ctx, `SELECT COALESCE(MAX(ledger_sequence),0) FROM forward_booking_ledger WHERE booking_id = $1`, newBookingID).Scan(&newLedgerSeq)
 	newLedgerSeq++
-	_, err = db.ExecContext(ctx, `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+	_, err = pool.Exec(ctx, `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		newBookingID, newLedgerSeq, "Rollover", newBookingID, cancellationDate, amount, amount)
 	return err
 }
 
 // Handler: CancellationStatusRequest
-func CancellationStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func CancellationStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID             string             `json:"user_id"`
@@ -340,8 +339,7 @@ func CancellationStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc 
 			Comment            string             `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BookingAmounts) == 0 || req.CancellationRate == 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "user_id, booking_amounts (map), cancellation date, and cancellation_rate are required"})
+			respondEnvelopeError(w, http.StatusBadRequest, "user_id, booking_amounts (map), cancellation date, and cancellation_rate are required")
 			return
 		}
 		requestedStatus := strings.TrimSpace(req.Status)
@@ -359,7 +357,7 @@ func CancellationStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc 
 				return
 			}
 			var hasPendingCancellation bool
-			err := db.QueryRow(`
+			err := pool.QueryRow(r.Context(), `
 				SELECT EXISTS (
 					SELECT 1
 					FROM forward_cancellations
@@ -370,47 +368,42 @@ func CancellationStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc 
 				)
 			`, bid, cancellationDate).Scan(&hasPendingCancellation)
 			if err != nil || !hasPendingCancellation {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Booking not in pending cancellation state"})
+				respondEnvelopeError(w, http.StatusBadRequest, "Booking not in pending cancellation state")
 				return
 			}
 			if strings.EqualFold(requestedStatus, "Rejected") {
-				result, err := db.Exec(`UPDATE forward_cancellations SET status = 'Rejected' WHERE booking_id = $1 AND cancellation_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bid, cancellationDate)
+				result, err := pool.Exec(r.Context(), `UPDATE forward_cancellations SET status = 'Rejected' WHERE booking_id = $1 AND cancellation_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bid, cancellationDate)
 				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to reject pending cancellation"})
+					respondEnvelopeError(w, http.StatusInternalServerError, "failed to reject pending cancellation")
 					return
 				}
-				if affected, _ := result.RowsAffected(); affected == 0 {
-					w.WriteHeader(http.StatusBadRequest)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrPendingCancellationNotUpdated})
+				if affected := result.RowsAffected(); affected == 0 {
+					respondEnvelopeError(w, http.StatusBadRequest, constants.ErrPendingCancellationNotUpdated)
 					return
 				}
-				_, _ = db.Exec(`UPDATE forward_bookings SET status = $1, processing_status = $2 WHERE system_transaction_id = $3 AND status = 'Pending Cancellation'`, constants.FwdStatusConfirmed, constants.FwdProcessingStatusApproved, bid)
+				_, _ = pool.Exec(r.Context(), `UPDATE forward_bookings SET status = $1, processing_status = $2 WHERE system_transaction_id = $3 AND status = 'Pending Cancellation'`, constants.FwdStatusConfirmed, constants.FwdProcessingStatusApproved, bid)
 				decisionComment := strings.TrimSpace(req.Comment)
 				if decisionComment == "" {
 					decisionComment = strings.TrimSpace(req.CancellationReason)
 				}
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
-				recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: decisionComment})
+				auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
+				recordCancelRollStatusAction(r.Context(), pool, cancelRollStatusActionParams{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: decisionComment})
 				notifItems = append(notifItems, fxnotification.CancelRollItem{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate})
 				continue
 			}
 			// Perform the actual cancellation logic (ledger, cancellation record, etc.)
 			var openAmount float64
 			var ledgerSeq int
-			err = db.QueryRow(`SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bid).Scan(&openAmount, &ledgerSeq)
-			if err == sql.ErrNoRows {
-				err = db.QueryRow(`SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&openAmount)
+			err = pool.QueryRow(r.Context(), `SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bid).Scan(&openAmount, &ledgerSeq)
+			if errors.Is(err, pgx.ErrNoRows) {
+				err = pool.QueryRow(r.Context(), `SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&openAmount)
 				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to read cancellation booking amount"})
+					respondEnvelopeError(w, http.StatusInternalServerError, "failed to read cancellation booking amount")
 					return
 				}
 				ledgerSeq = 0
 			} else if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to read cancellation ledger"})
+				respondEnvelopeError(w, http.StatusInternalServerError, "failed to read cancellation ledger")
 				return
 			}
 			ledgerSeq++
@@ -420,36 +413,33 @@ func CancellationStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc 
 				newOpenAmount = 0
 				actionType = "Cancellation"
 			}
-			_, err = db.Exec(`INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			_, err = pool.Exec(r.Context(), `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 				bid, ledgerSeq, actionType, bid, cancellationDate, -amtCancelled, newOpenAmount)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to write cancellation ledger"})
+				respondEnvelopeError(w, http.StatusInternalServerError, "failed to write cancellation ledger")
 				return
 			}
 			// Update cancellation record to Approved
-			result, err := db.Exec(`UPDATE forward_cancellations SET status = 'Approved' WHERE booking_id = $1 AND cancellation_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bid, cancellationDate)
+			result, err := pool.Exec(r.Context(), `UPDATE forward_cancellations SET status = 'Approved' WHERE booking_id = $1 AND cancellation_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bid, cancellationDate)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to approve pending cancellation"})
+				respondEnvelopeError(w, http.StatusInternalServerError, "failed to approve pending cancellation")
 				return
 			}
-			if affected, _ := result.RowsAffected(); affected == 0 {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrPendingCancellationNotUpdated})
+			if affected := result.RowsAffected(); affected == 0 {
+				respondEnvelopeError(w, http.StatusBadRequest, constants.ErrPendingCancellationNotUpdated)
 				return
 			}
-			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: req.CancellationReason})
-			recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(req.UserID), Comment: req.CancellationReason})
+			auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: req.CancellationReason})
+			recordCancelRollStatusAction(r.Context(), pool, cancelRollStatusActionParams{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(req.UserID), Comment: req.CancellationReason})
 			// If fully cancelled, update booking status to Cancelled and processing_status to Approved
 			if newOpenAmount == 0 {
-				_, err = db.Exec(`UPDATE forward_bookings SET status = 'Cancelled' WHERE system_transaction_id = $1`, bid)
+				_, err = pool.Exec(r.Context(), `UPDATE forward_bookings SET status = 'Cancelled' WHERE system_transaction_id = $1`, bid)
 				if err == nil {
-					_ = DeactivateExposureHedgeLinks(db, []string{bid})
+					_ = DeactivateExposureHedgeLinks(r.Context(), pool, []string{bid})
 				}
 			} else {
 				// If partial, just update processing_status
-				_, _ = db.Exec(`UPDATE forward_bookings SET status = 'Partiallu Cancelled' WHERE system_transaction_id = $1`, bid)
+				_, _ = pool.Exec(r.Context(), `UPDATE forward_bookings SET status = 'Partiallu Cancelled' WHERE system_transaction_id = $1`, bid)
 			}
 			notifItems = append(notifItems, fxnotification.CancelRollItem{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate})
 		}
@@ -465,21 +455,19 @@ func CancellationStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc 
 }
 
 // Handler: GetPendingCancellations
-func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
+func GetPendingCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIIsRequired})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		scope := ctxutil.FromContext(r.Context())
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		// Join forward_cancellations with forward_bookings to get entity_level_0 (bu)
@@ -491,16 +479,19 @@ func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
 			  AND COALESCE(fc.is_deleted, false) = false
 			  AND (fb.entity_level_0 = ANY($1) OR fb.system_transaction_id IS NULL)
 		`
-		rows, err := db.Query(getQuery, pq.Array(buNames))
+		rows, err := pool.Query(r.Context(), getQuery, buNames)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve pending cancellations"})
+			respondEnvelopeError(w, http.StatusInternalServerError, "failed to retrieve pending cancellations")
 			return
 		}
 		defer rows.Close()
 
 		var bookings []map[string]interface{}
-		cols, _ := rows.Columns()
+		fieldDescs := rows.FieldDescriptions()
+		cols := make([]string, len(fieldDescs))
+		for i, fd := range fieldDescs {
+			cols[i] = fd.Name
+		}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
 			valPtrs := make([]interface{}, len(cols))
@@ -512,7 +503,7 @@ func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range cols {
-				v := vals[i]
+				v := normalizeMTMRowValue(vals[i])
 				switch col {
 				case "booking_id":
 					switch val := v.(type) {
@@ -549,29 +540,25 @@ func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
 			}
 			bookings = append(bookings, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"bookings":             bookings,
+		respondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"bookings": bookings,
 		})
 	}
 }
 
 // Handler: GetAllCancellationRollovers
-func GetAllCancellationRollovers(db *sql.DB) http.HandlerFunc {
+func GetAllCancellationRollovers(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIIsRequired})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -614,16 +601,19 @@ func GetAllCancellationRollovers(db *sql.DB) http.HandlerFunc {
 			) rows
 			ORDER BY request_date DESC NULLS LAST, booking_id
 		`
-		rows, err := db.Query(query, pq.Array(buNames))
+		rows, err := pool.Query(r.Context(), query, buNames)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve cancellation and rollover requests"})
+			respondEnvelopeError(w, http.StatusInternalServerError, "failed to retrieve cancellation and rollover requests")
 			return
 		}
 		defer rows.Close()
 
 		bookings := []map[string]interface{}{}
-		cols, _ := rows.Columns()
+		fieldDescs := rows.FieldDescriptions()
+		cols := make([]string, len(fieldDescs))
+		for i, fd := range fieldDescs {
+			cols[i] = fd.Name
+		}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
 			valPtrs := make([]interface{}, len(cols))
@@ -635,7 +625,7 @@ func GetAllCancellationRollovers(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range cols {
-				v := vals[i]
+				v := normalizeMTMRowValue(vals[i])
 				switch col {
 				case "booking_id", "request_type", "business_unit", "status", "cancellation_reason", "fx_pair":
 					switch val := v.(type) {
@@ -669,16 +659,14 @@ func GetAllCancellationRollovers(db *sql.DB) http.HandlerFunc {
 			bookings = append(bookings, rowMap)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"bookings":             bookings,
+		respondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"bookings": bookings,
 		})
 	}
 }
 
 // Handler: CancellationRolloverAction
-func CancellationRolloverAction(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID  string                 `json:"user_id"`
@@ -726,7 +714,7 @@ func CancellationRolloverAction(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc
 				  AND fb.entity_level_0 = ANY($3)
 				LIMIT 1
 			`, tableName, dateColumn)
-			if err := db.QueryRow(statusQuery, bookingID, requestDate, pq.Array(buNames)).Scan(&currentStatus); err != nil {
+			if err := pool.QueryRow(r.Context(), statusQuery, bookingID, requestDate, buNames).Scan(&currentStatus); err != nil {
 				respondWithError(w, http.StatusBadRequest, fmt.Sprintf("%s request not found or not accessible", cancelRollRequestLabel(requestType)))
 				return
 			}
@@ -737,44 +725,30 @@ func CancellationRolloverAction(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc
 					respondWithError(w, http.StatusBadRequest, "delete is not allowed for selected status")
 					return
 				}
-				oldValues := cancelRollRowSnapshot(r.Context(), db, requestType, bookingID, requestDate)
-				tx, err := db.BeginTx(r.Context(), nil)
-				if err != nil {
-					respondWithError(w, http.StatusInternalServerError, "failed to start delete request")
-					return
-				}
+				oldValues := cancelRollRowSnapshot(r.Context(), pool, requestType, bookingID, requestDate)
 				updateQuery := fmt.Sprintf(`UPDATE %s SET status = $1 WHERE booking_id = $2 AND %s = $3 AND COALESCE(is_deleted, false) = false`, tableName, dateColumn)
-				if _, err := tx.ExecContext(r.Context(), updateQuery, constants.StatusPendingDeleteApproval, bookingID, requestDate); err != nil {
-					_ = tx.Rollback()
+				if _, err := pool.Exec(r.Context(), updateQuery, constants.StatusPendingDeleteApproval, bookingID, requestDate); err != nil {
 					respondWithError(w, http.StatusInternalServerError, "failed to request delete")
 					return
 				}
 				newValues := map[string]interface{}{"status": constants.StatusPendingDeleteApproval, "request_date": requestDate}
-				if err := auditutil.RecordActionTx(r.Context(), tx, auditutil.ActionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, ActionType: constants.AuditActionDelete, Status: constants.StatusPendingDeleteApproval, Reason: req.Comment, RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValues, NewValues: newValues}); err != nil {
-					_ = tx.Rollback()
-					respondWithError(w, http.StatusInternalServerError, "failed to record delete audit: "+err.Error())
-					return
-				}
-				if err := tx.Commit(); err != nil {
-					respondWithError(w, http.StatusInternalServerError, "failed to complete delete request")
-					return
-				}
+				auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, ActionType: constants.AuditActionDelete, Status: constants.StatusPendingDeleteApproval, Reason: req.Comment, RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValues, NewValues: newValues})
 			case constants.AuditActionApprove:
 				if strings.EqualFold(currentStatus, constants.StatusPendingDeleteApproval) {
 					updateQuery := fmt.Sprintf(`UPDATE %s SET status = $1, is_deleted = true WHERE booking_id = $2 AND %s = $3 AND COALESCE(is_deleted, false) = false`, tableName, dateColumn)
-					if _, err := db.Exec(updateQuery, cancelRollStatusDeleted, bookingID, requestDate); err != nil {
+					if _, err := pool.Exec(r.Context(), updateQuery, cancelRollStatusDeleted, bookingID, requestDate); err != nil {
 						respondWithError(w, http.StatusInternalServerError, "failed to approve delete")
 						return
 					}
-					auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
+					auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
 				} else if strings.EqualFold(currentStatus, "Pending") {
 					if requestType == cancelRollTypeRollover {
-						if err := executeRolloverApproval(r.Context(), db, req.UserID, bookingID, requestDate, req.Comment); err != nil {
+						if err := executeRolloverApproval(r.Context(), pool, req.UserID, bookingID, requestDate, req.Comment); err != nil {
 							respondWithError(w, http.StatusInternalServerError, "failed to approve rollover request")
 							return
 						}
 					} else {
-						if err := executeCancellationApproval(r.Context(), db, req.UserID, bookingID, requestDate, req.Comment); err != nil {
+						if err := executeCancellationApproval(r.Context(), pool, req.UserID, bookingID, requestDate, req.Comment); err != nil {
 							respondWithError(w, http.StatusInternalServerError, "failed to approve cancellation request")
 							return
 						}
@@ -786,15 +760,15 @@ func CancellationRolloverAction(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc
 			case constants.AuditActionReject:
 				if strings.EqualFold(currentStatus, constants.StatusPendingDeleteApproval) {
 					updateQuery := fmt.Sprintf(`UPDATE %s SET status = $1 WHERE booking_id = $2 AND %s = $3 AND COALESCE(is_deleted, false) = false`, tableName, dateColumn)
-					if _, err := db.Exec(updateQuery, constants.StatusRejected, bookingID, requestDate); err != nil {
+					if _, err := pool.Exec(r.Context(), updateQuery, constants.StatusRejected, bookingID, requestDate); err != nil {
 						respondWithError(w, http.StatusInternalServerError, "failed to reject delete")
 						return
 					}
-					auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
-					recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: requestType, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: req.Comment})
+					auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
+					recordCancelRollStatusAction(r.Context(), pool, cancelRollStatusActionParams{RequestType: requestType, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: req.Comment})
 				} else if strings.EqualFold(currentStatus, "Pending") {
 					updateQuery := fmt.Sprintf(`UPDATE %s SET status = 'Rejected' WHERE booking_id = $1 AND %s = $2 AND COALESCE(is_deleted, false) = false`, tableName, dateColumn)
-					if _, err := db.Exec(updateQuery, bookingID, requestDate); err != nil {
+					if _, err := pool.Exec(r.Context(), updateQuery, bookingID, requestDate); err != nil {
 						respondWithError(w, http.StatusInternalServerError, "failed to reject request")
 						return
 					}
@@ -802,9 +776,9 @@ func CancellationRolloverAction(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc
 					if requestType == cancelRollTypeRollover {
 						parentPendingStatus = "Pending Rollover"
 					}
-					_, _ = db.Exec(`UPDATE forward_bookings SET status = $1, processing_status = $2 WHERE system_transaction_id = $3 AND status = $4`, constants.FwdStatusConfirmed, constants.FwdProcessingStatusApproved, bookingID, parentPendingStatus)
-					auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
-					recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: requestType, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: req.Comment})
+					_, _ = pool.Exec(r.Context(), `UPDATE forward_bookings SET status = $1, processing_status = $2 WHERE system_transaction_id = $3 AND status = $4`, constants.FwdStatusConfirmed, constants.FwdProcessingStatusApproved, bookingID, parentPendingStatus)
+					auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
+					recordCancelRollStatusAction(r.Context(), pool, cancelRollStatusActionParams{RequestType: requestType, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: req.Comment})
 				} else {
 					respondWithError(w, http.StatusBadRequest, "reject is only allowed for Pending or PENDING_DELETE_APPROVAL rows")
 					return
@@ -833,7 +807,7 @@ func GenerateFXRef() string {
 }
 
 // Handler: RolloverForwardBooking
-func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
+func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -870,7 +844,7 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 
 		for bid, amtCancelled := range req.BookingAmounts {
 			// Save rollover request as pending, including new forward details
-			_, err := db.Exec(`INSERT INTO forward_rollovers (
+			_, err := pool.Exec(r.Context(), `INSERT INTO forward_rollovers (
 				   booking_id, amount_rolled_over, rollover_date, original_maturity_date, new_maturity_date, rollover_cost, status,
 				   fx_pair, order_type, new_forward_amount, new_forward_spot_rate, new_forward_premium_discount, new_forward_margin_rate, new_forward_net_rate
 			   ) VALUES (
@@ -885,23 +859,19 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			// Set booking status to Pending Rollover
-			_, err = db.Exec(`UPDATE forward_bookings SET status = 'Pending Rollover', processing_status = 'Pending' WHERE system_transaction_id = $1`, bid)
+			_, err = pool.Exec(r.Context(), `UPDATE forward_bookings SET status = 'Pending Rollover', processing_status = 'Pending' WHERE system_transaction_id = $1`, bid)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Failed to update booking status for rollover")
 				return
 			}
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: map[string]interface{}{"amount_rolled_over": amtCancelled, "rollover_date": req.CancellationDate, "new_forward": req.NewForward}})
+			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: map[string]interface{}{"amount_rolled_over": amtCancelled, "rollover_date": req.CancellationDate, "new_forward": req.NewForward}})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"message":              "Forward rollover request submitted for approval",
-		})
+		respondEnvelopeSuccess(w, "Forward rollover request submitted for approval", nil)
 	}
 }
 
 // Handler: GetForwardBookingList
-func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
+func GetForwardBookingList(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -936,13 +906,17 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 				AND status NOT IN ('Cancelled', 'Pending Confirmation')
 				AND processing_status = 'Approved'
 		`
-		rows, err := db.Query(query, pq.Array(buNames))
+		rows, err := pool.Query(r.Context(), query, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch forward booking list")
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
+		fieldDescs := rows.FieldDescriptions()
+		cols := make([]string, len(fieldDescs))
+		for i, fd := range fieldDescs {
+			cols[i] = fd.Name
+		}
 		data := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -957,7 +931,7 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 			var bookingID string
 			var origBookingAmount float64
 			for i, col := range cols {
-				v := vals[i]
+				v := normalizeMTMRowValue(vals[i])
 				// decode and parse as needed
 				switch col {
 				case "system_transaction_id":
@@ -1034,7 +1008,7 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 			var openAmount float64
 			var found bool
 			if bookingID != "" {
-				err := db.QueryRow(`SELECT running_open_amount FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bookingID).Scan(&openAmount)
+				err := pool.QueryRow(r.Context(), `SELECT running_open_amount FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bookingID).Scan(&openAmount)
 				if err == nil {
 					found = true
 				}
@@ -1047,13 +1021,12 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
+		respondEnvelopeSuccess(w, "Success", data)
 	}
 }
 
 // Handler: GetExposuresByBookingIds
-func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
+func GetExposuresByBookingIds(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID               string   `json:"user_id"`
@@ -1084,13 +1057,17 @@ func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
 				AND (ehl.is_active = true OR ehl.is_active IS NULL)
 				AND eh.entity = ANY($2)
 		`
-		rows, err := db.Query(query, pq.Array(req.SystemTransactionIDs), pq.Array(buNames))
+		rows, err := pool.Query(r.Context(), query, req.SystemTransactionIDs, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposures by booking ids")
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
+		fieldDescs := rows.FieldDescriptions()
+		cols := make([]string, len(fieldDescs))
+		for i, fd := range fieldDescs {
+			cols[i] = fd.Name
+		}
 		data := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -1103,7 +1080,7 @@ func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range cols {
-				v := vals[i]
+				v := normalizeMTMRowValue(vals[i])
 				switch col {
 				case "total_open_amount", "total_original_amount":
 					switch val := v.(type) {
@@ -1140,22 +1117,21 @@ func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
+		respondEnvelopeSuccess(w, "Success", data)
 	}
 }
 
 // Helper: DeactivateExposureHedgeLinks
-func DeactivateExposureHedgeLinks(db *sql.DB, bookingIDs []string) error {
+func DeactivateExposureHedgeLinks(ctx context.Context, pool *pgxpool.Pool, bookingIDs []string) error {
 	if len(bookingIDs) == 0 {
 		return nil
 	}
-	_, err := db.Exec(`UPDATE exposure_hedge_links SET is_active = false WHERE booking_id = ANY($1)`, pq.Array(bookingIDs))
+	_, err := pool.Exec(ctx, `UPDATE exposure_hedge_links SET is_active = false WHERE booking_id = ANY($1)`, bookingIDs)
 	return err
 }
 
 // Handler: CreateForwardCancellations
-func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
+func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID             string             `json:"user_id"`
@@ -1172,38 +1148,34 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 		buNames, _ := r.Context().Value(api.BusinessUnitsKey).([]string)
 		// Save cancellation request as pending
 		for bookingOrReferenceID, amtCancelled := range req.BookingAmounts {
-			bookingID, err := resolveForwardBookingID(r.Context(), db, bookingOrReferenceID, buNames)
+			bookingID, err := resolveForwardBookingID(r.Context(), pool, bookingOrReferenceID, buNames)
 			if err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
+				if errors.Is(err, pgx.ErrNoRows) {
 					respondWithError(w, http.StatusBadRequest, fmt.Sprintf("Forward booking not found for %s", bookingOrReferenceID))
 					return
 				}
 				respondWithError(w, http.StatusInternalServerError, "Failed to validate forward booking: "+err.Error())
 				return
 			}
-			_, err = db.Exec(`INSERT INTO forward_cancellations (booking_id, amount_cancelled, cancellation_date, cancellation_rate, realized_gain_loss, cancellation_reason, status) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			_, err = pool.Exec(r.Context(), `INSERT INTO forward_cancellations (booking_id, amount_cancelled, cancellation_date, cancellation_rate, realized_gain_loss, cancellation_reason, status) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 				bookingID, amtCancelled, req.CancellationDate, req.CancellationRate, req.RealizedGainLoss, req.CancellationReason, "Pending")
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Failed to save cancellation request: "+err.Error())
 				return
 			}
 			// Set booking status to Pending Cancellation
-			_, err = db.Exec(`UPDATE forward_bookings SET status = 'Pending Cancellation', processing_status = 'Pending' WHERE system_transaction_id = $1`, bookingID)
+			_, err = pool.Exec(r.Context(), `UPDATE forward_bookings SET status = 'Pending Cancellation', processing_status = 'Pending' WHERE system_transaction_id = $1`, bookingID)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Failed to update booking status to pending cancellation")
 				return
 			}
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bookingID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: req.CancellationReason, RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: map[string]interface{}{"amount_cancelled": amtCancelled, "cancellation_date": req.CancellationDate, "cancellation_rate": req.CancellationRate, "realized_gain_loss": req.RealizedGainLoss}})
+			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bookingID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: req.CancellationReason, RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: map[string]interface{}{"amount_cancelled": amtCancelled, "cancellation_date": req.CancellationDate, "cancellation_rate": req.CancellationRate, "realized_gain_loss": req.RealizedGainLoss}})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"message":              "Forward cancellation request submitted for approval",
-		})
+		respondEnvelopeSuccess(w, "Forward cancellation request submitted for approval", nil)
 	}
 }
 
-func RolloverStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID           string             `json:"user_id"`
@@ -1234,10 +1206,10 @@ func RolloverStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			var err error
 			if rolloverDate != "" {
-				err = db.QueryRow(`SELECT rollover_date, original_maturity_date, new_maturity_date, fx_pair, order_type, new_forward_amount, new_forward_spot_rate, new_forward_premium_discount, new_forward_margin_rate, new_forward_net_rate, rollover_cost FROM forward_rollovers WHERE booking_id = $1 AND rollover_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bid, rolloverDate).
+				err = pool.QueryRow(r.Context(), `SELECT rollover_date, original_maturity_date, new_maturity_date, fx_pair, order_type, new_forward_amount, new_forward_spot_rate, new_forward_premium_discount, new_forward_margin_rate, new_forward_net_rate, rollover_cost FROM forward_rollovers WHERE booking_id = $1 AND rollover_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bid, rolloverDate).
 					Scan(&cancellationDate, &origMaturityDate, &newMaturityDate, &fxPair, &orderType, &amount, &spotRate, &premiumDiscount, &marginRate, &netRate, &realizedGainLoss)
 			} else {
-				err = db.QueryRow(`SELECT rollover_date, original_maturity_date, new_maturity_date, fx_pair, order_type, new_forward_amount, new_forward_spot_rate, new_forward_premium_discount, new_forward_margin_rate, new_forward_net_rate, rollover_cost FROM forward_rollovers WHERE booking_id = $1 AND status = 'Pending' AND COALESCE(is_deleted, false) = false ORDER BY rollover_date DESC NULLS LAST LIMIT 1`, bid).
+				err = pool.QueryRow(r.Context(), `SELECT rollover_date, original_maturity_date, new_maturity_date, fx_pair, order_type, new_forward_amount, new_forward_spot_rate, new_forward_premium_discount, new_forward_margin_rate, new_forward_net_rate, rollover_cost FROM forward_rollovers WHERE booking_id = $1 AND status = 'Pending' AND COALESCE(is_deleted, false) = false ORDER BY rollover_date DESC NULLS LAST LIMIT 1`, bid).
 					Scan(&cancellationDate, &origMaturityDate, &newMaturityDate, &fxPair, &orderType, &amount, &spotRate, &premiumDiscount, &marginRate, &netRate, &realizedGainLoss)
 			}
 			if err != nil {
@@ -1245,29 +1217,29 @@ func RolloverStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			if strings.EqualFold(requestedStatus, "Rejected") {
-				result, err := db.Exec(`UPDATE forward_rollovers SET status = 'Rejected' WHERE booking_id = $1 AND rollover_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bid, cancellationDate)
+				result, err := pool.Exec(r.Context(), `UPDATE forward_rollovers SET status = 'Rejected' WHERE booking_id = $1 AND rollover_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bid, cancellationDate)
 				if err != nil {
 					respondWithError(w, http.StatusInternalServerError, "failed to reject pending rollover")
 					return
 				}
-				if affected, _ := result.RowsAffected(); affected == 0 {
+				if affected := result.RowsAffected(); affected == 0 {
 					respondWithError(w, http.StatusBadRequest, constants.ErrPendingRolloverNotUpdated)
 					return
 				}
-				_, _ = db.Exec(`UPDATE forward_bookings SET status = $1, processing_status = $2 WHERE system_transaction_id = $3 AND status = 'Pending Rollover'`, constants.FwdStatusConfirmed, constants.FwdProcessingStatusApproved, bid)
+				_, _ = pool.Exec(r.Context(), `UPDATE forward_bookings SET status = $1, processing_status = $2 WHERE system_transaction_id = $3 AND status = 'Pending Rollover'`, constants.FwdStatusConfirmed, constants.FwdProcessingStatusApproved, bid)
 				decisionComment := strings.TrimSpace(req.Comment)
 				if decisionComment == "" {
 					decisionComment = strings.TrimSpace(req.RejectionComment)
 				}
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
-				recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: decisionComment})
+				auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
+				recordCancelRollStatusAction(r.Context(), pool, cancelRollStatusActionParams{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: decisionComment})
 				notifItems = append(notifItems, fxnotification.CancelRollItem{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate})
 				continue
 			}
 			// The pending tab is driven by forward_rollovers.status, so do not block
 			// valid pending rollover requests because the parent booking status is stale.
 			var currentStatus string
-			err = db.QueryRow(`SELECT status FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&currentStatus)
+			err = pool.QueryRow(r.Context(), `SELECT status FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&currentStatus)
 			if err != nil {
 				respondWithError(w, http.StatusBadRequest, "forward booking not found for rollover request")
 				return
@@ -1275,9 +1247,9 @@ func RolloverStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			// Ledger logic
 			var openAmount float64
 			var ledgerSeq int
-			err = db.QueryRow(`SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bid).Scan(&openAmount, &ledgerSeq)
-			if err == sql.ErrNoRows {
-				err = db.QueryRow(`SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&openAmount)
+			err = pool.QueryRow(r.Context(), `SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bid).Scan(&openAmount, &ledgerSeq)
+			if errors.Is(err, pgx.ErrNoRows) {
+				err = pool.QueryRow(r.Context(), `SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&openAmount)
 				if err != nil {
 					respondWithError(w, http.StatusInternalServerError, "failed to read rollover booking amount")
 					return
@@ -1294,36 +1266,36 @@ func RolloverStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				newOpenAmount = 0
 				actionType = "Rollover"
 			}
-			_, err = db.Exec(`INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			_, err = pool.Exec(r.Context(), `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 				bid, ledgerSeq, actionType, bid, cancellationDate, -amtCancelled, newOpenAmount)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "failed to write rollover ledger")
 				return
 			}
 			// Update rollover record to Approved
-			result, err := db.Exec(`UPDATE forward_rollovers SET status = 'Approved' WHERE booking_id = $1 AND rollover_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bid, cancellationDate)
+			result, err := pool.Exec(r.Context(), `UPDATE forward_rollovers SET status = 'Approved' WHERE booking_id = $1 AND rollover_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bid, cancellationDate)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "failed to approve pending rollover")
 				return
 			}
-			if affected, _ := result.RowsAffected(); affected == 0 {
+			if affected := result.RowsAffected(); affected == 0 {
 				respondWithError(w, http.StatusBadRequest, constants.ErrPendingRolloverNotUpdated)
 				return
 			}
-			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: ""})
-			recordCancelRollStatusAction(r.Context(), db, cancelRollStatusActionParams{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(req.UserID), Comment: strings.TrimSpace(req.Comment)})
+			auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: ""})
+			recordCancelRollStatusAction(r.Context(), pool, cancelRollStatusActionParams{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(req.UserID), Comment: strings.TrimSpace(req.Comment)})
 			// If fully rolled over, update booking status to Rolled Over and processing_status to Approved
 			if newOpenAmount == 0 {
-				_, _ = db.Exec(`UPDATE forward_bookings SET status = 'Rolled Over' WHERE system_transaction_id = $1`, bid)
+				_, _ = pool.Exec(r.Context(), `UPDATE forward_bookings SET status = 'Rolled Over' WHERE system_transaction_id = $1`, bid)
 			} else {
 				// If partial, just update processing_status
-				_, _ = db.Exec(`UPDATE forward_bookings SET processing_status = 'Partially Rollovered' WHERE system_transaction_id = $1`, bid)
+				_, _ = pool.Exec(r.Context(), `UPDATE forward_bookings SET processing_status = 'Partially Rollovered' WHERE system_transaction_id = $1`, bid)
 			}
 			// Insert new forward booking for the rollover using fetched details
 			randomRef := GenerateFXRef()
 			var entityLevel0, localCurrency, counterparty string
 			var entityLevel1, entityLevel2, entityLevel3 sql.NullString
-			err = db.QueryRow(`SELECT entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, counterparty FROM forward_bookings WHERE system_transaction_id::text = $1`, bid).Scan(&entityLevel0, &entityLevel1, &entityLevel2, &entityLevel3, &localCurrency, &counterparty)
+			err = pool.QueryRow(r.Context(), `SELECT entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, counterparty FROM forward_bookings WHERE system_transaction_id::text = $1`, bid).Scan(&entityLevel0, &entityLevel1, &entityLevel2, &entityLevel3, &localCurrency, &counterparty)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "failed to read rollover booking details")
 				return
@@ -1339,7 +1311,7 @@ func RolloverStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				entityLevel3Val = &entityLevel3.String
 			}
 			var newBookingID string
-			err = db.QueryRow(`INSERT INTO forward_bookings (
+			err = pool.QueryRow(r.Context(), `INSERT INTO forward_bookings (
 					internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, status, processing_status
 				) VALUES (
 					$1,$2,$3,$4,$5,$6,$7,NULL,$8,NULL,NULL,$9,$10,$11,NULL,$12,NULL,$13,$14,NULL,NULL,$15,$16,$17,$18,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'Pending Confirmation','pending'
@@ -1351,9 +1323,9 @@ func RolloverStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			var newLedgerSeq int
-			_ = db.QueryRow(`SELECT COALESCE(MAX(ledger_sequence),0) FROM forward_booking_ledger WHERE booking_id = $1`, newBookingID).Scan(&newLedgerSeq)
+			_ = pool.QueryRow(r.Context(), `SELECT COALESCE(MAX(ledger_sequence),0) FROM forward_booking_ledger WHERE booking_id = $1`, newBookingID).Scan(&newLedgerSeq)
 			newLedgerSeq++
-			_, err = db.Exec(`INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			_, err = pool.Exec(r.Context(), `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 				newBookingID, newLedgerSeq, "Rollover", newBookingID, cancellationDate, amount, amount)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "failed to write new rollover ledger")
@@ -1372,21 +1344,19 @@ func RolloverStatusRequest(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
+func GetPendingRollovers(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIIsRequired})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		scope := ctxutil.FromContext(r.Context())
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		// Join forward_rollovers with forward_bookings to get entity_level_0 (bu)
@@ -1398,16 +1368,19 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 		         AND COALESCE(fr.is_deleted, false) = false
 		         AND (fb.entity_level_0 = ANY($1) OR fb.system_transaction_id IS NULL)
 	       `
-		rows, err := db.Query(getQuery, pq.Array(buNames))
+		rows, err := pool.Query(r.Context(), getQuery, buNames)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve pending rollovers"})
+			respondEnvelopeError(w, http.StatusInternalServerError, "failed to retrieve pending rollovers")
 			return
 		}
 		defer rows.Close()
 
 		var bookings []map[string]interface{}
-		cols, _ := rows.Columns()
+		fieldDescs := rows.FieldDescriptions()
+		cols := make([]string, len(fieldDescs))
+		for i, fd := range fieldDescs {
+			cols[i] = fd.Name
+		}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
 			valPtrs := make([]interface{}, len(cols))
@@ -1419,7 +1392,7 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range cols {
-				v := vals[i]
+				v := normalizeMTMRowValue(vals[i])
 				switch col {
 				case "booking_id":
 					switch val := v.(type) {
@@ -1456,10 +1429,8 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 			}
 			bookings = append(bookings, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"bookings":             bookings,
+		respondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"bookings": bookings,
 		})
 	}
 }

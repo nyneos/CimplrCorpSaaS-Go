@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dashboard"
@@ -41,27 +42,21 @@ func userIDFromCtx(r *http.Request) string {
 	return r.URL.Query().Get("user_id")
 }
 
-// writeJSON is the low-level JSON writer — always sets Content-Type.
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
-}
-
-// writeOK writes a standard success envelope: {"success":true, "data":{...}}
+// writeOK writes the CLAUDE.md standard success envelope. Map-shaped payloads
+// are nested under data AND flattened to the top level for backward
+// compatibility with existing frontend callers; any other payload shape is
+// nested under data only.
 func writeOK(w http.ResponseWriter, data interface{}) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"row":     data,
-	})
+	if fields, ok := data.(map[string]interface{}); ok {
+		api.RespondEnvelopeSuccessCompat(w, "Success", fields)
+		return
+	}
+	api.RespondEnvelopeSuccess(w, "Success", data)
 }
 
-// writeErr writes a standard error envelope: {"success":false, "error":"..."}
+// writeErr writes the CLAUDE.md standard error envelope.
 func writeErr(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]interface{}{
-		"success": false,
-		"error":   msg,
-	})
+	api.RespondEnvelopeError(w, status, msg, "")
 }
 
 // pushCountSSE queries the unread count and pushes it to the user's SSE stream.

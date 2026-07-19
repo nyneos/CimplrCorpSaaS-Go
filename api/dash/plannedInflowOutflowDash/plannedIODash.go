@@ -83,16 +83,14 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var body reqBody
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrMissingUserID})
+			api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrMissingUserID, "")
 			return
 		}
 		ctx := r.Context()
 		entityNames := normalizeLower(api.GetEntityNamesFromCtx(ctx))
 		currencyCodes := normalizeUpper(api.GetCurrencyCodesFromCtx(ctx))
 		if len(entityNames) == 0 || len(currencyCodes) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			api.RespondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit, "")
 			return
 		}
 		now := time.Now()
@@ -131,8 +129,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`
 			rows, err := pgxPool.Query(ctx, entityQ, dr.Start, dr.End, entityNames, currencyCodes)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
 				return
 			}
 
@@ -191,8 +188,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`
 			rows2, err := pgxPool.Query(ctx, cashflowQ, dr.Start, dr.End, entityNames, currencyCodes)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
 				return
 			}
 
@@ -235,8 +231,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Cashflows: cashflows,
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": out})
+		api.RespondEnvelopeSuccess(w, "Success", out)
 	}
 }
 

@@ -59,22 +59,19 @@ func GetExposureSummary(db *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired, "")
 			return
 		}
 		// User verification via middleware
 		buNames := api.GetEntityNamesFromCtx(r.Context())
 		if len(buNames) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
+			api.RespondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit, "")
 			return
 		}
 
 		expRows, err := db.Query(r.Context(), `SELECT exposure_header_id, company_code, entity, entity1, entity2, entity3, exposure_type, document_id, document_date, counterparty_name, currency, total_original_amount, total_open_amount, value_date FROM exposure_headers WHERE entity = ANY($1)`, buNames)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch exposures"})
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to fetch exposures", "")
 			return
 		}
 
@@ -166,8 +163,7 @@ func GetExposureSummary(db *pgxpool.Pool) http.HandlerFunc {
 				UnhedgedValue:       unhedgedValue,
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"summary": summary})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"summary": summary})
 	}
 }
 
@@ -349,39 +345,36 @@ func GetLinkedSummaryByCategory(db *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			http.Error(w, `{constants.ValueError:constants.ErrUserIDRequired}`, http.StatusBadRequest)
+			api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired, "")
 			return
 		}
 
 		// Authorized business units from middleware
 		buNames := api.GetEntityNamesFromCtx(r.Context())
 		if len(buNames) == 0 {
-			http.Error(w, `{constants.ValueError:constants.ErrNoAccessibleBusinessUnit}`, http.StatusForbidden)
+			api.RespondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit, "")
 			return
 		}
 
 		bookings, err := fetchForwardBookings(r.Context(), db, buNames)
 		if err != nil {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch forward bookings", "detail": err.Error()})
+			api.RespondEnvelopeFailureWithData(w, http.StatusInternalServerError, "Failed to fetch forward bookings", "", map[string]interface{}{"detail": err.Error()})
 			return
 		}
 
 		rollovers, err := fetchForwardRollovers(r.Context(), db, buNames)
 		if err != nil {
-			http.Error(w, `{constants.ValueError:"Failed to fetch forward rollovers"}`, http.StatusInternalServerError)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to fetch forward rollovers", "")
 			return
 		}
 
 		cancellations, err := fetchForwardCancellations(r.Context(), db, buNames)
 		if err != nil {
-			http.Error(w, `{constants.ValueError:"Failed to fetch forward cancellations"}`, http.StatusInternalServerError)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to fetch forward cancellations", "")
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"Fwd Booking":      bookings,
 			"Fwd Rollovers":    rollovers,
 			"Fwd Cancellation": cancellations,

@@ -1,6 +1,7 @@
 package accountingworkbench
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
@@ -125,13 +126,7 @@ func CreateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 			CreatedAt:    createdAt,
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Setting created successfully",
-			"data":    response,
-		})
+		api.RespondEnvelopeSuccess(w, "Setting created successfully", response)
 	}
 }
 
@@ -241,12 +236,7 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		logger.LogAudit("Accounting setting updated successfully: key=%s", response.SettingKey)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Setting updated successfully",
-			"data":    response,
-		})
+		api.RespondEnvelopeSuccess(w, "Setting updated successfully", response)
 	}
 }
 
@@ -316,11 +306,9 @@ func GetSettings(pool *pgxpool.Pool) http.HandlerFunc {
 			settings = append(settings, setting)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"count":   len(settings),
-			"data":    settings,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"count": len(settings),
+			"data":  settings,
 		})
 	}
 }
@@ -366,11 +354,7 @@ func GetSettingByKey(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    setting,
-		})
+		api.RespondEnvelopeSuccess(w, "Success", setting)
 	}
 }
 
@@ -405,10 +389,6 @@ func DeleteSetting(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Setting deactivated successfully",
-		})
+		api.RespondEnvelopeSuccess(w, "Setting deactivated successfully", nil)
 	}
 }

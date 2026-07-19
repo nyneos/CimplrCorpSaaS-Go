@@ -364,10 +364,7 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":   true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"rows":      logs,
 			"total":     totalCount,
 			"page":      req.Page,

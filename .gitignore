@@ -37,3 +37,8 @@ output.txt
 api/investment/fdMaster/cashflow_engine_at_maturity_test.go
 api/investment/fdMaster/si_mm_interest_test.go
 api/investment/fdMaster/renumber_test.go
+
+# Go unit tests — keep out of this rename/policy commit set
+*_test.go
+**/*_test.go
+test.txt

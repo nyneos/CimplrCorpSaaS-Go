@@ -23,9 +23,7 @@ import (
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errMsg})
+	api.RespondEnvelopeError(w, status, errMsg, "")
 }
 
 func getRequesterEmail() string {

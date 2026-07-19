@@ -677,11 +677,7 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			batchIDs = append(batchIDs, uuid.New().String())
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"batch_ids":            batchIDs,
-		})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"batch_ids": batchIDs})
 	}
 }
 
@@ -1718,10 +1714,6 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"rows":                 out,
-		})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
 	}
 }

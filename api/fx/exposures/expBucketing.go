@@ -8,16 +8,16 @@ import (
 	fxnotif "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"CimplrCorpSaas/api/constants"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/lib/pq"
 )
 
 // // Helper: send JSON error response
@@ -92,8 +92,9 @@ func mapColumns(fields map[string]interface{}, allowed map[string]string) (map[s
 }
 
 // Handler: Update exposure headers, line items, bucketing, hedging proposal
-func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID           string                 `json:"user_id"`
 			ExposureHeaderID string                 `json:"exposure_header_id"`
@@ -141,9 +142,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 		// Ensure exposure_bucketing row exists
 		if len(req.BucketingFields) > 0 {
 			var exists int
-			err := db.QueryRow("SELECT 1 FROM exposure_bucketing WHERE exposure_header_id = $1", req.ExposureHeaderID).Scan(&exists)
-			if err == sql.ErrNoRows {
-				_, err := db.Exec("INSERT INTO exposure_bucketing (exposure_header_id) VALUES ($1)", req.ExposureHeaderID)
+			err := pool.QueryRow(ctx, "SELECT 1 FROM exposure_bucketing WHERE exposure_header_id = $1", req.ExposureHeaderID).Scan(&exists)
+			if errors.Is(err, pgx.ErrNoRows) {
+				_, err := pool.Exec(ctx, "INSERT INTO exposure_bucketing (exposure_header_id) VALUES ($1)", req.ExposureHeaderID)
 				if err != nil {
 					respondWithError(w, http.StatusInternalServerError, "Failed to create exposure_bucketing row")
 					return
@@ -154,9 +155,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 		// Ensure hedging_proposal row exists
 		if len(req.HedgingFields) > 0 {
 			var exists int
-			err := db.QueryRow("SELECT 1 FROM hedging_proposal WHERE exposure_header_id = $1", req.ExposureHeaderID).Scan(&exists)
-			if err == sql.ErrNoRows {
-				_, err := db.Exec("INSERT INTO hedging_proposal (exposure_header_id) VALUES ($1)", req.ExposureHeaderID)
+			err := pool.QueryRow(ctx, "SELECT 1 FROM hedging_proposal WHERE exposure_header_id = $1", req.ExposureHeaderID).Scan(&exists)
+			if errors.Is(err, pgx.ErrNoRows) {
+				_, err := pool.Exec(ctx, "INSERT INTO hedging_proposal (exposure_header_id) VALUES ($1)", req.ExposureHeaderID)
 				if err != nil {
 					respondWithError(w, http.StatusInternalServerError, "Failed to create hedging_proposal row")
 					return
@@ -166,11 +167,11 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 
 		oldBucketing := map[string]interface{}(nil)
 		if len(req.BucketingFields) > 0 {
-			oldBucketing = auditutil.FetchRowSnapshot(r.Context(), db, "public.exposure_bucketing", "exposure_header_id", req.ExposureHeaderID)
+			oldBucketing = auditutil.FetchRowSnapshotPGX(ctx, pool, "public.exposure_bucketing", "exposure_header_id", req.ExposureHeaderID)
 		}
 		oldHedging := map[string]interface{}(nil)
 		if len(req.HedgingFields) > 0 {
-			oldHedging = auditutil.FetchRowSnapshot(r.Context(), db, "public.hedging_proposal", "exposure_header_id", req.ExposureHeaderID)
+			oldHedging = auditutil.FetchRowSnapshotPGX(ctx, pool, "public.hedging_proposal", "exposure_header_id", req.ExposureHeaderID)
 		}
 
 		// Update exposure_headers
@@ -191,9 +192,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 			}
 			values = append(values, req.ExposureHeaderID)
 			query := fmt.Sprintf("UPDATE exposure_headers SET %s WHERE exposure_header_id = $%d RETURNING *", strings.Join(setParts, ", "), len(values))
-			rows, err := db.Query(query, values...)
+			rows, err := pool.Query(ctx, query, values...)
 			if err == nil {
-				cols, _ := rows.Columns()
+				cols := pgxColumnNames(rows)
 				for rows.Next() {
 					vals := make([]interface{}, len(cols))
 					valPtrs := make([]interface{}, len(cols))
@@ -210,7 +211,7 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 					updated["header"] = rowMap
 				}
 				rows.Close()
-				if _, err := db.Exec("UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
+				if _, err := pool.Exec(ctx, "UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
 					logger.LogError("update exposure_bucketing status after header update: exec failed: %v", err)
 				}
 			}
@@ -234,9 +235,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 			}
 			values = append(values, req.ExposureHeaderID)
 			query := fmt.Sprintf("UPDATE exposure_line_items SET %s WHERE exposure_header_id = $%d RETURNING *", strings.Join(setParts, ", "), len(values))
-			rows, err := db.Query(query, values...)
+			rows, err := pool.Query(ctx, query, values...)
 			if err == nil {
-				cols, _ := rows.Columns()
+				cols := pgxColumnNames(rows)
 				lineItems := []map[string]interface{}{}
 				for rows.Next() {
 					vals := make([]interface{}, len(cols))
@@ -255,7 +256,7 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 				}
 				updated["lineItems"] = lineItems
 				rows.Close()
-				if _, err := db.Exec("UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
+				if _, err := pool.Exec(ctx, "UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
 					logger.LogError("update exposure_bucketing status after line items update: exec failed: %v", err)
 				}
 			}
@@ -280,9 +281,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 			}
 			values = append(values, req.ExposureHeaderID)
 			query := fmt.Sprintf("UPDATE exposure_bucketing SET %s WHERE exposure_header_id = $%d RETURNING *", strings.Join(setParts, ", "), len(values))
-			rows, err := db.Query(query, values...)
+			rows, err := pool.Query(ctx, query, values...)
 			if err == nil {
-				cols, _ := rows.Columns()
+				cols := pgxColumnNames(rows)
 				bucketing := []map[string]interface{}{}
 				for rows.Next() {
 					vals := make([]interface{}, len(cols))
@@ -322,9 +323,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 			}
 			values = append(values, req.ExposureHeaderID)
 			query := fmt.Sprintf("UPDATE hedging_proposal SET %s WHERE exposure_header_id = $%d RETURNING *", strings.Join(setParts, ", "), len(values))
-			rows, err := db.Query(query, values...)
+			rows, err := pool.Query(ctx, query, values...)
 			if err == nil {
-				cols, _ := rows.Columns()
+				cols := pgxColumnNames(rows)
 				hedging := []map[string]interface{}{}
 				for rows.Next() {
 					vals := make([]interface{}, len(cols))
@@ -343,7 +344,7 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 				}
 				updated["hedging"] = hedging
 				rows.Close()
-				if _, err := db.Exec("UPDATE hedging_proposal SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
+				if _, err := pool.Exec(ctx, "UPDATE hedging_proposal SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
 					logger.LogError("update hedging_proposal status: exec failed: %v", err)
 				}
 			}
@@ -363,20 +364,20 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 			if bucketingRows, ok := updated["bucketing"].([]map[string]interface{}); ok && len(bucketingRows) > 0 {
 				newValues = bucketingRows[0]
 			}
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: reason, RequestedBy: actor, OldValues: oldBucketing, NewValues: newValues})
+			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: reason, RequestedBy: actor, OldValues: oldBucketing, NewValues: newValues})
 		}
 		if len(req.HedgingFields) > 0 {
 			newValues := any(req.HedgingFields)
 			if hedgingRows, ok := updated["hedging"]; ok {
 				newValues = hedgingRows
 			}
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableHedgeProposal, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: actor, OldValues: oldHedging, NewValues: newValues})
+			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableHedgeProposal, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: actor, OldValues: oldHedging, NewValues: newValues})
 		}
 		respondWithSuccess(w, http.StatusOK, "Exposure bucketing updated successfully", map[string]interface{}{
 			"updated": updated,
 		})
 
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
 			SourceRoute: fxnotif.SourceRouteBucketingUpdate, Action: fxnotif.ActionUpdate, UserID: req.UserID, RequestedBy: actor, CheckerComment: reason,
 			ExposureIDs: []string{req.ExposureHeaderID}, ResultBuckets: nil,
 		})
@@ -384,8 +385,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB, pool *pgxpool.Pool) htt
 }
 
 // Handler: Get exposure headers, line items, and bucketing for accessible business units
-func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
+func GetExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID string `json:"user_id"`
 		}
@@ -409,7 +411,7 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		// }
 
 		// Get business units from context (set by middleware)
-		scope := ctxutil.FromContext(r.Context())
+		scope := ctxutil.FromContext(ctx)
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
@@ -417,7 +419,7 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Ensure all exposure_header_id are present in exposure_bucketing
-		_, _ = db.Exec(`INSERT INTO exposure_bucketing (exposure_header_id)
+		_, _ = pool.Exec(ctx, `INSERT INTO exposure_bucketing (exposure_header_id)
 			SELECT exposure_header_id
 			FROM exposure_headers
 			WHERE entity = ANY($1)
@@ -425,22 +427,22 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			  AND COALESCE(is_deleted, false) = false
 			  AND exposure_header_id NOT IN (
 				SELECT exposure_header_id FROM exposure_bucketing
-			  )`, pq.Array(buNames))
+			  )`, buNames)
 
 		// Join exposure_headers, exposure_line_items, exposure_bucketing
-		rows, err := db.Query(`SELECT h.*, l.*, b.*
+		rows, err := pool.Query(ctx, `SELECT h.*, l.*, b.*
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
 			LEFT JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id
 			WHERE h.entity = ANY($1)
 			  AND (h.approval_status = 'approved' OR h.approval_status = 'Approved')
-			  AND COALESCE(h.is_deleted, false) = false`, pq.Array(buNames))
+			  AND COALESCE(h.is_deleted, false) = false`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch joined exposures")
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
+		cols := pgxColumnNames(rows)
 		pageData := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -461,9 +463,9 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		// Fetch permissions for 'exposure-bucketing' page for this role
 		exposureBucketingPerms := map[string]interface{}{}
 		var roleId int
-		err = db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
+		err = pool.QueryRow(ctx, "SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
 		if err == nil {
-			permRows, err := db.Query(`
+			permRows, err := pool.Query(ctx, `
 				SELECT p.page_name, p.tab_name, p.action, rp.allowed
 				FROM role_permissions rp
 				JOIN permissions p ON rp.permission_id = p.id
@@ -512,8 +514,9 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func DeleteBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func DeleteBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID            string   `json:"user_id"`
 			ExposureHeaderIds []string `json:"exposureHeaderIds"`
@@ -543,7 +546,7 @@ func DeleteBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			deleteComment = strings.TrimSpace(req.Reason)
 		}
 
-		rows, err := db.Query(
+		rows, err := pool.Query(ctx,
 			`WITH target AS (
 				SELECT b.exposure_header_id,
 				       COALESCE(b.status_bucketing, '') AS old_status_bucketing,
@@ -561,7 +564,7 @@ func DeleteBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			FROM target t
 			WHERE b.exposure_header_id = t.exposure_header_id
 			RETURNING b.exposure_header_id, t.old_status_bucketing, t.old_comments`,
-			pq.Array(req.ExposureHeaderIds),
+			req.ExposureHeaderIds,
 			requestedBy,
 			deleteComment,
 		)
@@ -584,7 +587,7 @@ func DeleteBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 					"status_bucketing": constants.StatusPendingDeleteApproval,
 					"comments":         deleteComment,
 				}
-				auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: deleteComment, RequestedBy: requestedBy, OldValues: oldValues, NewValues: newValues})
+				auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: deleteComment, RequestedBy: requestedBy, OldValues: oldValues, NewValues: newValues})
 			}
 		}
 		if len(deleted) == 0 {
@@ -596,7 +599,7 @@ func DeleteBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			"deleted": deleted,
 		})
 
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
 			SourceRoute: fxnotif.SourceRouteBucketingDelete, Action: fxnotif.ActionDelete, UserID: req.UserID, RequestedBy: requestedBy, CheckerComment: deleteComment,
 			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
 				"deleted": deleted,
@@ -605,8 +608,9 @@ func DeleteBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func ApproveBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func ApproveBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID            string   `json:"user_id"`
 			ExposureHeaderIds []string `json:"exposure_header_ids"`
@@ -631,18 +635,18 @@ func ApproveBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		tx, err := db.Begin()
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		defer tx.Rollback()
+		defer tx.Rollback(ctx)
 
-		statusRows, err := tx.Query(
+		statusRows, err := tx.Query(ctx,
 			`SELECT exposure_header_id, COALESCE(status_bucketing, '')
 			 FROM exposure_bucketing
 			 WHERE exposure_header_id = ANY($1::uuid[])`,
-			pq.Array(req.ExposureHeaderIds),
+			req.ExposureHeaderIds,
 		)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -664,18 +668,18 @@ func ApproveBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 
 		approved := []map[string]interface{}{}
 		if len(toApprove) > 0 {
-			rows, err := tx.Query(
+			rows, err := tx.Query(ctx,
 				`UPDATE exposure_bucketing
 	             SET status_bucketing = 'Approved', updated_by = $2, comments = $3, updated_at = NOW()
 	             WHERE exposure_header_id = ANY($1::uuid[])
 	             RETURNING *`,
-				pq.Array(toApprove), updatedBy, req.Comments,
+				toApprove, updatedBy, req.Comments,
 			)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			cols, _ := rows.Columns()
+			cols := pgxColumnNames(rows)
 			for rows.Next() {
 				vals := make([]interface{}, len(cols))
 				valPtrs := make([]interface{}, len(cols))
@@ -696,7 +700,7 @@ func ApproveBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 
 		deleted := []string{}
 		if len(toDelete) > 0 {
-			delRows, err := tx.Query(
+			delRows, err := tx.Query(ctx,
 				`UPDATE exposure_headers
 				 SET is_deleted = TRUE,
 				     deleted_at = NOW(),
@@ -704,7 +708,7 @@ func ApproveBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				 WHERE exposure_header_id = ANY($1::uuid[])
 				   AND COALESCE(is_deleted, false) = false
 				 RETURNING exposure_header_id`,
-				pq.Array(toDelete), updatedBy,
+				toDelete, updatedBy,
 			)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -719,11 +723,11 @@ func ApproveBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			delRows.Close()
 
 			if len(deleted) > 0 {
-				if _, err := tx.Exec(
+				if _, err := tx.Exec(ctx,
 					`UPDATE exposure_bucketing
 					 SET status_bucketing = 'Approved', updated_by = $2, comments = $3, updated_at = NOW()
 					 WHERE exposure_header_id = ANY($1::uuid[])`,
-					pq.Array(deleted), updatedBy, req.Comments,
+					deleted, updatedBy, req.Comments,
 				); err != nil {
 					respondWithError(w, http.StatusInternalServerError, err.Error())
 					return
@@ -731,18 +735,18 @@ func ApproveBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if err := tx.Commit(); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
 		for _, rowMap := range approved {
 			if id, ok := rowMap["exposure_header_id"]; ok {
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: constants.StatusApproved, CheckerBy: updatedBy, Comment: req.Comments})
+				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: constants.StatusApproved, CheckerBy: updatedBy, Comment: req.Comments})
 			}
 		}
 		for _, id := range deleted {
-			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: updatedBy, Comment: req.Comments})
+			auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: updatedBy, Comment: req.Comments})
 		}
 
 		respondWithSuccess(w, http.StatusOK, "Exposure bucketing rows approved successfully", map[string]interface{}{
@@ -756,7 +760,7 @@ func ApproveBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				approvedIDs = append(approvedIDs, fmt.Sprint(id))
 			}
 		}
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
 			SourceRoute: fxnotif.SourceRouteBucketingApprove, Action: fxnotif.ActionApprove, UserID: req.UserID, RequestedBy: updatedBy, CheckerComment: req.Comments,
 			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
 				"approved": approvedIDs,
@@ -766,8 +770,9 @@ func ApproveBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func RejectBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func RejectBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID            string   `json:"user_id"`
 			ExposureHeaderIds []string `json:"exposure_header_ids"`
@@ -792,20 +797,20 @@ func RejectBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(
+		rows, err := pool.Query(ctx,
 			`UPDATE exposure_bucketing
              SET status_bucketing = 'Rejected',
 		     updated_by = $2, comments = $3, updated_at = NOW()
              WHERE exposure_header_id = ANY($1::uuid[])
              RETURNING *`,
-			pq.Array(req.ExposureHeaderIds), updatedBy, req.Comments,
+			req.ExposureHeaderIds, updatedBy, req.Comments,
 		)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
+		cols := pgxColumnNames(rows)
 		rejected := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -822,7 +827,7 @@ func RejectBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			rejected = append(rejected, rowMap)
 			if id, ok := rowMap["exposure_header_id"]; ok {
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: constants.StatusRejected, CheckerBy: updatedBy, Comment: req.Comments})
+				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: constants.StatusRejected, CheckerBy: updatedBy, Comment: req.Comments})
 			}
 		}
 		respondWithSuccess(w, http.StatusOK, "Exposure bucketing rows rejected successfully", map[string]interface{}{
@@ -835,7 +840,7 @@ func RejectBucketingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				rejectedIDs = append(rejectedIDs, fmt.Sprint(id))
 			}
 		}
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
 			SourceRoute: fxnotif.SourceRouteBucketingReject, Action: fxnotif.ActionReject, UserID: req.UserID, RequestedBy: updatedBy, CheckerComment: req.Comments,
 			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
 				"rejected": rejectedIDs,

@@ -15,35 +15,22 @@ import (
 	"CimplrCorpSaas/api/investment"
 	"CimplrCorpSaas/api/master"
 	"CimplrCorpSaas/api/notification"
+	"CimplrCorpSaas/api/policyengine"
 	"CimplrCorpSaas/api/uam"
 	"CimplrCorpSaas/internal/jobs"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/resource"
 	"CimplrCorpSaas/internal/serviceiface"
 
-	"database/sql"
-
 	"github.com/jackc/pgx/v5/pgxpool"
 	"gopkg.in/yaml.v3"
 )
 
-var AuthDB *sql.DB
-var db *sql.DB
 var pgxPool *pgxpool.Pool
-
-func SetDB(database *sql.DB) {
-	db = database
-	AuthDB = database
-}
 
 func SetPgxPool(pool *pgxpool.Pool) {
 	pgxPool = pool
 	api.SetGatewayPool(pool)
-}
-
-// GetDB returns the database connection
-func GetDB() *sql.DB {
-	return db
 }
 
 // GetPgxPool returns the pgx pool connection
@@ -59,29 +46,31 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 		return resource.NewResourceManagerService(cfg)
 	},
 	"fx": func(cfg map[string]interface{}) serviceiface.Service {
-		return fx.NewFXService(cfg, db) // Pass db here
+		return fx.NewFXService(cfg)
 	},
 	"dash": func(cfg map[string]interface{}) serviceiface.Service {
-		return dash.NewDashService(cfg, db) // Pass db here
+		return dash.NewDashService(cfg)
 	},
 	"cash": func(cfg map[string]interface{}) serviceiface.Service {
-		return cash.NewCashService(cfg, db) // Pass db here
+		return cash.NewCashService(cfg)
 	},
 	"uam": func(cfg map[string]interface{}) serviceiface.Service {
-		return uam.NewUAMService(cfg, db)
+		return uam.NewUAMService(cfg)
 	},
 	"master": func(cfg map[string]interface{}) serviceiface.Service {
-		return master.NewMasterService(cfg, db)
+		return master.NewMasterService(cfg)
 	},
 	"investment": func(cfg map[string]interface{}) serviceiface.Service {
-		// return investment.NewInvestmentService(cfg, pgxPool)
-		return investment.NewInvestmentService(cfg, pgxPool, db)
+		return investment.NewInvestmentService(cfg, pgxPool)
 	},
 	"notification": func(cfg map[string]interface{}) serviceiface.Service {
-		return notification.NewNotificationService(cfg, pgxPool, db)
+		return notification.NewNotificationService(cfg, pgxPool)
 	},
 	"email": func(cfg map[string]interface{}) serviceiface.Service {
-		return email.NewEmailService(cfg, pgxPool, db)
+		return email.NewEmailService(cfg, pgxPool)
+	},
+	"policyengine": func(cfg map[string]interface{}) serviceiface.Service {
+		return policyengine.NewPolicyEngineService(cfg, pgxPool)
 	},
 	"gateway": func(cfg map[string]interface{}) serviceiface.Service {
 		return api.NewGatewayService(cfg)
@@ -127,7 +116,7 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 				sessionCleanerPeriod = toInt(v)
 			}
 		}
-		return auth.NewAuthService(AuthDB, maxUsers, sessionTimeout, maxLoginAttempts, accountLockDuration, sessionCleanerPeriod)
+		return auth.NewAuthService(pgxPool, maxUsers, sessionTimeout, maxLoginAttempts, accountLockDuration, sessionCleanerPeriod)
 	},
 	"cron": func(cfg map[string]interface{}) serviceiface.Service {
 		return jobs.NewCronService(cfg, pgxPool)

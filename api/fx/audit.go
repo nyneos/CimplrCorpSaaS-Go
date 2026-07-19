@@ -13,6 +13,9 @@ import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type fxAuditConfig struct {
@@ -32,7 +35,7 @@ type fxAuditQueryAttempt struct {
 	idAliasCol string
 }
 
-func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
+func NewFXAuditHandler(pool *pgxpool.Pool, cfg fxAuditConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeFXAuditError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
@@ -62,7 +65,7 @@ func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 				extraWhere = fmt.Sprintf(" AND %s = $%d", cfg.ExtraFilterCol, len(args))
 			}
 		}
-		actionRows, err := queryFXActionAudit(r, db, cfg, parentWhere, args, extraWhere)
+		actionRows, err := queryFXActionAudit(r, pool, cfg, parentWhere, args, extraWhere)
 		if err != nil {
 			if cfg.Source != "FX_FORWARD_MTM" {
 				writeFXAuditError(w, http.StatusInternalServerError, "failed to read FX audit history")
@@ -72,19 +75,19 @@ func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 		payload = append(payload, actionRows...)
 
 		if cfg.Source == "FX_FORWARD_MTM" && len(actionRows) == 0 {
-			if synthesized := synthesizeMTMAuditRow(r, db, parentID); synthesized != nil {
+			if synthesized := synthesizeMTMAuditRow(r, pool, parentID); synthesized != nil {
 				payload = append(payload, synthesized)
 			}
 		}
 
 		if strings.TrimSpace(cfg.DownloadTable) != "" {
-			downloadRows, downloadErr := queryFXDownloadAudit(r, db, cfg, parentID)
+			downloadRows, downloadErr := queryFXDownloadAudit(r, pool, cfg, parentID)
 			if downloadErr == nil {
 				payload = append(payload, downloadRows...)
 			}
 		}
 
-		fileAuditRows, fileAuditErr := queryFXAdditionalFileAudit(r, db, cfg, parentID)
+		fileAuditRows, fileAuditErr := queryFXAdditionalFileAudit(r, pool, cfg, parentID)
 		if fileAuditErr == nil {
 			payload = append(payload, fileAuditRows...)
 		}
@@ -95,7 +98,7 @@ func NewFXAuditHandler(db *sql.DB, cfg fxAuditConfig) http.HandlerFunc {
 	}
 }
 
-func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWhere string, args []interface{}, extraWhere string) ([]map[string]interface{}, error) {
+func queryFXActionAudit(r *http.Request, pool *pgxpool.Pool, cfg fxAuditConfig, parentWhere string, args []interface{}, extraWhere string) ([]map[string]interface{}, error) {
 	attempts := []fxAuditQueryAttempt{
 		{
 			query: fmt.Sprintf(`
@@ -289,7 +292,7 @@ func queryFXActionAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentWh
 
 	var lastErr error
 	for _, attempt := range attempts {
-		rows, err := db.QueryContext(r.Context(), attempt.query, attempt.args...)
+		rows, err := pool.Query(r.Context(), attempt.query, attempt.args...)
 		if err != nil {
 			lastErr = err
 			continue
@@ -359,8 +362,8 @@ func normalizeFXAuditParentID(cfg fxAuditConfig, parentID string) string {
 	return parentID
 }
 
-func synthesizeMTMAuditRow(r *http.Request, db *sql.DB, parentID string) map[string]interface{} {
-	row := auditutil.FetchRowSnapshot(r.Context(), db, "public.forward_mtm", "mtm_id", parentID)
+func synthesizeMTMAuditRow(r *http.Request, pool *pgxpool.Pool, parentID string) map[string]interface{} {
+	row := auditutil.FetchRowSnapshotPGX(r.Context(), pool, "public.forward_mtm", "mtm_id", parentID)
 	if len(row) == 0 {
 		return nil
 	}
@@ -473,7 +476,7 @@ func firstNonZeroTime(values ...interface{}) interface{} {
 	return nil
 }
 
-func queryFXAdditionalFileAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentID string) ([]map[string]interface{}, error) {
+func queryFXAdditionalFileAudit(r *http.Request, pool *pgxpool.Pool, cfg fxAuditConfig, parentID string) ([]map[string]interface{}, error) {
 	moduleKeys := fxAdditionalFileModules(cfg.Source)
 	if len(moduleKeys) == 0 {
 		return nil, nil
@@ -506,7 +509,7 @@ func queryFXAdditionalFileAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, 
 		ORDER BY requested_at ASC, audit_id ASC
 	`, strings.Join(placeholders, ", "))
 
-	rows, err := db.QueryContext(r.Context(), query, args...)
+	rows, err := pool.Query(r.Context(), query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -555,7 +558,7 @@ func fxAdditionalFileModules(source string) []string {
 	}
 }
 
-func scanFXAuditRow(rows *sql.Rows, hasJSON bool) (map[string]interface{}, error) {
+func scanFXAuditRow(rows pgx.Rows, hasJSON bool) (map[string]interface{}, error) {
 	var (
 		actionID       interface{}
 		entityID       string
@@ -627,14 +630,14 @@ func normalizeFXAuditID(value interface{}) interface{} {
 	}
 }
 
-func queryFXDownloadAudit(r *http.Request, db *sql.DB, cfg fxAuditConfig, parentID string) ([]map[string]interface{}, error) {
+func queryFXDownloadAudit(r *http.Request, pool *pgxpool.Pool, cfg fxAuditConfig, parentID string) ([]map[string]interface{}, error) {
 	query := fmt.Sprintf(`
 		SELECT %s, requested_by, requested_at, requested_ip, file_name, upload_s3_key
 		FROM %s
 		WHERE %s = $1
 		ORDER BY requested_at ASC, download_audit_id ASC
 	`, cfg.DownloadParentCol, cfg.DownloadTable, cfg.DownloadParentCol)
-	rows, err := db.QueryContext(r.Context(), query, parentID)
+	rows, err := pool.Query(r.Context(), query, parentID)
 	if err != nil {
 		return nil, err
 	}

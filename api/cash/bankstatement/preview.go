@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/bindref"
@@ -144,14 +145,10 @@ func PreviewBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 			allTransactions = transactions
 		}
 
-		response := map[string]interface{}{
-			"success": true,
-			"data":    allTransactions,
-			"count":   len(allTransactions),
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(response)
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"transactions": allTransactions,
+			"count":        len(allTransactions),
+		})
 	})
 }
 

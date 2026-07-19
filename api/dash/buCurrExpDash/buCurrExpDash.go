@@ -11,16 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	logger.LogError("%s", errMsg)
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
-}
-
 // Handler: GetDashboard
 func GetDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -75,20 +65,19 @@ func GetDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired, "")
 			return
 		}
 		buNames := api.GetEntityNamesFromCtx(r.Context())
 		if len(buNames) == 0 {
-			respondWithError(w, http.StatusInternalServerError, "Business units not found in context")
+			logger.LogError("%s", "Business units not found in context")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "Business units not found in context", "")
 			return
 		}
 		rows, err := pool.Query(r.Context(), query, buNames)
 		if err != nil {
 			logger.LogError("GetDashboard query failed: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Server error"})
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "Server error", "")
 			return
 		}
 		defer rows.Close()
@@ -124,8 +113,7 @@ func GetDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		if err := rows.Err(); err != nil {
 			logger.LogError("GetDashboard row iteration error: %v", err)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{"dashboards": dashboards})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]any{"dashboards": dashboards})
 	}
 }
 

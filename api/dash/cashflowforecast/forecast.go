@@ -146,13 +146,10 @@ func GetCashflowForecastHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{
-			constants.ValueSuccess: true,
-			"kpis":                 kpis,
-			"rows":                 rows,
-		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"kpis": kpis,
+			"rows": rows,
+		})
 	}
 }
 
@@ -535,9 +532,7 @@ func GetForecastDailyHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": rows})
 	}
 }
 
@@ -573,9 +568,7 @@ func GetForecastKPIsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "kpis": kpis}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"kpis": kpis})
 	}
 }
 
@@ -610,9 +603,7 @@ func GetForecastRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": rows})
 	}
 }
 
@@ -690,8 +681,6 @@ func GetForecastCategorySumsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "category_sums": sums}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"category_sums": sums})
 	}
 }

@@ -2,7 +2,6 @@ package email
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,15 +17,14 @@ import (
 type EmailService struct {
 	config    map[string]interface{}
 	pool      *pgxpool.Pool
-	db        *sql.DB
 	server    *http.Server
 	ownedPool *pgxpool.Pool
 	done      chan struct{}
 	mu        sync.Mutex
 }
 
-func NewEmailService(cfg map[string]interface{}, pool *pgxpool.Pool, db *sql.DB) serviceiface.Service {
-	return &EmailService{config: cfg, pool: pool, db: db}
+func NewEmailService(cfg map[string]interface{}, pool *pgxpool.Pool) serviceiface.Service {
+	return &EmailService{config: cfg, pool: pool}
 }
 
 func (s *EmailService) Name() string { return "email" }
@@ -46,7 +44,7 @@ func (s *EmailService) Start() error {
 		}
 	}
 
-	server, ownedPool, ownsPool, err := NewEmailServer(s.pool, s.db, port)
+	server, ownedPool, ownsPool, err := NewEmailServer(s.pool, port)
 	if err != nil {
 		return err
 	}

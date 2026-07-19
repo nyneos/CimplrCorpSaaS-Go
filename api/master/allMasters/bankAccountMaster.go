@@ -143,8 +143,7 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer func() {
 			if p := recover(); p != nil {
 				tx.Rollback(ctx)
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Panic: " + p.(string)})
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "Panic: "+p.(string), "")
 			}
 		}()
 		var accountID string
@@ -245,12 +244,10 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"account_id":           accountID,
-			"audit_action_id":      auditActionID,
-			"clearing_codes":       clearingResults,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"account_id":      accountID,
+			"audit_action_id": auditActionID,
+			"clearing_codes":  clearingResults,
 		})
 	}
 }
@@ -265,20 +262,17 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"accounts"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidJSONShort})
+			api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort, "")
 			return
 		}
 		userID := req.UserID
 		if userID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrMissingUserID})
+			api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrMissingUserID, "")
 			return
 		}
 		updatedBy := api.GetUserNameFromCtx(r.Context())
 		if updatedBy == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "User session not found"})
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "User session not found", "")
 			return
 		}
 
@@ -688,9 +682,12 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "account_id": updatedAccountID, "audit_action_id": auditActionID, "clearing_codes": clearingResults})
 			}()
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		finalSuccess := api.IsBulkSuccess(results)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: finalSuccess, "results": results})
+		if finalSuccess {
+			api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"results": results})
+		} else {
+			api.RespondEnvelopeFailureCompat(w, http.StatusOK, "Completed with errors", "", map[string]interface{}{"results": results})
+		}
 	}
 }
 
@@ -757,10 +754,8 @@ func BulkDeleteBankAccountAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, actionID)
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"created":              results,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"created": results,
 		})
 	}
 }
@@ -799,10 +794,8 @@ func BulkRejectBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			updated = append(updated, id, accountID)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"updated":              updated,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"updated": updated,
 		})
 	}
 }
@@ -883,11 +876,9 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 			updated = append(updated, id, accountID)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"updated":              updated,
-			"deleted":              deleted,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"updated": updated,
+			"deleted": deleted,
 		})
 	}
 }
@@ -941,7 +932,6 @@ func GetBankNamesWithIDForAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}(),
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if anyError != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
 			return
@@ -949,9 +939,8 @@ func GetBankNamesWithIDForAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if results == nil {
 			results = make([]map[string]interface{}, 0)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"results":              results,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"results": results,
 		})
 	}
 }
@@ -1144,13 +1133,11 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if results == nil {
 			results = make([]map[string]interface{}, 0)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"results":              results,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"results": results,
 		})
 	}
 }
@@ -1764,12 +1751,10 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Success Response
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"batch_ids":            batchIDs,
-			"uploaded":             len(files),
-			"requested_by":         userName,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"batch_ids":    batchIDs,
+			"uploaded":     len(files),
+			"requested_by": userName,
 		})
 	}
 }
@@ -1913,8 +1898,7 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if out == nil {
 			out = make([]map[string]interface{}, 0)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -2479,8 +2463,7 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"deleted_at": auditInfo.DeletedAt,
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": out})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"data": out})
 	}
 }
 
@@ -2699,7 +2682,6 @@ WHERE COALESCE(a.is_deleted, false) = false`
 		if out == nil {
 			out = make([]map[string]interface{}, 0)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": out})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"data": out})
 	}
 }

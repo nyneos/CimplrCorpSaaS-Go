@@ -2001,13 +2001,9 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			initiations = append(initiations, initiation)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"initiations": initiations,
-				"total":       len(initiations),
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"initiations": initiations,
+			"total":       len(initiations),
 		})
 	}
 }

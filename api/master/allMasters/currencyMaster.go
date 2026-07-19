@@ -273,12 +273,12 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"currency_code":        cur.CurrencyCode,
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		finalSuccess := api.IsBulkSuccess(results)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: finalSuccess,
-			"results":              results,
-		})
+		if finalSuccess {
+			api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"results": results})
+		} else {
+			api.RespondEnvelopeFailureCompat(w, http.StatusOK, "Completed with errors", "", map[string]interface{}{"results": results})
+		}
 	}
 }
 
@@ -335,8 +335,7 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to fetch currency data")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, statusCode, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -454,10 +453,8 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			currencies = make([]map[string]interface{}, 0)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 currencies,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"data": currencies,
 		})
 	}
 }
@@ -611,12 +608,12 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "currency_id": currencyID, "currency_code": currencyCode})
 			}()
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		finalSuccess := api.IsBulkSuccess(results)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: finalSuccess,
-			"results":              results,
-		})
+		if finalSuccess {
+			api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"results": results})
+		} else {
+			api.RespondEnvelopeFailureCompat(w, http.StatusOK, "Completed with errors", "", map[string]interface{}{"results": results})
+		}
 	}
 }
 func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -653,8 +650,7 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to reject currency actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, statusCode, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -669,10 +665,8 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			updated = append(updated, id, currencyID)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"updated":              updated,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"updated": updated,
 		})
 	}
 }
@@ -757,8 +751,7 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to approve currency actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, statusCode, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -775,11 +768,9 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// --- Step 6: Send response ---
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"updated":              updated,
-			"deleted":              deleted,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"updated": updated,
+			"deleted": deleted,
 		})
 	}
 }
@@ -840,10 +831,8 @@ func BulkDeleteCurrencyAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, actionID)
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"created":              results,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"created": results,
 		})
 	}
 }
@@ -869,8 +858,7 @@ func GetActiveApprovedCurrencyCodes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to fetch active currency codes")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, statusCode, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -892,7 +880,6 @@ func GetActiveApprovedCurrencyCodes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"decimal_place": decimalPlace,
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if anyError != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
 			return
@@ -900,9 +887,8 @@ func GetActiveApprovedCurrencyCodes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if results == nil {
 			results = make([]map[string]interface{}, 0)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"results":              results,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"results": results,
 		})
 	}
 }

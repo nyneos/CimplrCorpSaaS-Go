@@ -337,12 +337,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Use 422 so axios throws (enabling the catch block on the frontend)
 			// while avoiding misleading HTTP 500 / [ERROR] log noise for a normal
 			// business-logic condition.
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusUnprocessableEntity)
 			api.LogInfo("[FDBooking] CaptureConfirmation: variance detected booking=%s run=%s", req.BookingID, runID)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   "Variance detected — confirmation not saved. Resolve and Recapture.",
+			api.RespondEnvelopeFailureWithData(w, http.StatusUnprocessableEntity, "Variance detected — confirmation not saved. Resolve and Recapture.", "", map[string]interface{}{
 				"rows": map[string]interface{}{
 					"booking_id":     req.BookingID,
 					"has_variance":   true,
@@ -660,13 +656,9 @@ func GetFDConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"confirmation_id": confirmationID,
-				"download_url":    downloadURL,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"confirmation_id": confirmationID,
+			"download_url":    downloadURL,
 		})
 	}
 }
@@ -726,14 +718,15 @@ func GetFDConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"download_url":    downloadURL,
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: len(files) > 0,
-			"data": map[string]interface{}{
-				"files":      files,
-				"failed_ids": failedIDs,
-			},
-		})
+		data := map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
+		}
+		if len(files) > 0 {
+			api.RespondEnvelopeSuccess(w, "Success", data)
+		} else {
+			api.RespondEnvelopeFailureWithData(w, http.StatusNotFound, "No confirmation files were available for download", "", data)
+		}
 	}
 }
 
@@ -2539,8 +2532,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{constants.ValueSuccess: true, "rows": out}) //nolint:errcheck
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 		api.LogInfo("[FDBooking] GetConfirmationsWithAudit: %d rows", len(out))
 	}
 }
@@ -2654,8 +2646,7 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{constants.ValueSuccess: true, "audit_logs": out}) //nolint:errcheck
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"audit_logs": out})
 		api.LogInfo("[FDBooking] GetConfirmationAuditHistory: %d records", len(out))
 	}
 }

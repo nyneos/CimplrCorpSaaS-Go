@@ -3,7 +3,6 @@ package forwards
 import (
 	"CimplrCorpSaas/api/fx/auditutil"
 	"CimplrCorpSaas/internal/ctxutil"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,7 +10,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -35,7 +34,7 @@ func normalizeForwardSystemTransactionID(value interface{}) string {
 	}
 }
 
-func UpdateForwardBookingFields(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Accept system_transaction_id and fields in the JSON body
 		var req struct {
@@ -50,13 +49,13 @@ func UpdateForwardBookingFields(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc
 		}
 		// Check if booking exists
 		var exists bool
-		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM forward_bookings WHERE system_transaction_id = $1)", req.SystemTransactionID).Scan(&exists)
+		err := pool.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM forward_bookings WHERE system_transaction_id = $1)", req.SystemTransactionID).Scan(&exists)
 		if err != nil || !exists {
 			respondEnvelopeError(w, http.StatusNotFound, "No matching forward booking found")
 			return
 		}
 		// Get valid columns for forward_bookings
-		colRows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'forward_bookings'`)
+		colRows, err := pool.Query(r.Context(), `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'forward_bookings'`)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusInternalServerError, "Failed to fetch columns")
 			return
@@ -82,7 +81,7 @@ func UpdateForwardBookingFields(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc
 			respondEnvelopeError(w, http.StatusBadRequest, "No valid fields to update")
 			return
 		}
-		oldValues := auditutil.FetchRowSnapshot(r.Context(), db, "public.forward_bookings", "system_transaction_id", req.SystemTransactionID)
+		oldValues := auditutil.FetchRowSnapshotPGX(r.Context(), pool, "public.forward_bookings", "system_transaction_id", req.SystemTransactionID)
 		// Build dynamic SET clause
 		keys := make([]string, 0, len(updateFields))
 		values := make([]interface{}, 0, len(updateFields)+1)
@@ -97,7 +96,7 @@ func UpdateForwardBookingFields(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc
 		values = append(values, req.SystemTransactionID)
 		updateQuery := fmt.Sprintf("UPDATE forward_bookings SET %s WHERE system_transaction_id = $%d RETURNING row_to_json(forward_bookings)", strings.Join(setClause, ", "), len(values))
 		var updatedRaw []byte
-		if err := db.QueryRow(updateQuery, values...).Scan(&updatedRaw); err != nil {
+		if err := pool.QueryRow(r.Context(), updateQuery, values...).Scan(&updatedRaw); err != nil {
 			respondEnvelopeError(w, http.StatusNotFound, "No matching forward booking found after update")
 			return
 		}
@@ -110,7 +109,7 @@ func UpdateForwardBookingFields(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc
 		if strings.TrimSpace(requestedBy) == "" {
 			requestedBy = auditutil.ActorFromContext(r.Context())
 		}
-		auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: req.SystemTransactionID, ActionType: constants.FwdActionTypeEdit, Status: constants.FwdProcessingStatusPendingEditApproval, Reason: strings.TrimSpace(req.Reason), RequestedBy: requestedBy, OldValues: oldValues, NewValues: result})
+		auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: req.SystemTransactionID, ActionType: constants.FwdActionTypeEdit, Status: constants.FwdProcessingStatusPendingEditApproval, Reason: strings.TrimSpace(req.Reason), RequestedBy: requestedBy, OldValues: oldValues, NewValues: result})
 		triggerForwardBookingNotif(r.Context(), pool, routeForwardUpdateFields, "UPDATE", requestedBy, constants.FwdProcessingStatusPendingEditApproval, []string{req.SystemTransactionID})
 		respondEnvelopeSuccess(w, "Forward booking fields updated successfully", map[string]interface{}{
 			"updated": result,
@@ -119,7 +118,7 @@ func UpdateForwardBookingFields(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc
 }
 
 // Handler: BulkUpdateForwardBookingProcessingStatus
-func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func BulkUpdateForwardBookingProcessingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID               string   `json:"user_id"`
@@ -145,12 +144,12 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) ht
 		}
 		actor := auditutil.Actor(req.UserID)
 		// Find which records are delete-approval and accessible
-		delRows, err := db.Query(`
+		delRows, err := pool.Query(r.Context(), `
 			SELECT system_transaction_id, entity_level_0
 			FROM forward_bookings
 			WHERE system_transaction_id = ANY($1)
 			  AND processing_status IN ($2, $3)
-		`, pq.Array(req.SystemTransactionIDs),
+		`, req.SystemTransactionIDs,
 			constants.FwdProcessingStatusDeleteApproval,
 			constants.FwdProcessingStatusPendingDeleteApproval,
 		)
@@ -175,7 +174,7 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) ht
 		delRows.Close()
 		// Only approved delete requests should soft-delete the booking.
 		if len(deletedIds) > 0 && req.ProcessingStatus == constants.FwdProcessingStatusApproved {
-			rows, err := db.Query(`
+			rows, err := pool.Query(r.Context(), `
 				UPDATE forward_bookings
 				SET processing_status = $3,
 				    is_deleted = TRUE,
@@ -184,13 +183,16 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) ht
 				WHERE system_transaction_id = ANY($1)
 				  AND UPPER(COALESCE(processing_status, '')) IN ('DELETE-APPROVAL', 'PENDING_DELETE_APPROVAL')
 				RETURNING *
-			`, pq.Array(deletedIds), req.UserID, constants.FwdProcessingStatusApproved)
+			`, deletedIds, req.UserID, constants.FwdProcessingStatusApproved)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			cols, _ := rows.Columns()
+			fieldDescs := rows.FieldDescriptions()
+			cols := make([]string, len(fieldDescs))
+			for i, fd := range fieldDescs {
+				cols[i] = fd.Name
+			}
 			for rows.Next() {
 				vals := make([]interface{}, len(cols))
 				valPtrs := make([]interface{}, len(cols))
@@ -200,7 +202,7 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) ht
 				if err := rows.Scan(valPtrs...); err == nil {
 					rowMap := make(map[string]interface{})
 					for i, col := range cols {
-						rowMap[col] = vals[i]
+						rowMap[col] = normalizeMTMRowValue(vals[i])
 					}
 					deletedRows = append(deletedRows, rowMap)
 				}
@@ -208,19 +210,22 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) ht
 			rows.Close()
 		}
 		if len(deletedIds) > 0 && req.ProcessingStatus == constants.FwdProcessingStatusRejected {
-			rows, err := db.Query(`
+			rows, err := pool.Query(r.Context(), `
 				UPDATE forward_bookings
 				SET processing_status = $2
 				WHERE system_transaction_id = ANY($1)
 				  AND UPPER(COALESCE(processing_status, '')) IN ('DELETE-APPROVAL', 'PENDING_DELETE_APPROVAL')
 				RETURNING *
-			`, pq.Array(deletedIds), constants.FwdProcessingStatusRejected)
+			`, deletedIds, constants.FwdProcessingStatusRejected)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			cols, _ := rows.Columns()
+			fieldDescs := rows.FieldDescriptions()
+			cols := make([]string, len(fieldDescs))
+			for i, fd := range fieldDescs {
+				cols[i] = fd.Name
+			}
 			for rows.Next() {
 				vals := make([]interface{}, len(cols))
 				valPtrs := make([]interface{}, len(cols))
@@ -230,7 +235,7 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) ht
 				if err := rows.Scan(valPtrs...); err == nil {
 					rowMap := make(map[string]interface{})
 					for i, col := range cols {
-						rowMap[col] = vals[i]
+						rowMap[col] = normalizeMTMRowValue(vals[i])
 					}
 					deletedRows = append(deletedRows, rowMap)
 				}
@@ -254,10 +259,9 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) ht
 		var updatedRows []map[string]interface{}
 		if len(updateIds) > 0 {
 			// Only update those belonging to accessible business units
-			rows, err := db.Query(`SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, pq.Array(updateIds))
+			rows, err := pool.Query(r.Context(), `SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, updateIds)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 			var eligibleIds []string
@@ -276,14 +280,18 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) ht
 			}
 			rows.Close()
 			if len(eligibleIds) > 0 {
-				var resultRows *sql.Rows
+				var resultRows pgx.Rows
 				if req.ProcessingStatus == constants.FwdProcessingStatusApproved {
-					resultRows, err = db.Query(`UPDATE forward_bookings SET processing_status = $1, status = $2 WHERE system_transaction_id = ANY($3) RETURNING *`, req.ProcessingStatus, constants.FwdStatusConfirmed, pq.Array(eligibleIds))
+					resultRows, err = pool.Query(r.Context(), `UPDATE forward_bookings SET processing_status = $1, status = $2 WHERE system_transaction_id = ANY($3) RETURNING *`, req.ProcessingStatus, constants.FwdStatusConfirmed, eligibleIds)
 				} else {
-					resultRows, err = db.Query(`UPDATE forward_bookings SET processing_status = $1 WHERE system_transaction_id = ANY($2) RETURNING *`, constants.FwdProcessingStatusRejected, pq.Array(eligibleIds))
+					resultRows, err = pool.Query(r.Context(), `UPDATE forward_bookings SET processing_status = $1 WHERE system_transaction_id = ANY($2) RETURNING *`, constants.FwdProcessingStatusRejected, eligibleIds)
 				}
 				if err == nil {
-					cols, _ := resultRows.Columns()
+					resultFieldDescs := resultRows.FieldDescriptions()
+					cols := make([]string, len(resultFieldDescs))
+					for i, fd := range resultFieldDescs {
+						cols[i] = fd.Name
+					}
 					for resultRows.Next() {
 						vals := make([]interface{}, len(cols))
 						valPtrs := make([]interface{}, len(cols))
@@ -293,7 +301,7 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) ht
 						if err := resultRows.Scan(valPtrs...); err == nil {
 							rowMap := make(map[string]interface{})
 							for i, col := range cols {
-								rowMap[col] = vals[i]
+								rowMap[col] = normalizeMTMRowValue(vals[i])
 							}
 							updatedRows = append(updatedRows, rowMap)
 						}
@@ -319,12 +327,12 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) ht
 				if id == "" {
 					continue
 				}
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: id, Status: decisionStatus, CheckerBy: actor, Comment: decisionComment})
+				auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: id, Status: decisionStatus, CheckerBy: actor, Comment: decisionComment})
 			}
 			for _, row := range updatedRows {
 				if id, ok := row["system_transaction_id"]; ok {
 					if normalizedID := normalizeForwardSystemTransactionID(id); normalizedID != "" {
-						auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: normalizedID, Status: decisionStatus, CheckerBy: actor, Comment: decisionComment})
+						auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: normalizedID, Status: decisionStatus, CheckerBy: actor, Comment: decisionComment})
 					}
 				}
 			}
@@ -347,7 +355,7 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB, pool *pgxpool.Pool) ht
 }
 
 // Handler: BulkDeleteForwardBookings
-func BulkDeleteForwardBookings(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func BulkDeleteForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID               string   `json:"user_id"`
@@ -370,7 +378,7 @@ func BulkDeleteForwardBookings(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 		// Only update those belonging to accessible business units
-		rows, err := db.Query(`SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, pq.Array(req.SystemTransactionIDs))
+		rows, err := pool.Query(r.Context(), `SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, req.SystemTransactionIDs)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -394,7 +402,7 @@ func BulkDeleteForwardBookings(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc 
 		}
 		oldValuesByID := make(map[string]map[string]interface{}, len(eligibleIds))
 		for _, id := range eligibleIds {
-			oldValuesByID[id] = auditutil.FetchRowSnapshot(r.Context(), db, "public.forward_bookings", "system_transaction_id", id)
+			oldValuesByID[id] = auditutil.FetchRowSnapshotPGX(r.Context(), pool, "public.forward_bookings", "system_transaction_id", id)
 		}
 		updateQuery := `
 			UPDATE forward_bookings
@@ -403,12 +411,16 @@ func BulkDeleteForwardBookings(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc 
 			  AND COALESCE(is_deleted, false) = false
 			RETURNING *
 		`
-		resultRows, err := db.Query(updateQuery, pq.Array(eligibleIds), constants.FwdProcessingStatusPendingDeleteApproval)
+		resultRows, err := pool.Query(r.Context(), updateQuery, eligibleIds, constants.FwdProcessingStatusPendingDeleteApproval)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		cols, _ := resultRows.Columns()
+		fieldDescs := resultRows.FieldDescriptions()
+		cols := make([]string, len(fieldDescs))
+		for i, fd := range fieldDescs {
+			cols[i] = fd.Name
+		}
 		var updated []map[string]interface{}
 		for resultRows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -419,7 +431,7 @@ func BulkDeleteForwardBookings(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc 
 			if err := resultRows.Scan(valPtrs...); err == nil {
 				rowMap := make(map[string]interface{})
 				for i, col := range cols {
-					rowMap[col] = vals[i]
+					rowMap[col] = normalizeMTMRowValue(vals[i])
 				}
 				updated = append(updated, rowMap)
 				if id, ok := rowMap["system_transaction_id"]; ok {
@@ -428,7 +440,7 @@ func BulkDeleteForwardBookings(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc 
 						if reason == "" {
 							reason = strings.TrimSpace(req.Comment)
 						}
-						auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: normalizedID, ActionType: constants.FwdActionTypeDelete, Status: constants.FwdProcessingStatusPendingDeleteApproval, Reason: reason, RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValuesByID[normalizedID], NewValues: rowMap})
+						auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: normalizedID, ActionType: constants.FwdActionTypeDelete, Status: constants.FwdProcessingStatusPendingDeleteApproval, Reason: reason, RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValuesByID[normalizedID], NewValues: rowMap})
 					}
 				}
 			}
@@ -442,7 +454,7 @@ func BulkDeleteForwardBookings(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc 
 }
 
 // Handler: AddForwardConfirmationManualEntry
-func AddForwardConfirmationManualEntry(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func AddForwardConfirmationManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID               string `json:"user_id"`
@@ -502,7 +514,7 @@ func AddForwardConfirmationManualEntry(db *sql.DB, pool *pgxpool.Pool) http.Hand
 			constants.FwdStatusPendingConfirmation,
 			req.EntityLevel0,
 		}
-		row := db.QueryRow(updateQuery, updateValues...)
+		row := pool.QueryRow(r.Context(), updateQuery, updateValues...)
 		cols := []string{"internal_reference_id", "entity_level_0", "bank_transaction_id", "swift_unique_id", "bank_confirmation_date", constants.KeyStatus, "processing_status"}
 		vals := make([]interface{}, len(cols))
 		valPtrs := make([]interface{}, len(cols))
@@ -518,9 +530,9 @@ func AddForwardConfirmationManualEntry(db *sql.DB, pool *pgxpool.Pool) http.Hand
 			result[col] = vals[i]
 		}
 		var systemTransactionID string
-		_ = db.QueryRowContext(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 AND entity_level_0 = $2 LIMIT 1`, req.InternalReferenceID, req.EntityLevel0).Scan(&systemTransactionID)
+		_ = pool.QueryRow(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 AND entity_level_0 = $2 LIMIT 1`, req.InternalReferenceID, req.EntityLevel0).Scan(&systemTransactionID)
 		if strings.TrimSpace(systemTransactionID) != "" {
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.FwdActionTypeConfirm, Status: constants.FwdProcessingStatusPendingEditApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: result})
+			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.FwdActionTypeConfirm, Status: constants.FwdProcessingStatusPendingEditApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: result})
 			triggerForwardConfirmationNotif(r.Context(), pool, routeForwardManualConfirmation, "CONFIRM", auditutil.Actor(req.UserID), constants.FwdProcessingStatusPending, []string{systemTransactionID})
 		}
 		respondEnvelopeSuccess(w, "Forward confirmation recorded successfully", map[string]interface{}{

@@ -1,21 +1,21 @@
 package exposures
 
 import (
-	"database/sql"
 	"encoding/json"
 	"net/http"
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Handler for settlement
 
 // FilterForwardBookingsForSettlement handles the filtering of forward bookings for settlement
-func FilterForwardBookingsForSettlement(db *sql.DB) http.HandlerFunc {
+func FilterForwardBookingsForSettlement(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID            string   `json:"user_id"`
 			ExposureHeaderIDs []string `json:"exposure_header_ids"`
@@ -26,7 +26,7 @@ func FilterForwardBookingsForSettlement(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "user_id, exposure_header_ids (array), entity, and currency are required")
 			return
 		}
-		scope := ctxutil.FromContext(r.Context())
+		scope := ctxutil.FromContext(ctx)
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
@@ -59,13 +59,13 @@ func FilterForwardBookingsForSettlement(db *sql.DB) http.HandlerFunc {
 					OR fb.entity_level_3 = ANY($4)
 				)
 		`
-		rows, err := db.Query(query, pq.Array(req.ExposureHeaderIDs), req.Currency, req.Entity, pq.Array(buNames))
+		rows, err := pool.Query(ctx, query, req.ExposureHeaderIDs, req.Currency, req.Entity, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch forward bookings for settlement")
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
+		cols := pgxColumnNames(rows)
 		data := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -78,7 +78,7 @@ func FilterForwardBookingsForSettlement(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range cols {
-				rowMap[col] = vals[i]
+				rowMap[col] = parseDBValue(col, vals[i])
 			}
 			data = append(data, rowMap)
 		}
@@ -89,8 +89,9 @@ func FilterForwardBookingsForSettlement(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: GetForwardBookingsByEntityAndCurrency
-func GetForwardBookingsByEntityAndCurrency(db *sql.DB) http.HandlerFunc {
+func GetForwardBookingsByEntityAndCurrency(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID   string `json:"user_id"`
 			Entity   string `json:"entity"`
@@ -100,7 +101,7 @@ func GetForwardBookingsByEntityAndCurrency(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "user_id, entity, and currency are required")
 			return
 		}
-		scope := ctxutil.FromContext(r.Context())
+		scope := ctxutil.FromContext(ctx)
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
@@ -132,13 +133,13 @@ func GetForwardBookingsByEntityAndCurrency(db *sql.DB) http.HandlerFunc {
 					OR fb.entity_level_3 = ANY($3)
 				)
 		`
-		rows, err := db.Query(query, req.Currency, req.Entity, pq.Array(buNames))
+		rows, err := pool.Query(ctx, query, req.Currency, req.Entity, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch forward bookings")
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
+		cols := pgxColumnNames(rows)
 		data := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -151,7 +152,7 @@ func GetForwardBookingsByEntityAndCurrency(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range cols {
-				rowMap[col] = vals[i]
+				rowMap[col] = parseDBValue(col, vals[i])
 			}
 			data = append(data, rowMap)
 		}

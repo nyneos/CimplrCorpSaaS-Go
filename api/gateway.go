@@ -132,8 +132,7 @@ func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessions := authService.GetActiveSessions()
-	w.Header().Set(headerContentType, contentTypeJSON)
-	json.NewEncoder(w).Encode(sessions)
+	RespondEnvelopeSuccess(w, "Success", sessions)
 }
 
 // GetSessionByUserIDHandler returns session info for a specific user_id
@@ -146,8 +145,7 @@ func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
 		UserID string `json:"user_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Missing user_id in body"})
+		RespondEnvelopeError(w, http.StatusBadRequest, "Missing user_id in body", "")
 		return
 	}
 	if authService == nil {
@@ -161,8 +159,7 @@ func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
 			found = append(found, s)
 		}
 	}
-	w.Header().Set(headerContentType, contentTypeJSON)
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "sessions": found})
+	RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"sessions": found})
 }
 
 // LoginHandler handles POST /auth/login
@@ -186,7 +183,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientIP := extractClientIP(r)
-	session, mfaPending, err := authService.Login(req.Username, req.Password, clientIP)
+	session, mfaPending, err := authService.Login(r.Context(), req.Username, req.Password, clientIP)
 	if err != nil {
 		logger.LogError("Login failed for %s from %s: %v", req.Username, clientIP, err)
 		RespondWithError(w, http.StatusUnauthorized, "Invalid credentials")
@@ -194,17 +191,30 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if mfaPending {
-		w.Header().Set(headerContentType, contentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		RespondEnvelopeSuccessCompat(w, "MFA verification required", map[string]interface{}{
 			"mfa_pending": true,
 			"user_id":     session.UserID,
-			"message":     "MFA verification required",
 		})
 		return
 	}
 
-	w.Header().Set(headerContentType, contentTypeJSON)
-	json.NewEncoder(w).Encode(session)
+	// Flatten the session struct to the top level (via RespondEnvelopeSuccessCompat)
+	// as well as nesting it under data — Login.tsx reads fields like IsLoggedIn/
+	// UserID/SessionID directly off the response body without unwrapping data,
+	// so a nest-only response breaks the login flow.
+	sessionBytes, err := json.Marshal(session)
+	if err != nil {
+		LogErrorForResponse(w, "Login: failed to marshal session: %v", err)
+		RespondEnvelopeError(w, http.StatusInternalServerError, "Login failed", "")
+		return
+	}
+	var sessionFields map[string]interface{}
+	if err := json.Unmarshal(sessionBytes, &sessionFields); err != nil {
+		LogErrorForResponse(w, "Login: failed to unmarshal session: %v", err)
+		RespondEnvelopeError(w, http.StatusInternalServerError, "Login failed", "")
+		return
+	}
+	RespondEnvelopeSuccessCompat(w, "Success", sessionFields)
 }
 
 // LogoutHandler handles POST /auth/logout
@@ -238,14 +248,13 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errAuthServiceUnavailable, http.StatusInternalServerError)
 		return
 	}
-	err := authService.Logout(userID)
+	err := authService.Logout(r.Context(), userID)
 	if err != nil {
 		logger.LogError("Logout failed for userID %s: %v", userID, err)
 		RespondWithError(w, http.StatusUnauthorized, "Logout failed")
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"message":"logout successful"}`))
+	RespondEnvelopeSuccess(w, "Logout successful", nil)
 }
 
 // createReverseProxy returns a reverse proxy handler for the given target URL
@@ -351,20 +360,20 @@ func decryptPayload(next http.Handler) http.Handler {
 			return
 		}
 		if r.Header.Get("X-Payload-Enc") != "aes-gcm" {
-			writeJSONError(w, "unsupported encryption")
+			writeJSONError(w, 400, "unsupported encryption")
 			return
 		}
 
 		keyB64 := os.Getenv("PAYLOAD_ENC_KEY")
 		key, err := base64.StdEncoding.DecodeString(keyB64)
 		if keyB64 == "" || err != nil || len(key) != 32 {
-			writeJSONError(w, "encryption key not configured")
+			writeJSONError(w, 500, "encryption key not configured")
 			return
 		}
 
 		var raw map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-			writeJSONError(w, "invalid encrypted payload")
+			writeJSONError(w, 400, "invalid encrypted payload")
 			return
 		}
 
@@ -372,20 +381,20 @@ func decryptPayload(next http.Handler) http.Handler {
 		if ed, ok := raw["ED"]; ok {
 			parts := strings.Split(ed, ":")
 			if len(parts) != 3 {
-				writeJSONError(w, "invalid ED format")
+				writeJSONError(w, 400, "invalid ED format")
 				return
 			}
 			var err error
 			if iv, err = hexDecode(parts[0]); err != nil {
-				writeJSONError(w, "invalid iv")
+				writeJSONError(w, 400, "invalid iv")
 				return
 			}
 			if tag, err = hexDecode(parts[1]); err != nil {
-				writeJSONError(w, "invalid tag")
+				writeJSONError(w, 400, "invalid tag")
 				return
 			}
 			if ct, err = hexDecode(parts[2]); err != nil {
-				writeJSONError(w, "invalid ciphertext")
+				writeJSONError(w, 400, "invalid ciphertext")
 				return
 			}
 		} else {
@@ -399,40 +408,40 @@ func decryptPayload(next http.Handler) http.Handler {
 			}
 			ct, err = base64.StdEncoding.DecodeString(wrap.Ciphertext)
 			if err != nil {
-				writeJSONError(w, "invalid ciphertext")
+				writeJSONError(w, 400, "invalid ciphertext")
 				return
 			}
 			iv, err = base64.StdEncoding.DecodeString(wrap.IV)
 			if err != nil {
-				writeJSONError(w, "invalid iv")
+				writeJSONError(w, 400, "invalid iv")
 				return
 			}
 			tag, err = base64.StdEncoding.DecodeString(wrap.Tag)
 			if err != nil {
-				writeJSONError(w, "invalid tag")
+				writeJSONError(w, 400, "invalid tag")
 				return
 			}
 		}
 
 		block, err := aes.NewCipher(key)
 		if err != nil {
-			writeJSONError(w, "cipher init failed")
+			writeJSONError(w, 500, "cipher init failed")
 			return
 		}
 		gcm, err := cipher.NewGCM(block)
 		if err != nil {
-			writeJSONError(w, "cipher init failed")
+			writeJSONError(w, 500, "cipher init failed")
 			return
 		}
 		if len(iv) != gcm.NonceSize() {
-			writeJSONError(w, "invalid iv size")
+			writeJSONError(w, 400, "invalid iv size")
 			return
 		}
 
 		ciphertextWithTag := append(ct, tag...)
 		plaintext, err := gcm.Open(nil, iv, ciphertextWithTag, nil)
 		if err != nil {
-			writeJSONError(w, "decryption failed")
+			writeJSONError(w, 400, "decryption failed")
 			return
 		}
 
@@ -465,13 +474,13 @@ func encryptResponse(next http.Handler) http.Handler {
 		keyB64 := os.Getenv("PAYLOAD_ENC_KEY")
 		key, err := base64.StdEncoding.DecodeString(keyB64)
 		if keyB64 == "" || err != nil || len(key) != 32 {
-			writeJSONError(w, "encryption key not configured")
+			writeJSONError(w, 500, "encryption key not configured")
 			return
 		}
 
 		ciphertext, err := encryptBytes(erw.buf.Bytes(), key)
 		if err != nil {
-			writeJSONError(w, "encryption failed")
+			writeJSONError(w, 500, "encryption failed")
 			return
 		}
 
@@ -483,6 +492,11 @@ func encryptResponse(next http.Handler) http.Handler {
 		w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
 		w.Header().Set(headerContentType, contentTypeJSON)
 		w.WriteHeader(status)
+		// NOT migrated to the envelope: this is the wire contract for every
+		// AES-GCM encrypted response body (X-Response-Enc: aes-gcm). Clients
+		// decrypt by reading the top-level "ED" field directly; wrapping it in
+		// {success,statusCode,message,data} would change what ciphertext callers
+		// need to unwrap and break decryption for every encrypted response.
 		json.NewEncoder(w).Encode(map[string]string{"ED": ciphertext})
 	})
 }
@@ -509,13 +523,14 @@ func encryptBytes(plain []byte, key []byte) (string, error) {
 	return fmt.Sprintf("%x:%x:%x", iv, tag, ct), nil
 }
 
-func writeJSONError(w http.ResponseWriter, msg string) {
+// writeJSONError sends the CLAUDE.md standard error envelope with the given
+// HTTP status (previously always returned 200 regardless of failure).
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
 	w.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
 	w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
-	w.Header().Set(headerContentType, contentTypeJSON)
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]any{"success": false, "error": msg})
+	LogErrorForResponse(w, "[GATEWAY] %s", msg)
+	RespondEnvelopeError(w, status, msg, "")
 }
 
 func hexDecode(s string) ([]byte, error) {
@@ -611,8 +626,7 @@ func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, str
 	// Debug endpoint to list connected SSE clients
 	mux.HandleFunc("/debug/sse-clients", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		clients := dashboard.GetClients()
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"clients": clients,
 			"count":   dashboard.GetClientCount(),
 		})
@@ -632,8 +646,8 @@ func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, str
 		mux.HandleFunc("/auth/sso/providers", withCORS(auth.SSOProvidersHandler(ssoConfig)))
 		mux.HandleFunc("/auth/sso/login", withCORS(auth.SSOLoginRedirect(ssoConfig)))
 		if authService != nil {
-			mux.HandleFunc("/auth/sso/callback/", withCORS(auth.SSOCallbackHandler(ssoConfig, authService.DB())))
-			mux.HandleFunc("/auth/sso/logout", withCORS(auth.SSOLogoutHandler(ssoConfig, authService.DB())))
+			mux.HandleFunc("/auth/sso/callback/", withCORS(auth.SSOCallbackHandler(ssoConfig, authService.Pool())))
+			mux.HandleFunc("/auth/sso/logout", withCORS(auth.SSOLogoutHandler(ssoConfig, authService.Pool())))
 		}
 		logger.LogInfo("SSO endpoints enabled")
 	} else {
@@ -642,21 +656,21 @@ func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, str
 
 	// MFA (TOTP)
 	if authService != nil {
-		mfaDB := authService.DB()
-		mux.HandleFunc("/auth/mfa/setup", withCORS(auth.MFASetupHandler(mfaDB)))
-		mux.HandleFunc("/auth/mfa/confirm", withCORS(auth.MFAConfirmHandler(mfaDB)))
-		mux.HandleFunc("/auth/mfa/verify", withCORS(auth.MFAVerifyHandler(mfaDB)))
-		mux.HandleFunc("/auth/mfa/disable", withCORS(auth.MFADisableHandler(mfaDB)))
-		mux.HandleFunc("/auth/mfa/status", withCORS(auth.MFAStatusHandler(mfaDB)))
+		mfaPool := authService.Pool()
+		mux.HandleFunc("/auth/mfa/setup", withCORS(auth.MFASetupHandler(mfaPool)))
+		mux.HandleFunc("/auth/mfa/confirm", withCORS(auth.MFAConfirmHandler(mfaPool)))
+		mux.HandleFunc("/auth/mfa/verify", withCORS(auth.MFAVerifyHandler(mfaPool)))
+		mux.HandleFunc("/auth/mfa/disable", withCORS(auth.MFADisableHandler(mfaPool)))
+		mux.HandleFunc("/auth/mfa/status", withCORS(auth.MFAStatusHandler(mfaPool)))
 		logger.LogInfo("MFA (TOTP) endpoints enabled")
 	}
 
 	// Password Reset (Forgot / Reset)
 	if authService != nil {
-		pwDB := authService.DB()
-		mux.HandleFunc("/auth/forgot-password", withCORS(auth.ForgotPasswordHandler(pwDB)))
-		mux.HandleFunc("/auth/reset-password", withCORS(auth.ResetPasswordHandler(pwDB)))
-		mux.HandleFunc("/auth/validate-reset-token", withCORS(auth.ValidateResetTokenHandler(pwDB)))
+		pwPool := authService.Pool()
+		mux.HandleFunc("/auth/forgot-password", withCORS(auth.ForgotPasswordHandler(pwPool)))
+		mux.HandleFunc("/auth/reset-password", withCORS(auth.ResetPasswordHandler(pwPool)))
+		mux.HandleFunc("/auth/validate-reset-token", withCORS(auth.ValidateResetTokenHandler(pwPool)))
 		logger.LogInfo("Password reset endpoints enabled")
 	}
 
@@ -668,6 +682,7 @@ func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, str
 	mux.HandleFunc("/investment/", createReverseProxy("http://localhost:7143"))
 	mux.HandleFunc("/notification/", createReverseProxy("http://localhost:9111"))
 	mux.HandleFunc("/email/", createReverseProxy("http://localhost:8183"))
+	mux.HandleFunc("/policy-engine/", createReverseProxy("http://localhost:8185"))
 
 	mux.HandleFunc("/health", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -675,11 +690,8 @@ func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, str
 	}))
 
 	mux.HandleFunc("/health/db", withCORS(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(headerContentType, contentTypeJSON)
-
 		if gatewayPool == nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			RespondEnvelopeFailureCompat(w, http.StatusServiceUnavailable, "Database not configured", "", map[string]interface{}{
 				"status": "unhealthy",
 				"db":     "not configured",
 			})
@@ -695,19 +707,16 @@ func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, str
 
 		if err != nil {
 			logger.LogError("Health check DB ping failed: %v", err)
-			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			RespondEnvelopeFailureCompat(w, http.StatusServiceUnavailable, "Database unavailable", "", map[string]interface{}{
 				"status":  "unhealthy",
 				"db":      "disconnected",
-				"error":   "Database unavailable",
 				"latency": latency.String(),
 			})
 			return
 		}
 
 		stat := gatewayPool.Stat()
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"status":         "healthy",
 			"db":             "connected",
 			"latency":        latency.String(),

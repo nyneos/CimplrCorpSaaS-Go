@@ -1619,11 +1619,7 @@ func GetBankRateCardsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"rows":                 out,
-		})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
 		api.LogInfo("RateCard WithAudit: returned %d records", len(out))
 	}
 }

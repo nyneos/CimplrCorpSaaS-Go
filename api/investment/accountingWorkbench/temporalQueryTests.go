@@ -1,9 +1,9 @@
 package accountingworkbench
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -42,8 +42,7 @@ func TestTemporalQueriesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(result)
+		api.RespondEnvelopeSuccess(w, "Success", result)
 	}
 }
 
@@ -339,14 +338,11 @@ func VerifyAllQueriesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		response := map[string]interface{}{
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"all_queries_valid": allPassed,
 			"checks":            results,
 			"timestamp":         time.Now().Format(time.RFC3339),
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(response)
+		})
 	}
 }
 

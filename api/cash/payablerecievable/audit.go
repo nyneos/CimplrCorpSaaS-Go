@@ -31,7 +31,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var req transactionAuditRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.TransactionID) == "" || strings.TrimSpace(req.TransactionType) == "" {
-			respondTransactionAuditError(w, "transaction_type and transaction_id are required")
+			respondTransactionAuditError(w, http.StatusBadRequest, "transaction_type and transaction_id are required")
 			return
 		}
 
@@ -46,7 +46,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tableName = "auditactionreceivable"
 			idColumn = "receivable_id"
 		default:
-			respondTransactionAuditError(w, "transaction_type must be PAYABLE or RECEIVABLE")
+			respondTransactionAuditError(w, http.StatusBadRequest, "transaction_type must be PAYABLE or RECEIVABLE")
 			return
 		}
 
@@ -74,7 +74,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY requested_at ASC, action_id ASC
 		`, req.TransactionID)
 		if err != nil {
-			respondTransactionAuditError(w, err.Error())
+			respondTransactionAuditError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -87,7 +87,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var checkerBy, checkerComment, reason *string
 			var checkerAt *time.Time
 			if err := rows.Scan(&actionID, &entityID, &action, &status, &performedBy, &performedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason); err != nil {
-				respondTransactionAuditError(w, "failed to read transaction audit history")
+				respondTransactionAuditError(w, http.StatusInternalServerError, "failed to read transaction audit history")
 				return
 			}
 
@@ -108,7 +108,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if err := rows.Err(); err != nil {
-			respondTransactionAuditError(w, "failed to read transaction audit history")
+			respondTransactionAuditError(w, http.StatusInternalServerError, "failed to read transaction audit history")
 			return
 		}
 
@@ -119,7 +119,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY requested_at ASC, download_audit_id ASC
 		`, txType, req.TransactionID)
 		if err != nil {
-			respondTransactionAuditError(w, constants.ErrFailedToReadTransactionDownloadAuditHistory)
+			respondTransactionAuditError(w, http.StatusInternalServerError, constants.ErrFailedToReadTransactionDownloadAuditHistory)
 			return
 		}
 		defer downloadRows.Close()
@@ -130,7 +130,7 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var requestedIP sql.NullString
 			var fileName, uploadKey sql.NullString
 			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &requestedIP, &fileName, &uploadKey); err != nil {
-				respondTransactionAuditError(w, constants.ErrFailedToReadTransactionDownloadAuditHistory)
+				respondTransactionAuditError(w, http.StatusInternalServerError, constants.ErrFailedToReadTransactionDownloadAuditHistory)
 				return
 			}
 
@@ -152,14 +152,12 @@ func GetTransactionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if err := downloadRows.Err(); err != nil {
-			respondTransactionAuditError(w, constants.ErrFailedToReadTransactionDownloadAuditHistory)
+			respondTransactionAuditError(w, http.StatusInternalServerError, constants.ErrFailedToReadTransactionDownloadAuditHistory)
 			return
 		}
 
 		// Standardize: always return 'rows' as the array field
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"audit_logs": payload,
 		})
 	}
@@ -190,9 +188,8 @@ func validateTransactionRecordScope(ctx context.Context, pgxPool *pgxpool.Pool, 
 	return validatePayRecScope(ctx, entityName, counterpartyName, currencyCode)
 }
 
-func respondTransactionAuditError(w http.ResponseWriter, message string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": message})
+func respondTransactionAuditError(w http.ResponseWriter, status int, message string) {
+	api.RespondEnvelopeError(w, status, message, "")
 }
 
 func buildTransactionChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, transactionType, transactionID, action, actionID string) []map[string]interface{} {

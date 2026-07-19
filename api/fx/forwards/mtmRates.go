@@ -23,8 +23,9 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 
 	"CimplrCorpSaas/internal/logger"
@@ -34,17 +35,17 @@ var ErrMTMFileAlreadyUploaded = errors.New("mtm file already uploaded")
 
 const duplicateMTMUploadMessage = "This MTM file was already uploaded earlier. Please upload a different file."
 
-func forwardMTMHasIsDeletedColumn(ctx context.Context, db *sql.DB) bool {
-	return forwardMTMHasColumn(ctx, db, "is_deleted")
+func forwardMTMHasIsDeletedColumn(ctx context.Context, pool *pgxpool.Pool) bool {
+	return forwardMTMHasColumn(ctx, pool, "is_deleted")
 }
 
-func forwardMTMHasProcessingStatusColumn(ctx context.Context, db *sql.DB) bool {
-	return forwardMTMHasColumn(ctx, db, "processing_status")
+func forwardMTMHasProcessingStatusColumn(ctx context.Context, pool *pgxpool.Pool) bool {
+	return forwardMTMHasColumn(ctx, pool, "processing_status")
 }
 
-func forwardMTMHasColumn(ctx context.Context, db *sql.DB, columnName string) bool {
+func forwardMTMHasColumn(ctx context.Context, pool *pgxpool.Pool, columnName string) bool {
 	var exists bool
-	if err := db.QueryRowContext(ctx, `
+	if err := pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1
 			FROM information_schema.columns
@@ -58,17 +59,17 @@ func forwardMTMHasColumn(ctx context.Context, db *sql.DB, columnName string) boo
 	return exists
 }
 
-func existingMTMUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
+func existingMTMUploadKeys(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
 	query := `
 		SELECT DISTINCT upload_s3_key
 		FROM forward_mtm
 		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
 	`
-	if forwardMTMHasIsDeletedColumn(ctx, db) {
+	if forwardMTMHasIsDeletedColumn(ctx, pool) {
 		query += ` AND COALESCE(is_deleted, false) = false`
 	}
 
-	rows, err := db.QueryContext(ctx, query)
+	rows, err := pool.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -85,8 +86,8 @@ func existingMTMUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
 	return keys, rows.Err()
 }
 
-func ensureUniqueMTMUpload(ctx context.Context, db *sql.DB, fileBytes []byte) error {
-	keys, err := existingMTMUploadKeys(ctx, db)
+func ensureUniqueMTMUpload(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte) error {
+	keys, err := existingMTMUploadKeys(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("failed to check duplicate mtm upload: %w", err)
 	}
@@ -100,8 +101,8 @@ func ensureUniqueMTMUpload(ctx context.Context, db *sql.DB, fileBytes []byte) er
 	return nil
 }
 
-func mtmApprovalStatusExpr(ctx context.Context, db *sql.DB) string {
-	if forwardMTMHasProcessingStatusColumn(ctx, db) {
+func mtmApprovalStatusExpr(ctx context.Context, pool *pgxpool.Pool) string {
+	if forwardMTMHasProcessingStatusColumn(ctx, pool) {
 		return "COALESCE(NULLIF(TRIM(processing_status), ''), NULLIF(TRIM(status), ''), '')"
 	}
 	return "COALESCE(NULLIF(TRIM(status), ''), '')"
@@ -111,8 +112,8 @@ func mtmPendingStatuses() []string {
 	return []string{"PENDING", constants.StatusPendingApproval, constants.StatusPendingEditApproval, constants.StatusPendingDeleteApproval}
 }
 
-func mtmActiveFilterClause(ctx context.Context, db *sql.DB, tableAlias string) string {
-	if !forwardMTMHasIsDeletedColumn(ctx, db) {
+func mtmActiveFilterClause(ctx context.Context, pool *pgxpool.Pool, tableAlias string) string {
+	if !forwardMTMHasIsDeletedColumn(ctx, pool) {
 		return ""
 	}
 	if strings.TrimSpace(tableAlias) != "" {
@@ -126,7 +127,7 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	respondEnvelopeError(w, status, errMsg)
 }
 
-func UploadMTMFiles(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func UploadMTMFiles(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var userID string
 		ct := r.Header.Get(constants.ContentTypeText)
@@ -165,7 +166,7 @@ func UploadMTMFiles(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		results, err := processUploadMTMFiles(r.Context(), db, pool, r, buNames)
+		results, err := processUploadMTMFiles(r.Context(), pool, r, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -190,7 +191,7 @@ func UploadMTMFiles(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
+func processUploadMTMFiles(ctx context.Context, pool *pgxpool.Pool, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
 	files := r.MultipartForm.File["files"]
 	results := []map[string]interface{}{}
 	skipDuplicates := strings.EqualFold(strings.TrimSpace(r.FormValue("skipDuplicates")), "true")
@@ -218,7 +219,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, 
 		ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
 		s3Key := s3storage.BuildUploadedS3Key("fx/mtm", "", fileHeader.Filename, uploadedBy, time.Now().UTC())
 
-		if err := ensureUniqueMTMUpload(ctx, db, fileBytes); err != nil {
+		if err := ensureUniqueMTMUpload(ctx, pool, fileBytes); err != nil {
 			message := err.Error()
 			if errors.Is(err, ErrMTMFileAlreadyUploaded) {
 				message = duplicateMTMUploadMessage
@@ -317,7 +318,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, 
 		bookingIdList := []string{}
 		if len(refIds) > 0 {
 			query := `SELECT system_transaction_id, internal_reference_id, order_type, booking_amount, maturity_date, total_rate, currency_pair FROM forward_bookings WHERE internal_reference_id = ANY($1)`
-			rows, err := db.Query(query, pq.Array(refIds))
+			rows, err := pool.Query(ctx, query, refIds)
 			if err == nil {
 				for rows.Next() {
 					var systemTransactionId, internal_reference_id, order_type, currency_pair string
@@ -342,10 +343,10 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, 
 		existingMTMRefs := map[string]struct{}{}
 		if len(refIds) > 0 {
 			query := `SELECT internal_reference_id FROM forward_mtm WHERE internal_reference_id = ANY($1)`
-			if forwardMTMHasIsDeletedColumn(ctx, db) {
+			if forwardMTMHasIsDeletedColumn(ctx, pool) {
 				query += ` AND COALESCE(is_deleted, false) = false`
 			}
-			rows, err := db.Query(query, pq.Array(refIds))
+			rows, err := pool.Query(ctx, query, refIds)
 			if err == nil {
 				for rows.Next() {
 					var internalReferenceID string
@@ -359,7 +360,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, 
 		ledgerMap := map[string]map[string]interface{}{}
 		if len(bookingIdList) > 0 {
 			query := `SELECT booking_id, running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = ANY($1)`
-			rows, err := db.Query(query, pq.Array(bookingIdList))
+			rows, err := pool.Query(ctx, query, bookingIdList)
 			if err == nil {
 				for rows.Next() {
 					var bookingId string
@@ -478,7 +479,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, 
 			continue
 		}
 
-		tx, err := db.Begin()
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			results = append(results, map[string]interface{}{
 				"filename":           fileHeader.Filename,
@@ -491,7 +492,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, 
 		if s3storage.IsS3UploadEnabled() {
 			contentType := s3storage.DetectContentType(fileBytes)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				_ = tx.Rollback()
+				_ = tx.Rollback(ctx)
 				results = append(results, map[string]interface{}{
 					"filename":           fileHeader.Filename,
 					constants.ValueError: "Failed to upload file to S3: " + err.Error(),
@@ -501,7 +502,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, 
 			s3Uploaded = true
 		}
 
-		hasProcessingStatus := forwardMTMHasProcessingStatusColumn(ctx, db)
+		hasProcessingStatus := forwardMTMHasProcessingStatusColumn(ctx, pool)
 		if len(validRows) > 0 {
 			valueStrings := []string{}
 			valueArgs := []interface{}{}
@@ -527,9 +528,9 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, 
 				insertCols += ", processing_status"
 			}
 			insertQuery := "INSERT INTO forward_mtm (" + insertCols + ") VALUES " + strings.Join(valueStrings, ",")
-			_, err := tx.Exec(insertQuery, valueArgs...)
+			_, err := tx.Exec(ctx, insertQuery, valueArgs...)
 			if err != nil {
-				_ = tx.Rollback()
+				_ = tx.Rollback(ctx)
 				if s3Uploaded {
 					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 						logger.LogError("[mtm-upload] failed to cleanup S3 object after insert failure for %s: %v", fileHeader.Filename, cleanupErr)
@@ -542,7 +543,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, 
 				continue
 			}
 		}
-		err = tx.Commit()
+		err = tx.Commit(ctx)
 		if err != nil {
 			if s3Uploaded {
 				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
@@ -562,7 +563,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, 
 		})
 		for _, row := range validRows {
 			if len(row) > 0 {
-				auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: fmt.Sprint(row[0]), ActionType: "CREATE", Status: constants.StatusPendingApproval, Reason: "", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": s3Key}})
+				auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: fmt.Sprint(row[0]), ActionType: "CREATE", Status: constants.StatusPendingApproval, Reason: "", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": s3Key}})
 			}
 		}
 		insertedMTMIDs := make([]string, 0, len(validRows))
@@ -577,9 +578,9 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, 
 	return results, nil
 }
 
-func GetMTMDownloadURL(db *sql.DB) http.HandlerFunc {
+func GetMTMDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if err := db.Ping(); err != nil {
+		if err := pool.Ping(r.Context()); err != nil {
 			log.Printf("[ERROR] GetMTMDownloadURL: database connection issue: %v", err)
 			respondWithError(w, http.StatusInternalServerError, "database connection unavailable")
 			return
@@ -616,15 +617,15 @@ func GetMTMDownloadURL(db *sql.DB) http.HandlerFunc {
 			SELECT upload_s3_key
 			FROM forward_mtm
 			WHERE mtm_id = $1`
-		if forwardMTMHasIsDeletedColumn(r.Context(), db) {
+		if forwardMTMHasIsDeletedColumn(r.Context(), pool) {
 			query += `
 			  AND COALESCE(is_deleted, false) = false`
 		}
 		query += `
 			LIMIT 1`
-		err := db.QueryRowContext(r.Context(), query, mtmID).Scan(&uploadS3Key)
+		err := pool.QueryRow(r.Context(), query, mtmID).Scan(&uploadS3Key)
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, pgx.ErrNoRows) {
 				respondWithError(w, http.StatusNotFound, "mtm record not found")
 				return
 			}
@@ -648,19 +649,15 @@ func GetMTMDownloadURL(db *sql.DB) http.HandlerFunc {
 		if requestedBy == "" {
 			requestedBy = strings.TrimSpace(auditutil.Actor(req.UserID))
 		}
-		auditutil.RecordDownload(r.Context(), db, auditutil.DownloadParams{TableName: auditutil.TableForwardMTMDownloads, ParentColumn: "mtm_id", ParentID: mtmID, RequestedBy: requestedBy, UploadS3Key: s3Key, ExtraColumns: nil})
+		auditutil.RecordDownloadPGX(r.Context(), pool, auditutil.DownloadParams{TableName: auditutil.TableForwardMTMDownloads, ParentColumn: "mtm_id", ParentID: mtmID, RequestedBy: requestedBy, UploadS3Key: s3Key, ExtraColumns: nil})
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
+		respondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"download_url": downloadURL,
 		})
 	}
 }
 
-func GetMTMBulkDownloadURL(db *sql.DB) http.HandlerFunc {
+func GetMTMBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			MTMIDs []string `json:"mtm_ids"`
@@ -691,13 +688,13 @@ func GetMTMBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 				SELECT upload_s3_key
 				FROM forward_mtm
 				WHERE mtm_id = $1`
-			if forwardMTMHasIsDeletedColumn(ctx, db) {
+			if forwardMTMHasIsDeletedColumn(ctx, pool) {
 				query += `
 				  AND COALESCE(is_deleted, false) = false`
 			}
 			query += `
 				LIMIT 1`
-			err := db.QueryRowContext(ctx, query, mtmID).Scan(&uploadS3Key)
+			err := pool.QueryRow(ctx, query, mtmID).Scan(&uploadS3Key)
 			if err != nil {
 				failedIDs = append(failedIDs, mtmID)
 				continue
@@ -719,7 +716,7 @@ func GetMTMBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 				"mtm_id":       mtmID,
 				"download_url": downloadURL,
 			})
-			auditutil.RecordDownload(ctx, db, auditutil.DownloadParams{TableName: auditutil.TableForwardMTMDownloads, ParentColumn: "mtm_id", ParentID: mtmID, RequestedBy: requestedBy, UploadS3Key: s3Key, ExtraColumns: nil})
+			auditutil.RecordDownloadPGX(ctx, pool, auditutil.DownloadParams{TableName: auditutil.TableForwardMTMDownloads, ParentColumn: "mtm_id", ParentID: mtmID, RequestedBy: requestedBy, UploadS3Key: s3Key, ExtraColumns: nil})
 		}
 
 		writeBulkDownloadResponse(w, files, failedIDs)
@@ -750,6 +747,11 @@ func num(v interface{}) float64 {
 	case string:
 		f, _ := strconv.ParseFloat(t, 64)
 		return f
+	case pgtype.Numeric:
+		if f, err := t.Float64Value(); err == nil && f.Valid {
+			return f.Float64
+		}
+		return 0
 	default:
 		return 0
 	}
@@ -776,17 +778,34 @@ func calcDaysToMaturity(dealDateStr, maturityDateStr string, fallback interface{
 	return 0
 }
 
+// normalizeMTMRowValue is shared package-wide (called from fwdCancelRoll.go and
+// fwdBookings.go too) to normalize values coming out of blind interface{} pgx
+// scans — in particular pgtype.Numeric (what pgx returns for NUMERIC columns,
+// replacing lib/pq's []byte-based representation) back to float64 so existing
+// arithmetic and .(float64) call sites keep working.
 func normalizeMTMRowValue(v interface{}) interface{} {
 	switch t := v.(type) {
 	case []byte:
 		return string(t)
+	case pgtype.Numeric:
+		if !t.Valid {
+			return nil
+		}
+		if f, err := t.Float64Value(); err == nil && f.Valid {
+			return f.Float64
+		}
+		return nil
 	default:
 		return v
 	}
 }
 
-func collectMTMRows(rows *sql.Rows) []map[string]interface{} {
-	cols, _ := rows.Columns()
+func collectMTMRows(rows pgx.Rows) []map[string]interface{} {
+	fieldDescs := rows.FieldDescriptions()
+	cols := make([]string, len(fieldDescs))
+	for i, fd := range fieldDescs {
+		cols[i] = fd.Name
+	}
 	out := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		vals := make([]interface{}, len(cols))
@@ -810,7 +829,7 @@ func collectMTMRows(rows *sql.Rows) []map[string]interface{} {
 }
 
 // Handler: GetMTMData - returns MTM data for allowed business units from middleware
-func GetMTMData(db *sql.DB) http.HandlerFunc {
+func GetMTMData(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -830,16 +849,20 @@ func GetMTMData(db *sql.DB) http.HandlerFunc {
 
 		// Fetch MTM data for allowed business units
 		query := `SELECT * FROM forward_mtm WHERE entity = ANY($1)`
-		if forwardMTMHasIsDeletedColumn(r.Context(), db) {
+		if forwardMTMHasIsDeletedColumn(r.Context(), pool) {
 			query += ` AND COALESCE(is_deleted, false) = false`
 		}
-		rows, err := db.Query(query, pq.Array(buNames))
+		rows, err := pool.Query(r.Context(), query, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch MTM data")
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
+		fieldDescs := rows.FieldDescriptions()
+	cols := make([]string, len(fieldDescs))
+	for i, fd := range fieldDescs {
+		cols[i] = fd.Name
+	}
 		data := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -860,15 +883,11 @@ func GetMTMData(db *sql.DB) http.HandlerFunc {
 			delete(rowMap, "upload_link")
 			data = append(data, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 data,
-		})
+		respondEnvelopeSuccess(w, "Success", data)
 	}
 }
 
-func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
+func RequestDeleteMTMRecords(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string   `json:"user_id"`
@@ -883,7 +902,7 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.MTMIDsRequired)
 			return
 		}
-		if !forwardMTMHasIsDeletedColumn(r.Context(), db) {
+		if !forwardMTMHasIsDeletedColumn(r.Context(), pool) {
 			respondWithError(w, http.StatusInternalServerError, "forward_mtm soft delete columns are missing")
 			return
 		}
@@ -901,12 +920,12 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		statusColumn := mtmApprovalStatusExpr(r.Context(), db)
-		rows, err := db.QueryContext(r.Context(), fmt.Sprintf(`
+		statusColumn := mtmApprovalStatusExpr(r.Context(), pool)
+		rows, err := pool.Query(r.Context(), fmt.Sprintf(`
 			SELECT mtm_id, entity, COALESCE(%s, '')
 			FROM forward_mtm
 			WHERE mtm_id = ANY($1)%s
-		`, statusColumn, mtmActiveFilterClause(r.Context(), db, "")), pq.Array(normalizedIDs))
+		`, statusColumn, mtmActiveFilterClause(r.Context(), pool, "")), normalizedIDs)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to validate mtm rows")
 			return
@@ -926,7 +945,7 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 			eligibleIDs = append(eligibleIDs, mtmID)
-			oldSnapshots[mtmID] = auditutil.FetchRowSnapshot(r.Context(), db, "public.forward_mtm", "mtm_id", mtmID)
+			oldSnapshots[mtmID] = auditutil.FetchRowSnapshotPGX(r.Context(), pool, "public.forward_mtm", "mtm_id", mtmID)
 		}
 		rows.Close()
 
@@ -936,21 +955,25 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 		}
 
 		setClauses := []string{"status = 'Pending Delete Approval'"}
-		if forwardMTMHasProcessingStatusColumn(r.Context(), db) {
+		if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
 			setClauses = append(setClauses, "processing_status = 'PENDING_DELETE_APPROVAL'")
 		}
-		resultRows, err := db.QueryContext(r.Context(), fmt.Sprintf(`
+		resultRows, err := pool.Query(r.Context(), fmt.Sprintf(`
 			UPDATE forward_mtm
 			SET %s
 			WHERE mtm_id = ANY($1)%s
 			RETURNING *
-		`, strings.Join(setClauses, ", "), mtmActiveFilterClause(r.Context(), db, "")), pq.Array(eligibleIDs))
+		`, strings.Join(setClauses, ", "), mtmActiveFilterClause(r.Context(), pool, "")), eligibleIDs)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to submit mtm delete request")
 			return
 		}
 
-		cols, _ := resultRows.Columns()
+		resultFieldDescs := resultRows.FieldDescriptions()
+		cols := make([]string, len(resultFieldDescs))
+		for i, fd := range resultFieldDescs {
+			cols[i] = fd.Name
+		}
 		updated := make([]map[string]interface{}, 0, len(eligibleIDs))
 		requestedBy := auditutil.Actor(req.UserID)
 		for resultRows.Next() {
@@ -973,19 +996,17 @@ func RequestDeleteMTMRecords(db *sql.DB) http.HandlerFunc {
 			if mtmID == "" || mtmID == "<nil>" {
 				continue
 			}
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: mtmID, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: req.Reason, RequestedBy: requestedBy, OldValues: oldSnapshots[mtmID], NewValues: rowMap})
+			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: mtmID, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: req.Reason, RequestedBy: requestedBy, OldValues: oldSnapshots[mtmID], NewValues: rowMap})
 		}
 		resultRows.Close()
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"updated":              updated,
+		respondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"updated": updated,
 		})
 	}
 }
 
-func BulkUpdateMTMProcessingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func BulkUpdateMTMProcessingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID           string   `json:"user_id"`
@@ -1016,12 +1037,12 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 			return
 		}
 
-		statusColumn := mtmApprovalStatusExpr(r.Context(), db)
-		rows, err := db.QueryContext(r.Context(), fmt.Sprintf(`
+		statusColumn := mtmApprovalStatusExpr(r.Context(), pool)
+		rows, err := pool.Query(r.Context(), fmt.Sprintf(`
 			SELECT mtm_id, entity, COALESCE(%s, '')
 			FROM forward_mtm
 			WHERE mtm_id = ANY($1)%s
-		`, statusColumn, mtmActiveFilterClause(r.Context(), db, "")), pq.Array(normalizedIDs))
+		`, statusColumn, mtmActiveFilterClause(r.Context(), pool, "")), normalizedIDs)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to validate mtm rows")
 			return
@@ -1059,7 +1080,7 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 
 		if len(deletePendingIDs) > 0 {
 			if req.ProcessingStatus == "Approved" {
-				if !forwardMTMHasColumn(r.Context(), db, "deleted_by") || !forwardMTMHasColumn(r.Context(), db, "deleted_at") {
+				if !forwardMTMHasColumn(r.Context(), pool, "deleted_by") || !forwardMTMHasColumn(r.Context(), pool, "deleted_at") {
 					respondWithError(w, http.StatusInternalServerError, "forward_mtm delete audit columns are missing")
 					return
 				}
@@ -1069,16 +1090,16 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 					"deleted_at = NOW()",
 					"status = 'Deleted'",
 				}
-				if forwardMTMHasProcessingStatusColumn(r.Context(), db) {
+				if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
 					setClauses = append(setClauses, "processing_status = 'APPROVED'")
 				}
-				resultRows, updateErr := db.QueryContext(r.Context(), fmt.Sprintf(`
+				resultRows, updateErr := pool.Query(r.Context(), fmt.Sprintf(`
 					UPDATE forward_mtm
 					SET %s
 					WHERE mtm_id = ANY($1)
 					  AND COALESCE(is_deleted, false) = false
 					RETURNING *
-				`, strings.Join(setClauses, ", ")), pq.Array(deletePendingIDs), strings.TrimSpace(req.UserID))
+				`, strings.Join(setClauses, ", ")), deletePendingIDs, strings.TrimSpace(req.UserID))
 				if updateErr != nil {
 					respondWithError(w, http.StatusInternalServerError, "failed to approve mtm delete request")
 					return
@@ -1087,16 +1108,16 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 				resultRows.Close()
 			} else {
 				setClauses := []string{"status = 'Rejected'"}
-				if forwardMTMHasProcessingStatusColumn(r.Context(), db) {
+				if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
 					setClauses = append(setClauses, "processing_status = 'REJECTED'")
 				}
-				resultRows, updateErr := db.QueryContext(r.Context(), fmt.Sprintf(`
+				resultRows, updateErr := pool.Query(r.Context(), fmt.Sprintf(`
 					UPDATE forward_mtm
 					SET %s
 					WHERE mtm_id = ANY($1)
 					  AND COALESCE(is_deleted, false) = false
 					RETURNING *
-				`, strings.Join(setClauses, ", ")), pq.Array(deletePendingIDs))
+				`, strings.Join(setClauses, ", ")), deletePendingIDs)
 				if updateErr != nil {
 					respondWithError(w, http.StatusInternalServerError, "failed to reject mtm delete request")
 					return
@@ -1106,7 +1127,7 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 			}
 
 			for _, id := range deletePendingIDs {
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: id, Status: strings.ToUpper(req.ProcessingStatus), CheckerBy: checker, Comment: decisionComment})
+				auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: id, Status: strings.ToUpper(req.ProcessingStatus), CheckerBy: checker, Comment: decisionComment})
 			}
 		}
 
@@ -1115,22 +1136,22 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 			switch req.ProcessingStatus {
 			case "Approved":
 				setClauses = append(setClauses, "status = 'Approved'")
-				if forwardMTMHasProcessingStatusColumn(r.Context(), db) {
+				if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
 					setClauses = append(setClauses, "processing_status = 'APPROVED'")
 				}
 			case "Rejected":
 				setClauses = append(setClauses, "status = 'Rejected'")
-				if forwardMTMHasProcessingStatusColumn(r.Context(), db) {
+				if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
 					setClauses = append(setClauses, "processing_status = 'REJECTED'")
 				}
 			}
-			resultRows, updateErr := db.QueryContext(r.Context(), fmt.Sprintf(`
+			resultRows, updateErr := pool.Query(r.Context(), fmt.Sprintf(`
 				UPDATE forward_mtm
 				SET %s
 				WHERE mtm_id = ANY($1)
 				  AND COALESCE(is_deleted, false) = false
 				RETURNING *
-			`, strings.Join(setClauses, ", ")), pq.Array(regularPendingIDs))
+			`, strings.Join(setClauses, ", ")), regularPendingIDs)
 			if updateErr != nil {
 				respondWithError(w, http.StatusInternalServerError, "failed to update mtm approval status")
 				return
@@ -1139,7 +1160,7 @@ func BulkUpdateMTMProcessingStatus(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 			resultRows.Close()
 
 			for _, id := range regularPendingIDs {
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: id, Status: strings.ToUpper(req.ProcessingStatus), CheckerBy: checker, Comment: decisionComment})
+				auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: id, Status: strings.ToUpper(req.ProcessingStatus), CheckerBy: checker, Comment: decisionComment})
 			}
 		}
 

@@ -24,12 +24,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
 
 	"CimplrCorpSaas/api/constants"
-
-	"github.com/lib/pq"
 
 	"CimplrCorpSaas/internal/logger"
 )
@@ -38,8 +38,8 @@ var ErrExposureFileAlreadyUploaded = errors.New("exposure file already uploaded"
 
 const duplicateExposureUploadMessage = "This exposure file was already uploaded earlier. Please upload a different file."
 
-func existingExposureUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
+func existingExposureUploadKeys(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	rows, err := pool.Query(ctx, `
 		SELECT DISTINCT upload_s3_key
 		FROM exposure_headers
 		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
@@ -61,8 +61,8 @@ func existingExposureUploadKeys(ctx context.Context, db *sql.DB) ([]string, erro
 	return keys, rows.Err()
 }
 
-func ensureUniqueExposureUpload(ctx context.Context, db *sql.DB, fileBytes []byte) error {
-	keys, err := existingExposureUploadKeys(ctx, db)
+func ensureUniqueExposureUpload(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte) error {
+	keys, err := existingExposureUploadKeys(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("failed to check duplicate exposure upload: %w", err)
 	}
@@ -121,13 +121,13 @@ func respondWithSuccess(w http.ResponseWriter, status int, message string, data 
 	api.RespondEnvelopeSuccess(w, message, data)
 }
 
-func fetchExposurePermissions(db *sql.DB, userID string) map[string]interface{} {
+func fetchExposurePermissions(ctx context.Context, pool *pgxpool.Pool, userID string) map[string]interface{} {
 	result := map[string]interface{}{}
 	var roleId int
-	if err := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", userID).Scan(&roleId); err != nil {
+	if err := pool.QueryRow(ctx, "SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", userID).Scan(&roleId); err != nil {
 		return result
 	}
-	rows, err := db.Query(`
+	rows, err := pool.Query(ctx, `
 		SELECT p.page_name, p.tab_name, p.action, rp.allowed
 		FROM role_permissions rp
 		JOIN permissions p ON rp.permission_id = p.id
@@ -204,6 +204,16 @@ func parseDBValue(col string, val interface{}) interface{} {
 			return t.Format(time.RFC3339)
 		}
 		return fmt.Sprintf("%v", t)
+	case pgtype.Numeric:
+		// pgx returns NUMERIC columns as pgtype.Numeric (not []byte like lib/pq did) —
+		// convert to float64 so downstream code (arithmetic, .(float64) assertions) keeps working.
+		if !t.Valid {
+			return nil
+		}
+		if f, err := t.Float64Value(); err == nil && f.Valid {
+			return f.Float64
+		}
+		return nil
 	}
 
 	if b, ok := val.([]byte); ok {
@@ -256,8 +266,19 @@ const headersLineItemsSelectSQL = `
 			LEFT JOIN exposure_line_items l ON l.exposure_header_id = h.exposure_header_id
 `
 
-func scanHeadersLineItemsRows(rows *sql.Rows) ([]map[string]interface{}, error) {
-	joinCols, _ := rows.Columns()
+// pgxColumnNames returns the column names for a pgx.Rows result set, mirroring
+// the []string returned by (*sql.Rows).Columns() used throughout this package.
+func pgxColumnNames(rows pgx.Rows) []string {
+	fds := rows.FieldDescriptions()
+	cols := make([]string, len(fds))
+	for i, fd := range fds {
+		cols[i] = fd.Name
+	}
+	return cols
+}
+
+func scanHeadersLineItemsRows(rows pgx.Rows) ([]map[string]interface{}, error) {
+	joinCols := pgxColumnNames(rows)
 	joinData := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		vals := make([]interface{}, len(joinCols))
@@ -292,13 +313,13 @@ func scanHeadersLineItemsRows(rows *sql.Rows) ([]map[string]interface{}, error) 
 	return joinData, rows.Err()
 }
 
-func queryHeadersLineItems(ctx context.Context, db *sql.DB, buNames []string, batchID string, pendingOnly bool) ([]map[string]interface{}, error) {
+func queryHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, buNames []string, batchID string, pendingOnly bool) ([]map[string]interface{}, error) {
 	query := headersLineItemsSelectSQL + `
 			WHERE h.entity = ANY($1)
 			  AND h.exposure_creation_status = 'Approved'
 			  AND h.is_deleted IS NOT TRUE
 	`
-	args := []interface{}{pq.Array(buNames)}
+	args := []interface{}{buNames}
 	if strings.TrimSpace(batchID) != "" {
 		query += ` AND h.batch_id::text = $2`
 		args = append(args, strings.TrimSpace(batchID))
@@ -308,7 +329,7 @@ func queryHeadersLineItems(ctx context.Context, db *sql.DB, buNames []string, ba
 	}
 	query += ` ORDER BY h.document_id, l.line_number NULLS FIRST`
 
-	joinRows, err := db.QueryContext(ctx, query, args...)
+	joinRows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -349,9 +370,9 @@ func hasNonEmptyUploadValue(v interface{}) bool {
 	}
 }
 
-func exposureHeadersHasUploadBatchID(ctx context.Context, db *sql.DB) bool {
+func exposureHeadersHasUploadBatchID(ctx context.Context, pool *pgxpool.Pool) bool {
 	var exists bool
-	if err := db.QueryRowContext(ctx, `
+	if err := pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1
 			FROM information_schema.columns
@@ -364,14 +385,14 @@ func exposureHeadersHasUploadBatchID(ctx context.Context, db *sql.DB) bool {
 	return exists
 }
 
-func lookupExposureUploadS3Key(ctx context.Context, db *sql.DB, recordID string) (sql.NullString, error) {
+func lookupExposureUploadS3Key(ctx context.Context, pool *pgxpool.Pool, recordID string) (sql.NullString, error) {
 	var uploadS3Key sql.NullString
 	trimmedRecordID := strings.TrimSpace(recordID)
 	if trimmedRecordID == "" {
 		return sql.NullString{}, sql.ErrNoRows
 	}
 
-	err := db.QueryRowContext(ctx, `
+	err := pool.QueryRow(ctx, `
 		SELECT upload_s3_key
 		FROM exposure_headers
 		WHERE exposure_header_id::text = $1
@@ -380,11 +401,11 @@ func lookupExposureUploadS3Key(ctx context.Context, db *sql.DB, recordID string)
 	if err == nil && strings.TrimSpace(uploadS3Key.String) != "" {
 		return uploadS3Key, nil
 	}
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return sql.NullString{}, err
 	}
 
-	err = db.QueryRowContext(ctx, `
+	err = pool.QueryRow(ctx, `
 		SELECT upload_s3_key
 		FROM exposure_headers
 		WHERE document_id = $1
@@ -394,16 +415,17 @@ func lookupExposureUploadS3Key(ctx context.Context, db *sql.DB, recordID string)
 	if err == nil && strings.TrimSpace(uploadS3Key.String) != "" {
 		return uploadS3Key, nil
 	}
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return sql.NullString{}, err
 	}
 	return sql.NullString{}, sql.ErrNoRows
 }
 
 // Handler
-func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 	// ...existing code...
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			ID     string                 `json:"id"` // exposure_header_id
 			Fields map[string]interface{} `json:"fields"`
@@ -416,7 +438,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.Han
 		}
 
 		// Get buNames from context
-		scope := ctxutil.FromContext(r.Context())
+		scope := ctxutil.FromContext(ctx)
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusInternalServerError, "Business units not found in context")
@@ -424,7 +446,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.Han
 		}
 
 		// Get joined row
-		joinRow := db.QueryRow(`
+		joinRow := pool.QueryRow(ctx, `
 			SELECT h.exposure_header_id, h.entity
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
@@ -444,7 +466,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.Han
 		}
 
 		// Get columns for each table
-		headerColsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_headers'`)
+		headerColsRes, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_headers'`)
 		if err != nil {
 			logger.LogError("failed to query header columns: %v", err)
 			respondWithError(w, http.StatusInternalServerError, "failed to read table metadata")
@@ -452,7 +474,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.Han
 		}
 		defer headerColsRes.Close()
 
-		lineColsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_line_items'`)
+		lineColsRes, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_line_items'`)
 		if err != nil {
 			logger.LogError("failed to query line columns: %v", err)
 			respondWithError(w, http.StatusInternalServerError, "failed to read table metadata")
@@ -491,7 +513,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.Han
 			headerFields["value_date"] = val
 			delete(headerFields, "document_date")
 		}
-		oldValues := auditutil.FetchRowSnapshot(r.Context(), db, constants.ExposureHeaders, "exposure_header_id", exposureHeaderID)
+		oldValues := auditutil.FetchRowSnapshotPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", exposureHeaderID)
 		// Update header if needed
 		if len(headerFields) > 0 {
 			setParts := []string{}
@@ -510,13 +532,13 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.Han
 				strings.Join(setParts, ", "),
 				len(values),
 			)
-			if _, err := db.Exec(query, values...); err != nil {
+			if _, err := pool.Exec(ctx, query, values...); err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Header update failed: "+err.Error())
 				return
 			}
 		}
 		if len(headerFields) == 0 && len(lineFields) > 0 {
-			if _, err := db.Exec(
+			if _, err := pool.Exec(ctx,
 				`UPDATE exposure_headers SET approval_status = $1 WHERE exposure_header_id = $2`,
 				constants.StatusPendingEditApproval,
 				exposureHeaderID,
@@ -543,7 +565,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.Han
 				strings.Join(setParts, ", "),
 				len(values),
 			)
-			if _, err := db.Exec(query, values...); err != nil {
+			if _, err := pool.Exec(ctx, query, values...); err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Line item update failed: "+err.Error())
 				return
 			}
@@ -551,7 +573,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.Han
 
 		// Only return the updated fields
 		// Fetch full joined row and parse fields
-		rows, err := db.Query(`
+		rows, err := pool.Query(ctx, `
 			SELECT h.*, l.*
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
@@ -563,7 +585,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.Han
 		}
 		defer rows.Close()
 
-		cols, _ := rows.Columns()
+		cols := pgxColumnNames(rows)
 		results := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -603,9 +625,9 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB, pool *pgxpool.Pool) http.Han
 		if len(results) > 0 {
 			newValues = results[0]
 		}
-		auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: exposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: strings.TrimSpace(req.Reason), RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValues, NewValues: newValues})
+		auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: exposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: strings.TrimSpace(req.Reason), RequestedBy: auditutil.Actor(req.UserID), OldValues: oldValues, NewValues: newValues})
 
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
 			SourceRoute: fxnotif.SourceRouteLegacyEdit, Action: fxnotif.ActionEdit, UserID: req.UserID, RequestedBy: auditutil.Actor(req.UserID), CheckerComment: strings.TrimSpace(req.Reason),
 			ExposureIDs: []string{exposureHeaderID}, ResultBuckets: nil,
 		})
@@ -653,7 +675,7 @@ func normalizeDateFields(rowMap map[string]interface{}) {
 }
 
 // Handler: GetExposureHeadersLineItems
-func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
+func GetExposureHeadersLineItems(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID  string `json:"user_id"`
@@ -672,7 +694,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		joinData, err := queryHeadersLineItems(ctx, db, buNames, req.BatchID, false)
+		joinData, err := queryHeadersLineItems(ctx, pool, buNames, req.BatchID, false)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure headers/line items")
 			return
@@ -687,7 +709,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: GetPendingApprovalHeadersLineItems
-func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
+func GetPendingApprovalHeadersLineItems(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID  string `json:"user_id"`
@@ -719,7 +741,7 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		joinData, err := queryHeadersLineItems(ctx, db, buNames, req.BatchID, true)
+		joinData, err := queryHeadersLineItems(ctx, pool, buNames, req.BatchID, true)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch pending approval headers/line items")
 			return
@@ -733,8 +755,9 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: deleteExposureHeaders - marks headers for delete approval
-func DeleteExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func DeleteExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID            string   `json:"user_id"`
 			ExposureHeaderIds []string `json:"exposureHeaderIds"`
@@ -766,7 +789,7 @@ func DeleteExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			deleteComment = req.Reason
 		}
 
-		res, err := db.Exec(
+		res, err := pool.Exec(ctx,
 			`UPDATE exposure_headers
 			 SET approval_status = 'PENDING_DELETE_APPROVAL',
 			     delete_comment = $1,
@@ -775,23 +798,23 @@ func DeleteExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			   AND COALESCE(is_deleted, false) = false`,
 			deleteComment,
 			requestedBy,
-			pq.Array(req.ExposureHeaderIds),
+			req.ExposureHeaderIds,
 		)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		count, _ := res.RowsAffected()
+		count := res.RowsAffected()
 		if count == 0 {
 			respondWithError(w, http.StatusNotFound, "No matching exposure_headers found")
 			return
 		}
 		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d exposure_header(s) marked for delete approval", count), nil)
 		for _, id := range req.ExposureHeaderIds {
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: deleteComment, RequestedBy: requestedBy, OldValues: nil, NewValues: nil})
+			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, ActionType: "DELETE", Status: constants.StatusPendingDeleteApproval, Reason: deleteComment, RequestedBy: requestedBy, OldValues: nil, NewValues: nil})
 		}
 
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
 			SourceRoute: fxnotif.SourceRouteLegacyDeleteMultiple, Action: fxnotif.ActionDelete, UserID: req.UserID, RequestedBy: requestedBy, CheckerComment: deleteComment,
 			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
 				"deleted": req.ExposureHeaderIds,
@@ -801,8 +824,9 @@ func DeleteExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // Handler: rejectMultipleExposureHeaders - rejects multiple headers
-func RejectMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func RejectMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID            string   `json:"user_id"`
 			ExposureHeaderIds []string `json:"exposureHeaderIds"`
@@ -834,10 +858,10 @@ func RejectMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 
 		oldValuesByID := make(map[string]map[string]interface{}, len(req.ExposureHeaderIds))
 		for _, id := range req.ExposureHeaderIds {
-			oldValuesByID[id] = auditutil.FetchRowSnapshot(r.Context(), db, constants.ExposureHeaders, "exposure_header_id", id)
+			oldValuesByID[id] = auditutil.FetchRowSnapshotPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", id)
 		}
 
-		rows, err := db.Query(
+		rows, err := pool.Query(ctx,
 			`UPDATE exposure_headers
 			 SET approval_status = 'REJECTED',
 			     rejected_by = $1,
@@ -848,14 +872,14 @@ func RejectMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 			 RETURNING *`,
 			rejectedBy,
 			rejectionComment,
-			pq.Array(req.ExposureHeaderIds),
+			req.ExposureHeaderIds,
 		)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
+		cols := pgxColumnNames(rows)
 		rejected := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -873,8 +897,8 @@ func RejectMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 			rejected = append(rejected, rowMap)
 			if id, ok := rowMap["exposure_header_id"]; ok {
 				parentID := fmt.Sprint(id)
-				auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: parentID, Status: constants.StatusRejected, CheckerBy: rejectedBy, Comment: rejectionComment})
-				auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: parentID, ActionType: "REJECT", Status: constants.StatusRejected, Reason: rejectionComment, RequestedBy: rejectedBy, OldValues: oldValuesByID[parentID], NewValues: rowMap})
+				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: parentID, Status: constants.StatusRejected, CheckerBy: rejectedBy, Comment: rejectionComment})
+				auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: parentID, ActionType: "REJECT", Status: constants.StatusRejected, Reason: rejectionComment, RequestedBy: rejectedBy, OldValues: oldValuesByID[parentID], NewValues: rowMap})
 			}
 		}
 		respondWithSuccess(w, http.StatusOK, "Exposures rejected successfully", map[string]interface{}{
@@ -887,7 +911,7 @@ func RejectMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 				rejectedIDs = append(rejectedIDs, fmt.Sprint(id))
 			}
 		}
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
 			SourceRoute: fxnotif.SourceRouteLegacyRejectMultiple, Action: fxnotif.ActionReject, UserID: req.UserID, RequestedBy: rejectedBy, CheckerComment: rejectionComment,
 			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
 				"rejected": rejectedIDs,
@@ -897,8 +921,9 @@ func RejectMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerF
 }
 
 // Handler: approveMultipleExposureHeaders - approves multiple headers and handles business logic
-func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID            string   `json:"user_id"`
 			ExposureHeaderIds []string `json:"exposureHeaderIds"`
@@ -926,19 +951,19 @@ func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.Handler
 
 		oldValuesByID := make(map[string]map[string]interface{}, len(req.ExposureHeaderIds))
 		for _, id := range req.ExposureHeaderIds {
-			oldValuesByID[id] = auditutil.FetchRowSnapshot(r.Context(), db, constants.ExposureHeaders, "exposure_header_id", id)
+			oldValuesByID[id] = auditutil.FetchRowSnapshotPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", id)
 		}
 
-		tx, err := db.Begin()
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		defer tx.Rollback()
+		defer tx.Rollback(ctx)
 		// Fetch current statuses and details
-		rows, err := tx.Query(`
+		rows, err := tx.Query(ctx, `
 			SELECT exposure_header_id, approval_status, exposure_type, status, document_id, total_original_amount, total_open_amount, additional_header_details
-			FROM exposure_headers WHERE exposure_header_id = ANY($1::uuid[])`, pq.Array(req.ExposureHeaderIds))
+			FROM exposure_headers WHERE exposure_header_id = ANY($1::uuid[])`, req.ExposureHeaderIds)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -992,7 +1017,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.Handler
 		var approvalErr error
 		// Handle delete approval as a soft delete on the master row.
 		if len(toDelete) > 0 {
-			delRows, errDel := tx.Query(`
+			delRows, errDel := tx.Query(ctx, `
 				UPDATE exposure_headers
 				SET approval_status = 'APPROVED',
 				    approved_by = $1,
@@ -1004,12 +1029,12 @@ func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.Handler
 				WHERE exposure_header_id = ANY($3::uuid[])
 				  AND COALESCE(is_deleted, false) = false
 				RETURNING *
-			`, approvedBy, approvalComment, pq.Array(toDelete))
+			`, approvedBy, approvalComment, toDelete)
 			deletedHeaders := []map[string]interface{}{}
 			if errDel != nil {
 				approvalErr = errDel
 			} else {
-				delCols, _ := delRows.Columns()
+				delCols := pgxColumnNames(delRows)
 				for delRows.Next() {
 					vals := make([]interface{}, len(delCols))
 					valPtrs := make([]interface{}, len(delCols))
@@ -1066,7 +1091,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.Handler
 				}
 				if parentDocNo != "" {
 					var parentId string
-					err := tx.QueryRow(`SELECT exposure_header_id FROM exposure_headers WHERE document_id = $1 LIMIT 1`, parentDocNo).Scan(&parentId)
+					err := tx.QueryRow(ctx, `SELECT exposure_header_id FROM exposure_headers WHERE document_id = $1 LIMIT 1`, parentDocNo).Scan(&parentId)
 					if err == nil {
 						amt := 0.0
 						if v, ok := h["total_open_amount"].(float64); ok {
@@ -1074,7 +1099,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.Handler
 						} else if v, ok := h["total_original_amount"].(float64); ok {
 							amt = math.Abs(v)
 						}
-						_, _ = tx.Exec(`UPDATE exposure_headers SET total_open_amount = total_open_amount + $1, status = 'Open' WHERE exposure_header_id = $2`, amt, parentId)
+						_, _ = tx.Exec(ctx, `UPDATE exposure_headers SET total_open_amount = total_open_amount + $1, status = 'Open' WHERE exposure_header_id = $2`, amt, parentId)
 					}
 				}
 			}
@@ -1082,14 +1107,14 @@ func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.Handler
 
 		// Approve remaining headers
 		if len(toApprove) > 0 {
-			appRows, err := tx.Query(`UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approval_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, approvalComment, pq.Array(toApprove))
+			appRows, err := tx.Query(ctx, `UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approval_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, approvalComment, toApprove)
 			if err != nil {
 				logger.LogError("[WARN] approving exposure headers failed: %v", err)
 				approvalErr = err
 			} else {
 				defer appRows.Close()
 				approvedHeaders := []map[string]interface{}{}
-				appCols, _ := appRows.Columns()
+				appCols := pgxColumnNames(appRows)
 				for appRows.Next() {
 					vals := make([]interface{}, len(appCols))
 					valPtrs := make([]interface{}, len(appCols))
@@ -1145,15 +1170,15 @@ func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.Handler
 					}
 					if parentDocNo != "" {
 						var parentId string
-						err := tx.QueryRow(`SELECT exposure_header_id FROM exposure_headers WHERE document_id = $1 LIMIT 1`, parentDocNo).Scan(&parentId)
+						err := tx.QueryRow(ctx, `SELECT exposure_header_id FROM exposure_headers WHERE document_id = $1 LIMIT 1`, parentDocNo).Scan(&parentId)
 						if err == nil {
 							amt := 0.0
 							if v, ok := h["total_original_amount"].(float64); ok {
 								amt = math.Abs(v)
 							}
-							_, _ = tx.Exec(`UPDATE exposure_headers SET total_open_amount = total_open_amount - $1, status = 'Rolled' WHERE exposure_header_id = $2`, amt, parentId)
-							_, _ = tx.Exec(`UPDATE exposure_headers SET status = 'Rolled' WHERE exposure_header_id = $1`, h["exposure_header_id"])
-							_, _ = tx.Exec(`INSERT INTO exposure_rollover_log (parent_header_id, child_header_id, rollover_amount, rollover_date, created_at) VALUES ($1, $2, $3, CURRENT_DATE, NOW())`, parentId, h["exposure_header_id"], amt)
+							_, _ = tx.Exec(ctx, `UPDATE exposure_headers SET total_open_amount = total_open_amount - $1, status = 'Rolled' WHERE exposure_header_id = $2`, amt, parentId)
+							_, _ = tx.Exec(ctx, `UPDATE exposure_headers SET status = 'Rolled' WHERE exposure_header_id = $1`, h["exposure_header_id"])
+							_, _ = tx.Exec(ctx, `INSERT INTO exposure_rollover_log (parent_header_id, child_header_id, rollover_amount, rollover_date, created_at) VALUES ($1, $2, $3, CURRENT_DATE, NOW())`, parentId, h["exposure_header_id"], amt)
 							if rolled, ok := results["rolled"].([]map[string]interface{}); ok {
 								rolled = append(rolled, h)
 								results["rolled"] = rolled
@@ -1174,19 +1199,19 @@ func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.Handler
 			return
 		}
 
-		if err := tx.Commit(); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		for _, row := range results["approved"].([]map[string]interface{}) {
 			id := fmt.Sprint(row["exposure_header_id"])
 			// Update the existing pending audit row in place instead of creating a new APPROVE row.
-			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
+			auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
 		}
 		for _, row := range results["deleted"].([]map[string]interface{}) {
 			id := fmt.Sprint(row["exposure_header_id"])
 			// Update the existing pending audit row in place instead of creating a new APPROVE row.
-			auditutil.RecordDecision(r.Context(), db, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
+			auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
 		}
 
 		respondWithSuccess(w, http.StatusOK, "Exposures approved successfully", map[string]interface{}{
@@ -1212,7 +1237,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.Handler
 				}
 			}
 		}
-		fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
 			SourceRoute: fxnotif.SourceRouteLegacyApproveMultiple, Action: fxnotif.ActionApprove, UserID: req.UserID, RequestedBy: approvedBy, CheckerComment: approvalComment,
 			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
 				"approved": approvedIDs,
@@ -1223,7 +1248,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB, pool *pgxpool.Pool) http.Handler
 }
 
 // Handler: BatchUploadStagingData - handles batch upload for staging tables
-func BatchUploadStagingData(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		err := r.ParseMultipartForm(32 << 20) // 32MB max
@@ -1259,7 +1284,7 @@ func BatchUploadStagingData(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		results, absorptionErrors, err := processBatchUploadStagingData(ctx, db, r, buNames, session)
+		results, absorptionErrors, err := processBatchUploadStagingData(ctx, pool, r, buNames, session)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1301,11 +1326,11 @@ func BatchUploadStagingData(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			if uploadBatchID == "" {
 				continue
 			}
-			exposureIDs := fxnotif.FetchExposureIDsByBatch(r.Context(), pool, uploadBatchID)
+			exposureIDs := fxnotif.FetchExposureIDsByBatch(ctx, pool, uploadBatchID)
 			if len(exposureIDs) == 0 {
 				continue
 			}
-			fxnotif.NotifyExposureBulkAction(r.Context(), pool, fxnotif.BulkActionNotifyInput{
+			fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
 				SourceRoute: fxnotif.SourceRouteLegacyBatchUpload, Action: fxnotif.ActionUpload, UserID: userID, RequestedBy: session.Name, CheckerComment: "",
 				ExposureIDs: exposureIDs, ResultBuckets: nil,
 			})
@@ -1314,7 +1339,7 @@ func BatchUploadStagingData(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func GetExposureDownloadURL(db *sql.DB) http.HandlerFunc {
+func GetExposureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			RecordID string `json:"record_id"`
@@ -1329,7 +1354,7 @@ func GetExposureDownloadURL(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "record_id is required")
 			return
 		}
-		uploadS3Key, err := lookupExposureUploadS3Key(r.Context(), db, recordID)
+		uploadS3Key, err := lookupExposureUploadS3Key(r.Context(), pool, recordID)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				respondWithError(w, http.StatusNotFound, "record not found")
@@ -1382,8 +1407,8 @@ func exposureDownloadActor(ctx context.Context, userID string) string {
 	return requestedBy
 }
 
-func recordExposureDownloadAudit(ctx context.Context, db *sql.DB, exposureHeaderID, requestedBy, uploadS3Key string) {
-	auditutil.RecordDownload(ctx, db, auditutil.DownloadParams{TableName: auditutil.TableExposureDownloads, ParentColumn: "exposure_header_id", ParentID: exposureHeaderID, RequestedBy: requestedBy, UploadS3Key: uploadS3Key, ExtraColumns: nil})
+func recordExposureDownloadAudit(ctx context.Context, pool *pgxpool.Pool, exposureHeaderID, requestedBy, uploadS3Key string) {
+	auditutil.RecordDownloadPGX(ctx, pool, auditutil.DownloadParams{TableName: auditutil.TableExposureDownloads, ParentColumn: "exposure_header_id", ParentID: exposureHeaderID, RequestedBy: requestedBy, UploadS3Key: uploadS3Key, ExtraColumns: nil})
 }
 
 func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
@@ -1402,7 +1427,7 @@ func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string,
 	api.RespondEnvelopeSuccess(w, "Bulk download URLs generated successfully", payload)
 }
 
-func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {
+func GetExposureBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UploadBatchIDs []string `json:"upload_batch_ids"`
@@ -1426,7 +1451,7 @@ func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 		requestedBy := exposureDownloadActor(ctx, req.UserID)
 
 		for _, recordID := range recordIDs {
-			uploadS3Key, err := lookupExposureUploadS3Key(ctx, db, recordID)
+			uploadS3Key, err := lookupExposureUploadS3Key(ctx, pool, recordID)
 			if err != nil {
 				failedIDs = append(failedIDs, recordID)
 				continue
@@ -1448,14 +1473,14 @@ func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 				"record_id":    recordID,
 				"download_url": downloadURL,
 			})
-			recordExposureDownloadAudit(ctx, db, recordID, requestedBy, s3Key)
+			recordExposureDownloadAudit(ctx, pool, recordID, requestedBy, s3Key)
 		}
 
 		writeBulkDownloadResponse(w, files, failedIDs)
 	}
 }
 
-func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Request, buNames []string, session *auth.UserSession) ([]map[string]interface{}, []string, error) {
+func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *http.Request, buNames []string, session *auth.UserSession) ([]map[string]interface{}, []string, error) {
 	uploadedBy := "user"
 	if session != nil {
 		uploadedBy = strings.TrimSpace(session.Name)
@@ -1486,7 +1511,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 				filename := fh.Filename
 				var s3Key string
 				var uploadedNewObject bool
-				var tx *sql.Tx
+				var tx pgx.Tx
 				var txCommitted bool
 
 				tempFile, err := os.CreateTemp("", "upload-*")
@@ -1503,7 +1528,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 				defer os.Remove(tempPath)
 				defer func() {
 					if tx != nil && !txCommitted {
-						_ = tx.Rollback()
+						_ = tx.Rollback(ctx)
 					}
 					if uploadedNewObject && !txCommitted && s3Key != "" {
 						if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
@@ -1659,7 +1684,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					return
 				}
 				if s3storage.IsS3UploadEnabled() {
-					if err := ensureUniqueExposureUpload(ctx, db, fileBytes); err != nil {
+					if err := ensureUniqueExposureUpload(ctx, pool, fileBytes); err != nil {
 						message := err.Error()
 						if errors.Is(err, ErrExposureFileAlreadyUploaded) {
 							message = duplicateExposureUploadMessage
@@ -1688,7 +1713,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					logger.LogInfo("[FX-STAGING] S3 DISABLED - file will not be uploaded to S3!")
 				}
 
-				tableColumnsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = $1`, field.TableName)
+				tableColumnsRes, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_name = $1`, field.TableName)
 				validColumns := make(map[string]bool)
 				if err == nil {
 					defer tableColumnsRes.Close()
@@ -1700,14 +1725,14 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					}
 				}
 
-				tx, err = db.BeginTx(ctx, nil)
+				tx, err = pool.Begin(ctx)
 				if err != nil {
 					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to start DB transaction: " + err.Error()})
 					return
 				}
 
 				hasHeaderUploadBatchID := false
-				if err := tx.QueryRowContext(ctx, `
+				if err := tx.QueryRow(ctx, `
 					SELECT EXISTS (
 						SELECT 1
 						FROM information_schema.columns
@@ -1767,14 +1792,14 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 						continue
 					}
 					query := fmt.Sprintf(constants.ErrInsertFailed, field.TableName, strings.Join(keys, ", "), strings.Join(placeholders, ", "))
-					if _, err := tx.ExecContext(ctx, query, vals...); err != nil {
+					if _, err := tx.Exec(ctx, query, vals...); err != nil {
 						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to insert row: " + err.Error()})
 						return
 					}
 					insertedRows++
 				}
 
-				mappingRows, err := tx.QueryContext(ctx, `
+				mappingRows, err := tx.Query(ctx, `
 					SELECT source_column_name, target_table_name, target_field_name
 					FROM upload_mappings
 					WHERE LOWER(TRIM(exposure_type)) = LOWER(TRIM($1))
@@ -1842,12 +1867,12 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					return
 				}
 
-				stagedRows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT * FROM %s WHERE upload_batch_id = $1`, field.TableName), uploadBatchId)
+				stagedRows, err := tx.Query(ctx, fmt.Sprintf(`SELECT * FROM %s WHERE upload_batch_id = $1`, field.TableName), uploadBatchId)
 				if err != nil {
 					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to fetch staged rows: " + err.Error()})
 					return
 				}
-				stagedCols, _ := stagedRows.Columns()
+				stagedCols := pgxColumnNames(stagedRows)
 				stagedData := make([]map[string]interface{}, 0)
 				for stagedRows.Next() {
 					stagedVals := make([]interface{}, len(stagedCols))
@@ -2022,7 +2047,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					logger.LogInfo("[FX-STAGING] INSERT VALUES count=%d, first few: %v", len(headerVals), headerVals)
 					logger.LogInfo("[FX-STAGING] Trying INSERT into exposure_headers now...")
 					var exposureHeaderId string
-					err := tx.QueryRowContext(ctx, headerInsert, headerVals...).Scan(&exposureHeaderId)
+					err := tx.QueryRow(ctx, headerInsert, headerVals...).Scan(&exposureHeaderId)
 					if err != nil {
 						absorptionErrors = append(absorptionErrors, fmt.Sprintf("header insert error for file %s: %v", filename, err))
 						logger.LogError("[FX-STAGING] INSERT FAILED: %v", err)
@@ -2049,7 +2074,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 							strings.Join(headerMetaSetParts, ", "),
 							metaIdx,
 						)
-						if _, err := tx.ExecContext(ctx, headerMetaUpdate, headerMetaVals...); err != nil {
+						if _, err := tx.Exec(ctx, headerMetaUpdate, headerMetaVals...); err != nil {
 							absorptionErrors = append(absorptionErrors, fmt.Sprintf("header upload metadata update error for file %s: %v", filename, err))
 							logger.LogError("[FX-STAGING] upload metadata update failed: %v", err)
 							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: absorptionErrors[len(absorptionErrors)-1]})
@@ -2058,7 +2083,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					}
 					if strings.TrimSpace(persistedS3Key) != "" {
 						var storedUploadS3Key string
-						if err := tx.QueryRowContext(ctx, `
+						if err := tx.QueryRow(ctx, `
 							SELECT COALESCE(upload_s3_key, '')
 							FROM exposure_headers
 							WHERE exposure_header_id = $1
@@ -2138,7 +2163,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 						idx++
 					}
 					lineInsert := fmt.Sprintf("INSERT INTO exposure_line_items (%s) VALUES (%s)", strings.Join(lineKeys, ", "), strings.Join(linePlaceholders, ", "))
-					if _, err = tx.ExecContext(ctx, lineInsert, lineVals...); err != nil {
+					if _, err = tx.Exec(ctx, lineInsert, lineVals...); err != nil {
 						absorptionErrors = append(absorptionErrors, fmt.Sprintf("line item insert error for file %s: %v", filename, err))
 						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: absorptionErrors[len(absorptionErrors)-1]})
 						return
@@ -2157,7 +2182,7 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					logger.LogError("[FX-STAGING] ERROR DETAIL: %v", absorptionErrors)
 				}
 				logger.LogInfo("[FX-STAGING] About to COMMIT transaction...")
-				if err := tx.Commit(); err != nil {
+				if err := tx.Commit(ctx); err != nil {
 					logger.LogError("[FX-STAGING] COMMIT FAILED: %v", err)
 					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to commit staged exposure upload: " + err.Error()})
 					return
@@ -2165,8 +2190,8 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 				logger.LogInfo("[FX-STAGING] COMMIT SUCCESS for filename=%s", filename)
 				txCommitted = true
 				for _, exposureHeaderID := range createdExposureIDs {
-					newValues := auditutil.FetchRowSnapshot(ctx, db, constants.ExposureHeaders, "exposure_header_id", exposureHeaderID)
-					auditutil.RecordAction(ctx, db, auditutil.ActionParams{
+					newValues := auditutil.FetchRowSnapshotPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", exposureHeaderID)
+					auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{
 						TableName:    auditutil.TableExposure,
 						ParentColumn: "exposure_header_id",
 						ParentID:     exposureHeaderID,

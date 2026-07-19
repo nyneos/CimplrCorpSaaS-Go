@@ -16,6 +16,7 @@
 package notification
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
@@ -30,14 +31,27 @@ import (
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-func writeJSON(w http.ResponseWriter, code int, v interface{}) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+// writeJSON writes v (always a success payload — every call site passes
+// http.StatusOK) as the CLAUDE.md envelope. v's own top-level fields (already
+// JSON-tagged on the response structs) are flattened under data via
+// RespondEnvelopeSuccessCompat so existing frontend readers keep working.
+func writeJSON(w http.ResponseWriter, _ int, v interface{}) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+		return
+	}
+	var fields map[string]interface{}
+	if err := json.Unmarshal(b, &fields); err != nil {
+		api.RespondEnvelopeSuccess(w, "Success", v)
+		return
+	}
+	delete(fields, "success")
+	api.RespondEnvelopeSuccessCompat(w, "Success", fields)
 }
 
 func errResp(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]interface{}{"success": false, "error": msg})
+	api.RespondEnvelopeError(w, code, msg, "")
 }
 
 // filterRequest is the common filter body shared by all endpoints.

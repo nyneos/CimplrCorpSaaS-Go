@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +12,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"CimplrCorpSaas/internal/logger"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type contextKey string
@@ -342,7 +343,7 @@ func IsCashFlowCategoryAllowed(ctx context.Context, categoryName string) bool {
 	return false
 }
 
-func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
+func BusinessUnitMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var userID string
@@ -382,12 +383,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 
 			if userID == "" {
 				logger.LogInfo("[BUMiddleware] BLOCKED %s %s — missing user_id (ct=%q)", r.Method, r.URL.Path, ct)
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				w.WriteHeader(http.StatusUnauthorized)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrMissingUserID,
-				})
+				RespondEnvelopeError(w, http.StatusUnauthorized, constants.ErrMissingUserID, "")
 				return
 			}
 
@@ -401,12 +397,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			}
 			if matchedSession == nil {
 				logger.LogError("[BUMiddleware] BLOCKED %s %s — invalid session for user_id=%s", r.Method, r.URL.Path, userID)
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				w.WriteHeader(http.StatusUnauthorized)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrInvalidSession,
-				})
+				RespondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, "")
 				return
 			}
 
@@ -415,7 +406,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			// Fallback: legacy users.business_unit_name → single root entity lookup.
 			var rootEntityIds []string
 			{
-				mRows, mErr := db.QueryContext(r.Context(),
+				mRows, mErr := pool.Query(r.Context(),
 					"SELECT entity_id::text FROM user_entity_mappings WHERE user_id = $1",
 					userID,
 				)
@@ -432,12 +423,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 
 			if len(rootEntityIds) == 0 {
 				logger.LogInfo("[BUMiddleware] BLOCKED %s %s — no entity mapping for user_id=%s", r.Method, r.URL.Path, userID)
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				w.WriteHeader(http.StatusForbidden)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrNoAccessibleBusinessUnit,
-				})
+				RespondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit, "")
 				return
 			}
 
@@ -447,7 +433,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			var buEntityIDs []string
 
 			for _, rootEntityId := range rootEntityIds {
-				rows1, err1 := db.QueryContext(r.Context(), `
+				rows1, err1 := pool.Query(r.Context(), `
 					WITH RECURSIVE descendants AS (
 						SELECT entity_id, entity_name
 						FROM masterentitycash
@@ -476,7 +462,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 					logger.LogError("[WARN] masterentitycash recursive query failed for root=%s: %v", rootEntityId, err1)
 				}
 
-				rows2, err2 := db.QueryContext(r.Context(), `
+				rows2, err2 := pool.Query(r.Context(), `
 					WITH RECURSIVE descendants AS (
 						SELECT entity_id, entity_name
 						FROM masterEntity
@@ -507,11 +493,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 
 			if len(buNames) == 0 {
 				logger.LogError("No accessible business units found for user_id: %s", userID)
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrNoAccessibleBusinessUnit,
-				})
+				RespondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit, "")
 				return
 			}
 			// Attach entity scope, session, request metadata, and user identity to context

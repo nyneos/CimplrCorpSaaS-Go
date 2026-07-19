@@ -5,13 +5,15 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
 )
@@ -21,30 +23,26 @@ import (
 // ---------------------------------------------------------------------------
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
-	})
+	api.RespondEnvelopeError(w, status, errMsg, "")
 }
 
 // ---------------------------------------------------------------------------
 // GetRolePermissionsJsonByRoleName — UNCHANGED
 // ---------------------------------------------------------------------------
 
-func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
+func GetRolePermissionsJsonByRoleName(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			RoleName string `json:"roleName"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"success":false,"error":"invalid request"}`, http.StatusBadRequest)
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request", "")
 			return
 		}
 
 		var jsonResult []byte
-		err := db.QueryRow(`
+		err := pool.QueryRow(ctx, `
 			WITH role_cte AS (
 				SELECT id FROM public.roles WHERE LOWER(name) = LOWER($1) AND LOWER(status) = 'approved'
 			),
@@ -89,21 +87,18 @@ func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
 			FROM page_json;
 		`, req.RoleName).Scan(&jsonResult)
 
-		if err == sql.ErrNoRows {
-			http.Error(w, `{"success":false,"error":"role not found"}`, http.StatusNotFound)
+		if errors.Is(err, pgx.ErrNoRows) {
+			api.RespondEnvelopeError(w, http.StatusNotFound, "role not found", "")
 			return
 		} else if err != nil {
-			http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
 			return
 		}
 
-		resp := map[string]interface{}{
-			"success":  true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"roleName": req.RoleName,
 			"pages":    json.RawMessage(jsonResult),
-		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		})
 	}
 }
 
@@ -112,8 +107,9 @@ func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
 // at the end of the transaction to populate role_permission_requests.
 // ---------------------------------------------------------------------------
 
-func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
+func UpsertRolePermissions(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID   string                 `json:"user_id"`
 			RoleName string                 `json:"roleName"`
@@ -126,7 +122,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 
 		// Step 1: Get role_id
 		var roleID string
-		if err := db.QueryRow(`SELECT id FROM roles WHERE name = $1`, req.RoleName).Scan(&roleID); err != nil {
+		if err := pool.QueryRow(ctx, `SELECT id FROM roles WHERE name = $1`, req.RoleName).Scan(&roleID); err != nil {
 			log.Print(err.Error())
 			respondWithError(w, http.StatusNotFound, "role not found")
 			return
@@ -192,13 +188,12 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Step 3: Bulk insert or fetch permission IDs
-		ctx := r.Context()
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction)
 			return
 		}
-		defer tx.Rollback()
+		defer tx.Rollback(ctx)
 
 		pageNames := []string{}
 		tabNames := []sql.NullString{}
@@ -209,17 +204,17 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 			actions = append(actions, p.Key.Action)
 		}
 
-		rows, err := tx.Query(`
+		rows, err := tx.Query(ctx, `
 			WITH input_data AS (
-				SELECT 
+				SELECT
 					UNNEST($1::text[]) AS page_name,
 					UNNEST($2::text[]) AS tab_name,
 					UNNEST($3::text[]) AS action
 			),
 			inserted AS (
 				INSERT INTO public.permissions (page_name, tab_name, action)
-				SELECT 
-					page_name, 
+				SELECT
+					page_name,
 					NULLIF(NULLIF(tab_name, ''), 'NULL') AS tab_name,
 					action
 				FROM input_data
@@ -233,7 +228,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 			WHERE (page_name, COALESCE(tab_name, ''), action) IN (
 				SELECT page_name, COALESCE(NULLIF(NULLIF(tab_name, ''), 'NULL'), ''), action FROM input_data
 			)
-		`, pq.Array(pageNames), pq.Array(nullStringToText(tabNames)), pq.Array(actions))
+		`, pageNames, nullStringToText(tabNames), actions)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "permission sync failed: "+err.Error())
 			return
@@ -274,9 +269,9 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 		// Step 4a: Snapshot current allowed values BEFORE upsert (for diff)
 		existingAllowed := make(map[int]sql.NullBool)
 		if len(permIDs) > 0 {
-			exRows, exErr := tx.Query(
+			exRows, exErr := tx.Query(ctx,
 				`SELECT permission_id, allowed FROM public.role_permissions WHERE role_id = $1 AND permission_id = ANY($2)`,
-				roleID, pq.Array(permIDs),
+				roleID, permIDs,
 			)
 			if exErr == nil {
 				for exRows.Next() {
@@ -293,7 +288,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 
 		// Step 4b: Upsert role_permissions (original logic unchanged)
 		if len(roleIDs) > 0 {
-			_, err = tx.Exec(`
+			_, err = tx.Exec(ctx, `
 				INSERT INTO public.role_permissions (role_id, permission_id, allowed, status)
 				SELECT UNNEST($1::text[]), UNNEST($2::int[]), UNNEST($3::bool[]), 'pending'
 				ON CONFLICT (role_id, permission_id)
@@ -303,7 +298,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 						WHEN role_permissions.allowed IS DISTINCT FROM EXCLUDED.allowed THEN 'pending'
 						ELSE role_permissions.status
 					END
-			`, pq.Array(roleIDs), pq.Array(permIDs), pq.Array(alloweds))
+			`, roleIDs, permIDs, alloweds)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "role_permissions upsert failed: "+err.Error())
 				return
@@ -324,7 +319,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 					oldValArg = oldNullBool.Bool
 				} // else nil → SQL NULL (brand new permission)
 
-				_, insErr := tx.Exec(`
+				_, insErr := tx.Exec(ctx, `
 					INSERT INTO public.role_permission_requests
 						(role_id, permission_id, old_value, new_value, status, submitted_by)
 					VALUES ($1, $2, $3, $4, 'Pending', $5)
@@ -338,21 +333,19 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 
 		// Mark role as Pending if any requests were staged
 		if hasPendingRequests {
-			_, _ = tx.Exec(
+			_, _ = tx.Exec(ctx,
 				`UPDATE public.roles SET roles_permission_status = 'Pending' WHERE id = $1`,
 				roleID,
 			)
 		}
 
-		if err := tx.Commit(); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			"success": true,
-			"count":   len(perms),
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"count": len(perms),
 		})
 	}
 }
@@ -361,7 +354,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 // GetRolePermissionsJson — UNCHANGED
 // ---------------------------------------------------------------------------
 
-func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
+func GetRolePermissionsJson(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := r.Context().Value("user_id")
 
@@ -370,7 +363,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 			RoleName string `json:"roleName,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"success":false,"error":constants.ErrInvalidRequestBody}`, http.StatusBadRequest)
+			api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody, "")
 			return
 		}
 
@@ -380,22 +373,22 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 				req.UserID = ctxUserID
 			}
 			if req.UserID == "" {
-				http.Error(w, `{"success":false,"error":constants.ErrUserIDRequired}`, http.StatusBadRequest)
+				api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired, "")
 				return
 			}
 			roleName = api.GetUserRoleFromCtx(r.Context())
 			if roleName == "" {
-				http.Error(w, `{"success":false,"error":"Role not found in session"}`, http.StatusUnauthorized)
+				api.RespondEnvelopeError(w, http.StatusUnauthorized, "Role not found in session", "")
 				return
 			}
 		}
 
 		var roleID string
-		if err := db.QueryRow(`SELECT id FROM roles WHERE name = $1`, roleName).Scan(&roleID); err != nil {
-			if err == sql.ErrNoRows {
-				http.Error(w, `{"success":false,"error":"Role not found"}`, http.StatusNotFound)
+		if err := pool.QueryRow(r.Context(), `SELECT id FROM roles WHERE name = $1`, roleName).Scan(&roleID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				api.RespondEnvelopeError(w, http.StatusNotFound, "Role not found", "")
 			} else {
-				http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
 			}
 			return
 		}
@@ -443,8 +436,8 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 		`
 
 		var pagesJSON sql.NullString
-		if err := db.QueryRow(query, roleID).Scan(&pagesJSON); err != nil {
-			http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		if err := pool.QueryRow(r.Context(), query, roleID).Scan(&pagesJSON); err != nil {
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
 			return
 		}
 
@@ -457,13 +450,15 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 		}
 		if pagesJSON.Valid {
 			if err := json.Unmarshal([]byte(pagesJSON.String), &resp.Pages); err != nil {
-				http.Error(w, `{"success":false,"error":"invalid json returned"}`, http.StatusInternalServerError)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "invalid json returned", "")
 				return
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"roleName": resp.RoleName,
+			"pages":    resp.Pages,
+		})
 	}
 }
 
@@ -482,9 +477,10 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 // Response: { success, action, actionedBy, count, changes: [{requestId, pageName, tabName?, action, oldValue, newValue}] }
 // ---------------------------------------------------------------------------
 
-func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
+func UpdateRolePermissionsStatusByName(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID := r.Context().Value("user_id")
+		ctx := r.Context()
+		userID := ctx.Value("user_id")
 		var req struct {
 			UserID     string `json:"user_id"`
 			RoleName   string `json:"roleName,omitempty"`
@@ -511,13 +507,12 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		ctx := r.Context()
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction)
 			return
 		}
-		defer tx.Rollback()
+		defer tx.Rollback(ctx)
 
 		// Fetch pending target rows
 		type targetRow struct {
@@ -527,16 +522,16 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			NewValue bool
 		}
 		var targets []targetRow
-		var fetchRows *sql.Rows
+		var fetchRows pgx.Rows
 
 		if len(req.RequestIDs) > 0 {
-			fetchRows, err = tx.Query(`
+			fetchRows, err = tx.Query(ctx, `
 				SELECT id, role_id, permission_id, new_value
 				FROM public.role_permission_requests
 				WHERE id = ANY($1) AND LOWER(status) = 'pending'
-			`, pq.Array(req.RequestIDs))
+			`, req.RequestIDs)
 		} else {
-			fetchRows, err = tx.Query(`
+			fetchRows, err = tx.Query(ctx, `
 				SELECT rpr.id, rpr.role_id, rpr.permission_id, rpr.new_value
 				FROM public.role_permission_requests rpr
 				JOIN public.roles r ON r.id = rpr.role_id
@@ -567,14 +562,14 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Mark request rows as actioned
-		_, err = tx.Exec(`
+		_, err = tx.Exec(ctx, `
 			UPDATE public.role_permission_requests
 			SET status      = $1,
 			    actioned_by = $2,
 			    actioned_at = now(),
 			    comment     = COALESCE(NULLIF($3, ''), comment)
 			WHERE id = ANY($4)
-		`, action, req.UserID, req.Comment, pq.Array(ids))
+		`, action, req.UserID, req.Comment, ids)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "request update failed: "+err.Error())
 			return
@@ -603,7 +598,7 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 				pIDs = append(pIDs, t.PermID)
 				nVals = append(nVals, t.NewValue)
 			}
-			_, err = tx.Exec(`
+			_, err = tx.Exec(ctx, `
 				INSERT INTO public.role_permissions
 					(role_id, permission_id, allowed, status, approved_by, approved_at)
 				SELECT UNNEST($1::text[]), UNNEST($2::int[]), UNNEST($3::bool[]), 'approved', $4, now()
@@ -613,7 +608,7 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 					status      = 'approved',
 					approved_by = EXCLUDED.approved_by,
 					approved_at = EXCLUDED.approved_at
-			`, pq.Array(rIDs), pq.Array(pIDs), pq.Array(nVals), req.UserID)
+			`, rIDs, pIDs, nVals, req.UserID)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "role_permissions apply failed: "+err.Error())
 				return
@@ -627,7 +622,7 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 		}
 		for rid := range affectedRoles {
 			var pendingCount int
-			if err := tx.QueryRow(`
+			if err := tx.QueryRow(ctx, `
 				SELECT COUNT(*) FROM public.role_permission_requests
 				WHERE role_id = $1 AND LOWER(status) = 'pending'
 			`, rid).Scan(&pendingCount); err != nil {
@@ -638,12 +633,12 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			if pendingCount > 0 {
 				newRoleStatus = "Pending"
 			}
-			if _, err := tx.Exec(`UPDATE public.roles SET roles_permission_status = $1 WHERE id = $2`, newRoleStatus, rid); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE public.roles SET roles_permission_status = $1 WHERE id = $2`, newRoleStatus, rid); err != nil {
 				logger.LogError("permissions.go UpdateRolePermissionsStatusByName: update role permission status failed: %v", err)
 			}
 		}
 
-		if err := tx.Commit(); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
@@ -658,12 +653,12 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			NewValue  bool    `json:"newValue"`
 		}
 		var audits []auditEntry
-		auditRows, auditErr := db.Query(`
+		auditRows, auditErr := pool.Query(ctx, `
 			SELECT rpr.id, p.page_name, p.tab_name, p.action, rpr.old_value, rpr.new_value
 			FROM public.role_permission_requests rpr
 			JOIN public.permissions p ON p.id = rpr.permission_id
 			WHERE rpr.id = ANY($1)
-		`, pq.Array(ids))
+		`, ids)
 		if auditErr == nil {
 			defer auditRows.Close()
 			for auditRows.Next() {
@@ -683,9 +678,7 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"action":     action,
 			"actionedBy": req.UserID,
 			"count":      len(targets),
@@ -705,7 +698,7 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 // showing pageName, tabName, action, oldValue, newValue, who submitted, who actioned.
 // ---------------------------------------------------------------------------
 
-func GetRolesStatus(db *sql.DB) http.HandlerFunc {
+func GetRolesStatus(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := r.Context().Value("user_id")
 		var req struct {
@@ -755,7 +748,7 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 		}
 		query += ` ORDER BY r.name, rpr.submitted_at DESC`
 
-		rows, err := db.Query(query, args...)
+		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -835,9 +828,7 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 			result = append(result, rg)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":      true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"statusFilter": statusFilter,
 			"roles":        result,
 		})
@@ -848,13 +839,14 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 // GetSidebarPermissions — UNCHANGED
 // ---------------------------------------------------------------------------
 
-func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
+func GetSidebarPermissions(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			http.Error(w, `{"success":false,"error":constants.ErrUserIDRequired}`, http.StatusBadRequest)
+			api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired, "")
 			return
 		}
 
@@ -882,9 +874,9 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 			ORDER BY p.page_name
 		`
 
-		rows, err := db.Query(query, req.UserID)
+		rows, err := pool.Query(ctx, query, req.UserID)
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
 			return
 		}
 		defer rows.Close()
@@ -901,10 +893,8 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"pages":   pages,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"pages": pages,
 		})
 	}
 }
@@ -1006,9 +996,10 @@ func normAction(s string) string {
 //   }
 // ---------------------------------------------------------------------------
 
-func GetAllPermissionRequests(db *sql.DB) http.HandlerFunc {
+func GetAllPermissionRequests(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID := r.Context().Value("user_id")
+		ctx := r.Context()
+		userID := ctx.Value("user_id")
 		var req struct {
 			UserID   string `json:"user_id"`
 			Status   string `json:"status,omitempty"`   // empty = all
@@ -1065,7 +1056,7 @@ func GetAllPermissionRequests(db *sql.DB) http.HandlerFunc {
 		}
 		query += ` ORDER BY rpr.submitted_at DESC`
 
-		rows, err := db.Query(query, args...)
+		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1142,9 +1133,7 @@ func GetAllPermissionRequests(db *sql.DB) http.HandlerFunc {
 			sfLabel = "all"
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":      true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"statusFilter": sfLabel,
 			"total":        len(requests),
 			"requests":     requests,
@@ -1210,7 +1199,7 @@ func GetAllPermissionRequests(db *sql.DB) http.HandlerFunc {
 //   }
 // ---------------------------------------------------------------------------
 
-func GetRolePermissionAuditTable(db *sql.DB) http.HandlerFunc {
+func GetRolePermissionAuditTable(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := r.Context().Value("user_id")
 		var req struct {
@@ -1282,7 +1271,7 @@ func GetRolePermissionAuditTable(db *sql.DB) http.HandlerFunc {
 		// Order matters for grouping: role → page → tab → action
 		query += ` ORDER BY ro.name, p.page_name, COALESCE(p.tab_name,''), p.action`
 
-		rows, err := db.Query(query, args...)
+		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1453,9 +1442,7 @@ func GetRolePermissionAuditTable(db *sql.DB) http.HandlerFunc {
 			result = append(result, roleMap[name])
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"totalRoles": len(result),
 			"roles":      result,
 		})

@@ -3,7 +3,6 @@ package dash
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"context"
-	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
@@ -23,7 +22,7 @@ type DashService struct {
 	mu     sync.Mutex
 }
 
-func NewDashService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
+func NewDashService(cfg map[string]interface{}) serviceiface.Service {
 	return &DashService{config: cfg}
 }
 

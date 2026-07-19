@@ -264,9 +264,7 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		pool.QueryRow(ctx, totalSQL, totalArgs...).Scan(&totalCount, &totalGross, &totalTDS, &totalNet) //nolint:errcheck
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":          true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"summary":          map[string]interface{}{"total_count": totalCount, "total_gross": totalGross, "total_tds": totalTDS, "total_net": totalNet},
 			"status_breakdown": statusData,
 			"recent_receipts":  recentData,
@@ -363,9 +361,7 @@ func GetTDSWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 		defer exRows.Close()
 		exData, _ := rowsToMapSlice(exRows)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":           true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"summary":           map[string]interface{}{"total_count": totalCount, "total_expected": totalExpected, "total_actual": totalActual, "total_variance": totalVariance, "exception_count": exceptionCount},
 			"entity_breakdown":  entityData,
 			"recent_exceptions": exData,
@@ -445,9 +441,7 @@ func GetReconciliationDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		defer pipelineRows.Close()
 		pipelineData, _ := rowsToMapSlice(pipelineRows)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":            true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"recent_runs":        runData,
 			"exception_pipeline": pipelineData,
 		})
@@ -534,11 +528,9 @@ func GetInterestVsAccrualAnalysis(pool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 		out, _ := rowsToMapSlice(rows)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"rows":    out,
-			"count":   len(out),
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"rows":  out,
+			"count": len(out),
 		})
 	}
 }

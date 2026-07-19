@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,17 +14,13 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/utils"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Helper: send JSON error response
+// Helper: send JSON error response (delegates to the CLAUDE.md standard envelope)
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
-	})
+	api.RespondEnvelopeError(w, status, errMsg, "")
 }
 
 // respondWithInternalError logs the real error internally and returns a generic
@@ -34,8 +31,9 @@ func respondWithInternalError(w http.ResponseWriter, err error) {
 }
 
 // Handler: Create role
-func CreateRole(db *sql.DB) http.HandlerFunc {
+func CreateRole(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			Name               string `json:"name"`
 			RoleCode           string `json:"rolecode"`
@@ -61,25 +59,25 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 		// Uniqueness checks: ensure role name and role code are unique (exclude soft-deleted roles)
 		var existingID string
 		// check name uniqueness (case-insensitive)
-		if err := db.QueryRow("SELECT id FROM roles WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) AND COALESCE(is_deleted, false) = false LIMIT 1", req.Name).Scan(&existingID); err == nil {
+		if err := pool.QueryRow(ctx, "SELECT id FROM roles WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) AND COALESCE(is_deleted, false) = false LIMIT 1", req.Name).Scan(&existingID); err == nil {
 			respondWithError(w, http.StatusBadRequest, fmt.Sprintf("role name '%s' already exists (id=%s)", req.Name, existingID))
 			return
-		} else if err != sql.ErrNoRows {
+		} else if !errors.Is(err, pgx.ErrNoRows) {
 			respondWithInternalError(w, err)
 			return
 		}
 		// check role code uniqueness if supplied
 		if strings.TrimSpace(req.RoleCode) != "" {
-			if err := db.QueryRow("SELECT id FROM roles WHERE (rolecode = $1 OR role_code = $1) AND COALESCE(is_deleted, false) = false LIMIT 1", req.RoleCode).Scan(&existingID); err == nil {
+			if err := pool.QueryRow(ctx, "SELECT id FROM roles WHERE (rolecode = $1 OR role_code = $1) AND COALESCE(is_deleted, false) = false LIMIT 1", req.RoleCode).Scan(&existingID); err == nil {
 				respondWithError(w, http.StatusBadRequest, fmt.Sprintf("role code '%s' already exists (id=%s)", req.RoleCode, existingID))
 				return
-			} else if err != sql.ErrNoRows {
+			} else if !errors.Is(err, pgx.ErrNoRows) {
 				respondWithInternalError(w, err)
 				return
 			}
 		}
 		// Insert role and return the inserted row (set created_at)
-		rows, err := db.Query(
+		rows, err := pool.Query(ctx,
 			`INSERT INTO roles (name, rolecode, description, office_start_time_ist, office_end_time_ist, status, created_by, created_at)
 			 VALUES ($1, $2, $3, $4, $5, 'pending', $6, NOW()) RETURNING *`,
 			req.Name,
@@ -94,24 +92,15 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		defer rows.Close()
-		cols, err := rows.Columns()
-		if err != nil {
-			respondWithInternalError(w, err)
-			return
-		}
-		vals := make([]interface{}, len(cols))
-		valPtrs := make([]interface{}, len(cols))
-		for i := range vals {
-			valPtrs[i] = &vals[i]
-		}
 		var roleMap map[string]interface{} = map[string]interface{}{}
 		if rows.Next() {
-			if err := rows.Scan(valPtrs...); err != nil {
+			vals, err := rows.Values()
+			if err != nil {
 				respondWithInternalError(w, err)
 				return
 			}
-			for i, col := range cols {
-				roleMap[col] = vals[i]
+			for i, col := range rows.FieldDescriptions() {
+				roleMap[string(col.Name)] = vals[i]
 			}
 
 			// Normalize role code: prefer `rolecode` (legacy insert column) and
@@ -135,16 +124,15 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 				roleMap["roleCode"] = ""
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"role":    roleMap,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"role": roleMap,
 		})
 	}
 }
 
-func GetRolesPageData(db *sql.DB) http.HandlerFunc {
+func GetRolesPageData(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID string `json:"user_id"`
 		}
@@ -161,7 +149,7 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 		// }
 
 		rolesPerms := map[string]interface{}{}
-		permRows, err := db.Query(`
+		permRows, err := pool.Query(ctx, `
 			SELECT p.page_name, p.tab_name, p.action,
 			       bool_or(rp.allowed) AS allowed
 			FROM role_permissions rp
@@ -208,13 +196,13 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Count total
-		total, _ := utils.CountTotal(db, "SELECT COUNT(*) FROM roles WHERE COALESCE(is_deleted, false) = false")
+		total, _ := utils.CountTotal(ctx, pool, "SELECT COUNT(*) FROM roles WHERE COALESCE(is_deleted, false) = false")
 		pagination.SetPaginationStats(total)
 
 		// Get roles with pagination
 		// Order by the latest of created_at, approved_at or edited_at (whichever is greatest)
 		// so the most recently created/approved/edited roles appear first.
-		rows, err := db.Query(
+		rows, err := pool.Query(ctx,
 			`SELECT * FROM roles
 								 WHERE COALESCE(is_deleted, false) = false
 								 ORDER BY GREATEST(
@@ -230,20 +218,16 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
 		roleData := []map[string]interface{}{}
 		for rows.Next() {
-			vals := make([]interface{}, len(cols))
-			valPtrs := make([]interface{}, len(cols))
-			for i := range vals {
-				valPtrs[i] = &vals[i]
-			}
-			if err := rows.Scan(valPtrs...); err != nil {
+			vals, err := rows.Values()
+			if err != nil {
 				log.Printf("role.go GetRolesPageData: scan role row failed: %v", err)
+				continue
 			}
 			rMap := map[string]interface{}{}
-			for i, col := range cols {
-				rMap[col] = vals[i]
+			for i, col := range rows.FieldDescriptions() {
+				rMap[string(col.Name)] = vals[i]
 			}
 			// Map fields as needed
 			// Normalize role_code: prefer `rolecode` then `role_code`. Also add
@@ -277,8 +261,7 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 			}
 			roleData = append(roleData, role)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"permissions": rolesPerms,
 			"roleData":    roleData,
 			"pagination":  pagination,
@@ -287,8 +270,9 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: Approve multiple roles
-func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
+func ApproveMultipleRoles(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID  string   `json:"user_id"`
 			RoleIds []string `json:"roleIds"`
@@ -308,7 +292,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 		// }
 
 		// Fetch current statuses
-		rows, err := db.Query(`SELECT id, status FROM roles WHERE id = ANY($1)`, pq.Array(req.RoleIds))
+		rows, err := pool.Query(ctx, `SELECT id, status FROM roles WHERE id = ANY($1)`, req.RoleIds)
 		if err != nil {
 			respondWithInternalError(w, err)
 			return
@@ -334,22 +318,18 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 		}
 		// Delete roles (Soft Delete)
 		if len(toDelete) > 0 {
-			delRows, err := db.Query(`UPDATE roles SET is_deleted = true, status = 'Deleted', edited_at = NOW() WHERE id = ANY($1) RETURNING *`, pq.Array(toDelete))
+			delRows, err := pool.Query(ctx, `UPDATE roles SET is_deleted = true, status = 'Deleted', edited_at = NOW() WHERE id = ANY($1) RETURNING *`, toDelete)
 			if err == nil {
 				defer delRows.Close()
-				cols, _ := delRows.Columns()
 				for delRows.Next() {
-					vals := make([]interface{}, len(cols))
-					valPtrs := make([]interface{}, len(cols))
-					for i := range vals {
-						valPtrs[i] = &vals[i]
-					}
-					if err := delRows.Scan(valPtrs...); err != nil {
+					vals, err := delRows.Values()
+					if err != nil {
 						log.Printf("role.go ApproveMultipleRoles: scan deleted role row failed: %v", err)
+						continue
 					}
 					roleMap := map[string]interface{}{}
-					for i, col := range cols {
-						roleMap[col] = vals[i]
+					for i, col := range delRows.FieldDescriptions() {
+						roleMap[string(col.Name)] = vals[i]
 					}
 					results["deleted"] = append(results["deleted"].([]map[string]interface{}), roleMap)
 				}
@@ -362,35 +342,34 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 		}
 		// Approve roles
 		if len(toApprove) > 0 {
-			appRows, err := db.Query(`UPDATE roles SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
+			appRows, err := pool.Query(ctx, `UPDATE roles SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) RETURNING *`, approvedBy, req.ApprovalComment, toApprove)
 			if err == nil {
 				defer appRows.Close()
-				cols, _ := appRows.Columns()
 				for appRows.Next() {
-					vals := make([]interface{}, len(cols))
-					valPtrs := make([]interface{}, len(cols))
-					for i := range vals {
-						valPtrs[i] = &vals[i]
-					}
-					if err := appRows.Scan(valPtrs...); err != nil {
+					vals, err := appRows.Values()
+					if err != nil {
 						log.Printf("role.go ApproveMultipleRoles: scan approved role row failed: %v", err)
+						continue
 					}
 					roleMap := map[string]interface{}{}
-					for i, col := range cols {
-						roleMap[col] = vals[i]
+					for i, col := range appRows.FieldDescriptions() {
+						roleMap[string(col.Name)] = vals[i]
 					}
 					results["approved"] = append(results["approved"].([]map[string]interface{}), roleMap)
 				}
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": results["deleted"], "approved": results["approved"]})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"deleted":  results["deleted"],
+			"approved": results["approved"],
+		})
 	}
 }
 
 // Handler: Delete role (soft delete)
-func DeleteRole(db *sql.DB) http.HandlerFunc {
+func DeleteRole(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID string   `json:"user_id"`
 			ID     string   `json:"id"`
@@ -417,39 +396,34 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 			targetIds = []string{req.ID}
 		}
 
-		rows, err := db.Query(
+		rows, err := pool.Query(ctx,
 			"UPDATE roles SET status = 'Delete-Approval', edited_by = $1, edited_at = NOW() WHERE id = ANY($2) RETURNING *",
-			editor, pq.Array(targetIds),
+			editor, targetIds,
 		)
 		if err != nil {
 			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
 		deleted := []map[string]interface{}{}
 		for rows.Next() {
-			vals := make([]interface{}, len(cols))
-			valPtrs := make([]interface{}, len(cols))
-			for i := range vals {
-				valPtrs[i] = &vals[i]
-			}
-			if err := rows.Scan(valPtrs...); err != nil {
+			vals, err := rows.Values()
+			if err != nil {
 				log.Printf("role.go DeleteRole: scan deleted role row failed: %v", err)
+				continue
 			}
 			roleMap := map[string]interface{}{}
-			for i, col := range cols {
-				roleMap[col] = vals[i]
+			for i, col := range rows.FieldDescriptions() {
+				roleMap[string(col.Name)] = vals[i]
 			}
 			deleted = append(deleted, roleMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": deleted})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"deleted": deleted})
 	}
 }
 
 // Handler: Reject multiple roles
-func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
+func RejectMultipleRoles(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID  string   `json:"user_id"`
@@ -472,16 +446,20 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		rows, err := db.Query(
+		rows, err := pool.Query(r.Context(),
 			`UPDATE roles SET status = 'Rejected', rejected_by = $1, rejected_at = NOW(), rejection_comment = $2 WHERE id = ANY($3) RETURNING *`,
-			rejectedBy, req.RejectionComment, pq.Array(req.RoleIds),
+			rejectedBy, req.RejectionComment, req.RoleIds,
 		)
 		if err != nil {
 			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
+		fieldDescs := rows.FieldDescriptions()
+		cols := make([]string, len(fieldDescs))
+		for i, fd := range fieldDescs {
+			cols[i] = fd.Name
+		}
 		updated := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -498,15 +476,14 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 			}
 			updated = append(updated, roleMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"updated": updated})
 	}
 }
 
 // Handler: Get roles for dropdown (returns id and name)
-func GetRolesForDropdown(db *sql.DB) http.HandlerFunc {
+func GetRolesForDropdown(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		rows, err := db.Query("SELECT id, name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND COALESCE(is_deleted, false) = false")
+		rows, err := pool.Query(r.Context(), "SELECT id, name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND COALESCE(is_deleted, false) = false")
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -524,13 +501,12 @@ func GetRolesForDropdown(db *sql.DB) http.HandlerFunc {
 			}
 			roles = append(roles, opt)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "roles": roles})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"roles": roles})
 	}
 }
 
 // Handler: Get just role names
-func GetJustRoles(db *sql.DB) http.HandlerFunc {
+func GetJustRoles(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID     string `json:"user_id"`
@@ -540,10 +516,10 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 
 		// If entity_name supplied: only return roles that have at least one member
 		// (via user_roles) whose users.business_unit_name matches that entity.
-		var rows *sql.Rows
+		var rows pgx.Rows
 		var err error
 		if req.EntityName != "" {
-			rows, err = db.Query(`
+			rows, err = pool.Query(r.Context(), `
 				SELECT DISTINCT r.name
 				FROM roles r
 				WHERE (r.status = 'approved' OR r.status = 'Approved')
@@ -558,7 +534,7 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 				)
 			`, req.EntityName)
 		} else {
-			rows, err = db.Query("SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND COALESCE(is_deleted, false) = false")
+			rows, err = pool.Query(r.Context(), "SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND COALESCE(is_deleted, false) = false")
 		}
 		if err != nil {
 			respondWithInternalError(w, err)
@@ -573,19 +549,18 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 			}
 			roleNames = append(roleNames, name)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "roles": roleNames})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"roles": roleNames})
 	}
 }
 
-func GetJustRolesPERMISSIONapproved(db *sql.DB) http.HandlerFunc {
+func GetJustRolesPERMISSIONapproved(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req) // Not required for this query
 
-		rows, err := db.Query("SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND (roles_permission_status = 'approved' OR roles_permission_status = 'Approved') AND COALESCE(is_deleted, false) = false")
+		rows, err := pool.Query(r.Context(), "SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND (roles_permission_status = 'approved' OR roles_permission_status = 'Approved') AND COALESCE(is_deleted, false) = false")
 		if err != nil {
 			respondWithInternalError(w, err)
 			return
@@ -599,13 +574,13 @@ func GetJustRolesPERMISSIONapproved(db *sql.DB) http.HandlerFunc {
 			}
 			roleNames = append(roleNames, name)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "roles": roleNames})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"roles": roleNames})
 	}
 }
 
-func GetPendingRoles(db *sql.DB) http.HandlerFunc {
+func GetPendingRoles(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID string `json:"user_id"`
 		}
@@ -615,7 +590,7 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 		}
 
 		rolesPerms := map[string]interface{}{}
-		permRows, err := db.Query(`
+		permRows, err := pool.Query(ctx, `
 			SELECT p.page_name, p.tab_name, p.action,
 			       bool_or(rp.allowed) AS allowed
 			FROM role_permissions rp
@@ -661,30 +636,26 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		totalPendingQuery := "SELECT COUNT(*) FROM roles WHERE status IN ($1, $2, $3) AND COALESCE(is_deleted, false) = false"
-		totalPending, _ := utils.CountTotal(db, totalPendingQuery, "pending", constants.StatusCodeAwaitingApproval, constants.StatusCodeDeleteApproval)
+		totalPending, _ := utils.CountTotal(ctx, pool, totalPendingQuery, "pending", constants.StatusCodeAwaitingApproval, constants.StatusCodeDeleteApproval)
 		pagination.SetPaginationStats(totalPending)
 
 		// Fetch paginated pending roles
-		rows, err := db.Query("SELECT * FROM roles WHERE status IN ($1, $2, $3) AND COALESCE(is_deleted, false) = false ORDER BY id LIMIT $4 OFFSET $5", "pending", constants.StatusCodeAwaitingApproval, constants.StatusCodeDeleteApproval, pagination.Limit, pagination.Offset)
+		rows, err := pool.Query(ctx, "SELECT * FROM roles WHERE status IN ($1, $2, $3) AND COALESCE(is_deleted, false) = false ORDER BY id LIMIT $4 OFFSET $5", "pending", constants.StatusCodeAwaitingApproval, constants.StatusCodeDeleteApproval, pagination.Limit, pagination.Offset)
 		if err != nil {
 			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
 		roleData := []map[string]interface{}{}
 		for rows.Next() {
-			vals := make([]interface{}, len(cols))
-			valPtrs := make([]interface{}, len(cols))
-			for i := range vals {
-				valPtrs[i] = &vals[i]
-			}
-			if err := rows.Scan(valPtrs...); err != nil {
+			vals, err := rows.Values()
+			if err != nil {
 				log.Printf("role.go GetPendingRoles: scan role row failed: %v", err)
+				continue
 			}
 			rMap := map[string]interface{}{}
-			for i, col := range cols {
-				rMap[col] = vals[i]
+			for i, col := range rows.FieldDescriptions() {
+				rMap[string(col.Name)] = vals[i]
 			}
 			role := map[string]interface{}{
 				"id":                      rMap["id"],
@@ -704,8 +675,7 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 			}
 			roleData = append(roleData, role)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"permissions": rolesPerms,
 			"roleData":    roleData,
 			"pagination":  pagination,
@@ -714,8 +684,9 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: Update role
-func UpdateRole(db *sql.DB) http.HandlerFunc {
+func UpdateRole(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, "Invalid request body")
@@ -810,33 +781,26 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 		)
 		values = append(values, id)
 		// Execute query and fetch row(s)
-		rows, err := db.Query(query, values...)
+		rows, err := pool.Query(ctx, query, values...)
 		if err != nil {
 			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
 		if !rows.Next() {
 			respondWithError(w, http.StatusNotFound, "Role not found")
 			return
 		}
-		vals := make([]interface{}, len(cols))
-		valPtrs := make([]interface{}, len(cols))
-		for i := range vals {
-			valPtrs[i] = &vals[i]
-		}
-		if err := rows.Scan(valPtrs...); err != nil {
+		vals, err := rows.Values()
+		if err != nil {
 			log.Printf("role.go UpdateRole: scan role row failed: %v", err)
 		}
 		roleMap := map[string]interface{}{}
-		for i, col := range cols {
-			roleMap[col] = vals[i]
+		for i, col := range rows.FieldDescriptions() {
+			roleMap[string(col.Name)] = vals[i]
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"role":    roleMap,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"role": roleMap,
 		})
 	}
 }

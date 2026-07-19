@@ -895,12 +895,8 @@ func GetFolioDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		insertFolioDownloadAudit(ctx, pgxPool, req.FolioID, req.UserID, api.ClientIPFromRequest(r))
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"download_url": downloadURL,
 		})
 	}
 }
@@ -957,25 +953,16 @@ func GetFolioBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(files) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				"message":              "no downloadable files found",
-				"data": map[string]interface{}{
-					"files":      []map[string]string{},
-					"failed_ids": failedIDs,
-				},
+			api.RespondEnvelopeFailureWithData(w, http.StatusOK, "no downloadable files found", "", map[string]interface{}{
+				"files":      []map[string]string{},
+				"failed_ids": failedIDs,
 			})
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"files":      files,
-				"failed_ids": failedIDs,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
 		})
 	}
 }

@@ -1403,12 +1403,8 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, plan)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"fund_plans": results,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"fund_plans": results,
 		})
 	}
 }
@@ -1570,11 +1566,7 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"fund_plan_groups": groups,
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 result,
-		})
+		api.RespondEnvelopeSuccess(w, "Success", result)
 	}
 }
 

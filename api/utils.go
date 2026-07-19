@@ -4,7 +4,6 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
 	"database/sql"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -133,81 +132,90 @@ func sanitizeInternalError(msg string) string {
 	return msg
 }
 
-// Error response helper
+// classifyErrorStatus infers an HTTP status code from error-message content — the
+// same heuristic RespondWithResult/RespondWithPayload always used, now shared so
+// both emit the CLAUDE.md envelope with a consistent status/code.
+func classifyErrorStatus(errMsg string) int {
+	switch {
+	case strings.Contains(errMsg, "duplicate"), strings.Contains(errMsg, "invalid"), strings.Contains(errMsg, "required"):
+		return http.StatusBadRequest
+	case strings.Contains(errMsg, "limit exceeded"), strings.Contains(errMsg, "validation"):
+		return http.StatusUnprocessableEntity
+	case strings.Contains(errMsg, "unauthorized"), strings.Contains(errMsg, "session"):
+		return http.StatusUnauthorized
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// RespondWithError sends the CLAUDE.md standard envelope for an error.
+// Legacy call sites only — prefer RespondEnvelopeError directly in new/touched code.
 func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
-	logger.LogError("%s", errMsg) // always log the full detail
+	LogErrorForResponse(w, "%s", errMsg) // always log the full detail, correlated with the response trace ID
 
 	clientMsg := errMsg
 	if status >= 500 {
 		clientMsg = sanitizeInternalError(errMsg)
 	}
-
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   clientMsg,
-	})
+	RespondEnvelopeError(w, status, clientMsg, "")
 }
 
-// RespondWithResult sends a consistent JSON response for success or error
+// RespondWithResult sends the CLAUDE.md standard envelope for a plain success/error
+// result, inferring the HTTP status from the error message content on failure.
+// Legacy call sites only — prefer RespondEnvelopeSuccess/RespondEnvelopeError directly
+// in new/touched code.
 func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-
 	if success {
-		w.WriteHeader(http.StatusOK) // 200
 		logger.LogInfo("RespondWithResult success")
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true})
-	} else {
-		logger.LogError("RespondWithResult: %s", errMsg) // log full detail before any sanitization
-
-		clientMsg := errMsg
-		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
-			w.WriteHeader(http.StatusBadRequest) // 400
-		} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
-			w.WriteHeader(http.StatusUnprocessableEntity) // 422
-		} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
-			w.WriteHeader(http.StatusUnauthorized) // 401
-		} else {
-			w.WriteHeader(http.StatusInternalServerError) // 500
-			clientMsg = sanitizeInternalError(errMsg)
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: clientMsg})
+		RespondEnvelopeSuccess(w, "Success", nil)
+		return
 	}
+
+	LogErrorForResponse(w, "RespondWithResult: %s", errMsg) // log full detail before any sanitization, correlated with the response trace ID
+	status := classifyErrorStatus(errMsg)
+	clientMsg := errMsg
+	if status >= http.StatusInternalServerError {
+		clientMsg = sanitizeInternalError(errMsg)
+	}
+	RespondEnvelopeError(w, status, clientMsg, "")
 }
 
-// RespondWithPayload sends a consistent JSON response and includes an arbitrary payload
+// RespondWithPayload sends the CLAUDE.md standard envelope with an optional payload,
+// inferring the HTTP status from the error message content on failure. The payload is
+// nested under data.rows (matching the legacy top-level "rows" key) so existing
+// frontend code reading response.data.rows keeps working via nos.tsx's envelope shim.
+// Legacy call sites only — prefer RespondEnvelopeSuccess/RespondEnvelopeFailureWithData
+// directly in new/touched code.
 func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payload interface{}) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	resp := map[string]interface{}{constants.ValueSuccess: success}
-
 	if !success {
 		errMsg = promotePayloadErrors(errMsg, payload)
 	}
 
 	if !success && errMsg != "" {
-		logger.LogError("RespondWithPayload: %s", errMsg) // log full detail before any sanitization
+		LogErrorForResponse(w, "RespondWithPayload: %s", errMsg) // log full detail before any sanitization, correlated with the response trace ID
+		status := classifyErrorStatus(errMsg)
 		clientMsg := errMsg
-		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
-			w.WriteHeader(http.StatusBadRequest) // 400
-		} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
-			w.WriteHeader(http.StatusUnprocessableEntity) // 422
-		} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
-			w.WriteHeader(http.StatusUnauthorized) // 401
-		} else {
-			w.WriteHeader(http.StatusInternalServerError) // 500
+		if status >= http.StatusInternalServerError {
 			clientMsg = sanitizeInternalError(errMsg)
 		}
-		resp[constants.ValueError] = clientMsg
-	} else {
-		w.WriteHeader(http.StatusOK) // 200
+		var data interface{}
+		if payload != nil {
+			data = map[string]interface{}{"rows": payload}
+		}
+		RespondEnvelopeFailureWithData(w, status, clientMsg, "", data)
+		return
 	}
+
+	message := errMsg
+	if message == "" {
+		message = "Success"
+	}
+	var data interface{}
 	if payload != nil {
-		// use a conventional key `rows` for list payloads
-		resp["rows"] = payload
+		data = map[string]interface{}{"rows": payload}
 		logger.LogInfo("RespondWithPayload: payload included")
 	}
-	json.NewEncoder(w).Encode(resp)
+	RespondEnvelopeSuccess(w, message, data)
 }
 
 func promotePayloadErrors(errMsg string, payload interface{}) string {

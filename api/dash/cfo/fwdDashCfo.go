@@ -18,12 +18,7 @@ import (
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	logger.LogError("%s", errMsg)
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
-	})
+	api.RespondEnvelopeError(w, status, errMsg, "")
 }
 
 func GetAvgForwardMaturity(db *pgxpool.Pool) http.HandlerFunc {
@@ -94,8 +89,7 @@ func GetAvgForwardMaturity(db *pgxpool.Pool) http.HandlerFunc {
 		if totalAmount > 0 {
 			avgMaturity = int(weightedSum/totalAmount + 0.5)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"avgForwardMaturity": avgMaturity})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"avgForwardMaturity": avgMaturity})
 	}
 }
 
@@ -168,8 +162,7 @@ func GetForwardBuySellTotals(db *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"buyForwardsUSD":  format2f(buyTotal),
 			"sellForwardsUSD": format2f(sellTotal),
 		})
@@ -197,9 +190,7 @@ func GetUserCurrency(db *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "No entity mapping found for this user")
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		// json.NewEncoder(w).Encode(map[string]interface{}{"defaultCurrency": defaultCurrency})
-		json.NewEncoder(w).Encode(map[string]any{"defaultCurrency": defaultCurrency})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]any{"defaultCurrency": defaultCurrency})
 	}
 }
 
@@ -227,8 +218,7 @@ func GetActiveForwardsCount(db *pgxpool.Pool) http.HandlerFunc {
 			return
 			// Route: dash/cfo/fwd/active-forwards-count
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"ActiveForward": count})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"ActiveForward": count})
 	}
 }
 
@@ -363,8 +353,7 @@ func GetRecentTradesDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			"BANKS": banks,
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(response)
+		api.RespondEnvelopeSuccessCompat(w, "Success", response)
 	}
 }
 
@@ -441,8 +430,7 @@ func GetTotalUsdSumDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			totalUsd += usdAmount
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
 			"totalUsdSum": format2f(totalUsd),
 		})
 	}
@@ -547,8 +535,7 @@ func GetOpenAmountToBookingRatioDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			ratio = openUsd / totalUsd
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"openToBookingRatio": format2f(ratio),
 			"openAmountUsd":      format2f(openUsd),
 			"totalBookedUsd":     format2f(totalUsd),
@@ -626,8 +613,7 @@ func GetTotalUsdSumByCurrencyDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(result)
+		api.RespondEnvelopeSuccess(w, "Success", result)
 	}
 }
 
@@ -757,8 +743,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFun
 			})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(result)
+		api.RespondEnvelopeSuccess(w, "Success", result)
 	}
 }
 
@@ -807,8 +792,7 @@ func GetRolloverCountsByCurrency(db *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Add total at the top
 		data = append([]map[string]string{{"label": "Total Rollovers:", "value": fmt.Sprintf("%d", total)}}, data...)
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(data)
+		api.RespondEnvelopeSuccess(w, "Success", data)
 	}
 }
 
@@ -915,8 +899,7 @@ func GetBankTradesData(db *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(forwardsData)
+		api.RespondEnvelopeSuccess(w, "Success", forwardsData)
 	}
 }
 
@@ -1022,8 +1005,7 @@ func GetMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(response)
+		api.RespondEnvelopeSuccess(w, "Success", response)
 	}
 }
 
@@ -1066,8 +1048,7 @@ func GetTotalBankMarginFromForwardBookings(db *pgxpool.Pool) http.HandlerFunc {
 			}
 			totalBankMargin += margin * rate
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]float64{"totalBankmargin": totalBankMargin})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]float64{"totalBankmargin": totalBankMargin})
 	}
 }
 
@@ -1119,8 +1100,7 @@ func GetOpenAmountToBookingRatioSimple(db *pgxpool.Pool) http.HandlerFunc {
 			ratio = math.Abs(totalOpen) / math.Abs(totalBooking) * 100
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
 			"ratio": fmt.Sprintf("%.3f", ratio),
 		})
 	}

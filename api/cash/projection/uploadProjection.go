@@ -4,7 +4,6 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -81,12 +80,9 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		resp := map[string]interface{}{
-			constants.ValueSuccess: true,
-			"proposal_id":          proposalID,
-			"imported_rows":        importedRows,
-			"message":              "Proposal, items, projections & audit committed successfully",
-		}
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccessCompat(w, "Proposal, items, projections & audit committed successfully", map[string]interface{}{
+			"proposal_id":   proposalID,
+			"imported_rows": importedRows,
+		})
 	}
 }

@@ -183,12 +183,8 @@ func GetBankBalanceDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		insertBankBalanceDownloadAudit(ctx, pgxPool, req.BalanceID, requestedByFromCtx(ctx, req.UserID), key, api.ClientIPFromRequest(r))
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"download_url": downloadURL,
 		})
 	}
 }
@@ -250,25 +246,16 @@ func GetBankBalanceBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(files) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				"message":              "no downloadable files found",
-				"data": map[string]interface{}{
-					"files":      []map[string]string{},
-					"failed_ids": failedIDs,
-				},
+			api.RespondEnvelopeFailureWithData(w, http.StatusNotFound, "no downloadable files found", "", map[string]interface{}{
+				"files":      []map[string]string{},
+				"failed_ids": failedIDs,
 			})
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"files":      files,
-				"failed_ids": failedIDs,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
 		})
 	}
 }
@@ -591,8 +578,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		// return structured JSON
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(actionIDs), "deleted": deleted}) //nolint:errcheck
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"approved_count": len(actionIDs), "deleted": deleted})
 	}
 }
 
@@ -688,8 +674,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rejected_count": len(actionIDs)})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rejected_count": len(actionIDs)})
 	}
 }
 
@@ -1098,12 +1083,8 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: true,
-				"data": map[string]interface{}{
-					"bank_balances": partialRows,
-				},
+			api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+				"bank_balances": partialRows,
 			})
 		}
 	}

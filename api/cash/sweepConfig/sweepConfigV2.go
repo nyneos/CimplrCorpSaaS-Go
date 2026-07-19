@@ -638,12 +638,8 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if len(norm) == 0 {
 				// nothing allowed
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: true,
-					"data": map[string]interface{}{
-						"sweep_configurations": []map[string]interface{}{},
-					},
+				api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+					"sweep_configurations": []map[string]interface{}{},
 				})
 				return
 			}
@@ -896,12 +892,8 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"sweep_configurations": out,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"sweep_configurations": out,
 		})
 	}
 }

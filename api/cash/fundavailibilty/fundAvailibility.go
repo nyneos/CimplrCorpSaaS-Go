@@ -117,7 +117,6 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		projectionsSummary := calculateSummary(projections)
 
 		response := map[string]interface{}{
-			"success":    true,
 			"as_of_date": asOfDate.Format(constants.DateFormat),
 			"view_type":  viewType,
 			"date_range": map[string]string{
@@ -138,12 +137,8 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			},
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"fund_availability": response,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"fund_availability": response,
 		})
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -508,8 +507,7 @@ func GetUploadTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "type must be one of BANK, EXCHANGE, DATA_PROVIDER, CCP_CSD, PAYMENT_NETWORK, ERP_SYSTEM")
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"counterparty_type": cpType,
 			"columns":           cols,
 		})
@@ -842,8 +840,7 @@ func GetUploadTemplateV2(_ *pgxpool.Pool) http.HandlerFunc {
 			for t, extra := range typed {
 				all[t] = append(common, extra...)
 			}
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{"templates": all})
+			api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"templates": all})
 			return
 		}
 
@@ -855,8 +852,7 @@ func GetUploadTemplateV2(_ *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		cols := append(common, extra...)
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"counterparty_type": cpType,
 			"columns":           cols,
 			"notes": map[string]string{

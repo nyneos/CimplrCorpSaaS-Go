@@ -20,9 +20,7 @@ import (
 
 // simple error responder
 func respondWithErrorTemplate(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errMsg})
+	api.RespondEnvelopeError(w, status, errMsg, "")
 }
 
 func getRequesterEmailTemplate() string {
@@ -506,12 +504,9 @@ func respondValidationErrors(w http.ResponseWriter, findings []map[string]string
 	for _, f := range findings {
 		errs = append(errs, fieldError{Field: f["field"], Message: f["error"]})
 	}
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(http.StatusUnprocessableEntity)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   fmt.Sprintf("Template validation failed with %d error(s). Fix all issues and try again.", len(errs)),
-		"errors":  errs,
+	message := fmt.Sprintf("Template validation failed with %d error(s). Fix all issues and try again.", len(errs))
+	api.RespondEnvelopeFailureWithData(w, http.StatusUnprocessableEntity, message, "VALIDATION_FAILED", map[string]interface{}{
+		"errors": errs,
 	})
 }
 
@@ -2845,11 +2840,8 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(validationErrors) > 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":           false,
-				"error":             fmt.Sprintf("%d row(s) failed validation. Fix all errors and retry — no templates were saved.", len(validationErrors)),
+			message := fmt.Sprintf("%d row(s) failed validation. Fix all errors and retry — no templates were saved.", len(validationErrors))
+			api.RespondEnvelopeFailureWithData(w, http.StatusUnprocessableEntity, message, "VALIDATION_FAILED", map[string]interface{}{
 				"validation_errors": validationErrors,
 			})
 			return

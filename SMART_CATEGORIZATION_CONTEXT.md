@@ -389,9 +389,9 @@ Use `confidence_score` from `/cash/bank-statements/v2/transactions` to show badg
 | `internal/services/categorizer/narration.go` | Narration pre-processing: strip bank prefixes, detect channel, extract ref, stem |
 | `internal/services/categorizer/types.go` | Shared types: `TxnInput`, `ClassificationResult`, step constants |
 | `internal/services/categorizer/core.go` | 6-step waterfall engine + pgx persist logic |
-| `api/cash/bankstatement/review_queue.go` | HTTP handlers: review-queue, review-action, correction, gl-mapping |
-| `api/cash/bankstatement/smart_cat_status.go` | HTTP handler: status dashboard |
-| `internal/jobs/cash/categorization_processor.go` | Cron job: nightly full recategorization (pgx, no sql.DB) |
+| `api/cash/bankstatement/reviewQueue.go` | HTTP handlers: review-queue, review-action, correction, gl-mapping |
+| `api/cash/bankstatement/smartCatStatus.go` | HTTP handler: status dashboard |
+| `internal/jobs/cash/categorizationProcessor.go` | Cron job: nightly full recategorization (pgx, no sql.DB) |
 | `api/cash/cash.go` | Route registration (5 new `/cash/smart-cat/*` routes) |
 | `api/cash/bankstatement/handlers.go` | `GetBankStatementTransactionsHandler` updated with 5 new fields |
 

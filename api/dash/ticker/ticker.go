@@ -1,6 +1,7 @@
 package ticker
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"fmt"
@@ -302,8 +303,7 @@ func GetInrRatesHandler() http.Handler {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
-		json.NewEncoder(w).Encode(InrEquivalentRates())
+		api.RespondEnvelopeSuccess(w, "Success", InrEquivalentRates())
 	})
 }
 
@@ -311,7 +311,7 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req TickerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid json", "")
 		return
 	}
 
@@ -351,8 +351,7 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 				result[b] = map[string]interface{}{"base": b, "target": target, "rate": rate}
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
-		json.NewEncoder(w).Encode(result)
+		api.RespondEnvelopeSuccess(w, "Success", result)
 		return
 	}
 
@@ -400,11 +399,10 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 	// If only one base requested, return its value directly to preserve previous behavior
 	if len(bases) == 1 {
-		json.NewEncoder(w).Encode(baseResults[bases[0]])
+		api.RespondEnvelopeSuccess(w, "Success", baseResults[bases[0]])
 		return
 	}
-	json.NewEncoder(w).Encode(baseResults)
+	api.RespondEnvelopeSuccess(w, "Success", baseResults)
 }

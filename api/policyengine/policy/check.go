@@ -1,0 +1,90 @@
+package policy
+
+import (
+	"net/http"
+	"strings"
+
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+type checkReq struct {
+	EventCode          string            `json:"event_code"`
+	ModuleCode         string            `json:"module_code"`
+	SubModule          string            `json:"sub_module"`
+	FormID             string            `json:"form_id"`
+	EntityCode         string            `json:"entity_code"`
+	ActorUserID        string            `json:"actor_user_id"`
+	HandlerName        string            `json:"handler_name"`
+	APIPath            string            `json:"api_path"`
+	CorrelationID      string            `json:"correlation_id"`
+	TraceID            string            `json:"trace_id"`
+	BusinessRecordType string            `json:"business_record_type"`
+	BusinessRecordID   string            `json:"business_record_id"`
+	SourceFileName     string            `json:"source_file_name"`
+	SourceFileID       string            `json:"source_file_id"`
+	BatchID            string            `json:"batch_id"`
+	Variables          map[string]string `json:"variables"`
+	// Optional explicit policy payloads; if empty, Active policies for event+module are loaded.
+	Policies []map[string]interface{} `json:"policies"`
+}
+
+// HandleCheck loads applicable policies, calls CIMPLR-Policy-Service (parallel-safe client),
+// writes execution_log rows, returns aggregated action.
+func HandleCheck(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !common.RequirePOST(w, r) {
+			return
+		}
+		var req checkReq
+		if err := common.DecodeJSON(r, &req); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		req.EventCode = strings.TrimSpace(req.EventCode)
+		if req.EventCode == "" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "event_code is required", "VALIDATION_ERROR")
+			return
+		}
+		if req.Variables == nil {
+			req.Variables = map[string]string{}
+		}
+
+		traceID := common.ResolveTraceID(w, r, req.TraceID)
+		correlationID := common.ResolveCorrelationID(r, req.CorrelationID)
+
+		result, err := runtime.RunCheck(r.Context(), pool, runtime.CheckRequest{
+			EventCode:          req.EventCode,
+			ModuleCode:         req.ModuleCode,
+			SubModule:          req.SubModule,
+			FormID:             req.FormID,
+			EntityCode:         req.EntityCode,
+			ActorUserID:        req.ActorUserID,
+			HandlerName:        req.HandlerName,
+			APIPath:            req.APIPath,
+			CorrelationID:      correlationID,
+			TraceID:            traceID,
+			BusinessRecordType: req.BusinessRecordType,
+			BusinessRecordID:   req.BusinessRecordID,
+			SourceFileName:     req.SourceFileName,
+			SourceFileID:       req.SourceFileID,
+			BatchID:            req.BatchID,
+			Variables:          req.Variables,
+			Policies:           req.Policies,
+		})
+		if err != nil {
+			api.LogErrorForResponse(w, "policy check evaluate: %v", err)
+			api.RespondEnvelopeError(w, http.StatusBadGateway, "policy check service failed", "POLICY_SERVICE_ERROR")
+			return
+		}
+
+		api.RespondEnvelopeSuccess(w, "Policy check completed", map[string]interface{}{
+			"aggregated_action": result.AggregatedAction,
+			"results":           result.Results,
+			"duration_ms":       result.DurationMS,
+		})
+	}
+}

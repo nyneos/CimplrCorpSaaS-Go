@@ -1,14 +1,13 @@
 package exposures
 
 import (
-	"database/sql"
 	"encoding/json"
 	"net/http"
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Helper: send JSON error response
@@ -22,8 +21,9 @@ import (
 // }
 
 // Handler: Aggregate hedging proposals for accessible business units
-func GetHedgingProposalsAggregated(db *sql.DB) http.HandlerFunc {
+func GetHedgingProposalsAggregated(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID string `json:"user_id"`
 		}
@@ -33,7 +33,7 @@ func GetHedgingProposalsAggregated(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Get business units from context (set by middleware)
-		scope := ctxutil.FromContext(r.Context())
+		scope := ctxutil.FromContext(ctx)
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
@@ -41,13 +41,13 @@ func GetHedgingProposalsAggregated(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Ensure all exposure_header_id are present in hedging_proposal
-		_, _ = db.Exec(`INSERT INTO hedging_proposal (exposure_header_id)
+		_, _ = pool.Exec(ctx, `INSERT INTO hedging_proposal (exposure_header_id)
 			SELECT exposure_header_id
 			FROM exposure_headers
 			WHERE entity = ANY($1)
 			  AND exposure_header_id NOT IN (
 				SELECT exposure_header_id FROM hedging_proposal
-			  )`, pq.Array(buNames))
+			  )`, buNames)
 
 		// Aggregate hedging proposals
 		query := `
@@ -77,13 +77,13 @@ func GetHedgingProposalsAggregated(db *sql.DB) http.HandlerFunc {
 			WHERE h.entity = ANY($1)
 			GROUP BY h.entity, h.currency, h.exposure_type
 		`
-		rows, err := db.Query(query, pq.Array(buNames))
+		rows, err := pool.Query(ctx, query, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to aggregate proposals")
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
+		cols := pgxColumnNames(rows)
 		proposals := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -100,10 +100,8 @@ func GetHedgingProposalsAggregated(db *sql.DB) http.HandlerFunc {
 			}
 			proposals = append(proposals, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"proposals":            proposals,
+		respondWithSuccess(w, http.StatusOK, "Success", map[string]interface{}{
+			"proposals": proposals,
 		})
 	}
 }

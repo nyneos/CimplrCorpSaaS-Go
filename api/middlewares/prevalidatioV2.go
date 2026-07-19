@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -483,25 +482,17 @@ func loadApprovedTDSPlans(ctx context.Context, db *pgxpool.Pool) ([]map[string]s
 
 func loadApprovedBankConfigs(ctx context.Context, db *pgxpool.Pool) ([]map[string]string, error) {
 	query := `
-		WITH latest_approved_delete AS (
+		WITH latest_approved AS (
 			SELECT DISTINCT ON (config_id) config_id, action_type
 			FROM investment.fd_audit_bank_config
-			WHERE processing_status = 'APPROVED' AND action_type = 'DELETE'
-			ORDER BY config_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
+			WHERE processing_status = 'APPROVED'
+			ORDER BY config_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC, requested_at DESC
 		)
 		SELECT COALESCE(m.config_id,''), COALESCE(m.bank_code,''), COALESCE(m.product_type,'')
 		FROM investment.fd_bank_config_master m
-		LEFT JOIN latest_approved_delete d ON d.config_id = m.config_id
+		JOIN latest_approved la ON la.config_id = m.config_id AND la.action_type IN ('CREATE','EDIT')
 		WHERE m.is_active = true
 		  AND COALESCE(m.is_deleted, false) = false
-		  AND d.config_id IS NULL
-		  AND EXISTS (
-		  	SELECT 1
-		  	FROM investment.fd_audit_bank_config a
-		  	WHERE a.config_id = m.config_id
-		  	  AND a.processing_status = 'APPROVED'
-		  	  AND a.action_type IN ('CREATE','EDIT')
-		  )
 	`
 	rows, err := db.Query(ctx, query)
 	if err != nil {
@@ -777,12 +768,8 @@ func SessionMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			if err != nil {
 				le := strings.ToLower(err.Error())
 				if err == http.ErrMissingFile || strings.Contains(le, "no business") || strings.Contains(le, "no entity") || strings.Contains(le, "no accessible") {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{
-						constants.ValueSuccess: false,
-						"error":                "No accessible business units found for this user",
-						"code":                 "NO_ACCESS_ENTITIES",
-						"help":                 "Contact your administrator to grant access to business units or set up entities for your account.",
+					api.RespondEnvelopeFailureCompat(w, http.StatusForbidden, "No accessible business units found for this user", "NO_ACCESS_ENTITIES", map[string]interface{}{
+						"help": "Contact your administrator to grant access to business units or set up entities for your account.",
 					})
 					return
 				}
@@ -793,8 +780,7 @@ func SessionMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			entityIDs, entityNames, err := resolveEntityHierarchyMulti(ctx, db, validationResult.RootEntityIDs)
 			if err != nil {
 				if err == http.ErrMissingFile {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": constants.ErrNoAccessibleBusinessUnit})
+					api.RespondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit, "")
 					return
 				}
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve entity hierarchy: "+err.Error())

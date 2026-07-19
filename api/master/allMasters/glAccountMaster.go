@@ -217,8 +217,7 @@ func FindParentGLAccountAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to fetch parent GL accounts")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -232,8 +231,7 @@ func FindParentGLAccountAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"gl_account_name": name, "gl_account_id": id, "gl_account_code": code})
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"results": results})
 	}
 }
 
@@ -265,8 +263,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -327,8 +324,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 				errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to create savepoint")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
@@ -416,8 +412,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 				errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to release savepoint")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
@@ -459,8 +454,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := tx.Commit(ctx); err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to save GL accounts")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -468,8 +462,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		tx = nil
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": created})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": created})
 	}
 }
 
@@ -494,8 +487,7 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		currCodes := api.GetCurrencyCodesFromCtx(ctx)
 
 		if len(currCodes) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": []map[string]interface{}{}})
+			api.RespondEnvelopeSuccess(w, "Success", []map[string]interface{}{})
 			return
 		}
 
@@ -819,8 +811,7 @@ func GetApprovedActiveGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		currCodes := api.GetCurrencyCodesFromCtx(ctx)
 
 		if len(currCodes) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": []map[string]interface{}{}})
+			api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": []map[string]interface{}{}})
 			return
 		}
 
@@ -841,8 +832,7 @@ func GetApprovedActiveGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to fetch approved GL accounts")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -862,8 +852,7 @@ func GetApprovedActiveGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -1158,8 +1147,11 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: overall, "rows": results})
+		if overall {
+			api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": results})
+		} else {
+			api.RespondEnvelopeFailureWithData(w, http.StatusOK, "One or more GL account updates failed", "", map[string]interface{}{"rows": results})
+		}
 	}
 }
 
@@ -1233,14 +1225,13 @@ func DeleteGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err := pgxPool.Exec(ctx, q, body.Reason, requestedBy, allList); err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to queue GL accounts for deletion")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "queued_count": len(allList)})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"queued_count": len(allList)})
 	}
 }
 
@@ -1309,8 +1300,7 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1323,8 +1313,7 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to reject GL account actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1340,23 +1329,21 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
-		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
-		if !success {
-			resp["message"] = constants.ErrNoRowsUpdated
-		}
 		if err := tx.Commit(ctx); err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrCommitFailedCapitalized)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
 			return
 		}
-		json.NewEncoder(w).Encode(resp)
+		if success {
+			api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"updated": updated})
+		} else {
+			api.RespondEnvelopeFailureWithData(w, http.StatusOK, constants.ErrNoRowsUpdated, "", map[string]interface{}{"updated": updated})
+		}
 	}
 }
 
@@ -1451,8 +1438,7 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1465,8 +1451,7 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to approve GL account actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1497,23 +1482,21 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
-		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated, "blocked": blockedGLAccounts}
-		if !success {
-			resp["message"] = constants.ErrNoRowsUpdated
-		}
 		if err := tx.Commit(ctx); err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, constants.ErrCommitFailedCapitalized)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
 			return
 		}
-		json.NewEncoder(w).Encode(resp)
+		if success {
+			api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"updated": updated, "blocked": blockedGLAccounts})
+		} else {
+			api.RespondEnvelopeFailureWithData(w, http.StatusOK, constants.ErrNoRowsUpdated, "", map[string]interface{}{"updated": updated, "blocked": blockedGLAccounts})
+		}
 	}
 }
 
@@ -1841,11 +1824,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"batch_ids":            batchIDs,
-		})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"batch_ids": batchIDs})
 	}
 }
 
@@ -2231,7 +2210,6 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}(newCodes)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{constants.ValueSuccess: true, "batch_ids": batchIDs})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"batch_ids": batchIDs})
 	}
 }

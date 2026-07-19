@@ -160,9 +160,7 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Standardize: always return 'rows' as the array field
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
 			"audit_logs": payload,
 		})
 	}

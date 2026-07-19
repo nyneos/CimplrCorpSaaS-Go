@@ -558,12 +558,10 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"entities":             inserted,
-			"relationshipsAdded":   len(relationshipsAdded),
-			"details":              relationshipsAdded,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"entities":           inserted,
+			"relationshipsAdded": len(relationshipsAdded),
+			"details":            relationshipsAdded,
 		})
 	}
 }
@@ -1042,12 +1040,8 @@ func GetCashEntityLogoURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": logoURL,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"download_url": logoURL,
 		})
 	}
 }
@@ -1058,19 +1052,17 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		req, upload, err := parseUpdateCashEntityBulkRequest(r)
 		if err != nil {
 			contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
-			w.WriteHeader(http.StatusBadRequest)
 			if strings.HasPrefix(contentType, constants.ContentTypeMultipart) {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "")
 			} else {
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidJSONShort})
+				api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort, "")
 			}
 			return
 		}
 		// Get updated_by from session
 		updatedBy := api.GetUserNameFromCtx(r.Context())
 		if updatedBy == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidSessionCapitalized})
+			api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized, "")
 			return
 		}
 
@@ -1526,12 +1518,10 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "entity_id": updatedEntityID})
 			}()
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"results":              results,
-			"relationshipsAdded":   len(relationshipsAdded),
-			"details":              relationshipsAdded,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"results":            results,
+			"relationshipsAdded": len(relationshipsAdded),
+			"details":            relationshipsAdded,
 		})
 	}
 }
@@ -1776,12 +1766,8 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(blockedEntities) > 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusConflict)
-			json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
-				constants.ValueSuccess: false,
-				"error":                "Cannot request deletion: one or more entities have active records that must be resolved first.",
-				"blocked":              blockedEntities,
+			api.RespondEnvelopeFailureCompat(w, http.StatusConflict, "Cannot request deletion: one or more entities have active records that must be resolved first.", "", map[string]interface{}{
+				"blocked": blockedEntities,
 			})
 			return
 		}
@@ -1804,17 +1790,17 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// ── 8. Response ────────────────────────────────────
-		resp := map[string]interface{}{
-			constants.ValueSuccess: len(auditErrors) == 0,
-			"affected_entity_ids":  allIDs,
-			"affected_names":       allNames,
+		fields := map[string]interface{}{
+			"affected_entity_ids": allIDs,
+			"affected_names":      allNames,
 		}
 
 		if len(auditErrors) > 0 {
-			resp["audit_errors"] = auditErrors
+			fields["audit_errors"] = auditErrors
+			api.RespondEnvelopeFailureCompat(w, http.StatusUnprocessableEntity, "Some entities could not be queued for deletion", "", fields)
+			return
 		}
-
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccessCompat(w, "Success", fields)
 	}
 }
 
@@ -1842,8 +1828,7 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity relationships for bulk reject")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1861,8 +1846,7 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to resolve entity hierarchy for bulk reject")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1872,8 +1856,7 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1886,8 +1869,7 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to reject entity actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1904,26 +1886,25 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
-		resp := map[string]interface{}{
-			constants.ValueSuccess: success,
-			"updated":              updated,
-		}
-		if !success {
-			resp["message"] = "No entities found to reject"
-		}
 		if err := tx.Commit(ctx); err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrCommitFailedCapitalized)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
 			return
 		}
-		json.NewEncoder(w).Encode(resp)
+		if !success {
+			api.RespondEnvelopeFailureCompat(w, http.StatusOK, "No entities found to reject", "", map[string]interface{}{
+				"updated": updated,
+			})
+			return
+		}
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"updated": updated,
+		})
 	}
 }
 
@@ -1951,8 +1932,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity relationships for bulk approve")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1970,8 +1950,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -2019,8 +1998,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to mark entities as deleted")
 					if statusCode == http.StatusOK {
-						w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-						json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+						api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 					} else {
 						api.RespondWithError(w, statusCode, errMsg)
 					}
@@ -2052,8 +2030,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if aerr != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(aerr, "Failed to approve delete actions")
 					if statusCode == http.StatusOK {
-						w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-						json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+						api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 					} else {
 						api.RespondWithError(w, statusCode, errMsg)
 					}
@@ -2076,8 +2053,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to approve entity action")
 					if statusCode == http.StatusOK {
-						w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-						json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+						api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 					} else {
 						api.RespondWithError(w, statusCode, errMsg)
 					}
@@ -2096,60 +2072,48 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rows.Close()
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(allUpdated) > 0 && anyError == nil
-		resp := map[string]interface{}{
-			constants.ValueSuccess: success,
-			"updated":              allUpdated,
+		fields := map[string]interface{}{
+			"updated": allUpdated,
 		}
 		if anyError != nil {
-			resp[constants.ValueError] = anyError.Error()
-		}
-		if !success {
-			resp["message"] = "No entities found to approve"
+			fields[constants.ValueError] = anyError.Error()
 		}
 		if anyError == nil {
 			if err := tx.Commit(ctx); err != nil {
 				errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrCommitFailedCapitalized)
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
 				return
 			}
 		}
-		json.NewEncoder(w).Encode(resp)
+		if !success {
+			api.RespondEnvelopeFailureCompat(w, http.StatusOK, "No entities found to approve", "", fields)
+			return
+		}
+		api.RespondEnvelopeSuccessCompat(w, "Success", fields)
 	}
 }
 
 func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-
 		// Parse request
 		var req struct {
 			UserID string `json:"user_id"`
 			Level  int    `json:"level"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				constants.ValueError:   "Missing or invalid user_id/level",
-			})
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "Missing or invalid user_id/level", "")
 			return
 		}
 
 		// Validate user session
 		validUser := api.GetSessionFromCtx(r.Context()) != nil
 		if !validUser {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				constants.ValueError:   constants.ErrInvalidSessionCapitalized,
-			})
+			api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized, "")
 			return
 		}
 		ctx := r.Context()
@@ -2157,10 +2121,8 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Get user's accessible entities from context
 		accessibleEntityIDs := ctxutil.FromContext(ctx).EntityIDs
 		if len(accessibleEntityIDs) == 0 {
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: true,
-				"results":              []map[string]interface{}{},
+			api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+				"results": []map[string]interface{}{},
 			})
 			return
 		}
@@ -2187,11 +2149,7 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, parentLevel, accessibleEntityIDs)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				constants.ValueError:   err.Error(),
-			})
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
 			return
 		}
 		defer rows.Close()
@@ -2200,11 +2158,7 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var name, id string
 			if err := rows.Scan(&name, &id); err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   err.Error(),
-				})
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
 				return
 			}
 			results = append(results, map[string]interface{}{
@@ -2217,22 +2171,16 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := rows.Err(); err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Error during result iteration")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
-				w.WriteHeader(statusCode)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   errMsg,
-				})
+				api.RespondEnvelopeError(w, statusCode, errMsg, "")
 			}
 			return
 		}
 
 		// Success response
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"results":              results,
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"results": results,
 		})
 	}
 }
@@ -2286,8 +2234,7 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity names")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -2320,7 +2267,6 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"unique_identifier": uid,
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if anyError != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
 			return
@@ -2328,9 +2274,8 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if results == nil {
 			results = make([]map[string]interface{}, 0)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"results":              results,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"results": results,
 		})
 	}
 }
@@ -2373,8 +2318,7 @@ func GetAssignedCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch assigned entity names")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -2407,7 +2351,6 @@ func GetAssignedCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"unique_identifier": uid,
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if anyError != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
 			return
@@ -2415,9 +2358,8 @@ func GetAssignedCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if results == nil {
 			results = make([]map[string]interface{}, 0)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"results":              results,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"results": results,
 		})
 	}
 }
@@ -2533,8 +2475,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
@@ -2553,8 +2494,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"input_entitycash"}, columns, pgx.CopyFromRows(copyRows)); err != nil {
 				errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to stage data")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
@@ -2566,8 +2506,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch column mapping")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
@@ -2623,8 +2562,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyEntityCashError(err, "Final insert error")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
@@ -2645,8 +2583,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to insert audit actions")
 					if statusCode == http.StatusOK {
-						w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-						json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+						api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 					} else {
 						api.RespondWithError(w, statusCode, errMsg)
 					}
@@ -2660,8 +2597,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if err != nil {
 					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch parent info")
 					if statusCode == http.StatusOK {
-						w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-						json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+						api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 					} else {
 						api.RespondWithError(w, statusCode, errMsg)
 					}
@@ -2691,8 +2627,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.Commit(ctx); err != nil {
 				errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrCommitFailedCapitalized)
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
@@ -2715,8 +2650,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs, "relationships_added": len(relationshipsAdded), "relationship_details": relationshipsAdded})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"batch_ids": batchIDs, "relationships_added": len(relationshipsAdded), "relationship_details": relationshipsAdded})
 	}
 }
 
@@ -2744,14 +2678,9 @@ func (r *UploadValidationResult) addErr(row int, field, value, msg string) {
 	r.Valid = false
 }
 
-// uploadEntityError writes a flat {success:false, error:"…"} JSON response.
+// uploadEntityError writes the CLAUDE.md standard error envelope.
 func uploadEntityError(w http.ResponseWriter, statusCode int, msg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(statusCode)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   msg,
-	})
+	api.RespondEnvelopeError(w, statusCode, msg, "")
 }
 
 // uploadEntityValidationFail writes a flat 422 with the first validation error.
@@ -3577,13 +3506,11 @@ ON CONFLICT (parent_entity_name, child_entity_name) DO UPDATE
 		totalDur := time.Since(startOverall)
 		logger.LogInfo("[UploadEntitySimple] done rows=%d total_ms=%d", len(parsed), totalDur.Milliseconds())
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"file":                 fh.Filename,
-			"rows":                 len(parsed),
-			"duration_ms":          totalDur.Milliseconds(),
-			"batch_id":             uuid.New().String(),
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"file":        fh.Filename,
+			"rows":        len(parsed),
+			"duration_ms": totalDur.Milliseconds(),
+			"batch_id":    uuid.New().String(),
 		})
 	}
 }

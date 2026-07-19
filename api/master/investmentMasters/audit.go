@@ -81,11 +81,7 @@ func collectMasterPgxRows(rows pgx.Rows) ([]map[string]interface{}, error) {
 }
 
 func respondMasterAuditPayload(w http.ResponseWriter, payload interface{}) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
-		"success": true,
-		"data":    payload,
-	})
+	api.RespondEnvelopeSuccess(w, "Success", payload)
 }
 
 // emptyStringToNil returns nil for an empty/whitespace string value so that a

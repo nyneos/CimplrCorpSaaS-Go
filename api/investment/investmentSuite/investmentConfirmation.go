@@ -1,0 +1,1947 @@
+package investmentsuite
+
+import (
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/investment/uploadutil"
+	"CimplrCorpSaas/api/notification/catalog"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	jobs "CimplrCorpSaas/internal/jobs/investment"
+	"CimplrCorpSaas/internal/logger"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"CimplrCorpSaas/api/constants"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// ---------------------------
+// Request/Response Types
+// ---------------------------
+
+type CreateConfirmationRequest struct {
+	UserID             string  `json:"user_id"`
+	InitiationID       string  `json:"initiation_id"`
+	NAVDate            string  `json:"nav_date"` // YYYY-MM-DD
+	NAV                float64 `json:"nav"`
+	AllottedUnits      float64 `json:"allotted_units"`
+	StampDuty          float64 `json:"stamp_duty,omitempty"`
+	NetAmount          float64 `json:"net_amount"`
+	ActualNAV          float64 `json:"actual_nav,omitempty"`
+	ActualUnits        float64 `json:"actual_allotted_units,omitempty"`
+	ResolutionComments string  `json:"resolution_comment,omitempty"`
+	ResolutionVariance string  `json:"resolution_variance,omitempty"`
+	Status             string  `json:"status,omitempty"`
+}
+
+func GetConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID         string `json:"user_id"`
+			ConfirmationID string `json:"confirmation_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		if strings.TrimSpace(req.ConfirmationID) == "" {
+			api.RespondWithResult(w, false, "confirmation_id required")
+			return
+		}
+
+		var uploadS3Key sql.NullString
+		if err := pgxPool.QueryRow(r.Context(), `
+			SELECT upload_s3_key
+			FROM investment.investment_confirmation
+			WHERE confirmation_id = $1
+		`, req.ConfirmationID).Scan(&uploadS3Key); err != nil {
+			api.RespondWithResult(w, false, constants.ErrFileNotFound)
+			return
+		}
+
+		key := strings.TrimSpace(uploadS3Key.String)
+		if !uploadS3Key.Valid || key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			return
+		}
+
+		_, _ = pgxPool.Exec(r.Context(), `
+			INSERT INTO investment.auditactioninvestmentconfirmation (confirmation_id, actiontype, processing_status, requested_by, requested_at)
+			VALUES ($1, 'DOWNLOAD', 'APPROVED', $2, now())
+		`, req.ConfirmationID, api.GetUserNameFromCtx(r.Context()))
+
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"confirmation_id": req.ConfirmationID,
+			"download_url":    downloadURL,
+		})
+	}
+}
+
+func GetConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID          string   `json:"user_id"`
+			ConfirmationIDs []string `json:"confirmation_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+		if len(req.ConfirmationIDs) == 0 {
+			api.RespondWithResult(w, false, constants.ConfirmationIDsRequired)
+			return
+		}
+
+		files := make([]map[string]string, 0, len(req.ConfirmationIDs))
+		failedIDs := make([]string, 0)
+		for _, rawID := range req.ConfirmationIDs {
+			confirmationID := strings.TrimSpace(rawID)
+			if confirmationID == "" {
+				continue
+			}
+
+			var uploadS3Key sql.NullString
+			if err := pgxPool.QueryRow(r.Context(), `
+				SELECT upload_s3_key
+				FROM investment.investment_confirmation
+				WHERE confirmation_id = $1
+			`, confirmationID).Scan(&uploadS3Key); err != nil {
+				failedIDs = append(failedIDs, confirmationID)
+				continue
+			}
+
+			key := strings.TrimSpace(uploadS3Key.String)
+			if !uploadS3Key.Valid || key == "" {
+				failedIDs = append(failedIDs, confirmationID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, confirmationID)
+				continue
+			}
+			_, _ = pgxPool.Exec(r.Context(), `
+				INSERT INTO investment.auditactioninvestmentconfirmation (confirmation_id, actiontype, processing_status, requested_by, requested_at)
+				VALUES ($1, 'DOWNLOAD', 'APPROVED', $2, now())
+			`, confirmationID, api.GetUserNameFromCtx(r.Context()))
+			files = append(files, map[string]string{
+				"confirmation_id": confirmationID,
+				"download_url":    downloadURL,
+			})
+		}
+
+		if len(files) > 0 {
+			api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			})
+		} else {
+			api.RespondEnvelopeFailureCompat(w, http.StatusNotFound, "No files available for download", "", map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			})
+		}
+	}
+}
+
+type UpdateConfirmationRequest struct {
+	UserID         string                 `json:"user_id"`
+	ConfirmationID string                 `json:"confirmation_id"`
+	Fields         map[string]interface{} `json:"fields"`
+	Reason         string                 `json:"reason"`
+}
+
+// ---------------------------
+// CreateConfirmationSingle
+// ---------------------------
+
+func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		req, isMultipart, err := decodeCreateConfirmationRequest(r)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		// validate required fields
+		if strings.TrimSpace(req.InitiationID) == "" ||
+			strings.TrimSpace(req.NAVDate) == "" ||
+			req.NetAmount <= 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "Missing required fields: initiation_id, nav_date, net_amount")
+			return
+		}
+
+		userEmail := api.GetUserNameFromCtx(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		uploadS3Key := ""
+		if isMultipart {
+			if err := uploadutil.EnsureUniqueMultipartUpload(ctx, pgxPool, s3storage.CollectMultipartFiles(r.MultipartForm, "file", "files"), `
+				SELECT upload_s3_key
+				FROM investment.investment_confirmation
+				WHERE COALESCE(is_deleted, false) = false
+				  AND COALESCE(upload_s3_key, '') <> ''
+			`); err != nil {
+				if errors.Is(err, uploadutil.ErrFileAlreadyUploaded) {
+					api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
+					return
+				}
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+err.Error())
+				return
+			}
+			var uploadErr error
+			uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, "investment-confirmation", userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "file", "files"))
+			if uploadErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "upload file failed: "+uploadErr.Error())
+				return
+			}
+		}
+
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		status := "PENDING_CONFIRMATION"
+		if strings.TrimSpace(req.Status) != "" {
+			status = req.Status
+		}
+
+		// Calculate variances if actual values provided
+		var varianceNAV, varianceUnits *float64
+		if req.ActualNAV > 0 {
+			diff := req.ActualNAV - req.NAV
+			varianceNAV = &diff
+		}
+		if req.ActualUnits > 0 {
+			diff := req.ActualUnits - req.AllottedUnits
+			varianceUnits = &diff
+		}
+
+		insertQ := `
+			INSERT INTO investment.investment_confirmation (
+				initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
+				actual_nav, actual_allotted_units, variance_nav, variance_units, resolution_comment, resolution_variance, status, upload_s3_key
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULLIF($14, ''))
+			RETURNING confirmation_id
+		`
+		var confirmationID string
+		if err := tx.QueryRow(ctx, insertQ,
+			req.InitiationID,
+			req.NAVDate,
+			req.NAV,
+			req.AllottedUnits,
+			req.StampDuty,
+			req.NetAmount,
+			nullIfZero(req.ActualNAV),
+			nullIfZero(req.ActualUnits),
+			varianceNAV,
+			varianceUnits,
+			req.ResolutionComments,
+			req.ResolutionVariance,
+			status,
+			uploadS3Key,
+		).Scan(&confirmationID); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
+			return
+		}
+
+		// audit
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO investment.auditactioninvestmentconfirmation (confirmation_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+		`, confirmationID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			return
+		}
+
+		go func(cID, uID, uEmail string) {
+			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, []string{cID}, constants.AuditActionCreate, uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/investment/confirmation/create",
+				fmt.Sprintf("INVESTMENT_CONFIRMATION_CREATE/%s/%d", uID, time.Now().UnixMilli()),
+				pl.ToMap(),
+			)
+		}(confirmationID, req.UserID, userEmail)
+
+		api.RespondWithPayload(w, true, "", map[string]any{
+			"confirmation_id": confirmationID,
+			"initiation_id":   req.InitiationID,
+			"requested":       userEmail,
+		})
+	}
+}
+
+func decodeCreateConfirmationRequest(r *http.Request) (CreateConfirmationRequest, bool, error) {
+	var req CreateConfirmationRequest
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			return req, true, err
+		}
+		req.UserID = strings.TrimSpace(r.FormValue("user_id"))
+		req.InitiationID = strings.TrimSpace(r.FormValue("initiation_id"))
+		req.NAVDate = strings.TrimSpace(r.FormValue("nav_date"))
+		req.NAV = formFloat(r, "nav")
+		req.AllottedUnits = formFloat(r, "allotted_units")
+		req.StampDuty = formFloat(r, "stamp_duty")
+		req.NetAmount = formFloat(r, "net_amount")
+		req.ActualNAV = formFloat(r, "actual_nav")
+		req.ActualUnits = formFloat(r, "actual_allotted_units")
+		req.ResolutionComments = strings.TrimSpace(r.FormValue("resolution_comment"))
+		req.ResolutionVariance = strings.TrimSpace(r.FormValue("resolution_variance"))
+		req.Status = strings.TrimSpace(r.FormValue("status"))
+		return req, true, nil
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return req, false, err
+	}
+	return req, false, nil
+}
+
+func formFloat(r *http.Request, key string) float64 {
+	value, _ := strconv.ParseFloat(strings.TrimSpace(r.FormValue(key)), 64)
+	return value
+}
+
+// ---------------------------
+// CreateConfirmationBulk
+// ---------------------------
+
+func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+			Rows   []struct {
+				InitiationID       string  `json:"initiation_id"`
+				NAVDate            string  `json:"nav_date"`
+				NAV                float64 `json:"nav"`
+				AllottedUnits      float64 `json:"allotted_units"`
+				StampDuty          float64 `json:"stamp_duty,omitempty"`
+				NetAmount          float64 `json:"net_amount"`
+				ActualNAV          float64 `json:"actual_nav,omitempty"`
+				ActualUnits        float64 `json:"actual_allotted_units,omitempty"`
+				ResolutionComments string  `json:"resolution_comment,omitempty"`
+				ResolutionVariance string  `json:"resolution_variance,omitempty"`
+				Status             string  `json:"status,omitempty"`
+			} `json:"rows"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+
+		if len(req.Rows) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
+			return
+		}
+
+		userEmail := api.GetUserNameFromCtx(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+
+		ctx := r.Context()
+		results := make([]map[string]interface{}, 0, len(req.Rows))
+
+		for _, row := range req.Rows {
+			initiationID := strings.TrimSpace(row.InitiationID)
+			navDate := strings.TrimSpace(row.NAVDate)
+
+			if initiationID == "" || navDate == "" || row.NetAmount <= 0 {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false, constants.ValueError: "Missing required fields: initiation_id, nav_date, nav, allotted_units, net_amount",
+				})
+				continue
+			}
+
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
+				continue
+			}
+			defer tx.Rollback(ctx)
+
+			status := "PENDING_CONFIRMATION"
+			if strings.TrimSpace(row.Status) != "" {
+				status = row.Status
+			}
+
+			var varianceNAV, varianceUnits *float64
+			if row.ActualNAV > 0 {
+				diff := row.ActualNAV - row.NAV
+				varianceNAV = &diff
+			}
+			if row.ActualUnits > 0 {
+				diff := row.ActualUnits - row.AllottedUnits
+				varianceUnits = &diff
+			}
+
+			var confirmationID string
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO investment.investment_confirmation (
+					initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
+					actual_nav, actual_allotted_units, variance_nav, variance_units, resolution_comment, resolution_variance, status
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+				RETURNING confirmation_id
+			`, initiationID, navDate, row.NAV, row.AllottedUnits, row.StampDuty, row.NetAmount,
+				nullIfZero(row.ActualNAV), nullIfZero(row.ActualUnits), varianceNAV, varianceUnits, row.ResolutionComments, row.ResolutionVariance, status).Scan(&confirmationID); err != nil {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false, "initiation_id": initiationID, constants.ValueError: "Insert failed: " + err.Error(),
+				})
+				continue
+			}
+
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO investment.auditactioninvestmentconfirmation (confirmation_id, actiontype, processing_status, requested_by, requested_at, requested_ip)
+				VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+			`, confirmationID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false, "confirmation_id": confirmationID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(),
+				})
+				continue
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false, "confirmation_id": confirmationID, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error(),
+				})
+				continue
+			}
+
+			results = append(results, map[string]interface{}{
+				constants.ValueSuccess: true,
+				"confirmation_id":      confirmationID,
+				"initiation_id":        initiationID,
+			})
+		}
+
+		// Fire bulk-create notification for all successfully created IDs
+		createdCIDs := make([]string, 0)
+		for _, r := range results {
+			if ok, _ := r[constants.ValueSuccess].(bool); ok {
+				if id, _ := r["confirmation_id"].(string); id != "" {
+					createdCIDs = append(createdCIDs, id)
+				}
+			}
+		}
+		if len(createdCIDs) > 0 {
+			ids := createdCIDs
+			uID := req.UserID
+			uEmail := userEmail
+			go func() {
+				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionCreate, uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/investment/confirmation/bulk-create",
+					fmt.Sprintf("INVESTMENT_CONFIRMATION_BULK_CREATE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+
+		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+	}
+}
+
+// ---------------------------
+// UpdateConfirmation
+// ---------------------------
+
+func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req UpdateConfirmationRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+		if strings.TrimSpace(req.ConfirmationID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "confirmation_id required")
+			return
+		}
+		if len(req.Fields) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFieldsToUpdateUser)
+			return
+		}
+
+		userEmail := api.GetUserNameFromCtx(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+
+		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		// fetch existing values
+		sel := `
+			SELECT initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount, 
+				   actual_nav, actual_allotted_units, variance_nav, variance_units, status,
+				   resolution_comment, resolution_variance
+			FROM investment.investment_confirmation
+			WHERE confirmation_id=$1
+			FOR UPDATE
+		`
+		var oldVals [13]interface{}
+		if err := tx.QueryRow(ctx, sel, req.ConfirmationID).Scan(
+			&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4],
+			&oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12],
+		); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "fetch failed: "+err.Error())
+			return
+		}
+
+		fieldPairs := map[string]int{
+			"initiation_id":         0,
+			"nav_date":              1,
+			"nav":                   2,
+			"allotted_units":        3,
+			"stamp_duty":            4,
+			"net_amount":            5,
+			"actual_nav":            6,
+			"actual_allotted_units": 7,
+			"variance_nav":          8,
+			"variance_units":        9,
+			"status":                10,
+			"resolution_comment":    11,
+			"resolution_variance":   12,
+		}
+
+		var sets []string
+		var args []interface{}
+		pos := 1
+
+		for k, v := range req.Fields {
+			lk := strings.ToLower(k)
+			if idx, ok := fieldPairs[lk]; ok {
+				oldField := "old_" + lk
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
+				args = append(args, v, oldVals[idx])
+				pos += 2
+			}
+		}
+
+		if len(sets) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "no valid updatable fields found")
+			return
+		}
+
+		q := fmt.Sprintf("UPDATE investment.investment_confirmation SET %s, updated_at=now() WHERE confirmation_id=$%d", strings.Join(sets, ", "), pos)
+		args = append(args, req.ConfirmationID)
+		if _, err := tx.Exec(ctx, q, args...); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			return
+		}
+
+		// audit
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO investment.auditactioninvestmentconfirmation (confirmation_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now(), $4)
+		`, req.ConfirmationID, req.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			return
+		}
+
+		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
+		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
+			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
+		}
+
+		go func(cID, uID, uEmail string) {
+			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, []string{cID}, "UPDATE", uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/investment/confirmation/update",
+				fmt.Sprintf("INVESTMENT_CONFIRMATION_UPDATE/%s/%d", uID, time.Now().UnixMilli()),
+				pl.ToMap(),
+			)
+		}(req.ConfirmationID, req.UserID, userEmail)
+
+		api.RespondWithPayload(w, true, "", map[string]any{
+			"confirmation_id": req.ConfirmationID,
+			"requested":       userEmail,
+		})
+	}
+}
+
+// ---------------------------
+// UpdateConfirmationBulk
+// ---------------------------
+
+func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+			Rows   []struct {
+				ConfirmationID string                 `json:"confirmation_id"`
+				Fields         map[string]interface{} `json:"fields"`
+				Reason         string                 `json:"reason"`
+			} `json:"rows"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+
+		userEmail := api.GetUserNameFromCtx(r.Context())
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+
+		ctx := r.Context()
+		results := make([]map[string]interface{}, 0, len(req.Rows))
+
+		for _, row := range req.Rows {
+			if row.ConfirmationID == "" {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "confirmation_id missing"})
+				continue
+			}
+
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "confirmation_id": row.ConfirmationID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
+				continue
+			}
+			defer tx.Rollback(ctx)
+
+			sel := `
+				SELECT initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
+					   actual_nav, actual_allotted_units, variance_nav, variance_units, status,
+					   resolution_comment, resolution_variance
+				FROM investment.investment_confirmation WHERE confirmation_id=$1 FOR UPDATE`
+			var oldVals [13]interface{}
+			if err := tx.QueryRow(ctx, sel, row.ConfirmationID).Scan(
+				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4],
+				&oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12],
+			); err != nil {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "confirmation_id": row.ConfirmationID, constants.ValueError: "fetch failed: " + err.Error()})
+				continue
+			}
+
+			fieldPairs := map[string]int{
+				"initiation_id":         0,
+				"nav_date":              1,
+				"nav":                   2,
+				"allotted_units":        3,
+				"stamp_duty":            4,
+				"net_amount":            5,
+				"actual_nav":            6,
+				"actual_allotted_units": 7,
+				"variance_nav":          8,
+				"variance_units":        9,
+				"status":                10,
+				"resolution_comment":    11,
+				"resolution_variance":   12,
+			}
+
+			var sets []string
+			var args []interface{}
+			pos := 1
+
+			for k, v := range row.Fields {
+				lk := strings.ToLower(k)
+				if idx, ok := fieldPairs[lk]; ok {
+					oldField := "old_" + lk
+					sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
+					args = append(args, v, oldVals[idx])
+					pos += 2
+				}
+			}
+
+			if len(sets) == 0 {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "confirmation_id": row.ConfirmationID, constants.ValueError: "No valid fields"})
+				continue
+			}
+
+			q := fmt.Sprintf("UPDATE investment.investment_confirmation SET %s, updated_at=now() WHERE confirmation_id=$%d", strings.Join(sets, ", "), pos)
+			args = append(args, row.ConfirmationID)
+
+			if _, err := tx.Exec(ctx, q, args...); err != nil {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "confirmation_id": row.ConfirmationID, constants.ValueError: constants.ErrUpdateFailed + err.Error()})
+				continue
+			}
+
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO investment.auditactioninvestmentconfirmation (confirmation_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+				VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now(), $4)
+			`, row.ConfirmationID, row.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "confirmation_id": row.ConfirmationID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
+				continue
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "confirmation_id": row.ConfirmationID, constants.ValueError: constants.ErrCommitFailed + err.Error()})
+				continue
+			}
+
+			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "confirmation_id": row.ConfirmationID, "requested": userEmail})
+		}
+
+		// Fire bulk-update notification for all successful IDs
+		updatedCIDs := make([]string, 0)
+		for _, r := range results {
+			if ok, _ := r[constants.ValueSuccess].(bool); ok {
+				if id, _ := r["confirmation_id"].(string); id != "" {
+					updatedCIDs = append(updatedCIDs, id)
+				}
+			}
+		}
+		if len(updatedCIDs) > 0 {
+			ids := updatedCIDs
+			uID := req.UserID
+			uEmail := userEmail
+			go func() {
+				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "UPDATE", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/investment/confirmation/bulk-update",
+					fmt.Sprintf("INVESTMENT_CONFIRMATION_BULK_UPDATE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+
+		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+	}
+}
+
+// ---------------------------
+// DeleteConfirmation
+// ---------------------------
+
+func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID          string   `json:"user_id"`
+			ConfirmationIDs []string `json:"confirmation_ids"`
+			Reason          string   `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+		if len(req.ConfirmationIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ConfirmationIDsRequired)
+			return
+		}
+
+		requestedBy := api.GetUserNameFromCtx(r.Context())
+		if requestedBy == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		for _, id := range req.ConfirmationIDs {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO investment.auditactioninvestmentconfirmation (confirmation_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
+				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now(), $4)
+			`, id, req.Reason, api.SystemIfBlank(requestedBy), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+				return
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			return
+		}
+
+		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
+		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
+			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
+		}
+
+		go func(ids []string, uID, uEmail string) {
+			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "DELETE_REQUEST", uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/investment/confirmation/delete-request",
+				fmt.Sprintf("INVESTMENT_CONFIRMATION_DELETE_REQUEST/%s/%d", uID, time.Now().UnixMilli()),
+				pl.ToMap(),
+			)
+		}(append([]string{}, req.ConfirmationIDs...), req.UserID, requestedBy)
+
+		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.ConfirmationIDs})
+	}
+}
+
+// ---------------------------
+// BulkApproveConfirmationActions
+// ---------------------------
+
+func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID          string   `json:"user_id"`
+			ConfirmationIDs []string `json:"confirmation_ids"`
+			Comment         string   `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
+		if checkerBy == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+
+		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		sel := `
+			SELECT DISTINCT ON (confirmation_id) action_id, confirmation_id, actiontype, processing_status
+			FROM investment.auditactioninvestmentconfirmation
+			WHERE confirmation_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
+			ORDER BY confirmation_id, requested_at DESC
+		`
+		rows, err := tx.Query(ctx, sel, req.ConfirmationIDs)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		var toApprove []string
+		var toApproveConfirmations []string
+		var toDeleteActionIDs []string
+		var deleteMasterIDs []string
+
+		for rows.Next() {
+			var aid, cid, atype, pstatus string
+			if err := rows.Scan(&aid, &cid, &atype, &pstatus); err != nil {
+				continue
+			}
+			ps := strings.ToUpper(strings.TrimSpace(pstatus))
+			if ps == constants.StatusApproved {
+				continue
+			}
+			if ps == constants.StatusPendingDeleteApproval {
+				toDeleteActionIDs = append(toDeleteActionIDs, aid)
+				deleteMasterIDs = append(deleteMasterIDs, cid)
+				continue
+			}
+			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
+				toApprove = append(toApprove, aid)
+				toApproveConfirmations = append(toApproveConfirmations, cid)
+			}
+		}
+
+		if len(toApprove) == 0 && len(toDeleteActionIDs) == 0 {
+			api.RespondWithPayload(w, false, constants.ErrNoApprovableActions, map[string]any{
+				"approved_confirmation_ids": []string{},
+				"deleted_confirmations":     []string{},
+			})
+			return
+		}
+
+		if len(toApprove) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.auditactioninvestmentconfirmation
+				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				WHERE action_id = ANY($4)
+			`, api.SystemIfBlank(checkerBy), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), toApprove); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "approve failed: "+err.Error())
+				return
+			}
+
+			// Update investment_confirmation status to CONFIRMED
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.investment_confirmation
+				SET status='CONFIRMED'
+				WHERE confirmation_id = ANY($1)
+			`, toApproveConfirmations); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "update confirmation status failed: "+err.Error())
+				return
+			}
+		}
+
+		if len(toDeleteActionIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.auditactioninvestmentconfirmation
+				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+				WHERE action_id = ANY($4)
+			`, api.SystemIfBlank(checkerBy), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), toDeleteActionIDs); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "delete action update failed: "+err.Error())
+				return
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.investment_confirmation
+				SET is_deleted=true, status='DELETED', updated_at=now()
+				WHERE confirmation_id = ANY($1)
+			`, deleteMasterIDs); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "delete confirmation failed: "+err.Error())
+				return
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			return
+		}
+
+		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
+		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
+			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
+		}
+
+		// Automatically process confirmed investments (create BUY transactions and refresh snapshots)
+		var confirmResult map[string]any
+		if len(toApproveConfirmations) > 0 {
+			confirmResult, err = processInvestmentConfirmations(pgxPool, ctx, req.UserID, checkerBy, toApproveConfirmations)
+			if err != nil {
+				// Log the error but don't fail the approval - confirmations can be reprocessed manually
+				api.RespondWithPayload(w, true, "Approved but confirmation processing failed: "+err.Error(), map[string]any{
+					"approved_confirmation_ids": toApproveConfirmations,
+					"deleted_confirmations":     deleteMasterIDs,
+					"confirmation_error":        err.Error(),
+				})
+				return
+			}
+		}
+
+		// ensure non-nil slices so JSON marshals [] instead of null
+		if toApproveConfirmations == nil {
+			toApproveConfirmations = []string{}
+		}
+		if deleteMasterIDs == nil {
+			deleteMasterIDs = []string{}
+		}
+
+		if len(toApproveConfirmations) > 0 {
+			ids := append([]string{}, toApproveConfirmations...)
+			uID := req.UserID
+			uEmail := checkerBy
+			go func() {
+				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionApprove, uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/investment/confirmation/approve",
+					fmt.Sprintf("INVESTMENT_CONFIRMATION_APPROVE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+		if len(deleteMasterIDs) > 0 {
+			ids := append([]string{}, deleteMasterIDs...)
+			uID := req.UserID
+			uEmail := checkerBy
+			go func() {
+				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionDelete, uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/investment/confirmation/delete",
+					fmt.Sprintf("INVESTMENT_CONFIRMATION_DELETE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+
+		response := map[string]any{
+			"approved_confirmation_ids": toApproveConfirmations,
+			"deleted_confirmations":     deleteMasterIDs,
+		}
+		if confirmResult != nil {
+			response["confirmation_processing"] = confirmResult
+		}
+
+		api.RespondWithPayload(w, true, "", response)
+	}
+}
+
+// ---------------------------
+// BulkRejectConfirmationActions
+// ---------------------------
+
+func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID          string   `json:"user_id"`
+			ConfirmationIDs []string `json:"confirmation_ids"`
+			Comment         string   `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+		checkerBy := api.GetUserNameFromCtx(r.Context())
+		if checkerBy == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+
+		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		sel := `
+			SELECT DISTINCT ON (confirmation_id) action_id, confirmation_id, processing_status
+			FROM investment.auditactioninvestmentconfirmation
+			WHERE confirmation_id = ANY($1)
+			  AND UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
+			ORDER BY confirmation_id, requested_at DESC
+		`
+		rows, err := tx.Query(ctx, sel, req.ConfirmationIDs)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		actionIDs := []string{}
+		cannotReject := []string{}
+		found := map[string]bool{}
+		for rows.Next() {
+			var aid, cid, ps string
+			if err := rows.Scan(&aid, &cid, &ps); err != nil {
+				continue
+			}
+			found[cid] = true
+			if strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusApproved {
+				cannotReject = append(cannotReject, cid)
+			} else {
+				actionIDs = append(actionIDs, aid)
+			}
+		}
+
+		missing := []string{}
+		for _, id := range req.ConfirmationIDs {
+			if !found[id] {
+				missing = append(missing, id)
+			}
+		}
+		if len(missing) > 0 || len(cannotReject) > 0 {
+			msg := ""
+			if len(missing) > 0 {
+				msg += fmt.Sprintf("no audit action found for confirmation_ids: %v. ", missing)
+			}
+			if len(cannotReject) > 0 {
+				msg += fmt.Sprintf("cannot reject already approved confirmation_ids: %v", cannotReject)
+			}
+			api.RespondWithError(w, http.StatusBadRequest, msg)
+			return
+		}
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.auditactioninvestmentconfirmation
+			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
+			WHERE action_id = ANY($4)
+		`, api.SystemIfBlank(checkerBy), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionIDs); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			return
+		}
+
+		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
+		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
+			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
+		}
+
+		go func(ids []string, uID, uEmail string) {
+			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionReject, uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/investment/confirmation/reject",
+				fmt.Sprintf("INVESTMENT_CONFIRMATION_REJECT/%s/%d", uID, time.Now().UnixMilli()),
+				pl.ToMap(),
+			)
+		}(append([]string{}, req.ConfirmationIDs...), req.UserID, checkerBy)
+
+		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})
+	}
+}
+
+// ---------------------------
+// GetConfirmationsWithAudit
+// ---------------------------
+
+func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		out, err := fetchConfirmationRows(ctx, pgxPool, nil)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		api.RespondWithPayload(w, true, "", out)
+	}
+}
+
+// fetchConfirmationRows is the single source-of-truth query for confirmations + audit + history + initiation/scheme/folio/demat joins.
+// Pass ids=nil (or empty) to return ALL non-deleted confirmations (used by GetConfirmationsWithAudit).
+// Pass a non-empty ids slice to filter by confirmation_id = ANY(ids) (used by notif payload builder).
+func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []string) ([]map[string]interface{}, error) {
+	const baseSQL = `
+		WITH latest_audit AS (
+			SELECT DISTINCT ON (a.confirmation_id)
+				a.confirmation_id,
+				a.actiontype,
+				a.processing_status,
+				a.action_id,
+				a.requested_by,
+				a.requested_at,
+				a.checker_by,
+				a.checker_at,
+				a.checker_comment,
+				a.reason
+			FROM investment.auditactioninvestmentconfirmation a
+			WHERE UPPER(COALESCE(a.actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
+			ORDER BY a.confirmation_id, a.requested_at DESC
+		),
+		history AS (
+			SELECT 
+				confirmation_id,
+				MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
+				MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+				MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
+				MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+				MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
+				MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+			FROM investment.auditactioninvestmentconfirmation
+			GROUP BY confirmation_id
+		)
+		SELECT
+			m.confirmation_id,
+			m.initiation_id,
+			m.old_initiation_id,
+			TO_CHAR(m.nav_date, 'YYYY-MM-DD') AS nav_date,
+			TO_CHAR(m.old_nav_date, 'YYYY-MM-DD') AS old_nav_date,
+			m.nav,
+			m.old_nav,
+			m.allotted_units,
+			m.old_allotted_units,
+			m.stamp_duty,
+			m.old_stamp_duty,
+			m.net_amount,
+			m.old_net_amount,
+			(COALESCE(m.net_amount, 0) + COALESCE(m.stamp_duty, 0)) AS gross_amount,
+			(COALESCE(m.old_net_amount, 0) + COALESCE(m.old_stamp_duty, 0)) AS old_gross_amount,
+			m.actual_nav,
+			m.old_actual_nav,
+			m.actual_allotted_units,
+			m.old_actual_allotted_units,
+			m.variance_nav,
+			m.old_variance_nav,
+			m.variance_units,
+			m.old_variance_units,
+			m.resolution_comment,
+			m.old_resolution_comment,
+			m.resolution_variance,
+			m.old_resolution_variance,
+			m.status,
+			m.old_status,
+			COALESCE(m.upload_s3_key, '') AS upload_s3_key,
+			m.confirmed_by,
+			TO_CHAR(m.confirmed_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS confirmed_at,
+			m.is_deleted,
+			TO_CHAR(m.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
+
+			-- initiation fields
+			TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
+			i.entity_name AS initiation_entity_name,
+			COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
+			COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
+			COALESCE(s.amc_name, '') AS initiation_amc_name,
+			COALESCE(f.folio_number, '') AS initiation_folio_number,
+			COALESCE(f.folio_id::text, '') AS initiation_folio_id,
+			COALESCE(d.demat_account_number, '') AS initiation_demat_number,
+			COALESCE(d.demat_id::text, '') AS initiation_demat_id,
+			COALESCE(i.amount, 0) AS initiation_amount,
+			
+			COALESCE(l.actiontype,'') AS action_type,
+			COALESCE(l.processing_status,'') AS processing_status,
+			COALESCE(l.action_id::text,'') AS action_id,
+			COALESCE(l.requested_by,'') AS requested_by,
+			TO_CHAR((l.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+			COALESCE(l.checker_by,'') AS checker_by,
+			TO_CHAR((l.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+			COALESCE(l.checker_comment,'') AS checker_comment,
+			COALESCE(l.reason,'') AS reason,
+			
+			COALESCE(h.created_by,'') AS created_by,
+			COALESCE(h.created_at,'') AS created_at,
+			COALESCE(h.edited_by,'') AS edited_by,
+			COALESCE(h.edited_at,'') AS edited_at,
+			COALESCE(h.deleted_by,'') AS deleted_by,
+			COALESCE(h.deleted_at,'') AS deleted_at
+		FROM investment.investment_confirmation m
+		LEFT JOIN latest_audit l ON l.confirmation_id = m.confirmation_id
+		LEFT JOIN history h ON h.confirmation_id = m.confirmation_id
+		LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
+		LEFT JOIN investment.masterscheme s ON (COALESCE(s.is_deleted, false) = false AND ((NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.scheme_id::text = TRIM(i.scheme_id)) OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.internal_scheme_code = TRIM(i.scheme_id)) OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.amfi_scheme_code = TRIM(i.scheme_id))))
+		LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+		LEFT JOIN investment.masterdemataccount d ON (
+			d.demat_id::text = i.demat_id OR
+			d.default_settlement_account = i.demat_id OR
+			d.demat_account_number = i.demat_id
+		)
+	`
+
+	var (
+		q    string
+		args []interface{}
+	)
+	if len(ids) > 0 {
+		q = baseSQL + " WHERE m.confirmation_id = ANY($1) ORDER BY m.confirmation_id"
+		args = []interface{}{ids}
+	} else {
+		args = []interface{}{}
+		pos := 1
+		where := " WHERE COALESCE(m.is_deleted, false) = false"
+		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
+			where += fmt.Sprintf(constants.ErrEntityNameFilterAlt2, pos)
+			args = append(args, entityNames)
+			pos++
+		}
+		if schemeRefs := suiteMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			where += fmt.Sprintf(constants.ErrSchemeIDFilterAlt, pos)
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := suiteMFFolioRefs(ctx); len(folioRefs) > 0 {
+			where += fmt.Sprintf(constants.ErrFolioIDFilterAlt, pos)
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := suiteMFDematRefs(ctx); len(dematRefs) > 0 {
+			where += fmt.Sprintf(constants.ErrDematIDFilterAlt, pos)
+			args = append(args, dematRefs)
+		}
+		q = baseSQL + where + " ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+	}
+
+	rows, err := pgxPool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	fields := rows.FieldDescriptions()
+	out := make([]map[string]interface{}, 0, 1000)
+	// columns that should default to numeric zero when NULL
+	numericCols := map[string]bool{
+		"nav": true, "old_nav": true,
+		"allotted_units": true, "old_allotted_units": true,
+		"stamp_duty": true, "old_stamp_duty": true,
+		"net_amount": true, "old_net_amount": true,
+		"gross_amount": true, "old_gross_amount": true,
+		"actual_nav": true, "old_actual_nav": true,
+		"actual_allotted_units": true, "old_actual_allotted_units": true,
+		"variance_nav": true, "old_variance_nav": true,
+		"variance_units": true, "old_variance_units": true,
+	}
+	// boolean cols default to false
+	boolCols := map[string]bool{"is_deleted": true}
+
+	for rows.Next() {
+		vals, _ := rows.Values()
+		rec := make(map[string]interface{}, len(fields))
+		for i, f := range fields {
+			colName := string(f.Name)
+			if vals[i] == nil {
+				rec[colName] = nil
+				continue
+			}
+			switch v := vals[i].(type) {
+			case time.Time:
+				rec[colName] = v.Format(constants.DateTimeFormat)
+			default:
+				rec[colName] = v
+			}
+		}
+		// Normalize nils: numbers -> 0, bools -> false, others -> ""
+		for _, f := range fields {
+			colName := string(f.Name)
+			if rec[colName] == nil {
+				if numericCols[colName] {
+					rec[colName] = 0
+				} else if boolCols[colName] {
+					rec[colName] = false
+				} else {
+					rec[colName] = ""
+				}
+			}
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// GetAllConfirmationsWithAudit returns all rows from investment_confirmation along with
+// the latest audit action and a compact history summary. This endpoint accepts no body
+// and returns every confirmation row (including those marked deleted).
+func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		q := `
+			WITH latest_audit AS (
+				SELECT DISTINCT ON (a.confirmation_id)
+					a.confirmation_id,
+					a.actiontype,
+					a.processing_status,
+					a.action_id,
+					a.requested_by,
+					a.requested_at,
+					a.checker_by,
+					a.checker_at,
+					a.checker_comment,
+					a.reason
+				FROM investment.auditactioninvestmentconfirmation a
+				WHERE UPPER(COALESCE(a.actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
+				ORDER BY a.confirmation_id, a.requested_at DESC
+			),
+			history AS (
+				SELECT 
+					confirmation_id,
+					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
+					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
+					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
+					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+				FROM investment.auditactioninvestmentconfirmation
+				GROUP BY confirmation_id
+			)
+			SELECT
+				m.confirmation_id,
+				m.initiation_id,
+				m.old_initiation_id,
+				TO_CHAR(m.nav_date, 'YYYY-MM-DD') AS nav_date,
+				TO_CHAR(m.old_nav_date, 'YYYY-MM-DD') AS old_nav_date,
+				m.nav,
+				m.old_nav,
+				m.allotted_units,
+				m.old_allotted_units,
+				m.stamp_duty,
+				m.old_stamp_duty,
+				m.net_amount,
+				m.old_net_amount,
+				(COALESCE(m.net_amount, 0) + COALESCE(m.stamp_duty, 0)) AS gross_amount,
+				(COALESCE(m.old_net_amount, 0) + COALESCE(m.old_stamp_duty, 0)) AS old_gross_amount,
+				m.actual_nav,
+				m.old_actual_nav,
+				m.actual_allotted_units,
+				m.old_actual_allotted_units,
+				m.variance_nav,
+				m.old_variance_nav,
+				m.variance_units,
+				m.old_variance_units,
+	                m.resolution_comment,
+	                m.old_resolution_comment,
+	                m.resolution_variance,
+	                m.old_resolution_variance,
+				m.status,
+				m.old_status,
+				m.confirmed_by,
+				TO_CHAR(m.confirmed_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS confirmed_at,
+				m.is_deleted,
+				TO_CHAR(m.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at,
+
+				-- initiation fields
+				TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
+				i.entity_name AS initiation_entity_name,
+				COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
+				COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
+				COALESCE(s.amc_name, '') AS initiation_amc_name,
+				COALESCE(f.folio_number, '') AS initiation_folio_number,
+				COALESCE(f.folio_id::text, '') AS initiation_folio_id,
+				COALESCE(d.demat_account_number, '') AS initiation_demat_number,
+				COALESCE(d.demat_id::text, '') AS initiation_demat_id,
+				COALESCE(i.amount, 0) AS initiation_amount,
+
+				COALESCE(l.actiontype,'') AS action_type,
+				COALESCE(l.processing_status,'') AS processing_status,
+				COALESCE(l.action_id::text,'') AS action_id,
+				COALESCE(l.requested_by,'') AS requested_by,
+				TO_CHAR((l.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				COALESCE(l.checker_by,'') AS checker_by,
+				TO_CHAR((l.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				COALESCE(l.checker_comment,'') AS checker_comment,
+				COALESCE(l.reason,'') AS reason,
+
+				COALESCE(h.created_by,'') AS created_by,
+				COALESCE(h.created_at,'') AS created_at,
+				COALESCE(h.edited_by,'') AS edited_by,
+				COALESCE(h.edited_at,'') AS edited_at,
+				COALESCE(h.deleted_by,'') AS deleted_by,
+				COALESCE(h.deleted_at,'') AS deleted_at
+			FROM investment.investment_confirmation m
+			LEFT JOIN latest_audit l ON l.confirmation_id = m.confirmation_id
+			LEFT JOIN history h ON h.confirmation_id = m.confirmation_id
+			LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
+			LEFT JOIN investment.masterscheme s ON (COALESCE(s.is_deleted, false) = false AND ((NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.scheme_id::text = TRIM(i.scheme_id)) OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.internal_scheme_code = TRIM(i.scheme_id)) OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.amfi_scheme_code = TRIM(i.scheme_id))))
+			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+			LEFT JOIN investment.masterdemataccount d ON (
+				d.demat_id::text = i.demat_id OR
+				d.default_settlement_account = i.demat_id OR
+				d.demat_account_number = i.demat_id
+			)
+		`
+		args := []interface{}{}
+		pos := 1
+		where := " WHERE 1=1"
+		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
+			where += fmt.Sprintf(constants.ErrEntityNameFilterAlt2, pos)
+			args = append(args, entityNames)
+			pos++
+		}
+		if schemeRefs := suiteMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			where += fmt.Sprintf(constants.ErrSchemeIDFilterAlt, pos)
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := suiteMFFolioRefs(ctx); len(folioRefs) > 0 {
+			where += fmt.Sprintf(constants.ErrFolioIDFilterAlt, pos)
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := suiteMFDematRefs(ctx); len(dematRefs) > 0 {
+			where += fmt.Sprintf(constants.ErrDematIDFilterAlt, pos)
+			args = append(args, dematRefs)
+		}
+		q += where + " ORDER BY m.nav_date DESC, m.initiation_id"
+
+		rows, err := pgxPool.Query(ctx, q, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		fields := rows.FieldDescriptions()
+		out := make([]map[string]interface{}, 0, 1000)
+		numericCols := map[string]bool{
+			"nav": true, "old_nav": true,
+			"allotted_units": true, "old_allotted_units": true,
+			"stamp_duty": true, "old_stamp_duty": true,
+			"net_amount": true, "old_net_amount": true,
+			"actual_nav": true, "old_actual_nav": true,
+			"actual_allotted_units": true, "old_actual_allotted_units": true,
+			"variance_nav": true, "old_variance_nav": true,
+			"variance_units": true, "old_variance_units": true,
+		}
+		boolCols := map[string]bool{"is_deleted": true}
+
+		for rows.Next() {
+			vals, _ := rows.Values()
+			rec := make(map[string]interface{}, len(fields))
+			for i, f := range fields {
+				colName := string(f.Name)
+				if vals[i] == nil {
+					rec[colName] = nil
+					continue
+				}
+				switch v := vals[i].(type) {
+				case time.Time:
+					rec[colName] = v.Format(constants.DateTimeFormat)
+				default:
+					rec[colName] = v
+				}
+			}
+
+			// Normalize nils
+			for _, f := range fields {
+				colName := string(f.Name)
+				if rec[colName] == nil {
+					if numericCols[colName] {
+						rec[colName] = 0
+					} else if boolCols[colName] {
+						rec[colName] = false
+					} else {
+						rec[colName] = ""
+					}
+				}
+			}
+
+			out = append(out, rec)
+		}
+
+		if rows.Err() != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", out)
+	}
+}
+
+// ---------------------------
+// GetApprovedConfirmations
+// ---------------------------
+
+func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		q := `
+			WITH latest AS (
+				SELECT DISTINCT ON (confirmation_id)
+					confirmation_id,
+					processing_status
+				FROM investment.auditactioninvestmentconfirmation
+				WHERE UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
+				ORDER BY confirmation_id, requested_at DESC
+			)
+			SELECT
+				m.confirmation_id,
+				m.initiation_id,
+				TO_CHAR(m.nav_date, 'YYYY-MM-DD') AS nav_date,
+				m.nav,
+				m.allotted_units,
+				m.stamp_duty,
+				m.net_amount,
+				(COALESCE(m.net_amount, 0) + COALESCE(m.stamp_duty, 0)) AS gross_amount,
+				m.actual_nav,
+				m.actual_allotted_units,
+				m.variance_nav,
+				m.variance_units,
+				m.resolution_comment,
+				m.old_resolution_comment,
+				m.resolution_variance,
+				m.old_resolution_variance,
+				m.status,
+
+				-- initiation fields
+				TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
+				i.entity_name AS initiation_entity_name,
+				COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
+				COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
+				COALESCE(s.amc_name, '') AS initiation_amc_name,
+				COALESCE(f.folio_number, '') AS initiation_folio_number,
+				COALESCE(f.folio_id::text, '') AS initiation_folio_id,
+				COALESCE(d.demat_account_number, '') AS initiation_demat_number,
+				COALESCE(d.demat_id::text, '') AS initiation_demat_id,
+				COALESCE(i.amount, 0) AS initiation_amount
+
+			FROM investment.investment_confirmation m
+			JOIN latest l ON l.confirmation_id = m.confirmation_id
+			LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
+			LEFT JOIN investment.masterscheme s ON (COALESCE(s.is_deleted, false) = false AND ((NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.scheme_id::text = TRIM(i.scheme_id)) OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.internal_scheme_code = TRIM(i.scheme_id)) OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.amfi_scheme_code = TRIM(i.scheme_id))))
+			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+			LEFT JOIN investment.masterdemataccount d ON (
+				d.demat_id::text = i.demat_id OR
+				d.default_settlement_account = i.demat_id OR
+				d.demat_account_number = i.demat_id
+			)
+			WHERE 
+				UPPER(l.processing_status) = 'APPROVED'
+				AND COALESCE(m.is_deleted,false)=false
+		`
+		args := []interface{}{}
+		pos := 1
+		if entityNames := suiteEntityNameRefs(ctx); len(entityNames) > 0 {
+			q += fmt.Sprintf(constants.ErrEntityNameFilterAlt2, pos)
+			args = append(args, entityNames)
+			pos++
+		}
+		if schemeRefs := suiteMFSchemeRefs(ctx); len(schemeRefs) > 0 {
+			q += fmt.Sprintf(constants.ErrSchemeIDFilterAlt, pos)
+			args = append(args, schemeRefs)
+			pos++
+		}
+		if folioRefs := suiteMFFolioRefs(ctx); len(folioRefs) > 0 {
+			q += fmt.Sprintf(constants.ErrFolioIDFilterAlt, pos)
+			args = append(args, folioRefs)
+			pos++
+		}
+		if dematRefs := suiteMFDematRefs(ctx); len(dematRefs) > 0 {
+			q += fmt.Sprintf(constants.ErrDematIDFilterAlt, pos)
+			args = append(args, dematRefs)
+		}
+		q += " ORDER BY m.nav_date DESC"
+
+		rows, err := pgxPool.Query(ctx, q, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		fields := rows.FieldDescriptions()
+		out := make([]map[string]interface{}, 0, 100)
+		for rows.Next() {
+			vals, _ := rows.Values()
+			rec := make(map[string]interface{}, len(fields))
+			for i, f := range fields {
+				if vals[i] == nil {
+					rec[string(f.Name)] = ""
+				} else {
+					if t, ok := vals[i].(time.Time); ok {
+						rec[string(f.Name)] = t.Format(constants.DateTimeFormat)
+					} else {
+						rec[string(f.Name)] = vals[i]
+					}
+				}
+			}
+			out = append(out, rec)
+		}
+
+		if rows.Err() != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "rows error: "+rows.Err().Error())
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", out)
+	}
+}
+
+// ---------------------------
+// processInvestmentConfirmations - Internal helper to process confirmations
+// ---------------------------
+
+func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, userID string, confirmedBy string, confirmationIDs []string) (map[string]any, error) {
+	tx, err := pgxPool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tx begin failed: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Removed old batchID
+
+	// Fetch confirmation details with related initiation and scheme info
+	// NOTE: investment_initiation stores string identifiers in scheme_id/folio_id/demat_id, not UUIDs
+	// We need to resolve these to actual master table IDs
+	query := `
+		SELECT 
+			c.confirmation_id,
+			c.initiation_id,
+			c.nav_date,
+			c.nav,
+			c.allotted_units,
+			c.actual_nav,
+			c.actual_allotted_units,
+			c.stamp_duty,
+			c.net_amount,
+			c.status,
+			i.transaction_date,
+			i.entity_name,
+			i.scheme_id AS scheme_identifier,
+			i.folio_id AS folio_identifier,
+			i.demat_id AS demat_identifier,
+			i.amount AS initiation_amount,
+			-- Resolve actual scheme details
+			COALESCE(s.scheme_id::text) AS resolved_scheme_id,
+			COALESCE(s.scheme_name, '') AS scheme_name,
+			COALESCE(s.isin, '') AS isin,
+			COALESCE(s.internal_scheme_code, '') AS internal_scheme_code,
+			-- Resolve actual folio details
+			f.folio_id::text AS resolved_folio_id,
+			f.folio_number,
+			f.entity_name AS folio_entity_name,
+			-- Resolve actual demat details
+			d.demat_id::text AS resolved_demat_id,
+			d.demat_account_number,
+			d.entity_name AS demat_entity_name
+		FROM investment.investment_confirmation c
+		JOIN investment.investment_initiation i ON i.initiation_id = c.initiation_id
+		LEFT JOIN investment.masterscheme s ON (
+			COALESCE(s.is_deleted, false) = false
+			AND (
+				(NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.scheme_id::text = TRIM(i.scheme_id))
+				OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.internal_scheme_code = TRIM(i.scheme_id))
+				OR (NULLIF(TRIM(i.scheme_id), '') IS NOT NULL AND s.amfi_scheme_code = TRIM(i.scheme_id))
+			)
+		)
+		-- Resolve folio by trying folio_id or folio_number
+		LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+		-- Resolve demat by trying demat_id or demat_account_number
+		LEFT JOIN investment.masterdemataccount d ON (
+			d.demat_id::text = i.demat_id OR 
+			d.demat_account_number = i.demat_id OR
+			d.default_settlement_account = i.demat_id
+		)
+		WHERE c.confirmation_id = ANY($1)
+			AND c.status = 'CONFIRMED'
+			AND COALESCE(c.is_deleted, false) = false
+	`
+
+	rows, err := tx.Query(ctx, query, confirmationIDs)
+	if err != nil {
+		return nil, fmt.Errorf("fetch confirmations failed: %w", err)
+	}
+	defer rows.Close()
+
+	type ConfirmationData struct {
+		ConfirmationID      string
+		InitiationID        string
+		NAVDate             time.Time
+		NAV                 float64
+		AllottedUnits       float64
+		ActualNAV           float64
+		ActualAllottedUnits float64
+		StampDuty           float64
+		NetAmount           float64
+		Status              string
+		TransactionDate     time.Time
+		EntityName          string
+		SchemeIdentifier    string  // String from initiation (could be name, code, isin, etc)
+		FolioIdentifier     *string // String from initiation (could be folio_number or folio_id)
+		DematIdentifier     *string // String from initiation (could be demat_account_number or demat_id)
+		InitiationAmount    float64
+		ResolvedSchemeID    *string // Actual scheme_id from masterscheme (string/varchar)
+		SchemeName          *string
+		ISIN                *string
+		InternalSchemeCode  *string
+		ResolvedFolioID     *string // Actual folio_id from masterfolio (string/varchar)
+		FolioNumber         *string
+		FolioEntityName     *string
+		ResolvedDematID     *string // Actual demat_id from masterdemataccount (string/varchar)
+		DematAccountNumber  *string
+		DematEntityName     *string
+	}
+
+	// Use a generated transient batch ID (do not create an entry in onboard_batch)
+	batchID := uuid.New().String()
+
+	confirmations := []ConfirmationData{}
+	for rows.Next() {
+		var cd ConfirmationData
+		if err := rows.Scan(
+			&cd.ConfirmationID, &cd.InitiationID, &cd.NAVDate, &cd.NAV, &cd.AllottedUnits,
+			&cd.ActualNAV, &cd.ActualAllottedUnits,
+			&cd.StampDuty, &cd.NetAmount, &cd.Status, &cd.TransactionDate, &cd.EntityName,
+			&cd.SchemeIdentifier, &cd.FolioIdentifier, &cd.DematIdentifier, &cd.InitiationAmount,
+			&cd.ResolvedSchemeID, &cd.SchemeName, &cd.ISIN, &cd.InternalSchemeCode,
+			&cd.ResolvedFolioID, &cd.FolioNumber, &cd.FolioEntityName,
+			&cd.ResolvedDematID, &cd.DematAccountNumber, &cd.DematEntityName,
+		); err != nil {
+			return nil, fmt.Errorf("scan failed: %w", err)
+		}
+		confirmations = append(confirmations, cd)
+	}
+
+	if len(confirmations) == 0 {
+		return nil, fmt.Errorf("no confirmed investments found")
+	}
+
+	processedIDs := []string{}
+
+	for _, cd := range confirmations {
+		// Use resolved folio_number and demat_account_number (already fetched from JOINs)
+		var folioNumber, dematAccNumber *string
+		if cd.FolioNumber != nil && *cd.FolioNumber != "" {
+			folioNumber = cd.FolioNumber
+		}
+		if cd.DematAccountNumber != nil && *cd.DematAccountNumber != "" {
+			dematAccNumber = cd.DematAccountNumber
+		}
+
+		// Validate we have essential data
+		if cd.ResolvedSchemeID == nil {
+			return nil, fmt.Errorf("failed to resolve scheme for confirmation %s - scheme identifier: %s", cd.ConfirmationID, cd.SchemeIdentifier)
+		}
+
+		// Insert transaction into onboard_transaction
+		// Resolve entity_name: prefer folio/demat entity, fallback to initiation entity
+		var entityName *string
+		if cd.FolioEntityName != nil && *cd.FolioEntityName != "" {
+			entityName = cd.FolioEntityName
+		} else if cd.DematEntityName != nil && *cd.DematEntityName != "" {
+			entityName = cd.DematEntityName
+		} else if cd.EntityName != "" {
+			entityName = &cd.EntityName
+		}
+
+		// Validate actual values are present - do not fall back to expected values
+		if cd.ActualAllottedUnits <= 0 || cd.ActualNAV <= 0 {
+			return nil, fmt.Errorf("confirmation %s missing actual values: actual_allotted_units=%f, actual_nav=%f",
+				cd.ConfirmationID, cd.ActualAllottedUnits, cd.ActualNAV)
+		}
+
+		txInsert := `
+			INSERT INTO investment.onboard_transaction (
+				batch_id, transaction_date, transaction_type, folio_number, demat_acc_number,
+				amount, units, nav, scheme_id, folio_id, demat_id, scheme_internal_code, entity_name, approval_status, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'APPROVED', now())
+		`
+
+		if _, err := tx.Exec(ctx, txInsert,
+			batchID,
+			cd.NAVDate,
+			"BUY",
+			folioNumber,
+			dematAccNumber,
+			cd.NetAmount,
+			cd.ActualAllottedUnits, // Use actual units (validated above)
+			cd.ActualNAV,           // Use actual NAV (validated above)
+			cd.ResolvedSchemeID,    // Use actual scheme_id (string)
+			cd.ResolvedFolioID,     // Use actual folio_id (string)
+			cd.ResolvedDematID,     // Use actual demat_id (string)
+			cd.InternalSchemeCode,
+			entityName, // Entity from folio/demat or initiation
+		); err != nil {
+			return nil, fmt.Errorf("transaction insert failed: %w", err)
+		}
+
+		// Update confirmation
+		updateConfirm := `
+			UPDATE investment.investment_confirmation
+			SET confirmed_by=$1, confirmed_at=now()
+			WHERE confirmation_id=$2
+		`
+		if _, err := tx.Exec(ctx, updateConfirm, confirmedBy, cd.ConfirmationID); err != nil {
+			return nil, fmt.Errorf("update confirmation failed: %w", err)
+		}
+
+		processedIDs = append(processedIDs, cd.ConfirmationID)
+	}
+
+	// NOTE: We no longer create or update an `onboard_batch` row.
+	// The transient `batchID` is used only to group inserted transactions and snapshots,
+	// but no entry is persisted in `investment.onboard_batch`.
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit failed: %w", err)
+	}
+
+	return map[string]any{
+		"batch_id":           batchID,
+		"confirmed_ids":      processedIDs,
+		"transactions_count": len(processedIDs),
+		"snapshot_count":     0, // Rebuilt globally
+		"confirmed_by":       confirmedBy,
+	}, nil
+}
+
+// ---------------------------
+// ConfirmInvestment - Process approved confirmations (Manual endpoint for testing)
+// ---------------------------
+
+func ConfirmInvestment(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID          string   `json:"user_id"`
+			ConfirmationIDs []string `json:"confirmation_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+		if len(req.ConfirmationIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ConfirmationIDsRequired)
+			return
+		}
+
+		confirmedBy := api.GetUserNameFromCtx(r.Context())
+		if confirmedBy == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+
+		result, err := processInvestmentConfirmations(pgxPool, ctx, req.UserID, confirmedBy, req.ConfirmationIDs)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", result)
+	}
+}
+
+// ---------------------------
+// Helper functions
+// ---------------------------
+
+func nullIfZero(val float64) interface{} {
+	if val == 0 {
+		return nil
+	}
+	return val
+}
+
+func stringOrNull(s *string) interface{} {
+	if s == nil || *s == "" {
+		return nil
+	}
+	return *s
+}
+
+// GetConfirmationDetail returns full detail for a single investment confirmation.
+func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ConfirmationID string `json:"confirmation_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+		if strings.TrimSpace(req.ConfirmationID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "confirmation_id is required")
+			return
+		}
+		rows, err := fetchConfirmationRows(r.Context(), pgxPool, []string{req.ConfirmationID})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		if len(rows) == 0 {
+			api.RespondWithError(w, http.StatusNotFound, "confirmation not found")
+			return
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"data": rows[0]})
+	}
+}

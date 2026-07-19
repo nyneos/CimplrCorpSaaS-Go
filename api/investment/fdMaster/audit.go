@@ -3,7 +3,6 @@ package fdMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -198,9 +197,5 @@ func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 func respondFDAuditPayload(w http.ResponseWriter, payload interface{}) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
-		"success": true,
-		"data":    payload,
-	})
+	api.RespondEnvelopeSuccess(w, "Success", payload)
 }

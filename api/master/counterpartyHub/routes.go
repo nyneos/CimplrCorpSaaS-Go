@@ -2,7 +2,6 @@ package counterpartyHub
 
 import (
 	middlewares "CimplrCorpSaas/api/middlewares"
-	"database/sql"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -10,7 +9,7 @@ import (
 
 // RegisterCounterpartyHubRoutes wires all /master/v2/counterparty-hub/* routes.
 // Call this from master.StartMasterService after the existing counterparty block.
-func RegisterCounterpartyHubRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB) {
+func RegisterCounterpartyHubRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
 	midCash := func(h http.Handler) http.Handler {
 		return middlewares.SessionMiddleware(pool)(
 			middlewares.GlobalIndependentMiddleware(pool)(

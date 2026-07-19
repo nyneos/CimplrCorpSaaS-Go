@@ -195,11 +195,7 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 				"is_delete_pending_approval": isDeletePending,
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    resp,
-		})
+		apictx.RespondEnvelopeSuccess(w, "Success", resp)
 	})
 }
 
@@ -399,15 +395,15 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 			reviewSuggested := reviewStatus == constants.StatusPending
 
 			resp = append(resp, map[string]interface{}{
-				"transaction_id":     tid,
-				"entity_id":          entityID,
-				"entity_name":        entityName,
-				"tran_id":            tranID.String,
-				"value_date":         vdate,
-				"transaction_date":   tdate,
-				"description":        desc,
-				"withdrawal_amount":  withdrawal.Float64,
-				"deposit_amount":     deposit.Float64,
+				"transaction_id":    tid,
+				"entity_id":         entityID,
+				"entity_name":       entityName,
+				"tran_id":           tranID.String,
+				"value_date":        vdate,
+				"transaction_date":  tdate,
+				"description":       desc,
+				"withdrawal_amount": withdrawal.Float64,
+				"deposit_amount":    deposit.Float64,
 				"balance": func() interface{} {
 					if balance.Valid {
 						return balance.Float64
@@ -433,11 +429,7 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 			})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    resp,
-		})
+		apictx.RespondEnvelopeSuccess(w, "Success", resp)
 	})
 }
 
@@ -448,9 +440,7 @@ func GetBankStatementDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 			BankStatementID string `json:"bank_statement_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": constants.ErrBankStatementIDRequired})
+			apictx.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrBankStatementIDRequired, "")
 			return
 		}
 
@@ -470,14 +460,11 @@ func GetBankStatementDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 			WHERE s.bank_statement_id = $1
 		`, body.BankStatementID).Scan(&uploadS3Key, &entityName, &auditFileID, &entityID, &accountNumber, &bankID, &currency)
 		if err != nil {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
-				w.WriteHeader(http.StatusNotFound)
-				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "bank_statement_id not found"})
+				apictx.RespondEnvelopeError(w, http.StatusNotFound, "bank_statement_id not found", "")
 				return
 			}
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": pqUserFriendlyMessage(err)})
+			apictx.RespondEnvelopeError(w, http.StatusInternalServerError, pqUserFriendlyMessage(err), "")
 			return
 		}
 		if msg := validateCashMasterScope(ctx, map[string]interface{}{
@@ -487,24 +474,18 @@ func GetBankStatementDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 			"bank_id":        bankID,
 			"currency":       currency,
 		}); msg != "" {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": msg})
+			apictx.RespondEnvelopeError(w, http.StatusForbidden, msg, "")
 			return
 		}
 
 		if !uploadS3Key.Valid || strings.TrimSpace(uploadS3Key.String) == "" {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "no file available"})
+			apictx.RespondEnvelopeError(w, http.StatusNotFound, "no file available", "")
 			return
 		}
 
 		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, uploadS3Key.String, 15*time.Minute)
 		if err != nil {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Failed to generate download URL"})
+			apictx.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to generate download URL", "")
 			return
 		}
 
@@ -528,12 +509,8 @@ func GetBankStatementDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
+		apictx.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"download_url": downloadURL,
 		})
 	})
 }
@@ -545,9 +522,7 @@ func GetBankStatementBulkDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 			BankStatementIDs []string `json:"bank_statement_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.BankStatementIDs) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "bank_statement_ids is required"})
+			apictx.RespondEnvelopeError(w, http.StatusBadRequest, "bank_statement_ids is required", "")
 			return
 		}
 
@@ -629,25 +604,16 @@ func GetBankStatementBulkDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		if len(files) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "no downloadable files found",
-				"data": map[string]interface{}{
-					"files":      []map[string]string{},
-					"failed_ids": failedIDs,
-				},
+			apictx.RespondEnvelopeFailureWithData(w, http.StatusNotFound, "no downloadable files found", "", map[string]interface{}{
+				"files":      []map[string]string{},
+				"failed_ids": failedIDs,
 			})
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data": map[string]interface{}{
-				"files":      files,
-				"failed_ids": failedIDs,
-			},
+		apictx.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
 		})
 	})
 }
@@ -718,9 +684,7 @@ func MarkBankStatementTransactionsMisclassifiedHandler(pool *pgxpool.Pool) http.
 
 		rowsAffected := res.RowsAffected()
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":       true,
+		apictx.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"updated_count": rowsAffected,
 		})
 	})
@@ -931,12 +895,7 @@ func RecomputeBankStatementSummaryHandler(pool *pgxpool.Pool) http.Handler {
 			"ungrouped_transaction_percent":   ungroupedPct,
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Bank statement summary recomputed successfully",
-			"data":    result,
-		})
+		apictx.RespondEnvelopeSuccess(w, "Bank statement summary recomputed successfully", result)
 	})
 }
 
@@ -1386,11 +1345,11 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				break
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": overallSuccess,
-			"results": results,
-		})
+		if overallSuccess {
+			apictx.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"results": results})
+		} else {
+			apictx.RespondEnvelopeFailureCompat(w, http.StatusMultiStatus, "One or more bank statements could not be approved", "", map[string]interface{}{"results": results})
+		}
 	})
 }
 
@@ -1490,11 +1449,11 @@ func RejectBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				break
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": overallSuccess,
-			"results": results,
-		})
+		if overallSuccess {
+			apictx.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"results": results})
+		} else {
+			apictx.RespondEnvelopeFailureCompat(w, http.StatusMultiStatus, "One or more bank statements could not be rejected", "", map[string]interface{}{"results": results})
+		}
 		if pool != nil {
 			capturedIDs := body.BankStatementIDs
 			capturedUser := body.UserID
@@ -1592,11 +1551,11 @@ func DeleteBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				break
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": overallSuccess,
-			"results": results,
-		})
+		if overallSuccess {
+			apictx.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"results": results})
+		} else {
+			apictx.RespondEnvelopeFailureCompat(w, http.StatusMultiStatus, "One or more bank statements could not be queued for deletion", "", map[string]interface{}{"results": results})
+		}
 		if pool != nil {
 			capturedIDs := body.BankStatementIDs
 			capturedUser := body.UserID
@@ -1623,13 +1582,8 @@ func DeleteBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 
 func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-
 		if r.Method != http.MethodPost {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "Only POST method is allowed for this endpoint.",
-			})
+			apictx.RespondEnvelopeError(w, http.StatusMethodNotAllowed, "Only POST method is allowed for this endpoint.", "")
 			return
 		}
 
@@ -1639,10 +1593,7 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 			logger.LogInfo("[BANK_STATEMENT] PDF flag detected, processing from bank.json")
 			result, err := ProcessBankStatementFromJSON(r.Context(), pgxPool, apictx.ClientIPFromRequest(r))
 			if err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"message": userFriendlyUploadError(err),
-				})
+				apictx.RespondEnvelopeError(w, http.StatusInternalServerError, userFriendlyUploadError(err), "")
 				return
 			}
 
@@ -1651,20 +1602,13 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 				msg = fmt.Sprintf("Bank statement from PDF uploaded successfully. %d transactions are under review.", rc)
 			}
 
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": true,
-				"message": msg,
-				"data":    result,
-			})
+			apictx.RespondEnvelopeSuccess(w, msg, result)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			logger.LogError("[BANK-UPLOAD-ERROR] Failed to parse multipart form: %v", err)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "Unable to read the uploaded file. Please try again.",
-			})
+			apictx.RespondEnvelopeError(w, http.StatusBadRequest, "Unable to read the uploaded file. Please try again.", "")
 			return
 		}
 
@@ -1687,26 +1631,17 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 				mappings = &ColumnMappings{}
 				if err := json.Unmarshal([]byte(mappingsJSON), mappings); err != nil {
 					logger.LogError("[BANK-UPLOAD-ERROR] Invalid column_mappings JSON: %v", err)
-					json.NewEncoder(w).Encode(map[string]interface{}{
-						"success": false,
-						"message": "Invalid column_mappings JSON: " + err.Error(),
-					})
+					apictx.RespondEnvelopeError(w, http.StatusBadRequest, "Invalid column_mappings JSON: "+err.Error(), "")
 					return
 				}
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] Custom column mappings provided: %+v", mappings)
 			} else {
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"message": "mapping flag is true but column_mappings not provided",
-				})
+				apictx.RespondEnvelopeError(w, http.StatusBadRequest, "mapping flag is true but column_mappings not provided", "")
 				return
 			}
 
 			if strings.TrimSpace(mappings.AccountNumber) == "" {
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"message": "Column-Mappings must include 'Account Number' when mapping is enabled",
-				})
+				apictx.RespondEnvelopeError(w, http.StatusBadRequest, "Column-Mappings must include 'Account Number' when mapping is enabled", "")
 				return
 			}
 		}
@@ -1758,10 +1693,7 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 				if len(fileFieldsAvailable) > 0 {
 					errorMsg = fmt.Sprintf("No 'file' field found. Available fields: %v. Please use 'file' as the field name.", fileFieldsAvailable)
 				}
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"message": errorMsg,
-				})
+				apictx.RespondEnvelopeError(w, http.StatusBadRequest, errorMsg, "")
 				return
 			}
 		}
@@ -1769,10 +1701,7 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "Failed to read the uploaded file. Please try again.",
-			})
+			apictx.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to read the uploaded file. Please try again.", "")
 			return
 		}
 
@@ -1806,19 +1735,13 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 		if forceOverride {
 			switch len(accountNumbers) {
 			case 0:
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"message": "force_override=true requires at least one account number in account_numbers",
-				})
+				apictx.RespondEnvelopeError(w, http.StatusBadRequest, "force_override=true requires at least one account number in account_numbers", "")
 				return
 			case 1:
 				accountOverride = accountNumbers[0]
 				logger.LogError("[BANK-UPLOAD-DEBUG] force_override=true — using account %s directly", accountOverride)
 			default:
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"message": fmt.Sprintf("force_override=true with a single file requires exactly 1 account number, got %d. Use the zip endpoint for multiple files.", len(accountNumbers)),
-				})
+				apictx.RespondEnvelopeError(w, http.StatusBadRequest, fmt.Sprintf("force_override=true with a single file requires exactly 1 account number, got %d. Use the zip endpoint for multiple files.", len(accountNumbers)), "")
 				return
 			}
 		} else if len(accountNumbers) >= 1 {
@@ -1936,10 +1859,7 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 				}
 			}
 			logger.LogError("[BANK-UPLOAD-DEBUG] Multi fallback also failed; returning error: %s", surfaceMsg)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": surfaceMsg,
-			})
+			apictx.RespondEnvelopeError(w, http.StatusInternalServerError, surfaceMsg, "")
 			return
 		}
 
@@ -1948,11 +1868,7 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 			msg = fmt.Sprintf("Bank statement uploaded successfully. %d transactions are under review.", rc)
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": msg,
-			"data":    result,
-		})
+		apictx.RespondEnvelopeSuccess(w, msg, result)
 
 		if pgxPool != nil {
 			capturedResult := result
@@ -2314,8 +2230,8 @@ func UploadZippedBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 			successCount++
 		}
 
-		response := map[string]interface{}{
-			"message":       fmt.Sprintf("Processed %d files from zip", len(results)),
+		zipMsg := fmt.Sprintf("Processed %d files from zip", len(results))
+		apictx.RespondEnvelopeSuccessCompat(w, zipMsg, map[string]interface{}{
 			"zip_file_name": zipHeader.Filename,
 			"total_files":   len(results),
 			"success_count": successCount,
@@ -2323,11 +2239,7 @@ func UploadZippedBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 			"results":       results,
 			"uploaded_by":   userID,
 			"upload_time":   time.Now().Format(time.RFC3339),
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(response)
+		})
 
 		if pool != nil {
 			for i := range results {

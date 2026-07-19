@@ -341,8 +341,11 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: overall, "rows": created})
+		if overall {
+			api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": created})
+		} else {
+			api.RespondEnvelopeFailureCompat(w, http.StatusOK, "Completed with errors", "", map[string]interface{}{"rows": created})
+		}
 	}
 }
 
@@ -377,8 +380,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		categories := api.GetCashFlowCategoryNamesFromCtx(ctx)
 
 		if len(entities) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": []map[string]interface{}{}})
+			api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": []map[string]interface{}{}})
 			return
 		}
 
@@ -424,8 +426,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to fetch payable/receivable types")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, statusCode, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -698,8 +699,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -725,8 +725,7 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		categories := api.GetCashFlowCategoryNamesFromCtx(ctx)
 
 		if len(entities) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": []map[string]interface{}{}})
+			api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": []map[string]interface{}{}})
 			return
 		}
 
@@ -750,8 +749,7 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to fetch approved types")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, statusCode, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -782,8 +780,7 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -1023,8 +1020,11 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: overall, "rows": results})
+		if overall {
+			api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": results})
+		} else {
+			api.RespondEnvelopeFailureCompat(w, http.StatusOK, "Completed with errors", "", map[string]interface{}{"rows": results})
+		}
 	}
 }
 
@@ -1057,8 +1057,7 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, statusCode, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1089,8 +1088,7 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx.Rollback(ctx)
 			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to save deletion request")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, statusCode, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1098,8 +1096,7 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true})
+		api.RespondEnvelopeSuccess(w, "Success", nil)
 	}
 }
 
@@ -1197,7 +1194,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"updated": updated})
 	}
 }
 
@@ -1332,7 +1329,7 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			return
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated, "blocked": blockedRecords})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"updated": updated, "blocked": blockedRecords})
 	}
 }
 func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -1449,8 +1446,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyPayableReceivableError(err, constants.ErrTxStartFailed)
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, statusCode, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
@@ -1706,7 +1702,6 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"batch_ids": batchIDs})
 	}
 }

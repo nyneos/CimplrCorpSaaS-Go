@@ -3,7 +3,6 @@ package fx
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"context"
-	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
@@ -17,15 +16,14 @@ import (
 
 type FXService struct {
 	config map[string]interface{}
-	db     *sql.DB
 	server *http.Server
 	pool   *pgxpool.Pool
 	done   chan struct{}
 	mu     sync.Mutex
 }
 
-func NewFXService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
-	return &FXService{config: cfg, db: db}
+func NewFXService(cfg map[string]interface{}) serviceiface.Service {
+	return &FXService{config: cfg}
 }
 
 func (s *FXService) Name() string {
@@ -47,7 +45,7 @@ func (s *FXService) Start() error {
 		}
 	}
 
-	server, pool, err := NewFXServer(s.db, port)
+	server, pool, err := NewFXServer(port)
 	if err != nil {
 		return err
 	}

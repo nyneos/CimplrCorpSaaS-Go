@@ -188,9 +188,5 @@ func collectClosurePgxRows(rows pgx.Rows) ([]map[string]interface{}, error) {
 }
 
 func respondClosureAuditPayload(w http.ResponseWriter, payload interface{}) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
-		"success": true,
-		"data":    payload,
-	})
+	api.RespondEnvelopeSuccess(w, "Success", payload)
 }

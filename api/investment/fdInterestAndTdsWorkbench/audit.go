@@ -166,9 +166,5 @@ func validateTDSAuditAccess(ctx context.Context, pool *pgxpool.Pool, tdsID strin
 // ─── Response helper ──────────────────────────────────────────────────────────
 
 func respondTDSAuditPayload(w http.ResponseWriter, payload interface{}) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
-		"success": true,
-		"data":    payload,
-	})
+	api.RespondEnvelopeSuccess(w, "Success", payload)
 }

@@ -9,7 +9,6 @@ import (
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/csv"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -461,13 +460,10 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
-		resp := map[string]interface{}{
-			constants.ValueSuccess: true,
-			"proposal_id":          proposalID,
-			"imported_rows":        len(copyRows),
-			"message":              "V2 Proposal, items, projections & audit committed successfully",
-		}
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccessCompat(w, "V2 Proposal, items, projections & audit committed successfully", map[string]interface{}{
+			"proposal_id":   proposalID,
+			"imported_rows": len(copyRows),
+		})
 		logger.LogInfo("Committed V2 proposal %s (%d items, %d monthly rows)", proposalID, len(itemInfos), len(itemInfos)*12)
 		// Notify: FULL proposal data for rich templates
 		capturedProposalID := proposalID

@@ -914,8 +914,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
@@ -1068,8 +1067,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to read relationship inputs")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
@@ -1150,8 +1148,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.Commit(ctx); err != nil {
 				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to commit upload transaction")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
@@ -1174,8 +1171,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"batch_ids": batchIDs})
 	}
 }
 
@@ -1200,8 +1196,7 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		currCodes := api.GetCurrencyCodesFromCtx(ctx)
 
 		if len(entities) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": []map[string]interface{}{}})
+			api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": []map[string]interface{}{}})
 			return
 		}
 
@@ -1233,8 +1228,7 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				out = append(out, map[string]interface{}{"centre_id": id, "centre_code": ifaceToString(code), "centre_name": ifaceToString(name), "centre_type": ifaceToString(typ)})
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -1361,8 +1355,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to fetch centre hierarchy")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1735,8 +1728,7 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to fetch parent centres")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1758,8 +1750,7 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		logger.LogInfo("[DEBUG] FindParentCostProfitCenterAtLevel - Found %d results", len(results))
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"results": results})
 	}
 }
 
@@ -1856,7 +1847,7 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "queued_count": len(allList)})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"queued_count": len(allList)})
 	}
 }
 
@@ -1950,8 +1941,7 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1965,8 +1955,7 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to reject centre actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -1982,23 +1971,25 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
-		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
+		message := "Success"
 		if !success {
-			resp["message"] = constants.ErrNoRowsUpdated
+			message = constants.ErrNoRowsUpdated
 		}
 		if err := tx.Commit(ctx); err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrCommitFailedCapitalized)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
 			return
 		}
-		json.NewEncoder(w).Encode(resp)
+		if success {
+			api.RespondEnvelopeSuccessCompat(w, message, map[string]interface{}{"updated": updated})
+		} else {
+			api.RespondEnvelopeFailureCompat(w, http.StatusUnprocessableEntity, message, "", map[string]interface{}{"updated": updated})
+		}
 	}
 }
 
@@ -2114,8 +2105,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -2129,8 +2119,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to approve centre actions")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -2159,8 +2148,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			if _, err := tx.Exec(ctx, updQ, deleteIDs); err != nil {
 				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to mark centres as deleted")
 				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 				} else {
 					api.RespondWithError(w, statusCode, errMsg)
 				}
@@ -2168,23 +2156,25 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
-		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated, "blocked": blockedRecords}
+		message := "Success"
 		if !success {
-			resp["message"] = constants.ErrNoRowsUpdated
+			message = constants.ErrNoRowsUpdated
 		}
 		if err := tx.Commit(ctx); err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrCommitFailedCapitalized)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
 			return
 		}
-		json.NewEncoder(w).Encode(resp)
+		if success {
+			api.RespondEnvelopeSuccessCompat(w, message, map[string]interface{}{"updated": updated, "blocked": blockedRecords})
+		} else {
+			api.RespondEnvelopeFailureCompat(w, http.StatusUnprocessableEntity, message, "", map[string]interface{}{"updated": updated, "blocked": blockedRecords})
+		}
 	}
 }
 
@@ -2459,7 +2449,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			batchIDs = append(batchIDs, uuid.New().String())
 		}
 
-		json.NewEncoder(w).Encode(map[string]any{constants.ValueSuccess: true, "batch_ids": batchIDs})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"batch_ids": batchIDs})
 	}
 }
 

@@ -3,7 +3,6 @@ package cash
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"context"
-	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,15 +17,14 @@ import (
 
 type CashService struct {
 	config map[string]interface{}
-	db     *sql.DB
 	server *http.Server
 	pool   *pgxpool.Pool
 	done   chan struct{}
 	mu     sync.Mutex
 }
 
-func NewCashService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
-	return &CashService{config: cfg, db: db}
+func NewCashService(cfg map[string]interface{}) serviceiface.Service {
+	return &CashService{config: cfg}
 }
 
 func (s *CashService) Name() string {
@@ -51,7 +49,7 @@ func (s *CashService) Start() error {
 		}
 	}
 
-	server, pool, err := NewCashServer(s.db, port)
+	server, pool, err := NewCashServer(port)
 	if err != nil {
 		return err
 	}

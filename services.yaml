@@ -57,8 +57,12 @@ services:
     start_order: 13
     config:
       port: 8183
-  - name: cron
+  - name: policyengine
     start_order: 14
+    config:
+      port: 8185
+  - name: cron
+    start_order: 15
     config:
       batch_size: 1000
       sweep_schedule: "*/1 * * * *"

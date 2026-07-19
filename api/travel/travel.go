@@ -1,6 +1,7 @@
 package travel
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"errors"
@@ -117,9 +118,7 @@ func GetPackageHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			logger.LogError("rows error: %v", err)
 		}
 
-		if err := json.NewEncoder(w).Encode(out); err != nil {
-			logger.LogError("failed to write response: %v", err)
-		}
+		api.RespondEnvelopeSuccess(w, "Success", out)
 	}
 }
 
@@ -165,8 +164,6 @@ func DeletePackageHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{"deleted": true, "id": id})
+		api.RespondEnvelopeSuccessCompat(w, "Package deleted successfully", map[string]interface{}{"deleted": true, "id": id})
 	}
 }

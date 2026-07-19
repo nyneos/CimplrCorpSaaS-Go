@@ -93,8 +93,7 @@ func TotalCashBalanceByEntityHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(balances)
+		api.RespondEnvelopeSuccess(w, "Success", balances)
 	}
 }
 
@@ -120,8 +119,7 @@ func LiquidityCoverageRatioHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]float64{"liquidity_coverage_ratio": ratio})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"liquidity_coverage_ratio": ratio})
 	}
 }
 
@@ -151,8 +149,7 @@ func EntityCurrencyWiseCashHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(data)
+		api.RespondEnvelopeSuccess(w, "Success", data)
 	}
 }
 
@@ -370,8 +367,7 @@ func KpiCardsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(kpi)
+		api.RespondEnvelopeSuccess(w, "Success", kpi)
 	}
 }
 
@@ -405,8 +401,7 @@ func DetailedDailyCashFlowHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(rows)
+		api.RespondEnvelopeSuccess(w, "Success", rows)
 	}
 }
 

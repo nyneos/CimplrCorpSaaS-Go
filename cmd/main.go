@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"os"
@@ -11,32 +10,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv" 
-	_ "github.com/lib/pq"
+	"github.com/joho/godotenv"
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/appmanager"
 )
-
-// InitDB loads DB config from env vars
-func InitDB() (*sql.DB, error) {
-	user := os.Getenv("DB_USER")
-	pass := os.Getenv("DB_PASSWORD")
-	host := os.Getenv("DB_HOST")
-	port := os.Getenv("DB_PORT")
-	name := os.Getenv("DB_NAME")
-	sslMode := os.Getenv("DB_SSLMODE")
-	if sslMode == "" {
-		sslMode = "require"
-	}
-	connStr := fmt.Sprintf(
-		"user=%s password=%s host=%s port=%s dbname=%s sslmode=%s",
-		user, pass, host, port, name, sslMode,
-	)
-	return sql.Open("postgres", connStr)
-}
 
 func main() {
 	_ = godotenv.Overload("../.env") // Overload forces .env to win over stale shell exports
@@ -52,19 +32,6 @@ func main() {
 	} else {
 		fmt.Println("  DB_PASSWORD: [NOT SET!]")
 	}
-
-	db, err := InitDB()
-	if err != nil {
-
-		log.Fatal("failed to connect to DB:", err)
-	}
-	dbPingCtx, dbPingCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer dbPingCancel()
-	if err := db.PingContext(dbPingCtx); err != nil {
-		log.Fatal("failed to validate DB connection:", err)
-	}
-	log.Println("database/sql DB connection validated.Success")
-	appmanager.SetDB(db)
 
 	// Initialize pgx pool for better performance
 	user := os.Getenv("DB_USER")
@@ -152,8 +119,5 @@ func main() {
 	// Close pgx pool if initialized
 	if appmanager.GetPgxPool() != nil {
 		appmanager.GetPgxPool().Close()
-	}
-	if err := db.Close(); err != nil {
-		log.Printf("failed to close database/sql DB: %v", err)
 	}
 }

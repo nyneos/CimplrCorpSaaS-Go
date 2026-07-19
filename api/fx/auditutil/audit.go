@@ -2,7 +2,6 @@ package auditutil
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -36,24 +35,6 @@ type ExecContext interface {
 	ExecContext(ctx context.Context, query string, args ...interface{}) error
 }
 
-type sqlExecAdapter struct {
-	db *sql.DB
-}
-
-func (a sqlExecAdapter) ExecContext(ctx context.Context, query string, args ...interface{}) error {
-	_, err := a.db.ExecContext(ctx, query, args...)
-	return err
-}
-
-type txExecAdapter struct {
-	tx *sql.Tx
-}
-
-func (a txExecAdapter) ExecContext(ctx context.Context, query string, args ...interface{}) error {
-	_, err := a.tx.ExecContext(ctx, query, args...)
-	return err
-}
-
 type pgxExecAdapter struct {
 	pool *pgxpool.Pool
 }
@@ -77,30 +58,6 @@ func execFirstSuccess(ctx context.Context, exec ExecContext, attempts []execAtte
 		} else {
 			lastErr = err
 			errors = append(errors, err.Error())
-		}
-	}
-	if len(errors) > 0 {
-		return fmt.Errorf("%v; attempts=%s", lastErr, strings.Join(errors, " | "))
-	}
-	return lastErr
-}
-
-func execFirstSuccessTx(ctx context.Context, tx *sql.Tx, attempts []execAttempt) error {
-	var lastErr error
-	errors := make([]string, 0)
-	for i, attempt := range attempts {
-		savepoint := fmt.Sprintf("audit_insert_attempt_%d", i)
-		if _, err := tx.ExecContext(ctx, "SAVEPOINT "+savepoint); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, attempt.query, attempt.args...); err == nil {
-			_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT "+savepoint)
-			return nil
-		} else {
-			lastErr = err
-			errors = append(errors, err.Error())
-			_, _ = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+savepoint)
-			_, _ = tx.ExecContext(ctx, "RELEASE SAVEPOINT "+savepoint)
 		}
 	}
 	if len(errors) > 0 {
@@ -164,25 +121,6 @@ func JSONValue(value interface{}) interface{} {
 		return nil
 	}
 	return string(bytes)
-}
-
-func FetchRowSnapshot(ctx context.Context, db *sql.DB, tableName, parentColumn, parentID string) map[string]interface{} {
-	parentID = strings.TrimSpace(parentID)
-	if db == nil || tableName == "" || parentColumn == "" || parentID == "" {
-		return nil
-	}
-
-	query := fmt.Sprintf(`SELECT row_to_json(t) FROM (SELECT * FROM %s WHERE %s = $1 LIMIT 1) t`, tableName, parentColumn)
-	var raw []byte
-	if err := db.QueryRowContext(ctx, query, parentID).Scan(&raw); err != nil || len(raw) == 0 {
-		return nil
-	}
-
-	var snapshot map[string]interface{}
-	if err := json.Unmarshal(raw, &snapshot); err != nil {
-		return nil
-	}
-	return snapshot
 }
 
 func FetchRowSnapshotPGX(ctx context.Context, pool *pgxpool.Pool, tableName, parentColumn, parentID string) map[string]interface{} {
@@ -295,30 +233,6 @@ func buildActionInsertAttempts(p ActionParams) []execAttempt {
 	return attempts
 }
 
-func RecordAction(ctx context.Context, db *sql.DB, p ActionParams) {
-	if db == nil {
-		return
-	}
-	if err := recordAction(ctx, sqlExecAdapter{db: db}, p); err != nil {
-		logger.LogError("fx audit insert failed table=%s parent=%s action=%s: %v", p.TableName, p.ParentID, p.ActionType, err)
-	}
-}
-
-func RecordActionTx(ctx context.Context, tx *sql.Tx, p ActionParams) error {
-	if tx == nil {
-		return fmt.Errorf("transaction is required")
-	}
-	p.ParentID = strings.TrimSpace(p.ParentID)
-	p.RequestedBy = strings.TrimSpace(p.RequestedBy)
-	if p.ParentID == "" || p.RequestedBy == "" {
-		return fmt.Errorf("parent id and requested by are required")
-	}
-	if strings.TrimSpace(p.RequestedIP) == "" {
-		p.RequestedIP = api.ClientIPFromContext(ctx)
-	}
-	return execFirstSuccessTx(ctx, tx, buildActionInsertAttempts(p))
-}
-
 func RecordActionPGX(ctx context.Context, pool *pgxpool.Pool, p ActionParams) {
 	if pool == nil {
 		return
@@ -395,17 +309,6 @@ func recordDecision(ctx context.Context, exec ExecContext, p DecisionParams) err
 	return execFirstSuccess(ctx, exec, attempts)
 }
 
-func RecordDecision(ctx context.Context, db *sql.DB, p DecisionParams) {
-	p.ParentID = strings.TrimSpace(p.ParentID)
-	p.CheckerBy = strings.TrimSpace(p.CheckerBy)
-	if p.ParentID == "" || p.CheckerBy == "" || db == nil {
-		return
-	}
-	if err := recordDecision(ctx, sqlExecAdapter{db: db}, p); err != nil {
-		logger.LogError("fx audit decision failed table=%s parent=%s status=%s: %v", p.TableName, p.ParentID, p.Status, err)
-	}
-}
-
 func RecordDecisionPGX(ctx context.Context, pool *pgxpool.Pool, p DecisionParams) {
 	p.ParentID = strings.TrimSpace(p.ParentID)
 	p.CheckerBy = strings.TrimSpace(p.CheckerBy)
@@ -414,34 +317,6 @@ func RecordDecisionPGX(ctx context.Context, pool *pgxpool.Pool, p DecisionParams
 	}
 	if err := recordDecision(ctx, pgxExecAdapter{pool: pool}, p); err != nil {
 		logger.LogError("fx audit decision failed table=%s parent=%s status=%s: %v", p.TableName, p.ParentID, p.Status, err)
-	}
-}
-
-func RecordDownload(ctx context.Context, db *sql.DB, p DownloadParams) {
-	p.ParentID = strings.TrimSpace(p.ParentID)
-	p.RequestedBy = strings.TrimSpace(p.RequestedBy)
-	if p.ParentID == "" || p.RequestedBy == "" || db == nil {
-		return
-	}
-	if strings.TrimSpace(p.RequestedIP) == "" {
-		p.RequestedIP = api.ClientIPFromContext(ctx)
-	}
-	columns := []string{p.ParentColumn, "requested_by", "requested_at", "requested_ip", "file_name", "upload_s3_key"}
-	values := []string{"$1", "$2", "now()", "$3", "$4", "$5"}
-	args := []interface{}{p.ParentID, p.RequestedBy, NullIfBlank(p.RequestedIP), FileName(p.UploadS3Key), NullIfBlank(p.UploadS3Key)}
-	next := 6
-	for col, val := range p.ExtraColumns {
-		if strings.TrimSpace(col) == "" {
-			continue
-		}
-		columns = append(columns, col)
-		values = append(values, fmt.Sprintf("$%d", next))
-		args = append(args, strings.TrimSpace(val))
-		next++
-	}
-	query := fmt.Sprintf(constants.ErrInsertFailed, p.TableName, strings.Join(columns, ", "), strings.Join(values, ", "))
-	if _, err := db.ExecContext(ctx, query, args...); err != nil {
-		logger.LogError("fx audit download insert failed table=%s parent=%s: %v", p.TableName, p.ParentID, err)
 	}
 }
 

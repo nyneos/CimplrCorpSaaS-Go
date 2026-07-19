@@ -1924,13 +1924,9 @@ func GetFDClosureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"closure_request_id": closureRequestID,
-				"download_url":       downloadURL,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"closure_request_id": closureRequestID,
+			"download_url":       downloadURL,
 		})
 	}
 }
@@ -1980,14 +1976,15 @@ func GetFDClosureBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 				"download_url":       downloadURL,
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: len(files) > 0,
-			"data": map[string]interface{}{
-				"files":      files,
-				"failed_ids": failedIDs,
-			},
-		})
+		data := map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
+		}
+		if len(files) > 0 {
+			api.RespondEnvelopeSuccess(w, "Success", data)
+		} else {
+			api.RespondEnvelopeFailureWithData(w, http.StatusNotFound, "No closure files were available for download", "", data)
+		}
 	}
 }
 
@@ -2271,11 +2268,7 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		api.LogInfo("[FDClosure] BulkRejectClosureRequest: acted=%d errors=%d by=%s", acted, len(errors), userEmail)
 		if !success {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				constants.ValueError:   msg,
+			api.RespondEnvelopeFailureWithData(w, http.StatusBadRequest, msg, "", map[string]interface{}{
 				"rows": map[string]interface{}{
 					"acted":   acted,
 					"errors":  errors,

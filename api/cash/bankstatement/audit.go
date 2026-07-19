@@ -107,9 +107,7 @@ func GetBankStatementAuditHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		// Standardize: always return 'rows' as the array field
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"audit_logs": payload,
 		})
 	})
@@ -184,9 +182,7 @@ func GetBankStatementDownloadAuditHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		// Standardize: always return 'rows' as the array field
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"audit_logs": payload,
 		})
 	})
@@ -265,9 +261,7 @@ func GetBankStatementBalanceImpactAuditHandler(pool *pgxpool.Pool) http.Handler 
 		}
 
 		// Standardize: always return 'rows' as the array field
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"audit_logs": payload,
 		})
 	})
@@ -347,9 +341,7 @@ func GetBankStatementTransactionAuditHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		// Standardize: always return 'rows' as the array field
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"audit_logs": payload,
 		})
 	})
@@ -405,11 +397,7 @@ func nullIfBlank(value string) interface{} {
 }
 
 func respondAuditPayload(w http.ResponseWriter, payload interface{}) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"data":    payload,
-	})
+	api.RespondEnvelopeSuccess(w, "Success", payload)
 }
 
 func buildBankStatementChangeSummary(ctx context.Context, pool *pgxpool.Pool, bankStatementID string) []map[string]interface{} {

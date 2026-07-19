@@ -3,7 +3,6 @@ package uam
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"context"
-	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
@@ -17,15 +16,14 @@ import (
 
 type UAMService struct {
 	config map[string]interface{}
-	db     *sql.DB
 	server *http.Server
 	pool   *pgxpool.Pool
 	done   chan struct{}
 	mu     sync.Mutex
 }
 
-func NewUAMService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
-	return &UAMService{config: cfg, db: db}
+func NewUAMService(cfg map[string]interface{}) serviceiface.Service {
+	return &UAMService{config: cfg}
 }
 
 func (s *UAMService) Name() string {
@@ -47,7 +45,7 @@ func (s *UAMService) Start() error {
 		}
 	}
 
-	server, pool, err := NewUAMServer(s.db, port)
+	server, pool, err := NewUAMServer(port)
 	if err != nil {
 		return err
 	}

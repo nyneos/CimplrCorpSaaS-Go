@@ -3,7 +3,6 @@ package notification
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"context"
-	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,15 +17,14 @@ import (
 type NotificationService struct {
 	config    map[string]interface{}
 	pool      *pgxpool.Pool
-	db        *sql.DB
 	server    *http.Server
 	ownedPool *pgxpool.Pool
 	done      chan struct{}
 	mu        sync.Mutex
 }
 
-func NewNotificationService(cfg map[string]interface{}, pool *pgxpool.Pool, db *sql.DB) serviceiface.Service {
-	return &NotificationService{config: cfg, pool: pool, db: db}
+func NewNotificationService(cfg map[string]interface{}, pool *pgxpool.Pool) serviceiface.Service {
+	return &NotificationService{config: cfg, pool: pool}
 }
 
 func (s *NotificationService) Name() string {
@@ -48,7 +46,7 @@ func (s *NotificationService) Start() error {
 		}
 	}
 
-	server, ownedPool, ownsPool, err := NewNotificationServer(s.pool, s.db, port)
+	server, ownedPool, ownsPool, err := NewNotificationServer(s.pool, port)
 	if err != nil {
 		return err
 	}

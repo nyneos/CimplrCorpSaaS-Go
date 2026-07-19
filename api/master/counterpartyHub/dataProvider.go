@@ -649,8 +649,7 @@ func GetDataProviderAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			out = append(out, row)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -692,8 +691,7 @@ func GetDataProviderAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			out = append(out, row)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -734,8 +732,7 @@ func GetDataProviderApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			out = append(out, row)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -778,15 +775,11 @@ func GetDataProviderDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		dtRows.Close()
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"provider_id": pid, "counterparty_id": cpid, "provider_code": pcode,
-				"provider_type": ptype, "delivery_mechanism": delivery, "api_creds_kms_ref": apiCreds,
-				"entitlement_codes": entCodes, "renewal_date": renewal, "refresh_interval_sec": refresh,
-				"data_types": dataTypes,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"provider_id": pid, "counterparty_id": cpid, "provider_code": pcode,
+			"provider_type": ptype, "delivery_mechanism": delivery, "api_creds_kms_ref": apiCreds,
+			"entitlement_codes": entCodes, "renewal_date": renewal, "refresh_interval_sec": refresh,
+			"data_types": dataTypes,
 		})
 	}
 }

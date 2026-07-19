@@ -125,9 +125,7 @@ func GetForecastVsActualRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": rows})
 	}
 }
 
@@ -161,9 +159,7 @@ func GetForecastVsActualKPIHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "kpis": k}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"kpis": k})
 	}
 }
 func GetForecastVsActualByDateHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -196,9 +192,7 @@ func GetForecastVsActualByDateHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": rows})
 	}
 }
 
@@ -233,9 +227,7 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": rows})
 	}
 }
 

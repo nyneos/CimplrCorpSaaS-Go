@@ -1,18 +1,20 @@
 package auth
 
 import (
-	"database/sql"
+	"context"
 	"time"
 
 	"CimplrCorpSaas/internal/logger"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // LogSecurityEvent writes a security-relevant event to both the audit_logs table
 // and the file-based logger. Non-blocking: errors are logged but never returned.
-func LogSecurityEvent(db *sql.DB, userID, eventType, detail, clientIP string) {
+func LogSecurityEvent(ctx context.Context, pool *pgxpool.Pool, userID, eventType, detail, clientIP string) {
 	// DB insert (best-effort)
-	if db != nil {
-		_, err := db.Exec(
+	if pool != nil {
+		_, err := pool.Exec(ctx,
 			`INSERT INTO audit_logs (user_id, event_type, detail, ip_address, created_at)
 			 VALUES ($1, $2, $3, $4, $5)`,
 			nullIfEmpty(userID), eventType, detail, clientIP, time.Now(),

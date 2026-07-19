@@ -245,11 +245,7 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		simulation.SimulationID = fmt.Sprintf("SIM-%s-%d", time.Now().Format("20060102"), time.Now().Unix())
 		simulation.GeneratedAt = time.Now().Format(time.RFC3339)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    simulation,
-		})
+		api.RespondEnvelopeSuccess(w, "Success", simulation)
 	}
 }
 
@@ -297,9 +293,7 @@ func GetBalanceSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":  true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"balances": balances,
 			"count":    len(balances),
 		})
@@ -435,9 +429,7 @@ func ValidateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":        true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"sweeps_checked": sweepCount,
 			"violations":     violations,
 			"is_valid":       len(violations) == 0,
@@ -554,11 +546,7 @@ func GetSweepAnalytics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			},
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    analytics,
-		})
+		api.RespondEnvelopeSuccess(w, "Success", analytics)
 	}
 }
 
@@ -632,9 +620,7 @@ func GetSweepSuggestions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			EstimatedBenefit: "Unlock up to 15% more working capital",
 		})
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":     true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"suggestions": suggestions,
 			"count":       len(suggestions),
 		})
@@ -772,9 +758,7 @@ func GetSweepExecutionGraph(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nodeArray = append(nodeArray, node)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"graph": map[string]interface{}{
 				"nodes": nodeArray,
 				"edges": edges,

@@ -360,9 +360,7 @@ func sweepAuditPayloadTime(value interface{}) time.Time {
 }
 
 func writeSweepAuditPayload(w http.ResponseWriter, payload []map[string]interface{}) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":    true,
+	api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
 		"audit_logs": payload,
 	})
 }

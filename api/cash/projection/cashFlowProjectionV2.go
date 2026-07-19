@@ -1015,9 +1015,7 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"header":  header,
 			"items":   items,
 			"actions": actions,
@@ -1125,12 +1123,8 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data": map[string]interface{}{
-				"proposals": proposals,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"proposals": proposals,
 		})
 	}
 }
@@ -1183,12 +1177,8 @@ func GetProjectionDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		insertProjectionDownloadAudit(ctx, pgxPool, req.ProposalID, projectionRequestedBy(req.UserID), key, api.ClientIPFromRequest(r))
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"download_url": downloadURL,
 		})
 	}
 }
@@ -1258,25 +1248,16 @@ func GetProjectionBulkDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(files) == 0 {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				"message":              "no downloadable files found",
-				"data": map[string]interface{}{
-					"files":      []map[string]string{},
-					"failed_ids": failedIDs,
-				},
+			api.RespondEnvelopeFailureCompat(w, http.StatusNotFound, "no downloadable files found", "", map[string]interface{}{
+				"files":      []map[string]string{},
+				"failed_ids": failedIDs,
 			})
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"files":      files,
-				"failed_ids": failedIDs,
-			},
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
 		})
 	}
 }

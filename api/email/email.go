@@ -2,7 +2,6 @@ package email
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
@@ -23,11 +22,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func NewEmailServer(pool *pgxpool.Pool, db *sql.DB, port string) (*http.Server, *pgxpool.Pool, bool, error) {
+func NewEmailServer(pool *pgxpool.Pool, port string) (*http.Server, *pgxpool.Pool, bool, error) {
 	const serviceName = "email"
 	mux := http.NewServeMux()
 	ownsPool := false
-	_ = db
 
 	if pool == nil {
 		user := os.Getenv("DB_USER")

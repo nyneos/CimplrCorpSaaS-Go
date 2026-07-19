@@ -170,8 +170,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows2.Close()
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -401,7 +400,6 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			resp = append(resp, map[string]interface{}{"date_range": b.Label, "entities": entArr})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": resp})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": resp})
 	}
 }

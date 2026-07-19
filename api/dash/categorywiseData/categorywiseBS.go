@@ -787,7 +787,6 @@ LIMIT ` + strconv.Itoa(txnLimit) + `;
 		}
 
 		resp := map[string]interface{}{
-			"success":                    true,
 			"categories":                 categories,
 			"entities":                   entities,
 			"transactions":               txns,
@@ -865,7 +864,6 @@ LIMIT ` + strconv.Itoa(txnLimit) + `;
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		_ = json.NewEncoder(w).Encode(resp)
+		api.RespondEnvelopeSuccessCompat(w, "Success", resp)
 	}
 }

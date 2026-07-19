@@ -1493,12 +1493,8 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"bank_statements": out,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"bank_statements": out,
 		})
 	}
 }

@@ -1,11 +1,13 @@
 package utils
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"math"
 	"net/http"
 	"strconv"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type PaginationParams struct {
@@ -49,9 +51,9 @@ func (p *PaginationParams) SetPaginationStats(totalRecords int) {
 	}
 }
 
-func CountTotal(db *sql.DB, query string, args ...interface{}) (int, error) {
+func CountTotal(ctx context.Context, pool *pgxpool.Pool, query string, args ...interface{}) (int, error) {
 	var total int
-	err := db.QueryRow(query, args...).Scan(&total)
+	err := pool.QueryRow(ctx, query, args...).Scan(&total)
 	if err != nil {
 		return 0, fmt.Errorf("count query failed: %w", err)
 	}

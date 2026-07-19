@@ -20,6 +20,8 @@ import (
 	"CimplrCorpSaas/internal/logger"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ── SSO Provider abstraction ──────────────────────────────────────────────────
@@ -222,7 +224,7 @@ func SSOLoginRedirect(cfg *SSOConfig) http.HandlerFunc {
 //
 // GET  /auth/sso/callback/{provider}?code=...&state=...   ← IdP redirect
 // POST /auth/sso/callback/{provider}  { "code":"...", "state":"..." }
-func SSOCallbackHandler(cfg *SSOConfig, db *sql.DB) http.HandlerFunc {
+func SSOCallbackHandler(cfg *SSOConfig, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		providerName := extractProviderFromPath(r.URL.Path)
 		if providerName == "" {
@@ -247,7 +249,7 @@ func SSOCallbackHandler(cfg *SSOConfig, db *sql.DB) http.HandlerFunc {
 			code = r.URL.Query().Get("code")
 			state = r.URL.Query().Get("state")
 			if errMsg := r.URL.Query().Get("error_description"); errMsg != "" {
-				LogSecurityEvent(db, "", "sso_callback_error", providerName+": "+errMsg, extractClientIPFromRequest(r))
+				LogSecurityEvent(r.Context(), pool, "", "sso_callback_error", providerName+": "+errMsg, extractClientIPFromRequest(r))
 				frontendRedirectError(w, r, errMsg)
 				return
 			}
@@ -265,7 +267,7 @@ func SSOCallbackHandler(cfg *SSOConfig, db *sql.DB) http.HandlerFunc {
 		// Validate CSRF state
 		if state == "" || !consumeSSOState(state) {
 			msg := "Invalid or expired state parameter. Please try again."
-			LogSecurityEvent(db, "", "sso_state_invalid", providerName, extractClientIPFromRequest(r))
+			LogSecurityEvent(r.Context(), pool, "", "sso_state_invalid", providerName, extractClientIPFromRequest(r))
 			if isGET {
 				frontendRedirectError(w, r, msg)
 			} else {
@@ -287,7 +289,7 @@ func SSOCallbackHandler(cfg *SSOConfig, db *sql.DB) http.HandlerFunc {
 		// Exchange code for tokens
 		tokenResp, err := exchangeCodeForTokens(provider, code)
 		if err != nil {
-			LogSecurityEvent(db, "", "sso_token_exchange_failed", providerName+": "+err.Error(), extractClientIPFromRequest(r))
+			LogSecurityEvent(r.Context(), pool, "", "sso_token_exchange_failed", providerName+": "+err.Error(), extractClientIPFromRequest(r))
 			if isGET {
 				frontendRedirectError(w, r, "SSO authentication failed")
 			} else {
@@ -321,16 +323,16 @@ func SSOCallbackHandler(cfg *SSOConfig, db *sql.DB) http.HandlerFunc {
 		}
 
 		// Update sso_provider/sso_subject on user row
-		_, _ = db.Exec(
+		_, _ = pool.Exec(r.Context(),
 			`UPDATE users SET sso_provider = $1, sso_subject = $2 WHERE LOWER(email) = LOWER($3)`,
 			providerName, claims.Sub, email,
 		)
 
 		// Authenticate
 		clientIP := extractClientIPFromRequest(r)
-		session, mfaPending, err := globalAuthService.LoginViaSSO(email, clientIP)
+		session, mfaPending, err := globalAuthService.LoginViaSSO(r.Context(), email, clientIP)
 		if err != nil {
-			LogSecurityEvent(db, "", "sso_login_failed", email+": "+err.Error(), clientIP)
+			LogSecurityEvent(r.Context(), pool, "", "sso_login_failed", email+": "+err.Error(), clientIP)
 			if isGET {
 				frontendRedirectError(w, r, err.Error())
 			} else {
@@ -339,7 +341,7 @@ func SSOCallbackHandler(cfg *SSOConfig, db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		LogSecurityEvent(db, session.UserID, "sso_login_success", providerName+": "+email, clientIP)
+		LogSecurityEvent(r.Context(), pool, session.UserID, "sso_login_success", providerName+": "+email, clientIP)
 
 		// Return result
 		if isGET {
@@ -379,7 +381,7 @@ func SSOCallbackHandler(cfg *SSOConfig, db *sql.DB) http.HandlerFunc {
 // SSOLogoutHandler performs single logout: clears local session and returns the
 // IdP logout URL so the frontend can redirect there.
 // POST /auth/sso/logout  { "user_id": "...", "provider": "microsoft" }
-func SSOLogoutHandler(cfg *SSOConfig, db *sql.DB) http.HandlerFunc {
+func SSOLogoutHandler(cfg *SSOConfig, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID   string `json:"user_id"`
@@ -394,10 +396,10 @@ func SSOLogoutHandler(cfg *SSOConfig, db *sql.DB) http.HandlerFunc {
 		}
 
 		if globalAuthService != nil {
-			_ = globalAuthService.Logout(req.UserID)
+			_ = globalAuthService.Logout(r.Context(), req.UserID)
 		}
 
-		LogSecurityEvent(db, req.UserID, "sso_logout", req.Provider, extractClientIPFromRequest(r))
+		LogSecurityEvent(r.Context(), pool, req.UserID, "sso_logout", req.Provider, extractClientIPFromRequest(r))
 
 		provider := cfg.Get(req.Provider)
 		logoutURL := ""
@@ -417,19 +419,19 @@ func SSOLogoutHandler(cfg *SSOConfig, db *sql.DB) http.HandlerFunc {
 
 // ── LoginViaSSO on AuthService ────────────────────────────────────────────────
 
-func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, bool, error) {
+func (a *AuthService) LoginViaSSO(ctx context.Context, email string, clientIP string) (*UserSession, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	var dbUserID, dbName, dbEmail string
 	var dbStatus sql.NullString
 
-	err := a.db.QueryRow(
+	err := a.pool.QueryRow(ctx,
 		`SELECT id, employee_name, email, status FROM users WHERE LOWER(email) = LOWER($1) AND COALESCE(is_deleted, false) = false LIMIT 1`,
 		email,
 	).Scan(&dbUserID, &dbName, &dbEmail, &dbStatus)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, false, errors.New("no account linked to this identity")
 		}
 		return nil, false, errors.New("internal error")
@@ -447,7 +449,7 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 	}
 
 	var primaryRole, primaryRoleCode string
-	if roleRows, err := a.db.Query(
+	if roleRows, err := a.pool.Query(ctx,
 		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 ORDER BY ur.id ASC LIMIT 1`,
 		dbUserID,
 	); err == nil {
@@ -476,13 +478,13 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 		LastLoginTime:   time.Now().Format(time.RFC3339),
 		ClientIP:        clientIP,
 		IsLoggedIn:      true,
-		CreatedEntities: a.loadCreatedEntities(dbUserID, primaryRole, primaryRoleCode),
+		CreatedEntities: a.loadCreatedEntities(ctx, dbUserID, primaryRole, primaryRoleCode),
 	}
 
 	// Check MFA — only pending if BOTH enabled AND secret is configured
 	var mfaEnabled sql.NullBool
 	var mfaSecret sql.NullString
-	_ = a.db.QueryRow(`SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, dbUserID).Scan(&mfaEnabled, &mfaSecret)
+	_ = a.pool.QueryRow(ctx, `SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, dbUserID).Scan(&mfaEnabled, &mfaSecret)
 	if mfaEnabled.Valid && mfaEnabled.Bool && mfaSecret.Valid && mfaSecret.String != "" {
 		session.IsLoggedIn = false
 		a.users[sessionID] = session
@@ -605,8 +607,45 @@ func frontendRedirectError(w http.ResponseWriter, r *http.Request, msg string) {
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
+// writeJSON is the single funnel every SSO handler in this file uses to write
+// a JSON response. It is kept generic (handlers pass a pre-built
+// map[string]interface{} with a "success" key) but now routes through the
+// CLAUDE.md envelope shape (authEnvelopeSuccessCompat/authEnvelopeFailureCompat
+// — see responseEnvelope.go for why this package can't call the canonical
+// api.RespondEnvelope* functions directly) instead of writing a raw flat map.
+// "message"/"error" keys, when present, are promoted to the envelope message;
+// everything else is nested under "data" (and flattened at top level for
+// backward compat).
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	fields, ok := v.(map[string]interface{})
+	if !ok {
+		// Not a flat map (e.g. a struct payload) — treat as a plain success body.
+		authEnvelopeSuccess(w, "Success", v)
+		return
+	}
+
+	success := true
+	if sv, has := fields["success"]; has {
+		if b, isBool := sv.(bool); isBool {
+			success = b
+		}
+		delete(fields, "success")
+	}
+
+	message := "Success"
+	if m, has := fields["message"].(string); has {
+		message = m
+		delete(fields, "message")
+	}
+
+	if !success {
+		if e, has := fields["error"].(string); has {
+			message = e
+			delete(fields, "error")
+		}
+		authEnvelopeFailureCompat(w, status, message, "", fields)
+		return
+	}
+
+	authEnvelopeSuccessCompat(w, message, fields)
 }

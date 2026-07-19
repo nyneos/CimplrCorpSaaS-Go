@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
 	"database/sql"
@@ -216,7 +217,6 @@ func GetUncategorizedTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 		_ = pool.QueryRow(ctx, countQuery, entityIDs).Scan(&totalCount)
 
 		response := map[string]interface{}{
-			"success":      true,
 			"transactions": transactions,
 			"count":        len(transactions),
 			"total_count":  totalCount,
@@ -227,7 +227,6 @@ func GetUncategorizedTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 			response["offset"] = offset
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(response)
+		api.RespondEnvelopeSuccessCompat(w, "Success", response)
 	})
 }

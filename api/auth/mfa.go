@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
@@ -16,6 +17,8 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ── TOTP (RFC 6238) MFA implementation ────────────────────────────────────────
@@ -31,7 +34,7 @@ const (
 
 // MFASetupHandler generates a new TOTP secret for the user.
 // POST /auth/mfa/setup  { "user_id": "..." }
-func MFASetupHandler(db *sql.DB) http.HandlerFunc {
+func MFASetupHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -59,10 +62,10 @@ func MFASetupHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		var email string
-		_ = db.QueryRow(`SELECT email FROM users WHERE id = $1`, req.UserID).Scan(&email)
+		_ = pool.QueryRow(r.Context(), `SELECT email FROM users WHERE id = $1`, req.UserID).Scan(&email)
 
 		// Store secret but don't enable yet
-		_, err = db.Exec(
+		_, err = pool.Exec(r.Context(),
 			`UPDATE users SET mfa_secret = $1, mfa_enabled = false WHERE id = $2`,
 			secret, req.UserID,
 		)
@@ -79,7 +82,7 @@ func MFASetupHandler(db *sql.DB) http.HandlerFunc {
 			issuer, email, secret, issuer, totpDigits, totpPeriod,
 		)
 
-		LogSecurityEvent(db, req.UserID, "mfa_setup_initiated", email, extractClientIPFromRequest(r))
+		LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_setup_initiated", email, extractClientIPFromRequest(r))
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"success":     true,
@@ -92,7 +95,7 @@ func MFASetupHandler(db *sql.DB) http.HandlerFunc {
 
 // MFAConfirmHandler verifies first TOTP code and activates MFA.
 // POST /auth/mfa/confirm  { "user_id": "...", "code": "123456" }
-func MFAConfirmHandler(db *sql.DB) http.HandlerFunc {
+func MFAConfirmHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -105,7 +108,7 @@ func MFAConfirmHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		secret, err := getUserMFASecret(db, req.UserID)
+		secret, err := getUserMFASecret(r.Context(), pool, req.UserID)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"success": false, "error": "MFA setup not initiated. Call /auth/mfa/setup first",
@@ -114,14 +117,14 @@ func MFAConfirmHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		if !ValidateTOTP(secret, req.Code) {
-			LogSecurityEvent(db, req.UserID, "mfa_confirm_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
+			LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_confirm_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 				"success": false, "error": "Invalid code. Please try again",
 			})
 			return
 		}
 
-		_, err = db.Exec(`UPDATE users SET mfa_enabled = true WHERE id = $1`, req.UserID)
+		_, err = pool.Exec(r.Context(), `UPDATE users SET mfa_enabled = true WHERE id = $1`, req.UserID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 				"success": false, "error": "Failed to activate MFA",
@@ -129,7 +132,7 @@ func MFAConfirmHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		LogSecurityEvent(db, req.UserID, "mfa_activated", "", extractClientIPFromRequest(r))
+		LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_activated", "", extractClientIPFromRequest(r))
 		if logger.GlobalLogger != nil {
 			logger.GlobalLogger.LogAudit(fmt.Sprintf("MFA activated for user %s", req.UserID))
 		}
@@ -143,7 +146,7 @@ func MFAConfirmHandler(db *sql.DB) http.HandlerFunc {
 // MFAVerifyHandler validates a TOTP code during login. On success the session
 // is marked fully logged-in and the full session is returned.
 // POST /auth/mfa/verify  { "user_id": "...", "code": "123456" }
-func MFAVerifyHandler(db *sql.DB) http.HandlerFunc {
+func MFAVerifyHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -156,9 +159,9 @@ func MFAVerifyHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		secret, err := getUserMFASecret(db, req.UserID)
+		secret, err := getUserMFASecret(r.Context(), pool, req.UserID)
 		if err != nil {
-			LogSecurityEvent(db, req.UserID, "mfa_verify_failed", "no secret configured", extractClientIPFromRequest(r))
+			LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_verify_failed", "no secret configured", extractClientIPFromRequest(r))
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"success": false, "error": "MFA is not set up for this account. Please set up MFA first via /auth/mfa/setup",
 			})
@@ -166,7 +169,7 @@ func MFAVerifyHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		if !ValidateTOTP(secret, req.Code) {
-			LogSecurityEvent(db, req.UserID, "mfa_verify_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
+			LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_verify_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 				"success": false, "error": "Invalid MFA code",
 			})
@@ -189,7 +192,7 @@ func MFAVerifyHandler(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		LogSecurityEvent(db, req.UserID, "mfa_verify_success", "", extractClientIPFromRequest(r))
+		LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_verify_success", "", extractClientIPFromRequest(r))
 		if logger.GlobalLogger != nil {
 			logger.GlobalLogger.LogAudit(fmt.Sprintf("MFA verified for user %s", req.UserID))
 		}
@@ -202,7 +205,7 @@ func MFAVerifyHandler(db *sql.DB) http.HandlerFunc {
 
 // MFADisableHandler turns off MFA for a user (requires valid code).
 // POST /auth/mfa/disable  { "user_id": "...", "code": "123456" }
-func MFADisableHandler(db *sql.DB) http.HandlerFunc {
+func MFADisableHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -215,7 +218,7 @@ func MFADisableHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		secret, err := getUserMFASecret(db, req.UserID)
+		secret, err := getUserMFASecret(r.Context(), pool, req.UserID)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"success": false, "error": "MFA is not set up for this account",
@@ -224,14 +227,14 @@ func MFADisableHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		if !ValidateTOTP(secret, req.Code) {
-			LogSecurityEvent(db, req.UserID, "mfa_disable_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
+			LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_disable_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 				"success": false, "error": "Invalid MFA code",
 			})
 			return
 		}
 
-		_, err = db.Exec(`UPDATE users SET mfa_enabled = false, mfa_secret = NULL WHERE id = $1`, req.UserID)
+		_, err = pool.Exec(r.Context(), `UPDATE users SET mfa_enabled = false, mfa_secret = NULL WHERE id = $1`, req.UserID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 				"success": false, "error": "Failed to disable MFA",
@@ -239,7 +242,7 @@ func MFADisableHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		LogSecurityEvent(db, req.UserID, "mfa_disabled", "", extractClientIPFromRequest(r))
+		LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_disabled", "", extractClientIPFromRequest(r))
 		if logger.GlobalLogger != nil {
 			logger.GlobalLogger.LogAudit(fmt.Sprintf("MFA disabled for user %s", req.UserID))
 		}
@@ -252,7 +255,7 @@ func MFADisableHandler(db *sql.DB) http.HandlerFunc {
 
 // MFAStatusHandler returns whether MFA is enabled for a user.
 // POST /auth/mfa/status  { "user_id": "..." }
-func MFAStatusHandler(db *sql.DB) http.HandlerFunc {
+func MFAStatusHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -266,7 +269,7 @@ func MFAStatusHandler(db *sql.DB) http.HandlerFunc {
 
 		var mfaEnabled sql.NullBool
 		var mfaSecret sql.NullString
-		err := db.QueryRow(`SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, req.UserID).Scan(&mfaEnabled, &mfaSecret)
+		err := pool.QueryRow(r.Context(), `SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, req.UserID).Scan(&mfaEnabled, &mfaSecret)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]interface{}{
 				"success": false, "error": "User not found",
@@ -310,9 +313,9 @@ func isSessionValid(userID string) bool {
 }
 
 // getUserMFASecret retrieves the MFA secret for a user, returning error if not set.
-func getUserMFASecret(db *sql.DB, userID string) (string, error) {
+func getUserMFASecret(ctx context.Context, pool *pgxpool.Pool, userID string) (string, error) {
 	var mfaSecret sql.NullString
-	err := db.QueryRow(`SELECT mfa_secret FROM users WHERE id = $1`, userID).Scan(&mfaSecret)
+	err := pool.QueryRow(ctx, `SELECT mfa_secret FROM users WHERE id = $1`, userID).Scan(&mfaSecret)
 	if err != nil || !mfaSecret.Valid || mfaSecret.String == "" {
 		return "", fmt.Errorf("no MFA secret")
 	}

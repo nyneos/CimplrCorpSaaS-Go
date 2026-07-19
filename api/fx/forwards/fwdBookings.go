@@ -24,8 +24,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -83,8 +84,8 @@ func forwardDownloadAuditType(downloadType string, s3Key string) string {
 	}
 }
 
-func existingForwardBookingUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
+func existingForwardBookingUploadKeys(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	rows, err := pool.Query(ctx, `
 		SELECT DISTINCT upload_s3_key
 		FROM forward_bookings
 		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
@@ -106,8 +107,8 @@ func existingForwardBookingUploadKeys(ctx context.Context, db *sql.DB) ([]string
 	return keys, rows.Err()
 }
 
-func ensureUniqueForwardBookingUpload(ctx context.Context, db *sql.DB, fileBytes []byte) error {
-	keys, err := existingForwardBookingUploadKeys(ctx, db)
+func ensureUniqueForwardBookingUpload(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte) error {
+	keys, err := existingForwardBookingUploadKeys(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("failed to check duplicate forward booking upload: %w", err)
 	}
@@ -121,8 +122,8 @@ func ensureUniqueForwardBookingUpload(ctx context.Context, db *sql.DB, fileBytes
 	return nil
 }
 
-func existingForwardConfirmationUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
+func existingForwardConfirmationUploadKeys(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	rows, err := pool.Query(ctx, `
 		SELECT DISTINCT confirmation_upload_s3_key
 		FROM forward_bookings
 		WHERE COALESCE(TRIM(confirmation_upload_s3_key), '') <> ''
@@ -144,8 +145,8 @@ func existingForwardConfirmationUploadKeys(ctx context.Context, db *sql.DB) ([]s
 	return keys, rows.Err()
 }
 
-func ensureUniqueForwardConfirmationUpload(ctx context.Context, db *sql.DB, fileBytes []byte) error {
-	keys, err := existingForwardConfirmationUploadKeys(ctx, db)
+func ensureUniqueForwardConfirmationUpload(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte) error {
+	keys, err := existingForwardConfirmationUploadKeys(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("failed to check duplicate forward confirmation upload: %w", err)
 	}
@@ -242,7 +243,7 @@ func forwardUploadUserName(userID string) string {
 }
 
 // Handler: AddForwardBookingManualEntry
-func AddForwardBookingManualEntry(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID                      string      `json:"user_id"`
@@ -355,7 +356,7 @@ func AddForwardBookingManualEntry(db *sql.DB, pool *pgxpool.Pool) http.HandlerFu
 			req.TransactionTimestamp,
 			"pending",
 		}
-		row := db.QueryRow(query, values...)
+		row := pool.QueryRow(r.Context(), query, values...)
 		cols := []string{"internal_reference_id", "entity_level_0", "entity_level_1", "entity_level_2", "entity_level_3", "local_currency", "order_type", "transaction_type", "counterparty", "mode_of_delivery", "delivery_period", "add_date", "settlement_date", "maturity_date", "delivery_date", "currency_pair", "base_currency", "quote_currency", "booking_amount", "value_type", "actual_value_base_currency", "spot_rate", "forward_points", "bank_margin", "total_rate", "value_quote_currency", "intervening_rate_quote_to_local", "value_local_currency", "internal_dealer", "counterparty_dealer", "remarks", "narration", "transaction_timestamp", "processing_status"}
 		vals := make([]interface{}, len(cols))
 		valPtrs := make([]interface{}, len(cols))
@@ -371,9 +372,9 @@ func AddForwardBookingManualEntry(db *sql.DB, pool *pgxpool.Pool) http.HandlerFu
 			result[col] = vals[i]
 		}
 		var systemTransactionID string
-		_ = db.QueryRowContext(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 AND entity_level_0 = $2 LIMIT 1`, req.InternalReferenceID, req.EntityLevel0).Scan(&systemTransactionID)
+		_ = pool.QueryRow(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 AND entity_level_0 = $2 LIMIT 1`, req.InternalReferenceID, req.EntityLevel0).Scan(&systemTransactionID)
 		if strings.TrimSpace(systemTransactionID) != "" {
-			auditutil.RecordAction(r.Context(), db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: result})
+			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: result})
 			triggerForwardBookingNotif(r.Context(), pool, routeForwardManualEntry, "CREATE", auditutil.Actor(req.UserID), "pending", []string{systemTransactionID})
 		}
 		respondEnvelopeSuccess(w, "Forward booking created successfully", result)
@@ -381,14 +382,13 @@ func AddForwardBookingManualEntry(db *sql.DB, pool *pgxpool.Pool) http.HandlerFu
 }
 
 // Handler: GetEntityRelevantForwardBookings
-func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
+func GetEntityRelevantForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		scope := ctxutil.FromContext(r.Context())
@@ -397,18 +397,21 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		rows, err := db.Query(`
+		rows, err := pool.Query(r.Context(), `
 			SELECT *
 			FROM forward_bookings
 			WHERE entity_level_0 = ANY($1)
 			  AND COALESCE(is_deleted, false) = false
-		`, pq.Array(buNames))
+		`, buNames)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		cols, _ := rows.Columns()
+		fieldDescs := rows.FieldDescriptions()
+		cols := make([]string, len(fieldDescs))
+		for i, fd := range fieldDescs {
+			cols[i] = fd.Name
+		}
 		var data []map[string]interface{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -419,7 +422,7 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 			if err := rows.Scan(valPtrs...); err == nil {
 				rowMap := make(map[string]interface{})
 				for i, col := range cols {
-					v := vals[i]
+					v := normalizeMTMRowValue(vals[i])
 					switch val := v.(type) {
 					case nil:
 						rowMap[col] = nil
@@ -440,6 +443,14 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 						rowMap[col] = val
 					case string:
 						rowMap[col] = val
+					case pgtype.Numeric:
+						if !val.Valid {
+							rowMap[col] = nil
+						} else if f, err := val.Float64Value(); err == nil && f.Valid {
+							rowMap[col] = f.Float64
+						} else {
+							rowMap[col] = fmt.Sprintf("%v", val)
+						}
 					default:
 						rowMap[col] = fmt.Sprintf("%v", val)
 					}
@@ -448,9 +459,7 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		rows.Close()
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
+		respondEnvelopeSuccess(w, "Success", data)
 	}
 }
 
@@ -458,7 +467,7 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 // Multi-file upload for forward bookings (CSV/Excel)
 // Accepts multipart/form-data with files, uses user_id from middleware, checks buName access
 
-func UploadForwardBookingsMulti(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func UploadForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -478,7 +487,7 @@ func UploadForwardBookingsMulti(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc
 		}
 		// Delegate to service
 		ctx := r.Context()
-		results, err := processUploadForwardBookings(ctx, db, r, buNames)
+		results, err := processUploadForwardBookings(ctx, pool, r, buNames)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -490,7 +499,7 @@ func UploadForwardBookingsMulti(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc
 				continue
 			}
 			if inserted, ok := result["inserted"].(int); ok && inserted > 0 {
-				triggerForwardBookingNotif(ctx, pool, routeForwardUploadMulti, "UPLOAD", uploadedBy, "pending", fetchBookingIDsByUploadKey(ctx, db, s3Key))
+				triggerForwardBookingNotif(ctx, pool, routeForwardUploadMulti, "UPLOAD", uploadedBy, "pending", fetchBookingIDsByUploadKey(ctx, pool, s3Key))
 			}
 		}
 		respondEnvelopeSuccess(w, "Forward bookings uploaded successfully", map[string]interface{}{
@@ -501,7 +510,7 @@ func UploadForwardBookingsMulti(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc
 
 // processUploadForwardBookings contains all business logic for the forward bookings upload.
 // It is called by the thin UploadForwardBookingsMulti controller.
-func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
+func processUploadForwardBookings(ctx context.Context, pool *pgxpool.Pool, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
 	files := r.MultipartForm.File["files"]
 	results := []map[string]interface{}{}
 	uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
@@ -515,7 +524,7 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 		fileBytes, _ := io.ReadAll(file)
 		file.Close()
 		if s3storage.IsS3UploadEnabled() {
-			if err := ensureUniqueForwardBookingUpload(ctx, db, fileBytes); err != nil {
+			if err := ensureUniqueForwardBookingUpload(ctx, pool, fileBytes); err != nil {
 				message := err.Error()
 				if errors.Is(err, ErrForwardBookingFileAlreadyUploaded) {
 					message = duplicateForwardBookingUploadMessage
@@ -657,7 +666,7 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 			continue
 		}
 
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			results = append(results, map[string]interface{}{
 				"filename":      fileHeader.Filename,
@@ -668,7 +677,7 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 			})
 			continue
 		}
-		defer tx.Rollback()
+		defer tx.Rollback(ctx)
 
 		uploadS3Key := ""
 		s3Uploaded := false
@@ -699,7 +708,7 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 			values := []interface{}{
 				row["internal_reference_id"], row["entity_level_0"], row["entity_level_1"], row["entity_level_2"], row["entity_level_3"], row["local_currency"], row["order_type"], row["transaction_type"], row["counterparty"], row["mode_of_delivery"], row["delivery_period"], row["add_date"], row["settlement_date"], row["maturity_date"], row["delivery_date"], row["currency_pair"], row["base_currency"], row["quote_currency"], row["booking_amount"], row["value_type"], row["actual_value_base_currency"], row["spot_rate"], row["forward_points"], row["bank_margin"], row["total_rate"], row["value_quote_currency"], row["intervening_rate_quote_to_local"], row["value_local_currency"], row["internal_dealer"], row["counterparty_dealer"], row["remarks"], row["narration"], row["transaction_timestamp"], "pending", uploadS3Key,
 			}
-			_, err := tx.ExecContext(ctx, query, values...)
+			_, err := tx.Exec(ctx, query, values...)
 			if err != nil {
 				errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "Database insert error", "details": err.Error()})
 				break
@@ -722,7 +731,7 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 			})
 			continue
 		}
-		if err := tx.Commit(); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			if s3Uploaded {
 				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					fmt.Printf("[forward-upload] failed to cleanup S3 object for %s after commit failure: %v\n", fileHeader.Filename, cleanupErr)
@@ -745,7 +754,7 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 			"invalidRows":          invalidRows,
 			constants.ValueSuccess: successCount > 0,
 		})
-		recordForwardUploadAudit(ctx, db, uploadS3Key, uploadedBy)
+		recordForwardUploadAudit(ctx, pool, uploadS3Key, uploadedBy)
 	}
 	return results, nil
 }
@@ -759,13 +768,13 @@ func contains(arr []string, str string) bool {
 	return false
 }
 
-func recordForwardUploadAudit(ctx context.Context, db *sql.DB, uploadS3Key, uploadedBy string) {
+func recordForwardUploadAudit(ctx context.Context, pool *pgxpool.Pool, uploadS3Key, uploadedBy string) {
 	uploadS3Key = strings.TrimSpace(uploadS3Key)
 	uploadedBy = strings.TrimSpace(uploadedBy)
 	if uploadS3Key == "" || uploadedBy == "" {
 		return
 	}
-	rows, err := db.QueryContext(ctx, `SELECT system_transaction_id FROM forward_bookings WHERE upload_s3_key = $1`, uploadS3Key)
+	rows, err := pool.Query(ctx, `SELECT system_transaction_id FROM forward_bookings WHERE upload_s3_key = $1`, uploadS3Key)
 	if err != nil {
 		return
 	}
@@ -773,14 +782,14 @@ func recordForwardUploadAudit(ctx context.Context, db *sql.DB, uploadS3Key, uplo
 	for rows.Next() {
 		var systemTransactionID string
 		if err := rows.Scan(&systemTransactionID); err == nil {
-			auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": uploadS3Key}})
+			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": uploadS3Key}})
 		}
 	}
 }
 
 // Handler: UploadForwardConfirmationsMulti
 
-func UploadForwardConfirmationsMulti(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func UploadForwardConfirmationsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -800,7 +809,7 @@ func UploadForwardConfirmationsMulti(db *sql.DB, pool *pgxpool.Pool) http.Handle
 		}
 		// Delegate to service
 		ctx := r.Context()
-		results, err := processUploadForwardConfirmations(ctx, db, r, buNames)
+		results, err := processUploadForwardConfirmations(ctx, pool, r, buNames)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -812,7 +821,7 @@ func UploadForwardConfirmationsMulti(db *sql.DB, pool *pgxpool.Pool) http.Handle
 				continue
 			}
 			if updated, ok := result["updated"].(int); ok && updated > 0 {
-				triggerForwardConfirmationNotif(ctx, pool, routeForwardUploadConfirmations, "UPLOAD", uploadedBy, "pending", fetchBookingIDsByConfirmationUploadKey(ctx, db, s3Key))
+				triggerForwardConfirmationNotif(ctx, pool, routeForwardUploadConfirmations, "UPLOAD", uploadedBy, "pending", fetchBookingIDsByConfirmationUploadKey(ctx, pool, s3Key))
 			}
 		}
 		respondEnvelopeSuccess(w, "Forward confirmations uploaded successfully", map[string]interface{}{
@@ -821,7 +830,7 @@ func UploadForwardConfirmationsMulti(db *sql.DB, pool *pgxpool.Pool) http.Handle
 	}
 }
 
-func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
+func processUploadForwardConfirmations(ctx context.Context, pool *pgxpool.Pool, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
 	files := r.MultipartForm.File["files"]
 	results := []map[string]interface{}{}
 	uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
@@ -835,7 +844,7 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 		fileBytes, _ := io.ReadAll(file)
 		file.Close()
 		if s3storage.IsS3UploadEnabled() {
-			if err := ensureUniqueForwardConfirmationUpload(ctx, db, fileBytes); err != nil {
+			if err := ensureUniqueForwardConfirmationUpload(ctx, pool, fileBytes); err != nil {
 				message := err.Error()
 				if errors.Is(err, ErrForwardConfirmationFileAlreadyUploaded) {
 					message = duplicateForwardConfirmationUploadMessage
@@ -955,7 +964,7 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 			continue
 		}
 
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			results = append(results, map[string]interface{}{
 				"filename":      fileHeader.Filename,
@@ -966,7 +975,7 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 			})
 			continue
 		}
-		defer tx.Rollback()
+		defer tx.Rollback(ctx)
 
 		uploadS3Key := ""
 		s3Uploaded := false
@@ -1005,12 +1014,12 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 				row["entity_level_0"],
 				uploadS3Key,
 			}
-			res, err := tx.ExecContext(ctx, updateQuery, updateValues...)
+			res, err := tx.Exec(ctx, updateQuery, updateValues...)
 			if err != nil {
 				errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "Failed to update record", "details": err.Error()})
 				break
 			}
-			rowsAffected, _ := res.RowsAffected()
+			rowsAffected := res.RowsAffected()
 			if rowsAffected == 0 {
 				errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "No matching record found or already confirmed"})
 				break
@@ -1032,7 +1041,7 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 			})
 			continue
 		}
-		if err := tx.Commit(); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			if s3Uploaded {
 				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					fmt.Printf("[forward-confirmation-upload] failed to cleanup S3 object for %s after commit failure: %v\n", fileHeader.Filename, cleanupErr)
@@ -1055,18 +1064,18 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 			"invalidRows":          invalidRows,
 			constants.ValueSuccess: successCount > 0,
 		})
-		recordForwardConfirmationUploadAudit(ctx, db, uploadS3Key, uploadedBy)
+		recordForwardConfirmationUploadAudit(ctx, pool, uploadS3Key, uploadedBy)
 	}
 	return results, nil
 }
 
-func recordForwardConfirmationUploadAudit(ctx context.Context, db *sql.DB, uploadS3Key, uploadedBy string) {
+func recordForwardConfirmationUploadAudit(ctx context.Context, pool *pgxpool.Pool, uploadS3Key, uploadedBy string) {
 	uploadS3Key = strings.TrimSpace(uploadS3Key)
 	uploadedBy = strings.TrimSpace(uploadedBy)
 	if uploadS3Key == "" || uploadedBy == "" {
 		return
 	}
-	rows, err := db.QueryContext(ctx, `SELECT system_transaction_id FROM forward_bookings WHERE confirmation_upload_s3_key = $1`, uploadS3Key)
+	rows, err := pool.Query(ctx, `SELECT system_transaction_id FROM forward_bookings WHERE confirmation_upload_s3_key = $1`, uploadS3Key)
 	if err != nil {
 		return
 	}
@@ -1074,40 +1083,38 @@ func recordForwardConfirmationUploadAudit(ctx context.Context, db *sql.DB, uploa
 	for rows.Next() {
 		var systemTransactionID string
 		if err := rows.Scan(&systemTransactionID); err == nil {
-			auditutil.RecordAction(ctx, db, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": uploadS3Key}})
+			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: uploadedBy, OldValues: nil, NewValues: map[string]interface{}{"upload_s3_key": uploadS3Key}})
 		}
 	}
 }
 
-func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
+func UploadBankForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 		// Validate user_id
 		if userID := r.FormValue(constants.KeyUserID); userID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrPleaseLogin})
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
 		// Delegate to service
 		ctx := r.Context()
-		results, batchID, err := processUploadBankForwardBookings(ctx, db, r)
+		results, batchID, err := processUploadBankForwardBookings(ctx, pool, r)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_id": batchID, "results": results})
+		respondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"batch_id": batchID,
+			"results":  results,
+		})
 	}
 }
 
-func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
+func GetForwardDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			RecordID            string `json:"record_id"`
@@ -1142,13 +1149,13 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 
 		if systemTransactionID != "" {
 			selectExpr := forwardDownloadKeyExpr(downloadType)
-			err := db.QueryRowContext(r.Context(), fmt.Sprintf(`
+			err := pool.QueryRow(r.Context(), fmt.Sprintf(`
 				SELECT %s
 				FROM forward_bookings
 				WHERE system_transaction_id = $1
 				LIMIT 1
 			`, selectExpr), systemTransactionID).Scan(&uploadS3Key)
-			if err != nil && err != sql.ErrNoRows {
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				respondWithError(w, http.StatusInternalServerError, "failed to fetch forward booking")
 				return
 			}
@@ -1156,21 +1163,21 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 
 		if strings.TrimSpace(uploadS3Key.String) == "" && recordID != "" {
 			selectExpr := forwardDownloadKeyExpr(downloadType)
-			err := db.QueryRowContext(r.Context(), fmt.Sprintf(`
+			err := pool.QueryRow(r.Context(), fmt.Sprintf(`
 				SELECT %s
 				FROM forward_bookings
 				WHERE internal_reference_id = $1
 				ORDER BY add_date DESC
 				LIMIT 1
 			`, selectExpr), recordID).Scan(&uploadS3Key)
-			if err != nil && err != sql.ErrNoRows {
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				respondWithError(w, http.StatusInternalServerError, "failed to fetch forward booking")
 				return
 			}
 		}
 
 		if strings.TrimSpace(uploadS3Key.String) == "" && uploadBatchID != "" {
-			err := db.QueryRowContext(r.Context(), `
+			err := pool.QueryRow(r.Context(), `
 				SELECT COALESCE(NULLIF(upload_s3_key, ''), '')
 				FROM staging_bank_forward
 				WHERE upload_batch_id = $1
@@ -1178,7 +1185,7 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 				LIMIT 1
 			`, uploadBatchID).Scan(&uploadS3Key)
 			if err != nil {
-				if err == sql.ErrNoRows {
+				if errors.Is(err, pgx.ErrNoRows) {
 					respondWithError(w, http.StatusNotFound, "record not found")
 					return
 				}
@@ -1199,18 +1206,14 @@ func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		if systemTransactionID == "" && recordID != "" {
-			_ = db.QueryRowContext(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 LIMIT 1`, recordID).Scan(&systemTransactionID)
+			_ = pool.QueryRow(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 LIMIT 1`, recordID).Scan(&systemTransactionID)
 		}
 		if systemTransactionID != "" {
-			auditutil.RecordDownload(r.Context(), db, auditutil.DownloadParams{TableName: auditutil.TableForwardDownloads, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, RequestedBy: auditutil.ActorFromContext(r.Context()), UploadS3Key: s3Key, ExtraColumns: map[string]string{"download_type": forwardDownloadAuditType(downloadType, s3Key)}})
+			auditutil.RecordDownloadPGX(r.Context(), pool, auditutil.DownloadParams{TableName: auditutil.TableForwardDownloads, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, RequestedBy: auditutil.ActorFromContext(r.Context()), UploadS3Key: s3Key, ExtraColumns: map[string]string{"download_type": forwardDownloadAuditType(downloadType, s3Key)}})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"download_url": downloadURL,
-			},
+		respondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"download_url": downloadURL,
 		})
 	}
 }
@@ -1234,29 +1237,21 @@ func normalizeBulkIDs(ids []string) []string {
 }
 
 func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	if len(files) == 0 {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: false,
-			"message":              "no downloadable files found",
-			"data": map[string]interface{}{
-				"files":      []map[string]string{},
-				"failed_ids": failedIDs,
-			},
+		respondEnvelopeFailureWithData(w, http.StatusOK, "no downloadable files found", map[string]interface{}{
+			"files":      []map[string]string{},
+			"failed_ids": failedIDs,
 		})
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: true,
-		"data": map[string]interface{}{
-			"files":      files,
-			"failed_ids": failedIDs,
-		},
+	respondEnvelopeSuccess(w, "Success", map[string]interface{}{
+		"files":      files,
+		"failed_ids": failedIDs,
 	})
 }
 
-func GetForwardBulkDownloadURL(db *sql.DB) http.HandlerFunc {
+func GetForwardBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			InternalReferenceIDs []string `json:"internal_reference_ids"`
@@ -1278,7 +1273,7 @@ func GetForwardBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 
 		for _, referenceID := range ids {
 			var uploadS3Key sql.NullString
-			err := db.QueryRowContext(ctx, `
+			err := pool.QueryRow(ctx, `
 				SELECT COALESCE(NULLIF(upload_s3_key, ''), '')
 				FROM forward_bookings
 				WHERE internal_reference_id = $1
@@ -1307,15 +1302,15 @@ func GetForwardBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 				"download_url":          downloadURL,
 			})
 			var systemTransactionID string
-			_ = db.QueryRowContext(ctx, `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 LIMIT 1`, referenceID).Scan(&systemTransactionID)
-			auditutil.RecordDownload(ctx, db, auditutil.DownloadParams{TableName: auditutil.TableForwardDownloads, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, RequestedBy: auditutil.ActorFromContext(ctx), UploadS3Key: s3Key, ExtraColumns: map[string]string{"download_type": "BOOKING"}})
+			_ = pool.QueryRow(ctx, `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 LIMIT 1`, referenceID).Scan(&systemTransactionID)
+			auditutil.RecordDownloadPGX(ctx, pool, auditutil.DownloadParams{TableName: auditutil.TableForwardDownloads, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, RequestedBy: auditutil.ActorFromContext(ctx), UploadS3Key: s3Key, ExtraColumns: map[string]string{"download_type": "BOOKING"}})
 		}
 
 		writeBulkDownloadResponse(w, files, failedIDs)
 	}
 }
 
-func GetForwardConfirmationBulkDownloadURL(db *sql.DB) http.HandlerFunc {
+func GetForwardConfirmationBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			InternalReferenceIDs []string `json:"internal_reference_ids"`
@@ -1337,7 +1332,7 @@ func GetForwardConfirmationBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 
 		for _, referenceID := range ids {
 			var uploadS3Key sql.NullString
-			err := db.QueryRowContext(ctx, `
+			err := pool.QueryRow(ctx, `
 				SELECT COALESCE(NULLIF(confirmation_upload_s3_key, ''), '')
 				FROM forward_bookings
 				WHERE internal_reference_id = $1
@@ -1366,15 +1361,15 @@ func GetForwardConfirmationBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 				"download_url":          downloadURL,
 			})
 			var systemTransactionID string
-			_ = db.QueryRowContext(ctx, `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 LIMIT 1`, referenceID).Scan(&systemTransactionID)
-			auditutil.RecordDownload(ctx, db, auditutil.DownloadParams{TableName: auditutil.TableForwardDownloads, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, RequestedBy: auditutil.ActorFromContext(ctx), UploadS3Key: s3Key, ExtraColumns: map[string]string{"download_type": "CONFIRMATION"}})
+			_ = pool.QueryRow(ctx, `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 LIMIT 1`, referenceID).Scan(&systemTransactionID)
+			auditutil.RecordDownloadPGX(ctx, pool, auditutil.DownloadParams{TableName: auditutil.TableForwardDownloads, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, RequestedBy: auditutil.ActorFromContext(ctx), UploadS3Key: s3Key, ExtraColumns: map[string]string{"download_type": "CONFIRMATION"}})
 		}
 
 		writeBulkDownloadResponse(w, files, failedIDs)
 	}
 }
 
-func GetForwardBankBulkDownloadURL(db *sql.DB) http.HandlerFunc {
+func GetForwardBankBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UploadBatchIDs []string `json:"upload_batch_ids"`
@@ -1396,7 +1391,7 @@ func GetForwardBankBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 
 		for _, uploadBatchID := range ids {
 			var uploadS3Key sql.NullString
-			err := db.QueryRowContext(ctx, `
+			err := pool.QueryRow(ctx, `
 				SELECT COALESCE(NULLIF(upload_s3_key, ''), '')
 				FROM staging_bank_forward
 				WHERE upload_batch_id = $1
@@ -1432,11 +1427,11 @@ func GetForwardBankBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 
 // processUploadBankForwardBookings contains all business logic for the bank forward upload.
 // It is called by the thin UploadBankForwardBookingsMulti controller.
-func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.Request) ([]map[string]interface{}, string, error) {
+func processUploadBankForwardBookings(ctx context.Context, pool *pgxpool.Pool, r *http.Request) ([]map[string]interface{}, string, error) {
 	uploadBatchID := uuid.New().String()
 	// Get staging table columns
 	stagingCols := []string{}
-	colRows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'staging_bank_forward'`)
+	colRows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_name = 'staging_bank_forward'`)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to fetch staging table columns: %w", err)
 	}
@@ -1462,7 +1457,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 			fileBytes, _ := io.ReadAll(file)
 			file.Close()
 			if s3storage.IsS3UploadEnabled() {
-				if err := ensureUniqueForwardBookingUpload(ctx, db, fileBytes); err != nil {
+				if err := ensureUniqueForwardBookingUpload(ctx, pool, fileBytes); err != nil {
 					message := err.Error()
 					if errors.Is(err, ErrForwardBookingFileAlreadyUploaded) {
 						message = duplicateForwardBookingUploadMessage
@@ -1555,7 +1550,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 			}
 			// Get all mappings for this bank before S3/upload persistence work.
 			mappings := []map[string]interface{}{}
-			mapRows, err := db.Query(`SELECT * FROM fwd_mapping_bank_forward WHERE bank_identifier = $1 AND is_active = true`, bankIdentifier)
+			mapRows, err := pool.Query(ctx, `SELECT * FROM fwd_mapping_bank_forward WHERE bank_identifier = $1 AND is_active = true`, bankIdentifier)
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"filename":          fileHeader.Filename,
@@ -1567,7 +1562,11 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 				})
 				continue
 			}
-			cols, _ := mapRows.Columns()
+			mapFieldDescs := mapRows.FieldDescriptions()
+			cols := make([]string, len(mapFieldDescs))
+			for i, fd := range mapFieldDescs {
+				cols[i] = fd.Name
+			}
 			for mapRows.Next() {
 				vals := make([]interface{}, len(cols))
 				valPtrs := make([]interface{}, len(cols))
@@ -1584,7 +1583,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 			}
 			mapRows.Close()
 
-			tx, err := db.BeginTx(ctx, nil)
+			tx, err := pool.Begin(ctx)
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"filename":          fileHeader.Filename,
@@ -1602,7 +1601,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 			if s3storage.IsS3UploadEnabled() {
 				contentType := s3storage.DetectContentType(fileBytes)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					_ = tx.Rollback()
+					_ = tx.Rollback(ctx)
 					results = append(results, map[string]interface{}{
 						"filename":          fileHeader.Filename,
 						"upload_s3_key":     "",
@@ -1664,7 +1663,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 					values = append(values, v)
 					idx++
 				}
-				_, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO staging_bank_forward (%s) VALUES (%s)", strings.Join(fields, ", "), strings.Join(placeholders, ", ")), values...)
+				_, err := tx.Exec(ctx, fmt.Sprintf("INSERT INTO staging_bank_forward (%s) VALUES (%s)", strings.Join(fields, ", "), strings.Join(placeholders, ", ")), values...)
 				if err != nil {
 					stagingErrors = append(stagingErrors, map[string]interface{}{"row": i + 1, constants.ValueError: err.Error()})
 					break
@@ -1672,7 +1671,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 				stagingSuccess++
 			}
 			if len(stagingErrors) > 0 {
-				_ = tx.Rollback()
+				_ = tx.Rollback(ctx)
 				if s3Uploaded {
 					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 						fmt.Printf("[bank-forward-upload] failed to cleanup S3 object for %s after staging failure: %v\n", fileHeader.Filename, cleanupErr)
@@ -1750,7 +1749,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 					values = append(values, v)
 					idx++
 				}
-				_, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO forward_bookings (%s) VALUES (%s)", strings.Join(fields, ", "), strings.Join(placeholders, ", ")), values...)
+				_, err := tx.Exec(ctx, fmt.Sprintf("INSERT INTO forward_bookings (%s) VALUES (%s)", strings.Join(fields, ", "), strings.Join(placeholders, ", ")), values...)
 				if err != nil {
 					bookingErrors = append(bookingErrors, map[string]interface{}{"row": i + 1, constants.ValueError: err.Error()})
 					break
@@ -1758,7 +1757,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 				bookingSuccess++
 			}
 			if len(bookingErrors) > 0 {
-				_ = tx.Rollback()
+				_ = tx.Rollback(ctx)
 				if s3Uploaded {
 					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 						fmt.Printf("[bank-forward-upload] failed to cleanup S3 object for %s after booking failure: %v\n", fileHeader.Filename, cleanupErr)
@@ -1774,7 +1773,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 				})
 				continue
 			}
-			if err := tx.Commit(); err != nil {
+			if err := tx.Commit(ctx); err != nil {
 				if s3Uploaded {
 					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 						fmt.Printf("[bank-forward-upload] failed to cleanup S3 object for %s after commit failure: %v\n", fileHeader.Filename, cleanupErr)

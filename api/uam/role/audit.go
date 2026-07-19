@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // GetRoleAuditHistory synthesises audit events from the roles table fields
 // (create / edit / approve) since there is no dedicated role audit table.
 // POST /uam/roles/audit-history   Body: { role_id?: string }
-func GetRoleAuditHistory(db *sql.DB) http.HandlerFunc {
+func GetRoleAuditHistory(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if api.GetSessionFromCtx(r.Context()) == nil {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
@@ -53,7 +55,7 @@ func GetRoleAuditHistory(db *sql.DB) http.HandlerFunc {
 			ORDER BY requested_at DESC NULLS LAST
 			LIMIT 200`
 
-		rows, err := db.QueryContext(r.Context(), q, filter)
+		rows, err := pool.Query(r.Context(), q, filter)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
@@ -84,7 +86,6 @@ func GetRoleAuditHistory(db *sql.DB) http.HandlerFunc {
 			out = append(out, a)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": out}) //nolint:errcheck
+		api.RespondEnvelopeSuccess(w, "Success", out)
 	}
 }

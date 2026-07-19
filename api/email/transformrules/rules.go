@@ -2,6 +2,7 @@ package transformrules
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ type TransformationRule struct {
 	RuleName         string          `json:"rule_name"`
 	ConditionType    string          `json:"condition_type"`
 	ConditionValue   string          `json:"condition_value"`
+	MatchMode        string          `json:"match_mode"` // PREFIX | SUFFIX | EXACT | CONTAINS | GLOB (for SUBJECT_CONTAINS / ATTACHMENT_NAME)
 	MappingID        string          `json:"mapping_id"`
 	MappingName      string          `json:"mapping_name"`
 	ActionType       string          `json:"action_type"`
@@ -30,6 +32,30 @@ type TransformationRule struct {
 	CreatedAt        *time.Time      `json:"created_at,omitempty"`
 	UpdatedAt        *time.Time      `json:"updated_at,omitempty"`
 	UserID           string          `json:"user_id,omitempty"` // Injected by frontend nos.post
+}
+
+// normalizeMatchMode returns a canonical match mode for the given condition type.
+// Pattern conditions (SUBJECT_CONTAINS, ATTACHMENT_NAME) require PREFIX|SUFFIX|EXACT|CONTAINS|GLOB.
+// Other condition types ignore match_mode at evaluation time and store EXACT.
+func normalizeMatchMode(conditionType, matchMode string) (string, error) {
+	ct := strings.ToUpper(strings.TrimSpace(conditionType))
+	mm := strings.ToUpper(strings.TrimSpace(matchMode))
+	needsMode := ct == "SUBJECT_CONTAINS" || ct == "ATTACHMENT_NAME" || ct == "SUBJECT"
+	if !needsMode {
+		return "EXACT", nil
+	}
+	if mm == "" {
+		if ct == "SUBJECT_CONTAINS" || ct == "SUBJECT" {
+			return "CONTAINS", nil
+		}
+		return "EXACT", nil
+	}
+	switch mm {
+	case "PREFIX", "SUFFIX", "EXACT", "CONTAINS", "GLOB":
+		return mm, nil
+	default:
+		return "", fmt.Errorf("invalid match_mode %q (use PREFIX, SUFFIX, EXACT, CONTAINS, or GLOB)", matchMode)
+	}
 }
 
 func logAudit(r *http.Request, pool *pgxpool.Pool, ruleID, action, actorID string, newState interface{}) {
@@ -57,7 +83,8 @@ func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	inboxID := strings.TrimSpace(req.InboxID)
 
 	query := `
-		SELECT rule_id, inbox_id, rule_name, condition_type, condition_value, 
+		SELECT rule_id, inbox_id, rule_name, condition_type, condition_value,
+		       COALESCE(NULLIF(match_mode, ''), 'CONTAINS'),
 		       mapping_id, mapping_name, action_type, is_active, 
 		       processing_status, COALESCE(pending_edit_json, '{}'), submitted_by, approved_by, checker_comment, is_deleted,
 		       created_at, updated_at
@@ -80,7 +107,7 @@ func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		var submittedBy, approvedBy, checkerComment *string
 		if err := rows.Scan(
 			&rule.RuleID, &rule.InboxID, &rule.RuleName,
-			&rule.ConditionType, &rule.ConditionValue,
+			&rule.ConditionType, &rule.ConditionValue, &rule.MatchMode,
 			&rule.MappingID, &rule.MappingName, &rule.ActionType,
 			&rule.IsActive, &rule.ProcessingStatus, &rule.PendingEditJSON,
 			&submittedBy, &approvedBy, &checkerComment, &rule.IsDeleted,
@@ -119,17 +146,22 @@ func handleCreate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		emailcommon.RespondBadRequest(w, "Missing required fields")
 		return
 	}
-
+	mode, modeErr := normalizeMatchMode(req.ConditionType, req.MatchMode)
+	if modeErr != nil {
+		emailcommon.RespondBadRequest(w, modeErr.Error())
+		return
+	}
+	req.MatchMode = mode
 	req.ProcessingStatus = "PENDING_APPROVAL"
 
 	query := `
 		INSERT INTO email_svc.transformation_rules 
-		(inbox_id, rule_name, condition_type, condition_value, mapping_id, mapping_name, action_type, is_active, processing_status, submitted_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		(inbox_id, rule_name, condition_type, condition_value, match_mode, mapping_id, mapping_name, action_type, is_active, processing_status, submitted_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING rule_id, created_at, updated_at
 	`
 	err := pool.QueryRow(r.Context(), query,
-		req.InboxID, req.RuleName, req.ConditionType, req.ConditionValue,
+		req.InboxID, req.RuleName, req.ConditionType, req.ConditionValue, req.MatchMode,
 		req.MappingID, req.MappingName, req.ActionType, req.IsActive, req.ProcessingStatus, req.UserID,
 	).Scan(&req.RuleID, &req.CreatedAt, &req.UpdatedAt)
 
@@ -157,6 +189,12 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		emailcommon.RespondBadRequest(w, "rule_id is required")
 		return
 	}
+	mode, modeErr := normalizeMatchMode(req.ConditionType, req.MatchMode)
+	if modeErr != nil {
+		emailcommon.RespondBadRequest(w, modeErr.Error())
+		return
+	}
+	req.MatchMode = mode
 
 	pendingJSON, _ := json.Marshal(req)
 
@@ -267,22 +305,24 @@ func handleApprove(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		// Apply pending edit
 		var edits TransformationRule
 		_ = json.Unmarshal(pendingJSON, &edits)
+		editMode, _ := normalizeMatchMode(edits.ConditionType, edits.MatchMode)
 		_, err = pool.Exec(r.Context(), `
 			UPDATE email_svc.transformation_rules 
 			SET rule_name = COALESCE(NULLIF($1, ''), rule_name),
 			    condition_type = COALESCE(NULLIF($2, ''), condition_type),
 			    condition_value = COALESCE(NULLIF($3, ''), condition_value),
-			    mapping_id = COALESCE(NULLIF($4, ''), mapping_id),
-			    mapping_name = COALESCE(NULLIF($5, ''), mapping_name),
-			    action_type = COALESCE(NULLIF($6, ''), action_type),
-			    is_active = $7,
+			    match_mode = COALESCE(NULLIF($4, ''), match_mode),
+			    mapping_id = COALESCE(NULLIF($5, ''), mapping_id),
+			    mapping_name = COALESCE(NULLIF($6, ''), mapping_name),
+			    action_type = COALESCE(NULLIF($7, ''), action_type),
+			    is_active = $8,
 			    processing_status = 'APPROVED',
-			    approved_by = $8,
-			    checker_comment = $9,
+			    approved_by = $9,
+			    checker_comment = $10,
 			    pending_edit_json = NULL,
 			    updated_at = now()
-			WHERE rule_id = $10
-		`, edits.RuleName, edits.ConditionType, edits.ConditionValue, edits.MappingID, edits.MappingName, edits.ActionType, edits.IsActive, req.UserID, req.CheckerComment, req.RuleID)
+			WHERE rule_id = $11
+		`, edits.RuleName, edits.ConditionType, edits.ConditionValue, editMode, edits.MappingID, edits.MappingName, edits.ActionType, edits.IsActive, req.UserID, req.CheckerComment, req.RuleID)
 	} else {
 		// Just approve (like from initial create)
 		_, err = pool.Exec(r.Context(), `

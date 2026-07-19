@@ -3,7 +3,6 @@ package master
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"context"
-	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
@@ -17,15 +16,14 @@ import (
 
 type MasterService struct {
 	config map[string]interface{}
-	db     *sql.DB
 	server *http.Server
 	pool   *pgxpool.Pool
 	done   chan struct{}
 	mu     sync.Mutex
 }
 
-func NewMasterService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
-	return &MasterService{config: cfg, db: db}
+func NewMasterService(cfg map[string]interface{}) serviceiface.Service {
+	return &MasterService{config: cfg}
 }
 
 func (s *MasterService) Name() string {
@@ -47,7 +45,7 @@ func (s *MasterService) Start() error {
 		}
 	}
 
-	server, pool, err := NewMasterServer(s.db, port)
+	server, pool, err := NewMasterServer(port)
 	if err != nil {
 		return err
 	}

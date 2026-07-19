@@ -90,11 +90,10 @@ func GetTransactionPoolHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		transactions, err := FetchConsolidatedTransactionPool(ctx, pool, q)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(transactions)
+		api.RespondEnvelopeSuccess(w, "Success", transactions)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -17,7 +16,6 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/lib/pq"
 )
 
 // Helper: send JSON error response
@@ -31,8 +29,9 @@ import (
 // }
 
 // Handler: HedgeLinksDetails
-func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
+func HedgeLinksDetails(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID string `json:"user_id"`
 		}
@@ -47,19 +46,19 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
-		scope := ctxutil.FromContext(r.Context())
+		scope := ctxutil.FromContext(ctx)
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		rows, err := db.Query(`SELECT l.*, h.document_id, f.internal_reference_id FROM exposure_hedge_links l LEFT JOIN exposure_headers h ON l.exposure_header_id = h.exposure_header_id LEFT JOIN forward_bookings f ON l.booking_id = f.system_transaction_id WHERE h.entity = ANY($1) AND l.is_active = TRUE`, pq.Array(buNames))
+		rows, err := pool.Query(ctx, `SELECT l.*, h.document_id, f.internal_reference_id FROM exposure_hedge_links l LEFT JOIN exposure_headers h ON l.exposure_header_id = h.exposure_header_id LEFT JOIN forward_bookings f ON l.booking_id = f.system_transaction_id WHERE h.entity = ANY($1) AND l.is_active = TRUE`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch hedge links details")
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
+		cols := pgxColumnNames(rows)
 		data := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
@@ -72,12 +71,11 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range cols {
-				// rowMap[col] = vals[i]
 				switch v := vals[i].(type) {
 				case []uint8:
 					rowMap[col] = string(v)
 				default:
-					rowMap[col] = vals[i]
+					rowMap[col] = parseDBValue(col, vals[i])
 				}
 			}
 			data = append(data, rowMap)
@@ -89,8 +87,9 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: ExpFwdLinkingBookings
-func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
+func ExpFwdLinkingBookings(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID string `json:"user_id"`
 		}
@@ -105,13 +104,13 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
-		scope := ctxutil.FromContext(r.Context())
+		scope := ctxutil.FromContext(ctx)
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		bookRows, err := db.Query(`
+		bookRows, err := pool.Query(ctx, `
 			SELECT system_transaction_id, entity_level_0, order_type, currency_pair, maturity_date, booking_amount, counterparty, total_rate, value_local_currency
 			FROM forward_bookings
 			WHERE (processing_status = 'approved' OR processing_status = 'Approved')
@@ -122,7 +121,7 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		defer bookRows.Close()
-		bookCols, _ := bookRows.Columns()
+		bookCols := pgxColumnNames(bookRows)
 		bookings := []map[string]interface{}{}
 		for bookRows.Next() {
 			vals := make([]interface{}, len(bookCols))
@@ -139,7 +138,7 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 				if b, ok := vals[i].([]uint8); ok {
 					row[col] = string(b)
 				} else {
-					row[col] = vals[i]
+					row[col] = parseDBValue(col, vals[i])
 				}
 			}
 			entityStr, _ := row["entity_level_0"].(string)
@@ -147,7 +146,7 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 				bookings = append(bookings, row)
 			}
 		}
-		bookingIds := []interface{}{}
+		bookingIds := []string{}
 		for _, b := range bookings {
 			// Always use string for bookingIds
 			var bookingIDStr string
@@ -161,7 +160,7 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 		}
 		hedgeMap := map[interface{}]float64{}
 		if len(bookingIds) > 0 {
-			hedgeRows, err := db.Query(`SELECT booking_id, SUM(hedged_amount) AS linked_amount FROM exposure_hedge_links WHERE booking_id = ANY($1) GROUP BY booking_id`, pq.Array(bookingIds))
+			hedgeRows, err := pool.Query(ctx, `SELECT booking_id, SUM(hedged_amount) AS linked_amount FROM exposure_hedge_links WHERE booking_id = ANY($1) GROUP BY booking_id`, bookingIds)
 			if err == nil {
 				for hedgeRows.Next() {
 					var bookingId interface{}
@@ -183,7 +182,7 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		buCompliance := map[string]bool{}
-		buRows, err := db.QueryContext(r.Context(), `
+		buRows, err := pool.Query(ctx, `
 		SELECT me.entity_name
 		FROM masterentitycash me
 		JOIN LATERAL (
@@ -276,8 +275,9 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: ExpFwdLinking
-func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
+func ExpFwdLinking(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID string `json:"user_id"`
 		}
@@ -293,13 +293,13 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// request decoded
-		scope := ctxutil.FromContext(r.Context())
+		scope := ctxutil.FromContext(ctx)
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		headRows, err := db.Query(`
+		headRows, err := pool.Query(ctx, `
 			SELECT exposure_header_id, entity, exposure_type, currency, value_date, total_open_amount, counterparty_name
 			FROM exposure_headers
 			WHERE (approval_status = 'Approved' OR approval_status = 'approved' OR approval_status = 'APPROVED')
@@ -310,7 +310,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		defer headRows.Close()
-		headCols, _ := headRows.Columns()
+		headCols := pgxColumnNames(headRows)
 		headers := []map[string]interface{}{}
 		for headRows.Next() {
 			vals := make([]interface{}, len(headCols))
@@ -327,7 +327,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 				if b, ok := vals[i].([]uint8); ok {
 					row[col] = string(b)
 				} else {
-					row[col] = vals[i]
+					row[col] = parseDBValue(col, vals[i])
 				}
 			}
 			// Safe entity string
@@ -356,7 +356,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 		}
 		hedgeMap := map[string]float64{}
 		if len(headerIds) > 0 {
-			hedgeRows, err := db.Query(`SELECT exposure_header_id, SUM(hedged_amount) AS hedge_amount FROM exposure_hedge_links WHERE exposure_header_id = ANY($1) GROUP BY exposure_header_id`, pq.Array(headerIds))
+			hedgeRows, err := pool.Query(ctx, `SELECT exposure_header_id, SUM(hedged_amount) AS hedge_amount FROM exposure_hedge_links WHERE exposure_header_id = ANY($1) GROUP BY exposure_header_id`, headerIds)
 			if err == nil {
 				for hedgeRows.Next() {
 					var exposureHeaderId interface{}
@@ -383,7 +383,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 		}
 		// hedge map prepared
 		buCompliance := map[string]bool{}
-		buRows, err := db.QueryContext(r.Context(), `
+		buRows, err := pool.Query(ctx, `
 		SELECT me.entity_name
 		FROM masterentitycash me
 		JOIN LATERAL (
@@ -457,8 +457,9 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: LinkExposureHedge - upsert exposure_hedge_links and log to forward_booking_ledger
-func LinkExposureHedge(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
+func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			UserID           string  `json:"user_id"`
 			ExposureHeaderID string  `json:"exposure_header_id"`
@@ -482,7 +483,7 @@ func LinkExposureHedge(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			HedgedAmount     float64
 			IsActive         bool
 		}
-		err := db.QueryRow(upsertQuery, req.ExposureHeaderID, req.BookingID, req.HedgedAmount).Scan(
+		err := pool.QueryRow(ctx, upsertQuery, req.ExposureHeaderID, req.BookingID, req.HedgedAmount).Scan(
 			&link.ExposureHeaderID,
 			&link.BookingID,
 			&link.HedgedAmount,
@@ -500,16 +501,16 @@ func LinkExposureHedge(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Get booking amount
 		var bookingAmount float64
-		_ = db.QueryRow("SELECT Booking_Amount FROM forward_bookings WHERE system_transaction_id = $1 AND COALESCE(is_deleted, false) = false", req.BookingID).Scan(&bookingAmount)
+		_ = pool.QueryRow(ctx, "SELECT Booking_Amount FROM forward_bookings WHERE system_transaction_id = $1 AND COALESCE(is_deleted, false) = false", req.BookingID).Scan(&bookingAmount)
 		// Sum previous actions
 		var totalUtilized float64
 		sumQuery := `SELECT COALESCE(SUM(amount_changed), 0) FROM forward_booking_ledger WHERE booking_id = $1 AND action_type IN ('UTILIZATION', 'CANCELLATION', 'ROLLOVER')`
-		_ = db.QueryRow(sumQuery, req.BookingID).Scan(&totalUtilized)
+		_ = pool.QueryRow(ctx, sumQuery, req.BookingID).Scan(&totalUtilized)
 		newOpenAmount := math.Abs(math.Abs(bookingAmount) - math.Abs(totalUtilized))
 		// Log to forward_booking_ledger
 		ledgerQuery := `INSERT INTO forward_booking_ledger (booking_id, action_type, action_id, action_date, amount_changed, running_open_amount, user_id) VALUES ($1, 'UTILIZATION', $2, CURRENT_DATE, $3, $4, $5)`
-		_, _ = db.Exec(ledgerQuery, req.BookingID, req.ExposureHeaderID, req.HedgedAmount, newOpenAmount, req.UserID)
-		if _, auditErr := db.ExecContext(r.Context(), `
+		_, _ = pool.Exec(ctx, ledgerQuery, req.BookingID, req.ExposureHeaderID, req.HedgedAmount, newOpenAmount, req.UserID)
+		if _, auditErr := pool.Exec(ctx, `
 			INSERT INTO public.auditactionhedgelink
 				(exposure_header_id, booking_id, actiontype, processing_status, requested_by, requested_at, requested_ip, new_values, change_summary)
 			VALUES ($1, $2, 'LINK', 'COMPLETED', $3, now(), $4, $5, $5)
@@ -520,14 +521,14 @@ func LinkExposureHedge(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			"link": linkMap,
 		})
 
-		payload := fxnotif.BuildExposureBulkActionPayload(r.Context(), pool, fxnotif.ExposureBulkActionInput{
+		payload := fxnotif.BuildExposureBulkActionPayload(ctx, pool, fxnotif.ExposureBulkActionInput{
 			ExposureIDs: []string{req.ExposureHeaderID}, Action: fxnotif.ActionLink, RequestedBy: req.UserID,
 		})
 		payloadMap := payload.ToMap()
 		payloadMap["UserID"] = req.UserID
 		payloadMap["BookingID"] = req.BookingID
 		payloadMap["HedgedAmount"] = req.HedgedAmount
-		fxnotif.TriggerFX(context.WithoutCancel(r.Context()), pool, fxnotif.SourceRouteLinkExposureHedge, fxnotif.CorrelationID("FXLINK", req.ExposureHeaderID), payloadMap)
+		fxnotif.TriggerFX(context.WithoutCancel(ctx), pool, fxnotif.SourceRouteLinkExposureHedge, fxnotif.CorrelationID("FXLINK", req.ExposureHeaderID), payloadMap)
 	}
 }
 

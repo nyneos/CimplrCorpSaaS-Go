@@ -633,8 +633,7 @@ func GetCcpCsdAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			out = append(out, row)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -676,8 +675,7 @@ func GetCcpCsdAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			out = append(out, row)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -715,8 +713,7 @@ func GetCcpCsdApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			out = append(out, row)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -741,11 +738,10 @@ func GetCcpCsdDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": map[string]interface{}{
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
 			"ccp_csd_id": cid, "counterparty_id": cpid, "entity_code": ecode, "entity_sub_type": esubtype,
 			"lei": lei, "regulatory_body": regBody, "participant_id": participantID,
 			"clearing_acct_kms_ref": kmsRef, "margin_call_frequency": mcf, "is_deleted": isDeleted,
-		}})
+		})
 	}
 }

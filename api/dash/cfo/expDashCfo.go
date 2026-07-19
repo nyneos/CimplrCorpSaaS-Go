@@ -3,7 +3,6 @@ package cfo
 import (
 	// "context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -82,7 +81,7 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			}
 			totalUsd += val * rate
 		}
-		json.NewEncoder(w).Encode(map[string]float64{"totalUsd": totalUsd})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"totalUsd": totalUsd})
 	}
 }
 
@@ -129,7 +128,7 @@ func GetPayablesByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 		for cur, amt := range currencyTotals {
 			payablesData = append(payablesData, Payable{cur, "$" + formatK(amt)})
 		}
-		json.NewEncoder(w).Encode(payablesData)
+		api.RespondEnvelopeSuccess(w, "Success", payablesData)
 	}
 }
 
@@ -176,7 +175,7 @@ func GetReceivablesByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 		for cur, amt := range currencyTotals {
 			receivablesData = append(receivablesData, Receivable{cur, "$" + formatK(amt)})
 		}
-		json.NewEncoder(w).Encode(receivablesData)
+		api.RespondEnvelopeSuccess(w, "Success", receivablesData)
 	}
 }
 
@@ -223,7 +222,7 @@ func GetAmountByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 		for cur, amt := range currencyTotals {
 			payablesData = append(payablesData, Amount{cur, "$" + formatK(amt)})
 		}
-		json.NewEncoder(w).Encode(payablesData)
+		api.RespondEnvelopeSuccess(w, "Success", payablesData)
 	}
 }
 
@@ -292,7 +291,7 @@ func GetBusinessUnitCurrencySummaryFromHeaders(db *pgxpool.Pool) http.HandlerFun
 			}
 			output = append(output, Output{bu, "$" + formatK(total), currs})
 		}
-		json.NewEncoder(w).Encode(output)
+		api.RespondEnvelopeSuccess(w, "Success", output)
 	}
 }
 
@@ -355,7 +354,7 @@ func GetMaturityExpirySummaryFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			{"label": "Next 30 Days", "value": "$" + formatK(sum30)},
 			{"label": "Total Upcoming", "value": "$" + formatK(sumTotal)},
 		}
-		json.NewEncoder(w).Encode(output)
+		api.RespondEnvelopeSuccess(w, "Success", output)
 	}
 }
 
@@ -419,8 +418,7 @@ func GetAvgExposureMaturity(db *pgxpool.Pool) http.HandlerFunc {
 		if totalAmount > 0 {
 			avgMaturity = int(math.Round(weightedSum / totalAmount))
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]int{"avgExposureMaturity": avgMaturity})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"avgExposureMaturity": avgMaturity})
 	}
 }
 
@@ -454,7 +452,6 @@ func GetMaturityExpiryCount7DaysFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 				count7++
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]int{"value": count7})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"value": count7})
 	}
 }

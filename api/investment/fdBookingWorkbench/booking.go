@@ -5,7 +5,10 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/observability"
 	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
@@ -56,6 +59,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			AccrualFrequencyCode string  `json:"accrual_frequency_code"`
 			ResetType            string  `json:"reset_type"` // AT_MATURITY | AT_EACH_PAYOUT
 			PayoutFrequencyID    string  `json:"payout_frequency_id"`
+			CorrelationID        string  `json:"correlation_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -113,6 +117,36 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"tds_plan_id":            req.TdsPlanID,
 		}); errMsg != "" {
 			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+		// ── Policy check (PRE_SUBMIT / INVESTMENT_FD) ─────────────────────────
+		correlationID := common.ResolveCorrelationID(r, req.CorrelationID)
+		traceID := observability.TraceIDFromContext(r.Context())
+		policyResult, policyErr := runtime.RunCheck(r.Context(), pgxPool, runtime.CheckRequest{
+			EventCode:     "PRE_SUBMIT",
+			ModuleCode:    "INVESTMENT_FD",
+			EntityCode:    req.EntityID,
+			ActorUserID:   userEmail,
+			HandlerName:   "CreateBookingSingle",
+			APIPath:       "/investment/fd/booking/create",
+			CorrelationID: correlationID,
+			TraceID:       traceID,
+			Variables: map[string]string{
+				"investment.fd.principal_amount": fmt.Sprintf("%g", req.PrincipalAmount),
+				"investment.fd.interest_rate":    fmt.Sprintf("%g", req.InterestRate),
+			},
+		})
+		if policyErr != nil {
+			api.LogErrorForResponse(w, "fd booking policy check: %v", policyErr)
+			api.RespondWithError(w, http.StatusBadGateway, "Policy check failed — please try again later")
+			return
+		}
+		if policyResult.BlocksSubmit() {
+			msg := policyResult.FirstBreachMessage()
+			if msg == "" {
+				msg = "FD booking blocked by policy"
+			}
+			api.RespondWithError(w, http.StatusUnprocessableEntity, msg)
 			return
 		}
 		// ────────────────────────────────────────────────────────────────────
@@ -1818,8 +1852,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{constants.ValueSuccess: true, "rows": out}) //nolint:errcheck
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 		api.LogInfo("[FDBooking] GetBookingsWithAudit: %d rows", len(out))
 	}
 }
@@ -2140,8 +2173,7 @@ func GetBookingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{constants.ValueSuccess: true, "audit_logs": out}) //nolint:errcheck
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"audit_logs": out})
 		api.LogInfo("[FDBooking] GetBookingAuditHistory: %d records", len(out))
 	}
 }

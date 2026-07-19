@@ -3,7 +3,6 @@ package investment
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"context"
-	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
@@ -19,15 +18,14 @@ import (
 type InvestmentService struct {
 	cfg    map[string]interface{}
 	pool   *pgxpool.Pool
-	db     *sql.DB
 	server *http.Server
 	done   chan struct{}
 	mu     sync.Mutex
 }
 
-// NewInvestmentService constructs an InvestmentService and accepts a pgx pool instance and sql.DB.
-func NewInvestmentService(cfg map[string]interface{}, pool *pgxpool.Pool, db *sql.DB) serviceiface.Service {
-	return &InvestmentService{cfg: cfg, pool: pool, db: db}
+// NewInvestmentService constructs an InvestmentService and accepts a pgx pool instance.
+func NewInvestmentService(cfg map[string]interface{}, pool *pgxpool.Pool) serviceiface.Service {
+	return &InvestmentService{cfg: cfg, pool: pool}
 }
 
 func (s *InvestmentService) Name() string {
@@ -49,7 +47,7 @@ func (s *InvestmentService) Start() error {
 		}
 	}
 
-	server := NewInvestmentServer(s.pool, s.db, port)
+	server := NewInvestmentServer(s.pool, port)
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		return err

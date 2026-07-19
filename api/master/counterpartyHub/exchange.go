@@ -752,8 +752,7 @@ func GetExchangeAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			out = append(out, row)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -795,8 +794,7 @@ func GetExchangeAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			out = append(out, row)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -842,8 +840,7 @@ func GetExchangeApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			out = append(out, row)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -897,7 +894,6 @@ func GetExchangeDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"holiday_calendar_ref": calRef, "is_deleted": isDeleted, "asset_classes": assetClasses,
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": result})
+		api.RespondEnvelopeSuccess(w, "Success", result)
 	}
 }

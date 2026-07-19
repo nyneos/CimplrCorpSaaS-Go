@@ -7,7 +7,6 @@ import (
 	"CimplrCorpSaas/internal/validation"
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 
@@ -59,12 +58,8 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			if err != nil {
 				le := strings.ToLower(err.Error())
 				if err == http.ErrMissingFile || strings.Contains(le, "no business") || strings.Contains(le, "no entity") || strings.Contains(le, "no accessible") {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{
-						constants.ValueSuccess: false,
-						"error":                "No accessible business units found for this user",
-						"code":                 "NO_ACCESS_ENTITIES",
-						"help":                 "Contact your administrator to grant access to business units or set up entities for your account.",
+					api.RespondEnvelopeFailureCompat(w, http.StatusForbidden, "No accessible business units found for this user", "NO_ACCESS_ENTITIES", map[string]interface{}{
+						"help": "Contact your administrator to grant access to business units or set up entities for your account.",
 					})
 					return
 				}
@@ -75,8 +70,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			entityIDs, entityNames, err := resolveEntityHierarchyMulti(ctx, db, validationResult.RootEntityIDs)
 			if err != nil {
 				if err == http.ErrMissingFile {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": constants.ErrNoAccessibleBusinessUnit})
+					api.RespondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit, "")
 					return
 				}
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve entity hierarchy: "+err.Error())

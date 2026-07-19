@@ -163,8 +163,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "kpi": resp})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"kpi": resp})
 	}
 }
 
@@ -288,8 +287,7 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -417,7 +415,6 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, EntityBucket{Entity: entity, Departments: dbs})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": out})
+		api.RespondEnvelopeSuccess(w, "Success", out)
 	}
 }

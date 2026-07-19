@@ -85,13 +85,9 @@ func GetFVODownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, activityID.String, api.GetUserNameFromCtx(r.Context()))
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data": map[string]interface{}{
-				"fvo_id":       req.FVOID,
-				"download_url": downloadURL,
-			},
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"fvo_id":       req.FVOID,
+			"download_url": downloadURL,
 		})
 	}
 }
@@ -153,14 +149,17 @@ func GetFVOBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: len(files) > 0,
-			"data": map[string]interface{}{
+		if len(files) > 0 {
+			api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 				"files":      files,
 				"failed_ids": failedIDs,
-			},
-		})
+			})
+		} else {
+			api.RespondEnvelopeFailureCompat(w, http.StatusNotFound, "No files available for download", "", map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			})
+		}
 	}
 }
 

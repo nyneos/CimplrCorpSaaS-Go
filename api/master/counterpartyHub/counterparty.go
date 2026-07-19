@@ -1113,8 +1113,7 @@ func GetCounterpartyMasterAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 		api.LogInfo("GetCounterpartyMasterAll: returned %d rows", len(out))
 	}
 }
@@ -1169,8 +1168,7 @@ func GetCounterpartyMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -1221,8 +1219,7 @@ func GetCounterpartyMasterApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc
 			out = append(out, row)
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -1336,12 +1333,10 @@ func GetCounterpartyMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── 3. Child entity details ───────────────────────────────────────────
 		childData, _ := fetchLinkedChildDetail(ctx, pgxPool, cpType, cpID)
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"data":                 result,
-			"audits":               audits,
-			"child":                childData,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"data":    result,
+			"audits":  audits,
+			"child":   childData,
 		})
 	}
 }

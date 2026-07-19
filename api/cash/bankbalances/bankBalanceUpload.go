@@ -502,10 +502,8 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"batch_ids":            batchIDs,
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"batch_ids": batchIDs,
 		})
 	}
 }

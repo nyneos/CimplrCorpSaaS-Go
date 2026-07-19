@@ -499,8 +499,7 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -561,8 +560,7 @@ func GetCounterpartyBanks(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, statusCode, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -602,8 +600,7 @@ func GetCounterpartyBanks(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := rows.Err(); err != nil {
 			errMsg, statusCode := getUserFriendlyCounterpartyError(err, "Failed to process data")
 			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				api.RespondEnvelopeError(w, statusCode, errMsg, "")
 			} else {
 				api.RespondWithError(w, statusCode, errMsg)
 			}
@@ -663,8 +660,7 @@ func GetApprovedActiveCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 
@@ -1026,7 +1022,7 @@ func DeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "counterparty_ids": body.CounterpartyIDs})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"counterparty_ids": body.CounterpartyIDs})
 	}
 }
 
@@ -1120,7 +1116,7 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"updated": updated})
 	}
 }
 
@@ -1465,8 +1461,7 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				UploadedAt:       time.Now().UTC(),
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"batch_ids": batchIDs})
 	}
 }
 
@@ -1692,11 +1687,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			batchIDs = append(batchIDs, uuid.New().String())
 		}
 
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]any{
-			constants.ValueSuccess: true,
-			"batch_ids":            batchIDs,
-		})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"batch_ids": batchIDs})
 	}
 }
 
@@ -1964,7 +1955,6 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// respond
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"batch_ids": batchIDs})
 	}
 }
