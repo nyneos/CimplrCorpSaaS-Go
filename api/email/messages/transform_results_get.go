@@ -3,11 +3,13 @@ package emailmessages
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/api/utils/s3storage"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func HandleTransformResultGet(pool *pgxpool.Pool) http.HandlerFunc {
@@ -30,7 +32,6 @@ func HandleTransformResultGet(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Security: verify user identity and admin status (can be used to scope query if needed)
 		_, _, _, _ = emailcommon.RequestIdentity(r, "", "")
 
 		query := `
@@ -39,6 +40,9 @@ func HandleTransformResultGet(pool *pgxpool.Pool) http.HandlerFunc {
 			    tr.attachment_id::text, 
 			    tr.rule_id::text, 
 			    COALESCE(tr.transformed_s3_key, ''),
+			    COALESCE(NULLIF(tr.destination_type, ''), 'S3'),
+			    COALESCE(tr.output_location, ''),
+			    COALESCE(tr.output_filename, ''),
 			    tr.created_at,
 			    m.message_id::text, 
 			    COALESCE(m.inbox_id::text, ''), 
@@ -58,22 +62,26 @@ func HandleTransformResultGet(pool *pgxpool.Pool) http.HandlerFunc {
 		`
 
 		var res struct {
-			ResultID              string    `json:"id"`
-			AttachmentID          string    `json:"attachment_id"`
-			RuleID                string    `json:"rule_id"`
-			TransformedS3Key      string    `json:"transformed_s3_key"`
-			CreatedAt             time.Time `json:"created_at"`
-			MessageID             string    `json:"message_id"`
-			InboxID               string    `json:"inbox_id"`
-			EnvelopeFrom          string    `json:"envelope_from"`
-			Subject               string    `json:"subject"`
-			MessageDate           time.Time `json:"message_date"`
-			Filename              string    `json:"filename"`
-			OriginalS3Key         string    `json:"original_s3_key"`
-			RuleName              string    `json:"rule_name"`
-			MappingName           string    `json:"mapping_name"`
-			OriginalDownloadURL   string    `json:"original_download_url"`
-			TransformedDownloadURL string   `json:"transformed_download_url"`
+			ResultID               string    `json:"id"`
+			AttachmentID           string    `json:"attachment_id"`
+			RuleID                 string    `json:"rule_id"`
+			TransformedS3Key       string    `json:"transformed_s3_key"`
+			DestinationType        string    `json:"destination_type"`
+			OutputLocation         string    `json:"output_location"`
+			OutputFilename         string    `json:"output_filename"`
+			CreatedAt              time.Time `json:"created_at"`
+			MessageID              string    `json:"message_id"`
+			InboxID                string    `json:"inbox_id"`
+			EnvelopeFrom           string    `json:"envelope_from"`
+			Subject                string    `json:"subject"`
+			MessageDate            time.Time `json:"message_date"`
+			Filename               string    `json:"filename"`
+			OriginalS3Key          string    `json:"original_s3_key"`
+			RuleName               string    `json:"rule_name"`
+			MappingName            string    `json:"mapping_name"`
+			OriginalDownloadURL    string    `json:"original_download_url"`
+			TransformedDownloadURL string    `json:"transformed_download_url"`
+			LocalDownloadAvailable bool      `json:"local_download_available"`
 		}
 
 		err := pool.QueryRow(r.Context(), query, req.ResultID).Scan(
@@ -81,6 +89,9 @@ func HandleTransformResultGet(pool *pgxpool.Pool) http.HandlerFunc {
 			&res.AttachmentID,
 			&res.RuleID,
 			&res.TransformedS3Key,
+			&res.DestinationType,
+			&res.OutputLocation,
+			&res.OutputFilename,
 			&res.CreatedAt,
 			&res.MessageID,
 			&res.InboxID,
@@ -97,7 +108,6 @@ func HandleTransformResultGet(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Generate presigned URLs
 		if res.OriginalS3Key != "" {
 			if url, err := s3storage.GetDownloadPresignedURL(r.Context(), res.OriginalS3Key, 15*time.Minute); err == nil {
 				res.OriginalDownloadURL = url
@@ -107,6 +117,9 @@ func HandleTransformResultGet(pool *pgxpool.Pool) http.HandlerFunc {
 			if url, err := s3storage.GetDownloadPresignedURL(r.Context(), res.TransformedS3Key, 15*time.Minute); err == nil {
 				res.TransformedDownloadURL = url
 			}
+		}
+		if strings.EqualFold(res.DestinationType, "LOCAL") && strings.TrimSpace(res.OutputLocation) != "" {
+			res.LocalDownloadAvailable = true
 		}
 
 		emailcommon.RespondPayload(w, "GET_TRANSFORM_RESULT", res)

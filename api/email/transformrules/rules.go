@@ -12,13 +12,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Destination types for transformed output storage.
+const (
+	DestS3    = "S3"
+	DestLocal = "LOCAL"
+	DestSFTP  = "SFTP"
+	DestAPI   = "API"
+)
+
 type TransformationRule struct {
 	RuleID           string          `json:"rule_id,omitempty"`
 	InboxID          string          `json:"inbox_id"`
 	RuleName         string          `json:"rule_name"`
 	ConditionType    string          `json:"condition_type"`
 	ConditionValue   string          `json:"condition_value"`
-	MatchMode        string          `json:"match_mode"` // PREFIX | SUFFIX | EXACT | CONTAINS | GLOB (for SUBJECT_CONTAINS / ATTACHMENT_NAME)
+	MatchMode        string          `json:"match_mode"` // PREFIX | SUFFIX | EXACT | CONTAINS | GLOB
 	MappingID        string          `json:"mapping_id"`
 	MappingName      string          `json:"mapping_name"`
 	ActionType       string          `json:"action_type"`
@@ -31,12 +39,86 @@ type TransformationRule struct {
 	IsDeleted        bool            `json:"is_deleted"`
 	CreatedAt        *time.Time      `json:"created_at,omitempty"`
 	UpdatedAt        *time.Time      `json:"updated_at,omitempty"`
-	UserID           string          `json:"user_id,omitempty"` // Injected by frontend nos.post
+	UserID           string          `json:"user_id,omitempty"`
+
+	// Output destination + naming (1:1 on the rule master — no JSONB).
+	DestinationType  string `json:"destination_type"`            // S3 | LOCAL | SFTP | API
+	OutputNamePrefix string `json:"output_name_prefix"`          // user base name
+	AppendDatetime   *bool  `json:"append_datetime"`             // nil → true; append _YYYYMMDD_HHMMSS
+	S3Prefix         string `json:"s3_prefix,omitempty"`         // optional key prefix
+	LocalFolder      string `json:"local_folder,omitempty"`      // subfolder under local base
+	SftpHost         string `json:"sftp_host,omitempty"`
+	SftpPort         int    `json:"sftp_port,omitempty"`
+	SftpUser         string `json:"sftp_user,omitempty"`
+	SftpPassword     string `json:"sftp_password,omitempty"`
+	SftpFolder       string `json:"sftp_folder,omitempty"`
+	APIURL           string `json:"api_url,omitempty"`
+	APIAuthToken     string `json:"api_auth_token,omitempty"`
+}
+
+func appendDatetimeValue(v *bool) bool {
+	if v == nil {
+		return true
+	}
+	return *v
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+const ruleSelectCols = `
+		rule_id, inbox_id, rule_name, condition_type, condition_value,
+		COALESCE(NULLIF(match_mode, ''), 'CONTAINS'),
+		mapping_id, mapping_name, action_type, is_active,
+		processing_status, COALESCE(pending_edit_json, '{}'), submitted_by, approved_by, checker_comment, is_deleted,
+		created_at, updated_at,
+		COALESCE(NULLIF(destination_type, ''), 'S3'),
+		COALESCE(output_name_prefix, ''),
+		COALESCE(append_datetime, true),
+		COALESCE(s3_prefix, ''),
+		COALESCE(local_folder, ''),
+		COALESCE(sftp_host, ''),
+		COALESCE(sftp_port, 22),
+		COALESCE(sftp_user, ''),
+		COALESCE(sftp_password, ''),
+		COALESCE(sftp_folder, ''),
+		COALESCE(api_url, ''),
+		COALESCE(api_auth_token, '')
+`
+
+func scanRule(rows interface {
+	Scan(dest ...any) error
+}, rule *TransformationRule) error {
+	var submittedBy, approvedBy, checkerComment *string
+	var appendDT bool
+	err := rows.Scan(
+		&rule.RuleID, &rule.InboxID, &rule.RuleName,
+		&rule.ConditionType, &rule.ConditionValue, &rule.MatchMode,
+		&rule.MappingID, &rule.MappingName, &rule.ActionType,
+		&rule.IsActive, &rule.ProcessingStatus, &rule.PendingEditJSON,
+		&submittedBy, &approvedBy, &checkerComment, &rule.IsDeleted,
+		&rule.CreatedAt, &rule.UpdatedAt,
+		&rule.DestinationType, &rule.OutputNamePrefix, &appendDT,
+		&rule.S3Prefix, &rule.LocalFolder,
+		&rule.SftpHost, &rule.SftpPort, &rule.SftpUser, &rule.SftpPassword, &rule.SftpFolder,
+		&rule.APIURL, &rule.APIAuthToken,
+	)
+	if err != nil {
+		return err
+	}
+	rule.AppendDatetime = boolPtr(appendDT)
+	if submittedBy != nil {
+		rule.SubmittedBy = *submittedBy
+	}
+	if approvedBy != nil {
+		rule.ApprovedBy = *approvedBy
+	}
+	if checkerComment != nil {
+		rule.CheckerComment = *checkerComment
+	}
+	return nil
 }
 
 // normalizeMatchMode returns a canonical match mode for the given condition type.
-// Pattern conditions (SUBJECT_CONTAINS, ATTACHMENT_NAME) require PREFIX|SUFFIX|EXACT|CONTAINS|GLOB.
-// Other condition types ignore match_mode at evaluation time and store EXACT.
 func normalizeMatchMode(conditionType, matchMode string) (string, error) {
 	ct := strings.ToUpper(strings.TrimSpace(conditionType))
 	mm := strings.ToUpper(strings.TrimSpace(matchMode))
@@ -56,6 +138,49 @@ func normalizeMatchMode(conditionType, matchMode string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid match_mode %q (use PREFIX, SUFFIX, EXACT, CONTAINS, or GLOB)", matchMode)
 	}
+}
+
+func normalizeDestination(req *TransformationRule) error {
+	dt := strings.ToUpper(strings.TrimSpace(req.DestinationType))
+	if dt == "" {
+		dt = DestS3
+	}
+	switch dt {
+	case DestS3, DestLocal, DestSFTP, DestAPI:
+		req.DestinationType = dt
+	default:
+		return fmt.Errorf("invalid destination_type %q (use S3, LOCAL, SFTP, or API)", req.DestinationType)
+	}
+
+	req.OutputNamePrefix = strings.TrimSpace(req.OutputNamePrefix)
+	req.S3Prefix = strings.Trim(strings.TrimSpace(req.S3Prefix), "/")
+	req.LocalFolder = strings.Trim(strings.TrimSpace(req.LocalFolder), "/")
+	req.SftpHost = strings.TrimSpace(req.SftpHost)
+	req.SftpUser = strings.TrimSpace(req.SftpUser)
+	req.SftpPassword = strings.TrimSpace(req.SftpPassword)
+	req.SftpFolder = strings.Trim(strings.TrimSpace(req.SftpFolder), "/")
+	req.APIURL = strings.TrimSpace(req.APIURL)
+	req.APIAuthToken = strings.TrimSpace(req.APIAuthToken)
+
+	if req.SftpPort <= 0 {
+		req.SftpPort = 22
+	}
+
+	switch req.DestinationType {
+	case DestSFTP:
+		if req.SftpHost == "" || req.SftpUser == "" {
+			return fmt.Errorf("sftp_host and sftp_user are required for SFTP destination")
+		}
+	case DestAPI:
+		if req.APIURL == "" {
+			return fmt.Errorf("api_url is required for API destination")
+		}
+		if !strings.HasPrefix(strings.ToLower(req.APIURL), "http://") &&
+			!strings.HasPrefix(strings.ToLower(req.APIURL), "https://") {
+			return fmt.Errorf("api_url must start with http:// or https://")
+		}
+	}
+	return nil
 }
 
 func logAudit(r *http.Request, pool *pgxpool.Pool, ruleID, action, actorID string, newState interface{}) {
@@ -83,11 +208,7 @@ func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	inboxID := strings.TrimSpace(req.InboxID)
 
 	query := `
-		SELECT rule_id, inbox_id, rule_name, condition_type, condition_value,
-		       COALESCE(NULLIF(match_mode, ''), 'CONTAINS'),
-		       mapping_id, mapping_name, action_type, is_active, 
-		       processing_status, COALESCE(pending_edit_json, '{}'), submitted_by, approved_by, checker_comment, is_deleted,
-		       created_at, updated_at
+		SELECT ` + ruleSelectCols + `
 		FROM email_svc.transformation_rules
 		WHERE ($1 = '' OR inbox_id::text = $1)
 		  AND (is_deleted = false OR is_deleted IS NULL)
@@ -104,27 +225,13 @@ func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	var rules []TransformationRule
 	for rows.Next() {
 		var rule TransformationRule
-		var submittedBy, approvedBy, checkerComment *string
-		if err := rows.Scan(
-			&rule.RuleID, &rule.InboxID, &rule.RuleName,
-			&rule.ConditionType, &rule.ConditionValue, &rule.MatchMode,
-			&rule.MappingID, &rule.MappingName, &rule.ActionType,
-			&rule.IsActive, &rule.ProcessingStatus, &rule.PendingEditJSON,
-			&submittedBy, &approvedBy, &checkerComment, &rule.IsDeleted,
-			&rule.CreatedAt, &rule.UpdatedAt,
-		); err != nil {
+		if err := scanRule(rows, &rule); err != nil {
 			emailcommon.RespondInternal(w, "Failed to parse rules")
 			return
 		}
-		if submittedBy != nil {
-			rule.SubmittedBy = *submittedBy
-		}
-		if approvedBy != nil {
-			rule.ApprovedBy = *approvedBy
-		}
-		if checkerComment != nil {
-			rule.CheckerComment = *checkerComment
-		}
+		// Never echo secrets back to the UI list/view payload.
+		rule.SftpPassword = ""
+		rule.APIAuthToken = ""
 		rules = append(rules, rule)
 	}
 
@@ -152,25 +259,42 @@ func handleCreate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		return
 	}
 	req.MatchMode = mode
+	if destErr := normalizeDestination(&req); destErr != nil {
+		emailcommon.RespondBadRequest(w, destErr.Error())
+		return
+	}
+	appendDT := appendDatetimeValue(req.AppendDatetime)
+	req.AppendDatetime = boolPtr(appendDT)
 	req.ProcessingStatus = "PENDING_APPROVAL"
 
 	query := `
-		INSERT INTO email_svc.transformation_rules 
-		(inbox_id, rule_name, condition_type, condition_value, match_mode, mapping_id, mapping_name, action_type, is_active, processing_status, submitted_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO email_svc.transformation_rules
+		(inbox_id, rule_name, condition_type, condition_value, match_mode, mapping_id, mapping_name, action_type, is_active, processing_status, submitted_by,
+		 destination_type, output_name_prefix, append_datetime, s3_prefix, local_folder,
+		 sftp_host, sftp_port, sftp_user, sftp_password, sftp_folder, api_url, api_auth_token)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+		        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 		RETURNING rule_id, created_at, updated_at
 	`
 	err := pool.QueryRow(r.Context(), query,
 		req.InboxID, req.RuleName, req.ConditionType, req.ConditionValue, req.MatchMode,
 		req.MappingID, req.MappingName, req.ActionType, req.IsActive, req.ProcessingStatus, req.UserID,
+		req.DestinationType, req.OutputNamePrefix, appendDT, req.S3Prefix, req.LocalFolder,
+		req.SftpHost, req.SftpPort, req.SftpUser, req.SftpPassword, req.SftpFolder, req.APIURL, req.APIAuthToken,
 	).Scan(&req.RuleID, &req.CreatedAt, &req.UpdatedAt)
 
 	if err != nil {
-		if err.Error() == "ERROR: duplicate key value violates unique constraint \"unique_active_rule\" (SQLSTATE 23505)" { emailcommon.RespondBadRequest(w, "An active rule with this condition and mapping already exists for this inbox.") } else { emailcommon.RespondInternal(w, "Failed to create rule: " + err.Error()) }
+		if strings.Contains(err.Error(), "unique_active_rule") {
+			emailcommon.RespondBadRequest(w, "An active rule with this condition and mapping already exists for this inbox.")
+		} else {
+			emailcommon.RespondInternal(w, "Failed to create rule: "+err.Error())
+		}
 		return
 	}
 
 	logAudit(r, pool, req.RuleID, "CREATE_PENDING", req.UserID, req)
+	req.SftpPassword = ""
+	req.APIAuthToken = ""
 	emailcommon.RespondPayload(w, "transform-rules-create", req)
 }
 
@@ -195,11 +319,15 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		return
 	}
 	req.MatchMode = mode
+	if destErr := normalizeDestination(&req); destErr != nil {
+		emailcommon.RespondBadRequest(w, destErr.Error())
+		return
+	}
 
 	pendingJSON, _ := json.Marshal(req)
 
 	query := `
-		UPDATE email_svc.transformation_rules 
+		UPDATE email_svc.transformation_rules
 		SET processing_status = 'PENDING_APPROVAL',
 		    pending_edit_json = $1,
 		    submitted_by = $2,
@@ -214,6 +342,8 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	}
 
 	logAudit(r, pool, req.RuleID, "UPDATE_PENDING", req.UserID, req)
+	req.SftpPassword = ""
+	req.APIAuthToken = ""
 	emailcommon.RespondPayload(w, "transform-rules-update", req)
 }
 
@@ -221,7 +351,7 @@ type deleteReq struct {
 	RuleID         string `json:"rule_id"`
 	UserID         string `json:"user_id"`
 	CheckerComment string `json:"checker_comment"`
-	Reason         string `json:"reason"` // alias used by UI (same as FD delete)
+	Reason         string `json:"reason"`
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
@@ -245,7 +375,7 @@ func handleDelete(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	}
 
 	query := `
-		UPDATE email_svc.transformation_rules 
+		UPDATE email_svc.transformation_rules
 		SET processing_status = 'PENDING_DELETE_APPROVAL',
 		    submitted_by = $1,
 		    checker_comment = $2,
@@ -284,7 +414,6 @@ func handleApprove(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		return
 	}
 
-	// Fetch current rule to apply pending edits
 	var pendingJSON json.RawMessage
 	var isDeleted bool
 	var processingStatus string
@@ -295,19 +424,19 @@ func handleApprove(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	}
 
 	if isDeleted || processingStatus == "PENDING_DELETE_APPROVAL" {
-		// Permanently delete or mark deleted
 		_, err = pool.Exec(r.Context(), `
-			UPDATE email_svc.transformation_rules 
-			SET processing_status = 'APPROVED', is_deleted = true, approved_by = $1, checker_comment = $2, deleted_at = now(), deleted_by = $1 
+			UPDATE email_svc.transformation_rules
+			SET processing_status = 'APPROVED', is_deleted = true, approved_by = $1, checker_comment = $2, deleted_at = now(), deleted_by = $1
 			WHERE rule_id = $3
 		`, req.UserID, req.CheckerComment, req.RuleID)
 	} else if pendingJSON != nil && len(pendingJSON) > 2 {
-		// Apply pending edit
 		var edits TransformationRule
 		_ = json.Unmarshal(pendingJSON, &edits)
 		editMode, _ := normalizeMatchMode(edits.ConditionType, edits.MatchMode)
+		_ = normalizeDestination(&edits)
+		editAppendDT := appendDatetimeValue(edits.AppendDatetime)
 		_, err = pool.Exec(r.Context(), `
-			UPDATE email_svc.transformation_rules 
+			UPDATE email_svc.transformation_rules
 			SET rule_name = COALESCE(NULLIF($1, ''), rule_name),
 			    condition_type = COALESCE(NULLIF($2, ''), condition_type),
 			    condition_value = COALESCE(NULLIF($3, ''), condition_value),
@@ -316,18 +445,33 @@ func handleApprove(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 			    mapping_name = COALESCE(NULLIF($6, ''), mapping_name),
 			    action_type = COALESCE(NULLIF($7, ''), action_type),
 			    is_active = $8,
+			    destination_type = COALESCE(NULLIF($9, ''), destination_type),
+			    output_name_prefix = $10,
+			    append_datetime = $11,
+			    s3_prefix = $12,
+			    local_folder = $13,
+			    sftp_host = $14,
+			    sftp_port = $15,
+			    sftp_user = $16,
+			    sftp_password = CASE WHEN $17 <> '' THEN $17 ELSE sftp_password END,
+			    sftp_folder = $18,
+			    api_url = $19,
+			    api_auth_token = CASE WHEN $20 <> '' THEN $20 ELSE api_auth_token END,
 			    processing_status = 'APPROVED',
-			    approved_by = $9,
-			    checker_comment = $10,
+			    approved_by = $21,
+			    checker_comment = $22,
 			    pending_edit_json = NULL,
 			    updated_at = now()
-			WHERE rule_id = $11
-		`, edits.RuleName, edits.ConditionType, edits.ConditionValue, editMode, edits.MappingID, edits.MappingName, edits.ActionType, edits.IsActive, req.UserID, req.CheckerComment, req.RuleID)
+			WHERE rule_id = $23
+		`, edits.RuleName, edits.ConditionType, edits.ConditionValue, editMode, edits.MappingID, edits.MappingName, edits.ActionType, edits.IsActive,
+			edits.DestinationType, edits.OutputNamePrefix, editAppendDT, edits.S3Prefix, edits.LocalFolder,
+			edits.SftpHost, edits.SftpPort, edits.SftpUser, edits.SftpPassword, edits.SftpFolder,
+			edits.APIURL, edits.APIAuthToken,
+			req.UserID, req.CheckerComment, req.RuleID)
 	} else {
-		// Just approve (like from initial create)
 		_, err = pool.Exec(r.Context(), `
-			UPDATE email_svc.transformation_rules 
-			SET processing_status = 'APPROVED', approved_by = $1, checker_comment = $2, updated_at = now() 
+			UPDATE email_svc.transformation_rules
+			SET processing_status = 'APPROVED', approved_by = $1, checker_comment = $2, updated_at = now()
 			WHERE rule_id = $3
 		`, req.UserID, req.CheckerComment, req.RuleID)
 	}
@@ -358,7 +502,7 @@ func handleReject(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	}
 
 	_, err := pool.Exec(r.Context(), `
-		UPDATE email_svc.transformation_rules 
+		UPDATE email_svc.transformation_rules
 		SET processing_status = 'REJECTED',
 		    approved_by = $1,
 		    checker_comment = $2,
@@ -367,7 +511,7 @@ func handleReject(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		    updated_at = now()
 		WHERE rule_id = $3
 	`, req.UserID, req.CheckerComment, req.RuleID)
-	
+
 	if err != nil {
 		emailcommon.RespondInternal(w, "Failed to reject rule")
 		return
@@ -376,4 +520,3 @@ func handleReject(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	logAudit(r, pool, req.RuleID, "REJECTED", req.UserID, req)
 	emailcommon.RespondPayload(w, "transform-rules-reject", map[string]bool{"success": true})
 }
-

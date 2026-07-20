@@ -17,13 +17,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/transformtool"
 )
 
 // EnsureTransformationSchema creates/migrates the results table for converted files.
-// Converted output is stored in S3; DB row holds transformed_s3_key linked to rule_id.
+// Output lands at the rule's destination (S3 / LOCAL / SFTP / API); DB stores location.
 func EnsureTransformationSchema(ctx context.Context, pool *pgxpool.Pool) {
 	stmts := []string{
 		`
@@ -31,7 +31,7 @@ func EnsureTransformationSchema(ctx context.Context, pool *pgxpool.Pool) {
 			result_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			attachment_id UUID NOT NULL,
 			rule_id UUID NOT NULL,
-			transformed_s3_key TEXT NOT NULL,
+			transformed_s3_key TEXT NOT NULL DEFAULT '',
 			transformed_json JSONB,
 			status TEXT NOT NULL DEFAULT 'SUCCESS',
 			error_message TEXT,
@@ -40,7 +40,22 @@ func EnsureTransformationSchema(ctx context.Context, pool *pgxpool.Pool) {
 		`ALTER TABLE email_svc.transformation_results ADD COLUMN IF NOT EXISTS transformed_s3_key TEXT`,
 		`ALTER TABLE email_svc.transformation_results ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'SUCCESS'`,
 		`ALTER TABLE email_svc.transformation_results ADD COLUMN IF NOT EXISTS error_message TEXT`,
+		`ALTER TABLE email_svc.transformation_results ADD COLUMN IF NOT EXISTS destination_type TEXT NOT NULL DEFAULT 'S3'`,
+		`ALTER TABLE email_svc.transformation_results ADD COLUMN IF NOT EXISTS output_location TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE email_svc.transformation_results ADD COLUMN IF NOT EXISTS output_filename TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE email_svc.transformation_results ALTER COLUMN transformed_json DROP NOT NULL`,
+		`ALTER TABLE email_svc.transformation_rules ADD COLUMN IF NOT EXISTS destination_type TEXT NOT NULL DEFAULT 'S3'`,
+		`ALTER TABLE email_svc.transformation_rules ADD COLUMN IF NOT EXISTS output_name_prefix TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE email_svc.transformation_rules ADD COLUMN IF NOT EXISTS append_datetime BOOLEAN NOT NULL DEFAULT true`,
+		`ALTER TABLE email_svc.transformation_rules ADD COLUMN IF NOT EXISTS s3_prefix TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE email_svc.transformation_rules ADD COLUMN IF NOT EXISTS local_folder TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE email_svc.transformation_rules ADD COLUMN IF NOT EXISTS sftp_host TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE email_svc.transformation_rules ADD COLUMN IF NOT EXISTS sftp_port INT NOT NULL DEFAULT 22`,
+		`ALTER TABLE email_svc.transformation_rules ADD COLUMN IF NOT EXISTS sftp_user TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE email_svc.transformation_rules ADD COLUMN IF NOT EXISTS sftp_password TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE email_svc.transformation_rules ADD COLUMN IF NOT EXISTS sftp_folder TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE email_svc.transformation_rules ADD COLUMN IF NOT EXISTS api_url TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE email_svc.transformation_rules ADD COLUMN IF NOT EXISTS api_auth_token TEXT NOT NULL DEFAULT ''`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_transformation_results_attachment_rule ON email_svc.transformation_results (attachment_id, rule_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transformation_results_rule_id ON email_svc.transformation_results (rule_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transformation_results_created_at ON email_svc.transformation_results (created_at DESC)`,
@@ -292,10 +307,7 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 		return
 	}
 
-	baseURL := strings.TrimRight(os.Getenv("TRANSFORM_TOOL_URL"), "/")
-	if baseURL == "" {
-		baseURL = "https://tranformation-tool-go.onrender.com"
-	}
+	baseURL := transformtool.BaseURL()
 	apiURL := baseURL + "/tftoolapi/transform"
 
 	ext := strings.ToLower(filepath.Ext(s3Key))
@@ -368,27 +380,34 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 		contentType = "application/json"
 	}
 
-	transformedS3Key := fmt.Sprintf("email/transformed/%s/%s%s",
-		time.Now().Format("2006/01/02"),
-		uuid.New().String(),
-		transformedExt)
+	dest, destErr := loadRuleDestination(ctx, pool, ruleID)
+	if destErr != nil {
+		log.Printf("[TransformWorker] Failed to load destination for rule %s: %v", ruleID, destErr)
+		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, "load_destination: "+destErr.Error())
+		return
+	}
 
-	if err := s3storage.PutObjectToS3(ctx, transformedS3Key, bodyBytes, contentType); err != nil {
-		log.Printf("[TransformWorker] Failed to upload transformed file to S3: %v", err)
-		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, "s3_upload: "+err.Error())
+	location, s3Key, outName, delErr := deliverTransformed(ctx, dest, transformedExt, bodyBytes, contentType)
+	if delErr != nil {
+		log.Printf("[TransformWorker] Failed to deliver transformed file (%s): %v", dest.DestinationType, delErr)
+		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, "deliver_"+strings.ToLower(dest.DestinationType)+": "+delErr.Error())
 		return
 	}
 
 	query := `
-		INSERT INTO email_svc.transformation_results (attachment_id, rule_id, transformed_s3_key, status, error_message)
-		VALUES ($1::uuid, $2::uuid, $3, 'SUCCESS', NULL)
+		INSERT INTO email_svc.transformation_results
+			(attachment_id, rule_id, transformed_s3_key, status, error_message, destination_type, output_location, output_filename)
+		VALUES ($1::uuid, $2::uuid, $3, 'SUCCESS', NULL, $4, $5, $6)
 		ON CONFLICT (attachment_id, rule_id) DO UPDATE SET
 			transformed_s3_key = EXCLUDED.transformed_s3_key,
 			status = 'SUCCESS',
 			error_message = NULL,
+			destination_type = EXCLUDED.destination_type,
+			output_location = EXCLUDED.output_location,
+			output_filename = EXCLUDED.output_filename,
 			created_at = now()
 	`
-	_, err = pool.Exec(ctx, query, attachmentID, ruleID, transformedS3Key)
+	_, err = pool.Exec(ctx, query, attachmentID, ruleID, s3Key, dest.DestinationType, location, outName)
 	if err != nil {
 		log.Printf("[TransformWorker] Failed to save result to DB: %v", err)
 		logTransformStep(ctx, pool, messageID, "TRANSFORM", "FAIL", map[string]interface{}{
@@ -398,13 +417,48 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 		})
 		return
 	}
-	log.Printf("[TransformWorker] Saved converted file %s for attachment %s rule %s", transformedS3Key, attachmentID, ruleID)
+	log.Printf("[TransformWorker] Saved converted file %s (%s) for attachment %s rule %s", location, dest.DestinationType, attachmentID, ruleID)
 	logTransformStep(ctx, pool, messageID, "TRANSFORM", "OK", map[string]interface{}{
 		"attachment_id":      attachmentID,
 		"rule_id":            ruleID,
 		"mapping_id":         mappingID,
-		"transformed_s3_key": transformedS3Key,
+		"destination_type":   dest.DestinationType,
+		"output_location":    location,
+		"output_filename":    outName,
+		"transformed_s3_key": s3Key,
 	})
+}
+
+func loadRuleDestination(ctx context.Context, pool *pgxpool.Pool, ruleID string) (ruleDestination, error) {
+	var d ruleDestination
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(destination_type, ''), 'S3'),
+		       COALESCE(output_name_prefix, ''),
+		       COALESCE(append_datetime, true),
+		       COALESCE(s3_prefix, ''),
+		       COALESCE(local_folder, ''),
+		       COALESCE(sftp_host, ''),
+		       COALESCE(sftp_port, 22),
+		       COALESCE(sftp_user, ''),
+		       COALESCE(sftp_password, ''),
+		       COALESCE(sftp_folder, ''),
+		       COALESCE(api_url, ''),
+		       COALESCE(api_auth_token, ''),
+		       COALESCE(created_by, ''),
+		       COALESCE(approved_by, '')
+		FROM email_svc.transformation_rules
+		WHERE rule_id = $1::uuid
+	`, ruleID).Scan(
+		&d.DestinationType, &d.OutputNamePrefix, &d.AppendDatetime,
+		&d.S3Prefix, &d.LocalFolder,
+		&d.SftpHost, &d.SftpPort, &d.SftpUser, &d.SftpPassword, &d.SftpFolder,
+		&d.APIURL, &d.APIAuthToken,
+		&d.CreatedBy, &d.ApprovedBy,
+	)
+	if err != nil {
+		return d, err
+	}
+	return d, nil
 }
 
 func saveTransformFailure(ctx context.Context, pool *pgxpool.Pool, messageID, attachmentID, ruleID, errMsg string) {

@@ -535,3 +535,57 @@ func (r *Runtime) PullOAuthMessages(ctx context.Context, req OAuthPullRequest) (
 	}
 	return &out, nil
 }
+
+// StoragePutRequest is forwarded to CIMPLR-Email-Service POST /v1/storage/put.
+type StoragePutRequest struct {
+	ContentBase64    string `json:"content_base64"`
+	ContentType      string `json:"content_type,omitempty"`
+	FileExt          string `json:"file_ext,omitempty"`
+	DestinationType  string `json:"destination_type"`
+	OutputNamePrefix string `json:"output_name_prefix,omitempty"`
+	AppendDatetime   bool   `json:"append_datetime"`
+	S3Prefix         string `json:"s3_prefix,omitempty"`
+	LocalFolder      string `json:"local_folder,omitempty"`
+	SftpHost         string `json:"sftp_host,omitempty"`
+	SftpPort         int    `json:"sftp_port,omitempty"`
+	SftpUser         string `json:"sftp_user,omitempty"`
+	SftpPassword     string `json:"sftp_password,omitempty"`
+	SftpFolder       string `json:"sftp_folder,omitempty"`
+	APIURL           string `json:"api_url,omitempty"`
+	APIAuthToken     string `json:"api_auth_token,omitempty"`
+}
+
+// StoragePutResult is the data payload from /v1/storage/put.
+type StoragePutResult struct {
+	DestinationType string `json:"destination_type"`
+	OutputFilename  string `json:"output_filename"`
+	OutputLocation  string `json:"output_location"`
+	S3Key           string `json:"s3_key,omitempty"`
+}
+
+// PutStorage asks the email service to save file bytes to S3/LOCAL/SFTP/API
+// and apply the naming convention (prefix + optional date/time).
+func (r *Runtime) PutStorage(ctx context.Context, req StoragePutRequest) (*StoragePutResult, error) {
+	var out StoragePutResult
+	payload := map[string]interface{}{
+		"content_base64":     req.ContentBase64,
+		"content_type":       req.ContentType,
+		"file_ext":           req.FileExt,
+		"destination_type":   req.DestinationType,
+		"output_name_prefix": req.OutputNamePrefix,
+		"append_datetime":    req.AppendDatetime,
+		"s3_prefix":          req.S3Prefix,
+		"local_folder":       req.LocalFolder,
+		"sftp_host":          req.SftpHost,
+		"sftp_port":          req.SftpPort,
+		"sftp_user":          req.SftpUser,
+		"sftp_password":      req.SftpPassword,
+		"sftp_folder":        req.SftpFolder,
+		"api_url":            req.APIURL,
+		"api_auth_token":     req.APIAuthToken,
+	}
+	if err := r.invoke(ctx, "/v1/storage/put", payload, &out, 0); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

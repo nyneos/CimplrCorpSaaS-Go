@@ -3,6 +3,7 @@ package emailmessages
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -43,38 +44,68 @@ func HandleTransformResultPreviewContent(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		var originalKey, transformedKey, filename string
+		var originalKey, transformedKey, filename, destType, outputLocation, outputFilename string
 		err := pool.QueryRow(r.Context(), `
-			SELECT COALESCE(ma.s3_key, ''), COALESCE(tr.transformed_s3_key, ''), COALESCE(ma.filename, '')
+			SELECT COALESCE(ma.s3_key, ''),
+			       COALESCE(tr.transformed_s3_key, ''),
+			       COALESCE(ma.filename, ''),
+			       COALESCE(NULLIF(tr.destination_type, ''), 'S3'),
+			       COALESCE(tr.output_location, ''),
+			       COALESCE(tr.output_filename, '')
 			FROM email_svc.transformation_results tr
 			JOIN email_svc.message_attachment ma ON ma.attachment_id = tr.attachment_id
 			WHERE tr.result_id = $1::uuid
 			LIMIT 1
-		`, resultID).Scan(&originalKey, &transformedKey, &filename)
+		`, resultID).Scan(&originalKey, &transformedKey, &filename, &destType, &outputLocation, &outputFilename)
 		if err != nil {
 			emailcommon.RespondNotFound(w, "transformation result not found")
 			return
 		}
 
-		s3Key := originalKey
+		var raw []byte
 		label := filename
-		if which == "transformed" {
-			s3Key = transformedKey
-			if s3Key != "" {
-				label = filepath.Base(s3Key)
-			} else {
-				label = "transformed"
-			}
-		}
-		if strings.TrimSpace(s3Key) == "" {
-			emailcommon.RespondNotFound(w, which+" file not available")
-			return
-		}
+		s3Key := originalKey
 
-		raw, err := s3storage.GetObjectBytes(r.Context(), s3Key)
-		if err != nil {
-			emailcommon.RespondInternal(w, "Failed to read file: "+err.Error())
-			return
+		if which == "transformed" {
+			label = "transformed"
+			if strings.TrimSpace(outputFilename) != "" {
+				label = outputFilename
+			} else if transformedKey != "" {
+				label = filepath.Base(transformedKey)
+			}
+
+			if strings.EqualFold(destType, "LOCAL") && strings.TrimSpace(outputLocation) != "" {
+				if !isUnderTransformedLocalBase(outputLocation) {
+					emailcommon.RespondBadRequest(w, "local file path is outside allowed directory")
+					return
+				}
+				raw, err = os.ReadFile(outputLocation)
+				if err != nil {
+					emailcommon.RespondNotFound(w, "local file not found: "+err.Error())
+					return
+				}
+			} else {
+				s3Key = transformedKey
+				if strings.TrimSpace(s3Key) == "" {
+					emailcommon.RespondNotFound(w, which+" file not available")
+					return
+				}
+				raw, err = s3storage.GetObjectBytes(r.Context(), s3Key)
+				if err != nil {
+					emailcommon.RespondInternal(w, "Failed to read file: "+err.Error())
+					return
+				}
+			}
+		} else {
+			if strings.TrimSpace(s3Key) == "" {
+				emailcommon.RespondNotFound(w, which+" file not available")
+				return
+			}
+			raw, err = s3storage.GetObjectBytes(r.Context(), s3Key)
+			if err != nil {
+				emailcommon.RespondInternal(w, "Failed to read file: "+err.Error())
+				return
+			}
 		}
 
 		truncated := false

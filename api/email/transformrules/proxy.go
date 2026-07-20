@@ -3,11 +3,10 @@ package transformrules
 import (
 	"encoding/json"
 	"net/http"
-	"os"
-	"strings"
 	"time"
 
 	emailcommon "CimplrCorpSaas/api/email/common"
+	"CimplrCorpSaas/internal/transformtool"
 )
 
 var httpClient = &http.Client{
@@ -20,10 +19,7 @@ func handleListMappings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	toolURL := strings.TrimRight(os.Getenv("TRANSFORM_TOOL_URL"), "/")
-	if toolURL == "" {
-		toolURL = "https://tranformation-tool-go.onrender.com"
-	}
+	toolURL := transformtool.BaseURL()
 
 	resp, err := httpClient.Get(toolURL + "/tftoolapi/mappings/summary")
 	if err != nil {

@@ -15,6 +15,14 @@ import (
 const transformResultsMaxLimit = 100
 const transformResultsDefaultLimit = 50
 
+// Success rows: S3 key and/or non-S3 output_location (SFTP, LOCAL, API).
+const transformResultsSuccessSQL = `
+			  AND COALESCE(tr.status, 'SUCCESS') = 'SUCCESS'
+			  AND (
+			    COALESCE(tr.transformed_s3_key, '') <> ''
+			    OR COALESCE(tr.output_location, '') <> ''
+			  )`
+
 func transformResultsACLWhere() string {
 	return `
 			AND (
@@ -101,10 +109,8 @@ func HandleTransformResultsList(pool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN email_svc.transformation_rules r ON r.rule_id = tr.rule_id
 			LEFT JOIN email_svc.inbox_config msg_inbox ON msg_inbox.inbox_id = m.inbox_id
 			LEFT JOIN email_svc.inbox_config rule_inbox ON rule_inbox.inbox_id = r.inbox_id
-			WHERE COALESCE(tr.transformed_s3_key, '') <> ''
-			  AND COALESCE(tr.status, 'SUCCESS') = 'SUCCESS'
-			  AND ($1 = '' OR m.inbox_id::text = $1)
-			` + emailcommon.ActiveInboxMessageSQL + transformResultsACLWhere() + `
+			WHERE ($1 = '' OR m.inbox_id::text = $1)
+			` + transformResultsSuccessSQL + emailcommon.ActiveInboxMessageSQL + transformResultsACLWhere() + `
 			  AND ($5 = '' OR tr.created_at >= $5::date)
 			  AND ($6 = '' OR tr.created_at < ($6::date + interval '1 day'))
 			  AND (
@@ -146,7 +152,10 @@ func HandleTransformResultsList(pool *pgxpool.Pool) http.HandlerFunc {
 			    COALESCE(r.mapping_name, ''),
 			    COALESCE(msg_inbox.mailbox_address, ''),
 			    COALESCE(rule_inbox.mailbox_address, ''),
-			    COALESCE(r.inbox_id::text, '')
+			    COALESCE(r.inbox_id::text, ''),
+			    COALESCE(NULLIF(tr.destination_type, ''), 'S3'),
+			    COALESCE(tr.output_location, ''),
+			    COALESCE(tr.output_filename, '')
 			` + baseFrom + `
 			ORDER BY tr.created_at DESC
 			LIMIT $8 OFFSET $9`
@@ -177,6 +186,9 @@ func HandleTransformResultsList(pool *pgxpool.Pool) http.HandlerFunc {
 			MailboxAddress     string     `json:"mailbox_address"`
 			RuleMailboxAddress string     `json:"rule_mailbox_address"`
 			RuleInboxID        string     `json:"rule_inbox_id"`
+			DestinationType    string     `json:"destination_type"`
+			OutputLocation     string     `json:"output_location"`
+			OutputFilename     string     `json:"output_filename"`
 		}
 
 		items := make([]row, 0)
@@ -187,6 +199,7 @@ func HandleTransformResultsList(pool *pgxpool.Pool) http.HandlerFunc {
 				&i.MessageID, &i.InboxID, &i.EnvelopeFrom, &i.EnvelopeTo, &i.Subject, &i.MessageDate,
 				&i.Filename, &i.RuleName, &i.MappingName,
 				&i.MailboxAddress, &i.RuleMailboxAddress, &i.RuleInboxID,
+				&i.DestinationType, &i.OutputLocation, &i.OutputFilename,
 			); err != nil {
 				continue
 			}
@@ -229,10 +242,8 @@ func HandleTransformResultsStats(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM email_svc.transformation_results tr
 			JOIN email_svc.message_attachment ma ON ma.attachment_id = tr.attachment_id
 			JOIN email_svc.message m ON m.message_id = ma.message_id
-			WHERE COALESCE(tr.transformed_s3_key, '') <> ''
-			  AND COALESCE(tr.status, 'SUCCESS') = 'SUCCESS'
-			  AND ($1 = '' OR m.inbox_id::text = $1)
-			` + emailcommon.ActiveInboxMessageSQL + transformResultsACLWhere() + `
+			WHERE ($1 = '' OR m.inbox_id::text = $1)
+			` + transformResultsSuccessSQL + emailcommon.ActiveInboxMessageSQL + transformResultsACLWhere() + `
 			  AND ($5 = '' OR tr.created_at >= $5::date)
 			  AND ($6 = '' OR tr.created_at < ($6::date + interval '1 day'))`
 
