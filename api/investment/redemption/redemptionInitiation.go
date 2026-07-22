@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/portfolio"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/validation"
 	"context"
@@ -144,6 +145,23 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		entityCode := req.EntityName
+		if entityCode == "" {
+			entityCode = req.SchemeID
+		}
+		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateRedemptionSingle",
+			"/investment/redemption/initiation/create", mfSubRedemption, entityCode, userEmail,
+			map[string]interface{}{
+				"entity_name": req.EntityName,
+				"scheme_id":   req.SchemeID,
+				"folio_id":    req.FolioID,
+				"demat_id":    req.DematID,
+				"by_amount":   req.ByAmount,
+				"by_units":    req.ByUnits,
+			}) {
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
@@ -399,6 +417,24 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			entityCode := row.EntityName
+			if entityCode == "" {
+				entityCode = row.SchemeID
+			}
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "CreateRedemptionBulk",
+				"/investment/redemption/initiation/create-bulk", mfSubRedemption, entityCode, userEmail,
+				map[string]interface{}{
+					"entity_name": row.EntityName,
+					"scheme_id":   row.SchemeID,
+					"folio_id":    row.FolioID,
+					"demat_id":    row.DematID,
+					"by_amount":   row.ByAmount,
+					"by_units":    row.ByUnits,
+				}); !ok {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: pmsg})
+				continue
+			}
+
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
@@ -618,6 +654,12 @@ func UpdateRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateRedemption",
+			"/investment/redemption/initiation/update", mfSubRedemption, req.RedemptionID, userEmail,
+			map[string]interface{}{"redemption_id": req.RedemptionID, "fields": req.Fields}) {
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -742,6 +784,15 @@ func UpdateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreEdit, "UpdateRedemptionBulk",
+				"/investment/redemption/initiation/update-bulk", mfSubRedemption, row.RedemptionID, userEmail,
+				map[string]interface{}{"redemption_id": row.RedemptionID, "fields": row.Fields}); !ok {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: pmsg,
+				})
+				continue
+			}
+
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
@@ -863,6 +914,15 @@ func DeleteRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		for _, id := range req.RedemptionIDs {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreDelete, "DeleteRedemption",
+				"/investment/redemption/initiation/delete", mfSubRedemption, id, requestedBy,
+				map[string]interface{}{"redemption_id": id, "reason": req.Reason}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -920,6 +980,15 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		for _, id := range req.RedemptionIDs {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveRedemptionActions",
+				"/investment/redemption/initiation/approve", mfSubRedemption, id, checkerBy,
+				map[string]interface{}{"redemption_id": id, "comment": req.Comment}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -1201,6 +1270,15 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			api.RespondWithError(w, http.StatusBadRequest, msg)
 			return
+		}
+
+		for _, id := range req.RedemptionIDs {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectRedemptionActions",
+				"/investment/redemption/initiation/reject", mfSubRedemption, id, checkerBy,
+				map[string]interface{}{"redemption_id": id, "comment": req.Comment}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+				return
+			}
 		}
 
 		if _, err := tx.Exec(ctx, `

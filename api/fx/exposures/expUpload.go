@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/api/utils"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -789,6 +791,25 @@ func DeleteExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			deleteComment = req.Reason
 		}
 
+		for _, id := range req.ExposureHeaderIds {
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "EXPOSURE_CREATION",
+				EntityCode:          id,
+				ActorUserID:         req.UserID,
+				HandlerName:         "DeleteExposureHeaders",
+				APIPath:             "/fx/exposures/delete-multiple-headers",
+				DefaultBlockMessage: "Exposure delete blocked by policy",
+				Fields: map[string]interface{}{
+					"exposure_header_id": id,
+				},
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
+		}
+
 		res, err := pool.Exec(ctx,
 			`UPDATE exposure_headers
 			 SET approval_status = 'PENDING_DELETE_APPROVAL',
@@ -854,6 +875,25 @@ func RejectMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		rejectionComment := strings.TrimSpace(req.RejectionComment)
 		if rejectionComment == "" {
 			rejectionComment = strings.TrimSpace(req.Comments)
+		}
+
+		for _, id := range req.ExposureHeaderIds {
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "EXPOSURE_CREATION",
+				EntityCode:          id,
+				ActorUserID:         req.UserID,
+				HandlerName:         "RejectMultipleExposureHeaders",
+				APIPath:             "/fx/exposures/reject-multiple-headers",
+				DefaultBlockMessage: "Exposure rejection blocked by policy",
+				Fields: map[string]interface{}{
+					"exposure_header_id": id,
+				},
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
 		}
 
 		oldValuesByID := make(map[string]map[string]interface{}, len(req.ExposureHeaderIds))
@@ -948,6 +988,25 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		approvalComment := strings.TrimSpace(req.ApprovalComment)
+
+		for _, id := range req.ExposureHeaderIds {
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreApprove,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "EXPOSURE_CREATION",
+				EntityCode:          id,
+				ActorUserID:         req.UserID,
+				HandlerName:         "ApproveMultipleExposureHeaders",
+				APIPath:             "/fx/exposures/approve-multiple-headers",
+				DefaultBlockMessage: "Exposure approval blocked by policy",
+				Fields: map[string]interface{}{
+					"exposure_header_id": id,
+				},
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
+		}
 
 		oldValuesByID := make(map[string]map[string]interface{}, len(req.ExposureHeaderIds))
 		for _, id := range req.ExposureHeaderIds {
@@ -1282,6 +1341,25 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			return
+		}
+		if !runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreUpload,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "EXPOSURE_UPLOAD",
+			ActorUserID:         userID,
+			HandlerName:         "BatchUploadStagingData",
+			APIPath:             "/fx/exposures/batch-upload-staging",
+			DefaultBlockMessage: "Exposure batch staging upload blocked by policy",
+			Fields: map[string]interface{}{
+				"file_count": func() int {
+					if r.MultipartForm == nil || r.MultipartForm.File == nil {
+						return 0
+					}
+					return len(r.MultipartForm.File["files"])
+				}(),
+			},
+		}) {
 			return
 		}
 		results, absorptionErrors, err := processBatchUploadStagingData(ctx, pool, r, buNames, session)

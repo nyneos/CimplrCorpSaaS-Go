@@ -2,6 +2,8 @@ package forwards
 
 import (
 	"CimplrCorpSaas/api/fx/auditutil"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
 	"encoding/json"
 	"fmt"
@@ -82,6 +84,28 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		oldValues := auditutil.FetchRowSnapshotPGX(r.Context(), pool, "public.forward_bookings", "system_transaction_id", req.SystemTransactionID)
+		// Policy check sees the post-edit view (old row + patch), matching the FD booking edit pattern.
+		mergedFields := map[string]interface{}{}
+		for k, v := range oldValues {
+			mergedFields[k] = v
+		}
+		for k, v := range updateFields {
+			mergedFields[k] = v
+		}
+		entityCode, _ := oldValues["entity_level_0"].(string)
+		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "FORWARD_BOOKING",
+			EntityCode:          entityCode,
+			ActorUserID:         req.UserID,
+			HandlerName:         "UpdateForwardBookingFields",
+			APIPath:             "/fx/forwards/update-fields",
+			DefaultBlockMessage: "Forward booking edit blocked by policy",
+			Fields:              mergedFields,
+		}) {
+			return
+		}
 		// Build dynamic SET clause
 		keys := make([]string, 0, len(updateFields))
 		values := make([]interface{}, 0, len(updateFields)+1)
@@ -143,6 +167,26 @@ func BulkUpdateForwardBookingProcessingStatus(pool *pgxpool.Pool) http.HandlerFu
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
+		policyEvent := common.TriggerPreApprove
+		if req.ProcessingStatus == constants.FwdProcessingStatusRejected {
+			policyEvent = common.TriggerPreReject
+		}
+		enforceForwardStatusPolicy := func(entityCode, txnID string) (bool, string) {
+			return runtime.EnforceInline(r.Context(), r, pool, runtime.EnforceInput{
+				EventCode:           policyEvent,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "FORWARD_BOOKING",
+				EntityCode:          entityCode,
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkUpdateForwardBookingProcessingStatus",
+				APIPath:             "/fx/forwards/bulk-update-processing-status",
+				DefaultBlockMessage: "Forward booking status update blocked by policy",
+				Fields: map[string]interface{}{
+					"system_transaction_id": txnID,
+					"processing_status":     req.ProcessingStatus,
+				},
+			})
+		}
 		// Find which records are delete-approval and accessible
 		delRows, err := pool.Query(r.Context(), `
 			SELECT system_transaction_id, entity_level_0
@@ -174,6 +218,14 @@ func BulkUpdateForwardBookingProcessingStatus(pool *pgxpool.Pool) http.HandlerFu
 		delRows.Close()
 		// Only approved delete requests should soft-delete the booking.
 		if len(deletedIds) > 0 && req.ProcessingStatus == constants.FwdProcessingStatusApproved {
+			for _, id := range deletedIds {
+				var entityLevel0 string
+				_ = pool.QueryRow(r.Context(), `SELECT entity_level_0 FROM forward_bookings WHERE system_transaction_id = $1`, id).Scan(&entityLevel0)
+				if ok, msg := enforceForwardStatusPolicy(entityLevel0, id); !ok {
+					respondEnvelopeError(w, http.StatusUnprocessableEntity, msg)
+					return
+				}
+			}
 			rows, err := pool.Query(r.Context(), `
 				UPDATE forward_bookings
 				SET processing_status = $3,
@@ -210,6 +262,14 @@ func BulkUpdateForwardBookingProcessingStatus(pool *pgxpool.Pool) http.HandlerFu
 			rows.Close()
 		}
 		if len(deletedIds) > 0 && req.ProcessingStatus == constants.FwdProcessingStatusRejected {
+			for _, id := range deletedIds {
+				var entityLevel0 string
+				_ = pool.QueryRow(r.Context(), `SELECT entity_level_0 FROM forward_bookings WHERE system_transaction_id = $1`, id).Scan(&entityLevel0)
+				if ok, msg := enforceForwardStatusPolicy(entityLevel0, id); !ok {
+					respondEnvelopeError(w, http.StatusUnprocessableEntity, msg)
+					return
+				}
+			}
 			rows, err := pool.Query(r.Context(), `
 				UPDATE forward_bookings
 				SET processing_status = $2
@@ -280,6 +340,14 @@ func BulkUpdateForwardBookingProcessingStatus(pool *pgxpool.Pool) http.HandlerFu
 			}
 			rows.Close()
 			if len(eligibleIds) > 0 {
+				for _, id := range eligibleIds {
+					var entityLevel0 string
+					_ = pool.QueryRow(r.Context(), `SELECT entity_level_0 FROM forward_bookings WHERE system_transaction_id = $1`, id).Scan(&entityLevel0)
+					if ok, msg := enforceForwardStatusPolicy(entityLevel0, id); !ok {
+						respondEnvelopeError(w, http.StatusUnprocessableEntity, msg)
+						return
+					}
+				}
 				var resultRows pgx.Rows
 				if req.ProcessingStatus == constants.FwdProcessingStatusApproved {
 					resultRows, err = pool.Query(r.Context(), `UPDATE forward_bookings SET processing_status = $1, status = $2 WHERE system_transaction_id = ANY($3) RETURNING *`, req.ProcessingStatus, constants.FwdStatusConfirmed, eligibleIds)

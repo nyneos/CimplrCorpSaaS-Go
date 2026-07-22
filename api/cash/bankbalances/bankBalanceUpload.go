@@ -2,6 +2,8 @@ package bankbalances
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -480,6 +482,19 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			http.Error(w, constants.ErrFailedToParseMultipartForm, http.StatusBadRequest)
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreUpload,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "BANK_BALANCE",
+			ActorUserID:         userID,
+			HandlerName:         "UploadBankBalances",
+			APIPath:             "/cash/bank-balances/upload",
+			DefaultBlockMessage: "Bank balance upload blocked by policy",
+			Fields:              map[string]interface{}{"file_count": len(r.MultipartForm.File)},
+		}) {
 			return
 		}
 

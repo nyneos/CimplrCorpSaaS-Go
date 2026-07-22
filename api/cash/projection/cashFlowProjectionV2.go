@@ -4,6 +4,8 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
@@ -170,6 +172,21 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		for _, proposalID := range req.ProposalIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "CASHFLOW_PROJECTION",
+				ActorUserID:         req.UserID,
+				HandlerName:         "DeleteCashFlowProposalV2",
+				APIPath:             "/cash/projection/v2/delete",
+				DefaultBlockMessage: "Cash flow projection delete blocked by policy",
+				Fields:              map[string]interface{}{"proposal_id": proposalID},
+			}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
@@ -267,6 +284,21 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 		checkerIP := api.ClientIPFromRequest(r)
 
 		ctx := r.Context()
+		for _, proposalID := range req.ProposalIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "CASHFLOW_PROJECTION",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkRejectCashFlowProposalActionsV2",
+				APIPath:             "/cash/projection/v2/reject",
+				DefaultBlockMessage: "Cash flow projection reject blocked by policy",
+				Fields:              map[string]interface{}{"proposal_id": proposalID},
+			}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
@@ -414,6 +446,21 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 		}
 
 		ctx := r.Context()
+		for _, proposalID := range req.ProposalIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreApprove,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "CASHFLOW_PROJECTION",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkApproveCashFlowProposalActionsV2",
+				APIPath:             "/cash/projection/v2/approve",
+				DefaultBlockMessage: "Cash flow projection approve blocked by policy",
+				Fields:              map[string]interface{}{"proposal_id": proposalID},
+			}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
@@ -619,6 +666,27 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusForbidden, err.Error())
 				return
 			}
+		}
+		entityCode := ""
+		if len(req.Items) > 0 {
+			entityCode = req.Items[0].EntityName
+		}
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "CASHFLOW_PROJECTION",
+			EntityCode:          entityCode,
+			ActorUserID:         req.UserID,
+			HandlerName:         "CreateCashFlowProposalV2",
+			APIPath:             "/cash/projection/v2/create",
+			DefaultBlockMessage: "Cash flow projection create blocked by policy",
+			Fields: map[string]interface{}{
+				"proposal_name":      req.Proposal.ProposalName,
+				"base_currency_code": req.Proposal.BaseCurrencyCode,
+				"item_count":         len(req.Items),
+			},
+		}) {
+			return
 		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -1335,6 +1403,27 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusForbidden, err.Error())
 				return
 			}
+		}
+		entityCode := ""
+		if len(req.Items) > 0 {
+			entityCode = req.Items[0].EntityName
+		}
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "CASHFLOW_PROJECTION",
+			EntityCode:          entityCode,
+			ActorUserID:         req.UserID,
+			HandlerName:         "UpdateCashFlowProposalV2",
+			APIPath:             "/cash/projection/v2/update",
+			DefaultBlockMessage: "Cash flow projection update blocked by policy",
+			Fields: map[string]interface{}{
+				"proposal_id":        req.ProposalID,
+				"proposal_name":      req.Proposal.ProposalName,
+				"base_currency_code": req.Proposal.BaseCurrencyCode,
+			},
+		}) {
+			return
 		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {

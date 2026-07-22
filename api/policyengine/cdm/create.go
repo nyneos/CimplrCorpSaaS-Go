@@ -18,12 +18,12 @@ type createReq struct {
 	Description  string `json:"description"`
 	Domain       string `json:"domain"`
 	SourceSystem string `json:"source_system"`
+	CanonicalRef string `json:"canonical_ref"`
+	UserAlias    string `json:"user_alias"`
 	Nullable     bool   `json:"nullable"`
 	ActorID      string `json:"actor_id"`
 }
 
-// HandleCreate submits a new CDM variable for checker approval — it is never
-// auto-approved. The row is visible immediately with processing_status=PENDING_APPROVAL.
 func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !common.RequirePOST(w, r) {
@@ -39,6 +39,8 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		req.Domain = strings.TrimSpace(req.Domain)
 		req.DataType = strings.TrimSpace(req.DataType)
 		req.Description = strings.TrimSpace(req.Description)
+		req.CanonicalRef = strings.TrimSpace(req.CanonicalRef)
+		req.UserAlias = strings.TrimSpace(req.UserAlias)
 		if req.Name == "" || req.Label == "" || req.Domain == "" || req.DataType == "" || req.Description == "" {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "name, label, domain, data_type, description are required", "VALIDATION_ERROR")
 			return
@@ -57,26 +59,39 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		var id string
 		err = tx.QueryRow(r.Context(), `
 			INSERT INTO policyengine_svc.cdm_variable
-				(name, data_type, unit, label, description, domain, source_system, nullable, status, processing_status, created_by, last_modified_by)
-			VALUES ($1,$2,COALESCE($3,''),$4,$5,$6,NULLIF($7,''),$8,'Active','PENDING_APPROVAL',$9,$9)
+				(name, data_type, unit, label, description, domain, source_system,
+				 canonical_ref, user_alias, nullable, status, processing_status, created_by, last_modified_by)
+			VALUES ($1,$2,COALESCE($3,''),$4,$5,$6,NULLIF($7,''),COALESCE($8,''),NULLIF($9,''),$10,'Active','PENDING_APPROVAL',$11,$11)
 			RETURNING variable_id::text`,
-			req.Name, req.DataType, req.Unit, req.Label, req.Description, req.Domain, req.SourceSystem, req.Nullable, actor,
+			req.Name, req.DataType, req.Unit, req.Label, req.Description, req.Domain, req.SourceSystem,
+			req.CanonicalRef, req.UserAlias, req.Nullable, actor,
 		).Scan(&id)
 		if err != nil {
 			api.LogErrorForResponse(w, "cdm create insert: %v", err)
-			api.RespondEnvelopeError(w, http.StatusConflict, "failed to create CDM variable (duplicate name?)", "CDM_CREATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusConflict, "failed to create CDM variable (duplicate name or user_alias?)", "CDM_CREATE_FAILED")
 			return
+		}
+
+		if req.UserAlias != "" {
+			_, _ = tx.Exec(r.Context(), `
+				INSERT INTO policyengine_svc.cdm_variable_alias (variable_id, alias_name, created_by)
+				SELECT $1::uuid, $2, $3
+				WHERE NOT EXISTS (
+					SELECT 1 FROM policyengine_svc.cdm_variable_alias
+					WHERE is_deleted = false AND alias_name = $2
+				)`, id, req.UserAlias, actor)
 		}
 
 		_, err = tx.Exec(r.Context(), `
 			INSERT INTO policyengine_svc.cdm_variable_audit (
 				variable_id, action_type, processing_status, requested_by, requested_at, requested_ip,
 				new_name, new_data_type, new_unit, new_label, new_description, new_domain,
-				new_source_system, new_nullable, new_status, new_is_deleted
+				new_source_system, new_canonical_ref, new_user_alias, new_nullable, new_status, new_is_deleted
 			) VALUES ($1::uuid, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3,
-				$4, $5, $6, $7, $8, $9, $10, $11, 'Active', false)`,
+				$4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'Active', false)`,
 			id, actor, common.NullIfEmpty(ip),
-			req.Name, req.DataType, req.Unit, req.Label, req.Description, req.Domain, req.SourceSystem, req.Nullable,
+			req.Name, req.DataType, req.Unit, req.Label, req.Description, req.Domain, req.SourceSystem,
+			req.CanonicalRef, common.NullIfEmpty(req.UserAlias), req.Nullable,
 		)
 		if err != nil {
 			api.LogErrorForResponse(w, "cdm create audit: %v", err)
@@ -88,6 +103,6 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create CDM variable", "CDM_CREATE_FAILED")
 			return
 		}
-		api.RespondEnvelopeSuccess(w, "CDM variable submitted for approval", map[string]string{"variable_id": id, "name": req.Name})
+		api.RespondEnvelopeSuccess(w, "CDM variable submitted for approval", map[string]string{"variable_id": id})
 	}
 }

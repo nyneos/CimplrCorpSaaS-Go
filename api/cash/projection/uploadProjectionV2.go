@@ -6,6 +6,8 @@ import (
 	"CimplrCorpSaas/api/cash/additionalfiles"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/csv"
@@ -174,6 +176,23 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"currency_code": baseCurrencyCode,
 		}); err != nil {
 			api.RespondWithError(w, http.StatusForbidden, err.Error())
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreUpload,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "CASHFLOW_PROJECTION",
+			ActorUserID:         userID,
+			HandlerName:         "UploadCashflowProposalV2",
+			APIPath:             "/cash/projection/v2/upload",
+			DefaultBlockMessage: "Cash flow projection upload blocked by policy",
+			Fields: map[string]interface{}{
+				"proposal_name":      proposalName,
+				"base_currency_code": baseCurrencyCode,
+				"filename":           fh.Filename,
+			},
+		}) {
 			return
 		}
 

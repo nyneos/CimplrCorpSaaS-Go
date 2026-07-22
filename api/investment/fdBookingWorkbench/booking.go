@@ -6,9 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
-	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
-	"CimplrCorpSaas/internal/observability"
 	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
@@ -119,34 +117,28 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
-		// ── Policy check (PRE_SUBMIT / INVESTMENT_FD) ─────────────────────────
+		// ── Policy check — CDM vars from domain_catalog.field.cdm_path ────────
 		correlationID := common.ResolveCorrelationID(r, req.CorrelationID)
-		traceID := observability.TraceIDFromContext(r.Context())
-		policyResult, policyErr := runtime.RunCheck(r.Context(), pgxPool, runtime.CheckRequest{
-			EventCode:     "PRE_SUBMIT",
-			ModuleCode:    "INVESTMENT_FD",
-			EntityCode:    req.EntityID,
-			ActorUserID:   userEmail,
-			HandlerName:   "CreateBookingSingle",
-			APIPath:       "/investment/fd/booking/create",
-			CorrelationID: correlationID,
-			TraceID:       traceID,
-			Variables: map[string]string{
-				"investment.fd.principal_amount": fmt.Sprintf("%g", req.PrincipalAmount),
-				"investment.fd.interest_rate":    fmt.Sprintf("%g", req.InterestRate),
+		if !enforceFDBookingPolicy(r.Context(), w, r, pgxPool, common.TriggerPreCreate,
+			"CreateBookingSingle", "/investment/fd/booking/create",
+			req.EntityID, userEmail, correlationID,
+			map[string]interface{}{
+				"entity_id":           req.EntityID,
+				"entity_code":         req.EntityID,
+				"bank_id":             req.BankID,
+				"principal_amount":    req.PrincipalAmount,
+				"interest_rate":       req.InterestRate,
+				"interest_type_code":  req.InterestType,
+				"tenor_days":          req.TenorDays,
+				"tenure_days":         req.TenorDays,
+				"tenor_months":        req.TenorMonths,
+				"tenure_months":       req.TenorMonths,
+				"expected_start_date": req.ExpectedStartDate,
+				"value_date":          req.ValueDate,
+				"maturity_date":       req.MaturityDate,
+				"requested_at":        time.Now().UTC().Format(time.RFC3339),
 			},
-		})
-		if policyErr != nil {
-			api.LogErrorForResponse(w, "fd booking policy check: %v", policyErr)
-			api.RespondWithError(w, http.StatusBadGateway, "Policy check failed — please try again later")
-			return
-		}
-		if policyResult.BlocksSubmit() {
-			msg := policyResult.FirstBreachMessage()
-			if msg == "" {
-				msg = "FD booking blocked by policy"
-			}
-			api.RespondWithError(w, http.StatusUnprocessableEntity, msg)
+		) {
 			return
 		}
 		// ────────────────────────────────────────────────────────────────────
@@ -462,6 +454,33 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{
 					"row_index": i, "entity_id": row.EntityID,
 					constants.ValueSuccess: false, constants.ValueError: errMsg,
+				})
+				continue
+			}
+
+			if ok, pmsg := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreCreate,
+				"CreateBookingBulk", "/investment/fd/booking/create-bulk",
+				row.EntityID, userEmail,
+				map[string]interface{}{
+					"entity_id":           row.EntityID,
+					"entity_code":         row.EntityID,
+					"bank_id":             row.BankID,
+					"principal_amount":    row.PrincipalAmount,
+					"interest_rate":       row.InterestRate,
+					"interest_type_code":  row.InterestType,
+					"tenor_days":          row.TenorDays,
+					"tenure_days":         row.TenorDays,
+					"tenor_months":        row.TenorMonths,
+					"tenure_months":       row.TenorMonths,
+					"expected_start_date": row.ExpectedStartDate,
+					"value_date":          row.ValueDate,
+					"maturity_date":       row.MaturityDate,
+					"requested_at":        time.Now().UTC().Format(time.RFC3339),
+				},
+			); !ok {
+				results = append(results, map[string]interface{}{
+					"row_index": i, "entity_id": row.EntityID,
+					constants.ValueSuccess: false, constants.ValueError: pmsg,
 				})
 				continue
 			}
@@ -804,6 +823,32 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Policy PRE_EDIT — merge current row + patch, map via domain_catalog CDM paths
+		merged := map[string]interface{}{
+			"booking_id":          req.BookingID,
+			"entity_id":           entityID,
+			"entity_code":         entityID,
+			"bank_id":             oldBankID,
+			"principal_amount":    oldPrincipal,
+			"interest_rate":       oldRate,
+			"tenor_days":          oldTenorDays,
+			"tenure_days":         oldTenorDays,
+			"tenor_months":        oldTenorMonths,
+			"tenure_months":       oldTenorMonths,
+			"value_date":          oldValueDate,
+			"maturity_date":       oldMaturityDate,
+			"interest_type_id":    oldInterestTypeID,
+		}
+		for k, v := range req.Fields {
+			merged[k] = v
+		}
+		if !enforceFDBookingPolicy(ctx, w, r, pgxPool, common.TriggerPreEdit,
+			"UpdateBooking", "/investment/fd/booking/update",
+			entityID, userEmail, "", merged,
+		) {
+			return
+		}
+
 		// Build dynamic SET clause
 		// allowedFields maps accepted client-side field names to their actual DB column names.
 		// Aliases (e.g. interest_payout_frequency, compounding_frequency) resolve to the same
@@ -1006,6 +1051,25 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		var policyBlocked []string
+		for _, bID := range req.BookingIDs {
+			fields, entityID, loadErr := loadFDBookingCDMFields(ctx, pgxPool, bID)
+			if loadErr != nil {
+				// Soft-deleted / missing rows are skipped by the delete query below.
+				continue
+			}
+			if ok, pmsg := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreDelete,
+				"DeleteBooking", "/investment/fd/booking/delete",
+				entityID, userEmail, fields,
+			); !ok {
+				policyBlocked = append(policyBlocked, bID+": "+pmsg)
+			}
+		}
+		if len(policyBlocked) > 0 && len(policyBlocked) >= len(req.BookingIDs) {
+			api.RespondWithError(w, http.StatusUnprocessableEntity, strings.Join(policyBlocked, "; "))
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrTransactionFailed)
@@ -1038,6 +1102,13 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			deleteBaseQ += ` AND entity_id = ANY($2::text[])`
 			deleteQueryArgs = append(deleteQueryArgs, deleteScope.EntityIDs)
 		}
+		// Exclude policy-blocked IDs from the delete set
+		blockedSet := map[string]struct{}{}
+		for _, line := range policyBlocked {
+			if i := strings.Index(line, ":"); i > 0 {
+				blockedSet[strings.TrimSpace(line[:i])] = struct{}{}
+			}
+		}
 		rows, err := tx.Query(ctx, deleteBaseQ, deleteQueryArgs...)
 		if err != nil {
 			msg, status := getUserFriendlyFDError(err, "Verify bookings failed")
@@ -1057,6 +1128,9 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := rows.Scan(&bm.id, &bm.entity, &bm.amount); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
 				return
+			}
+			if _, blocked := blockedSet[bm.id]; blocked {
+				continue
 			}
 			validBookings = append(validBookings, bm)
 		}
@@ -1418,6 +1492,19 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errors []string
 
 		for _, bID := range req.BookingIDs {
+			fields, entityID, loadErr := loadFDBookingCDMFields(ctx, pgxPool, bID)
+			if loadErr != nil {
+				errors = append(errors, bID+": "+loadErr.Error())
+				continue
+			}
+			if ok, pmsg := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreApprove,
+				"BulkApproveBooking", "/investment/fd/booking/approve",
+				entityID, userEmail, fields,
+			); !ok {
+				errors = append(errors, bID+": "+pmsg)
+				continue
+			}
+
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: bID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDBooking] RecordAction approve failed for booking %s: %v", bID, actionErr)
@@ -1550,6 +1637,19 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errors []string
 
 		for _, bID := range req.BookingIDs {
+			fields, entityID, loadErr := loadFDBookingCDMFields(ctx, pgxPool, bID)
+			if loadErr != nil {
+				errors = append(errors, bID+": "+loadErr.Error())
+				continue
+			}
+			if ok, pmsg := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreReject,
+				"BulkRejectBooking", "/investment/fd/booking/reject",
+				entityID, userEmail, fields,
+			); !ok {
+				errors = append(errors, bID+": "+pmsg)
+				continue
+			}
+
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: bID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDBooking] RecordAction reject failed for booking %s: %v", bID, actionErr)

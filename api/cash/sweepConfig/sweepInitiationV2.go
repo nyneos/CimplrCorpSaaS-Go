@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/validation"
 	"context"
@@ -193,6 +195,28 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				executionTime = "10:00"
 			}
 
+			if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreCreate,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "SWEEP_INITIATION",
+				EntityCode:          req.EntityName,
+				ActorUserID:         req.UserID,
+				HandlerName:         "CreateSweepInitiation",
+				APIPath:             "/cash/sweep-initiation/create",
+				DefaultBlockMessage: "Sweep initiation create blocked by policy",
+				Fields: map[string]interface{}{
+					"entity_name":         req.EntityName,
+					"source_bank_account": req.SourceBankAccount,
+					"target_bank_account": req.TargetBankAccount,
+					"sweep_type":          sweepType,
+					"auto_create_sweep":   true,
+					"sweep_amount":        req.SweepAmount,
+					"buffer_amount":       req.BufferAmount,
+				},
+			}) {
+				return
+			}
+
 			// Begin transaction
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
@@ -368,6 +392,27 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil || processingStatus != constants.StatusApproved {
 			api.RespondWithResult(w, false, "Sweep must be approved before creating initiation")
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "SWEEP_INITIATION",
+			EntityCode:          entityName,
+			ActorUserID:         req.UserID,
+			HandlerName:         "CreateSweepInitiation",
+			APIPath:             "/cash/sweep-initiation/create",
+			DefaultBlockMessage: "Sweep initiation create blocked by policy",
+			Fields: map[string]interface{}{
+				"sweep_id":            sweepID,
+				"entity_name":         entityName,
+				"source_bank_account": sourceAccount,
+				"target_bank_account": targetAccount,
+				"sweep_amount":        req.SweepAmount,
+				"buffer_amount":       req.BufferAmount,
+			},
+		}) {
 			return
 		}
 
@@ -1050,6 +1095,22 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			comment = req.Comment
 		}
 
+		for _, initiationID := range req.InitiationIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreApprove,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "SWEEP_INITIATION",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkApproveSweepInitiations",
+				APIPath:             "/cash/sweep-initiation/bulk-approve",
+				DefaultBlockMessage: "Sweep initiation approve blocked by policy",
+				Fields:              map[string]interface{}{"initiation_id": initiationID},
+			}); !ok {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
@@ -1186,6 +1247,22 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			comment = req.Comment
 		}
 
+		for _, initiationID := range req.InitiationIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "SWEEP_INITIATION",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkRejectSweepInitiations",
+				APIPath:             "/cash/sweep-initiation/bulk-reject",
+				DefaultBlockMessage: "Sweep initiation reject blocked by policy",
+				Fields:              map[string]interface{}{"initiation_id": initiationID},
+			}); !ok {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
@@ -1304,6 +1381,22 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if requestedBy == "" {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
+		}
+
+		for _, initiationID := range req.InitiationIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "SWEEP_INITIATION",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkDeleteSweepInitiations",
+				APIPath:             "/cash/sweep-initiation/bulk-delete",
+				DefaultBlockMessage: "Sweep initiation delete blocked by policy",
+				Fields:              map[string]interface{}{"initiation_id": initiationID},
+			}); !ok {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
 		}
 
 		tx, err := pgxPool.Begin(ctx)
@@ -1428,6 +1521,32 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if initiatedBy == "" {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
+		}
+
+		for i, item := range req.Initiations {
+			entityCode := strings.TrimSpace(item.EntityName)
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreCreate,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "SWEEP_INITIATION",
+				EntityCode:          entityCode,
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkCreateSweepInitiation",
+				APIPath:             "/cash/sweep-initiation/bulk-create",
+				DefaultBlockMessage: "Sweep initiation create blocked by policy",
+				Fields: map[string]interface{}{
+					"entity_name":         entityCode,
+					"sweep_id":            item.SweepID,
+					"source_bank_account": item.SourceBankAccount,
+					"target_bank_account": item.TargetBankAccount,
+					"sweep_amount":        item.SweepAmount,
+					"buffer_amount":       item.BufferAmount,
+					"index":               i,
+				},
+			}); !ok {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
 		}
 
 		// Begin transaction
@@ -2366,6 +2485,21 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if requestedBy == "" {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "SWEEP_INITIATION",
+			ActorUserID:         req.UserID,
+			HandlerName:         "UpdateSweepInitiation",
+			APIPath:             "/cash/sweep-initiation/update",
+			DefaultBlockMessage: "Sweep initiation update blocked by policy",
+			Fields: map[string]interface{}{
+				"initiation_id": req.InitiationID,
+			},
+		}) {
 			return
 		}
 

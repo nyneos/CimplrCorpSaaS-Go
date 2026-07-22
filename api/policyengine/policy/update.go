@@ -102,7 +102,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := replacePolicyChildren(r.Context(), tx, r, req.PolicyID, req.TriggerEvents, req.Modules, req.RuleType, rf); err != nil {
+		if err := replacePolicyChildren(r.Context(), tx, r, req.PolicyID, req.TriggerEvents, req.Modules, req.EntitiesInclude, req.EntitiesExclude, req.RuleType, rf); err != nil {
 			api.LogErrorForResponse(w, "policy update children: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach triggers/modules/rule rows (unknown code?)", "POLICY_UPDATE_FAILED")
 			return

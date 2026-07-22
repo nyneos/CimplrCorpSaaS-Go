@@ -10,8 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Item is the full CDM variable view: canonical columns + processing_status +
-// maker/checker audit-trail scalars (created_by/at, last_modified_by/at).
+// Item is the full CDM variable view: stable name + friendly label + source mapping.
 type Item struct {
 	VariableID       string `json:"variable_id"`
 	Name             string `json:"name"`
@@ -21,6 +20,8 @@ type Item struct {
 	Description      string `json:"description"`
 	Domain           string `json:"domain"`
 	SourceSystem     string `json:"source_system"`
+	CanonicalRef     string `json:"canonical_ref"`
+	UserAlias        string `json:"user_alias"`
 	Nullable         bool   `json:"nullable"`
 	Status           string `json:"status"`
 	ProcessingStatus string `json:"processing_status"`
@@ -30,15 +31,28 @@ type Item struct {
 	LastModifiedAt   string `json:"last_modified_at"`
 }
 
+const itemSelectCols = `
+	variable_id::text, name, data_type, unit, label, description, domain,
+	COALESCE(source_system, ''), COALESCE(canonical_ref, ''), COALESCE(user_alias, ''),
+	nullable, status, processing_status,
+	COALESCE(created_by, ''), created_at, COALESCE(last_modified_by, ''), last_modified_at`
+
+func scanItem(it *Item, createdAt, lastModifiedAt *time.Time) []interface{} {
+	return []interface{}{
+		&it.VariableID, &it.Name, &it.DataType, &it.Unit, &it.Label, &it.Description, &it.Domain,
+		&it.SourceSystem, &it.CanonicalRef, &it.UserAlias,
+		&it.Nullable, &it.Status, &it.ProcessingStatus,
+		&it.CreatedBy, createdAt, &it.LastModifiedBy, lastModifiedAt,
+	}
+}
+
 func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !common.RequirePOST(w, r) {
 			return
 		}
 		rows, err := pool.Query(r.Context(), `
-			SELECT variable_id::text, name, data_type, unit, label, description, domain,
-			       COALESCE(source_system, ''), nullable, status, processing_status,
-			       COALESCE(created_by, ''), created_at, COALESCE(last_modified_by, ''), last_modified_at
+			SELECT `+itemSelectCols+`
 			FROM policyengine_svc.cdm_variable
 			WHERE is_deleted = false
 			ORDER BY domain, name`)
@@ -53,9 +67,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var it Item
 			var createdAt, lastModifiedAt time.Time
-			if err := rows.Scan(&it.VariableID, &it.Name, &it.DataType, &it.Unit, &it.Label, &it.Description,
-				&it.Domain, &it.SourceSystem, &it.Nullable, &it.Status, &it.ProcessingStatus,
-				&it.CreatedBy, &createdAt, &it.LastModifiedBy, &lastModifiedAt); err != nil {
+			if err := rows.Scan(scanItem(&it, &createdAt, &lastModifiedAt)...); err != nil {
 				api.LogErrorForResponse(w, "cdm list scan: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to list CDM variables", "CDM_LIST_FAILED")
 				return

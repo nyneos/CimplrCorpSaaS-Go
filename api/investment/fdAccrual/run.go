@@ -14,6 +14,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5"
@@ -189,6 +190,20 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if input.FinancialPeriod == "" {
 			input.FinancialPeriod = buildAccrualPeriod(input.AccrualPeriodStart)
+		}
+
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateAccrualRun",
+			"/investment/fd/accrual/run/create", req.EntityID, userEmail, map[string]interface{}{
+				"entity_id":            req.EntityID,
+				"entity_code":          req.EntityID,
+				"run_type":             req.RunType,
+				"run_mode":             req.RunMode,
+				"accrual_period_start": req.AccrualPeriodStart,
+				"accrual_period_end":   req.AccrualPeriodEnd,
+				"financial_period":     input.FinancialPeriod,
+				"accrual_granularity":  req.AcrualGranularity,
+			}) {
+			return
 		}
 
 		runID, err := createAccrualRunInternal(ctx, pgxPool, input)
@@ -428,6 +443,20 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if gateStatus != "VALIDATED" {
 			api.RespondWithError(w, http.StatusBadRequest,
 				fmt.Sprintf("Run must be in VALIDATED status before execution (current: %s). Call /validate first.", gateStatus))
+			return
+		}
+
+		if code, msg := requireAccrualRunAccess(ctx, pgxPool, req.RunID); code != 0 {
+			api.RespondWithError(w, code, msg)
+			return
+		}
+		runFields, runEntityID, pfErr := accrualRunPolicyFields(ctx, pgxPool, req.RunID)
+		if pfErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
+			return
+		}
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreSubmit, "RunAccrual",
+			"/investment/fd/accrual/run/execute", runEntityID, userEmail, runFields) {
 			return
 		}
 
@@ -1094,6 +1123,18 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreSubmit, "SubmitForApproval",
+			"/investment/fd/accrual/run/submit", entityID, userEmail, map[string]interface{}{
+				"run_id":                 req.RunID,
+				"entity_id":              entityID,
+				"entity_code":            entityID,
+				"run_mode":               runMode,
+				"run_status":             runStatus,
+				"total_interest_accrued": totalNet,
+			}) {
+			return
+		}
+
 		_, err = pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_run
 			SET run_status = 'PENDING_APPROVAL', submitted_by = $1, submitted_at = now()
@@ -1190,6 +1231,21 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, runID := range req.RunIDs {
 			res := map[string]interface{}{"run_id": runID}
+
+			runFields, approveEntityID, pfErr := accrualRunPolicyFields(ctx, pgxPool, runID)
+			if pfErr != nil {
+				res[constants.ValueSuccess] = false
+				res[constants.ValueError] = pfErr.Error()
+				results = append(results, res)
+				continue
+			}
+			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveAccrualRun",
+				"/investment/fd/accrual/run/approve", approveEntityID, userEmail, runFields); !ok {
+				res[constants.ValueSuccess] = false
+				res[constants.ValueError] = pmsg
+				results = append(results, res)
+				continue
+			}
 
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: runID, UserID: req.UserID, UserEmail: userEmail, RoleID: req.RoleID, Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
@@ -1382,6 +1438,21 @@ func BulkRejectAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, runID := range req.RunIDs {
 			res := map[string]interface{}{"run_id": runID}
+
+			runFields, rejectEntityID, pfErr := accrualRunPolicyFields(ctx, pgxPool, runID)
+			if pfErr != nil {
+				res[constants.ValueSuccess] = false
+				res[constants.ValueError] = pfErr.Error()
+				results = append(results, res)
+				continue
+			}
+			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectAccrualRun",
+				"/investment/fd/accrual/run/reject", rejectEntityID, userEmail, runFields); !ok {
+				res[constants.ValueSuccess] = false
+				res[constants.ValueError] = pmsg
+				results = append(results, res)
+				continue
+			}
 
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: runID, UserID: req.UserID, UserEmail: userEmail, RoleID: req.RoleID, Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
@@ -2215,6 +2286,18 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		req.RunID = outRunID
 		req.FDID = outFDID
 
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "ProposeOverride",
+			"/investment/fd/accrual/override/propose", entityID, userEmail, map[string]interface{}{
+				"run_id":          outRunID,
+				"ledger_id":       ledgerID,
+				"fd_id":           outFDID,
+				"entity_id":       entityID,
+				"entity_code":     entityID,
+				"override_amount": req.OverrideAmount,
+			}) {
+			return
+		}
+
 		// ── Step 2: Write audit row with ALL old values before any mutation ────
 		_, _ = pgxPool.Exec(ctx, `
 			INSERT INTO investment.fd_accrual_ledger_audit (
@@ -2478,6 +2561,15 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreApprove, "ApproveOverride",
+			"/investment/fd/accrual/override/approve", entityID, userEmail, map[string]interface{}{
+				"ledger_id":   ledgerID,
+				"entity_id":   entityID,
+				"entity_code": entityID,
+			}) {
+			return
+		}
+
 		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 			ModuleCode: "FIXED_DEPOSIT", RecordID: ledgerID,
 			UserID: req.UserID, UserEmail: userEmail, RoleID: "",
@@ -2664,6 +2756,17 @@ func RejectOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&proposedBy,
 		); err != nil {
 			api.RespondWithError(w, http.StatusNotFound, "No PROPOSED override found for this run/fd")
+			return
+		}
+
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreReject, "RejectOverride",
+			"/investment/fd/accrual/override/reject", entityID, userEmail, map[string]interface{}{
+				"run_id":      req.RunID,
+				"ledger_id":   ledgerID,
+				"fd_id":       req.FDID,
+				"entity_id":   entityID,
+				"entity_code": entityID,
+			}) {
 			return
 		}
 
@@ -3892,6 +3995,17 @@ func RecomputeAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		results := make([]runResult, 0, len(req.RunIDs))
 		for _, runID := range req.RunIDs {
+			runFields, recomputeEntityID, pfErr := accrualRunPolicyFields(ctx, pgxPool, runID)
+			if pfErr != nil {
+				results = append(results, runResult{RunID: runID, Error: pfErr.Error()})
+				continue
+			}
+			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, common.TriggerPreSubmit, "RecomputeAccrualRun",
+				"/investment/fd/accrual/run/recompute", recomputeEntityID, userEmail, runFields); !ok {
+				results = append(results, runResult{RunID: runID, Error: pmsg})
+				continue
+			}
+
 			// Soft-delete old ledger rows so we don't double-count but preserve audit trail
 			_, _ = pgxPool.Exec(ctx,
 				`UPDATE investment.fd_accrual_ledger
@@ -4051,6 +4165,17 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreSubmit, "BulkGenerateMonthlyAccruals",
+			"/investment/fd/accrual/run/bulk-generate", req.EntityID, userEmail, map[string]interface{}{
+				"entity_id":    req.EntityID,
+				"entity_code":  req.EntityID,
+				"start_month":  req.StartMonth,
+				"end_month":    req.EndMonth,
+				"run_mode":     req.RunMode,
+			}) {
+			return
+		}
+
 		type monthResult struct {
 			Month      string `json:"month"`
 			RunID      string `json:"run_id"`
@@ -4094,6 +4219,20 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Step 1: Create run
+			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "BulkGenerateMonthlyAccruals",
+				"/investment/fd/accrual/run/bulk-generate", req.EntityID, userEmail, map[string]interface{}{
+					"entity_id":            req.EntityID,
+					"entity_code":          req.EntityID,
+					"month":                monthStr,
+					"accrual_period_start": periodStart.Format("2006-01-02"),
+					"accrual_period_end":   periodEnd.Format("2006-01-02"),
+					"run_mode":             req.RunMode,
+				}); !ok {
+				res.Error = pmsg
+				monthResults = append(monthResults, res)
+				continue
+			}
+
 			input := CreateAccrualRunInput{
 				RunType:            "MONTHLY", // bulk monthly generate always produces MONTHLY runs
 				RunMode:            req.RunMode,
@@ -4144,6 +4283,18 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Step 3: Execute
+			runFields, bulkRunEntityID, pfErr := accrualRunPolicyFields(ctx, pgxPool, runID)
+			if pfErr != nil {
+				res.Error = pfErr.Error()
+				monthResults = append(monthResults, res)
+				continue
+			}
+			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, common.TriggerPreSubmit, "BulkGenerateMonthlyAccruals",
+				"/investment/fd/accrual/run/bulk-generate", bulkRunEntityID, userEmail, runFields); !ok {
+				res.Error = pmsg
+				monthResults = append(monthResults, res)
+				continue
+			}
 			calc, failed, execErr := executeAccrualRun(ctx, pgxPool, runID, userEmail)
 			res.Calculated = calc
 			res.Failed = failed

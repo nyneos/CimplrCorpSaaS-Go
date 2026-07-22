@@ -9,6 +9,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/policyengine/common"
 	jobs "CimplrCorpSaas/internal/jobs/investment"
 	"CimplrCorpSaas/internal/logger"
 
@@ -142,6 +143,18 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if userEmail == "" {
 			api.RespondWithError(w, 401, constants.ErrInvalidSession)
 			return
+		}
+
+		approvalEventCode := common.TriggerPreApprove
+		if req.Action == constants.AuditActionReject {
+			approvalEventCode = common.TriggerPreReject
+		}
+		for _, batchID := range batchIDs {
+			if !mfEnforce(ctx, w, r, pgxPool, approvalEventCode, "BulkApproveBatch",
+				"/investment/onboard/batch/approve", batchID, userEmail,
+				map[string]interface{}{"batch_id": batchID, "action": req.Action, "comment": req.Comment}) {
+				return
+			}
 		}
 
 		tx, err := pgxPool.BeginTx(ctx, pgx.TxOptions{})

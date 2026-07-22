@@ -66,7 +66,7 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 
 	policies := req.Policies
 	if len(policies) == 0 {
-		loaded, err := loadActivePolicies(ctx, pool, req.EventCode, req.ModuleCode)
+		loaded, err := loadActivePolicies(ctx, pool, req.EventCode, req.ModuleCode, req.EntityCode)
 		if err != nil {
 			return CheckResult{}, err
 		}
@@ -127,6 +127,8 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 		)
 	}
 
+	dispatchNotifyBreaches(ctx, pool, req, policies, resp.Results)
+
 	return CheckResult{
 		AggregatedAction: resp.AggregatedAction,
 		Results:          resp.Results,
@@ -134,20 +136,25 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 	}, nil
 }
 
-func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode string) ([]map[string]interface{}, error) {
+func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, entityCode string) ([]map[string]interface{}, error) {
+	codes := ExpandTriggerAliases(eventCode)
 	q := `
 		SELECT p.policy_id::text, p.code, p.rule_type, p.action_on_breach, p.null_handling,
 		       COALESCE(p.null_handling_default, ''), COALESCE(p.addl_expression, ''),
 		       COALESCE(p.thr_variable, ''), COALESCE(p.thr_operator, ''), COALESCE(p.thr_value, 0),
 		       COALESCE(p.thr_value_mode, ''), COALESCE(p.thr_percent_base, ''),
-		       COALESCE(p.list_target_field, ''), COALESCE(p.list_mode, ''), COALESCE(p.list_case_sensitive, false)
+		       COALESCE(p.list_target_field, ''), COALESCE(p.list_mode, ''), COALESCE(p.list_case_sensitive, false),
+		       COALESCE(p.notification_group, ''),
+		       COALESCE(p.formula_expression, ''), COALESCE(p.formula_return_type, ''),
+		       COALESCE(p.formula_operator, ''), COALESCE(p.formula_value, 0),
+		       COALESCE(p.applicability, 'Global')
 		FROM policyengine_svc.policy_master p
 		INNER JOIN policyengine_svc.policy_trigger t
-			ON t.policy_id = p.policy_id AND t.is_deleted = false AND t.event_code = $1
+			ON t.policy_id = p.policy_id AND t.is_deleted = false AND t.event_code = ANY($1::text[])
 		WHERE p.is_deleted = false AND p.status = 'Active' AND p.processing_status = 'APPROVED'
 		  AND p.effective_start <= CURRENT_DATE
 		  AND (p.effective_end IS NULL OR p.effective_end >= CURRENT_DATE)`
-	args := []interface{}{eventCode}
+	args := []interface{}{codes}
 	if strings.TrimSpace(moduleCode) != "" {
 		q += `
 		AND (
@@ -167,15 +174,19 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 	defer rows.Close()
 
 	out := make([]map[string]interface{}, 0)
+	policyIDs := make([]string, 0)
 	for rows.Next() {
 		var (
 			id, code, ruleType, action, nullH, nullDef, addl     string
 			thrVar, thrOp, thrMode, thrBase, listField, listMode string
-			thrVal                                               float64
+			notifGroup, formulaExpr, formulaRet, formulaOp       string
+			applicability                                        string
+			thrVal, formulaVal                                   float64
 			listCase                                             bool
 		)
 		if err := rows.Scan(&id, &code, &ruleType, &action, &nullH, &nullDef, &addl,
-			&thrVar, &thrOp, &thrVal, &thrMode, &thrBase, &listField, &listMode, &listCase); err != nil {
+			&thrVar, &thrOp, &thrVal, &thrMode, &thrBase, &listField, &listMode, &listCase,
+			&notifGroup, &formulaExpr, &formulaRet, &formulaOp, &formulaVal, &applicability); err != nil {
 			return nil, err
 		}
 		snap := map[string]interface{}{
@@ -194,14 +205,127 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 			"list_target_field":     listField,
 			"list_mode":             listMode,
 			"list_case_sensitive":   listCase,
+			"notification_group":    notifGroup,
+			"formula_expression":    formulaExpr,
+			"formula_return_type":   formulaRet,
+			"formula_operator":      formulaOp,
+			"formula_value":         formulaVal,
+			"applicability":         applicability,
 		}
 		if ruleType == "list" {
 			vals, _ := loadListValues(ctx, pool, id)
 			snap["list_values"] = vals
 		}
 		out = append(out, snap)
+		policyIDs = append(policyIDs, id)
+	}
+
+	entityMap, err := loadPolicyEntityScopes(ctx, pool, policyIDs)
+	if err != nil {
+		return nil, err
+	}
+	entityCode = strings.TrimSpace(entityCode)
+	filtered := make([]map[string]interface{}, 0, len(out))
+	for _, snap := range out {
+		id, _ := snap["policy_id"].(string)
+		applicability, _ := snap["applicability"].(string)
+		scope := entityMap[id]
+		if policyAppliesToEntity(applicability, entityCode, scope.include, scope.exclude) {
+			filtered = append(filtered, snap)
+		}
+	}
+	return filtered, nil
+}
+
+type entityScopeLists struct {
+	include []string
+	exclude []string
+}
+
+func loadPolicyEntityScopes(ctx context.Context, pool *pgxpool.Pool, policyIDs []string) (map[string]entityScopeLists, error) {
+	out := make(map[string]entityScopeLists, len(policyIDs))
+	if len(policyIDs) == 0 {
+		return out, nil
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT policy_id::text, entity_code, filter_mode
+		FROM policyengine_svc.policy_entity
+		WHERE policy_id = ANY($1::uuid[]) AND is_deleted = false`, policyIDs)
+	if err != nil {
+		// Table may not exist yet on older DBs — treat as no entity filters.
+		if strings.Contains(err.Error(), "policy_entity") {
+			return out, nil
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, code, mode string
+		if err := rows.Scan(&id, &code, &mode); err != nil {
+			return nil, err
+		}
+		s := out[id]
+		if mode == "exclude" {
+			s.exclude = append(s.exclude, code)
+		} else {
+			s.include = append(s.include, code)
+		}
+		out[id] = s
 	}
 	return out, nil
+}
+
+// policyAppliesToEntity enforces mutual exclusion semantics:
+// exclude always removes; when include is non-empty the entity must be listed.
+func policyAppliesToEntity(applicability, entityCode string, include, exclude []string) bool {
+	applicability = strings.TrimSpace(applicability)
+	if applicability == "" {
+		applicability = "Global"
+	}
+
+	incSet := make(map[string]struct{}, len(include))
+	for _, e := range include {
+		e = strings.TrimSpace(e)
+		if e != "" {
+			incSet[e] = struct{}{}
+		}
+	}
+	for _, e := range exclude {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if _, inInc := incSet[e]; inInc {
+			continue // include wins over exclude if both somehow present
+		}
+		if entityCode != "" && e == entityCode {
+			return false
+		}
+	}
+
+	switch applicability {
+	case "Entity":
+		if len(incSet) == 0 {
+			return false
+		}
+		if entityCode == "" {
+			return false
+		}
+		_, ok := incSet[entityCode]
+		return ok
+	case "Custom":
+		if len(incSet) > 0 {
+			if entityCode == "" {
+				return false
+			}
+			_, ok := incSet[entityCode]
+			return ok
+		}
+		return true
+	default:
+		// Global / Scheme / Module — entity lists only act as excludes (already applied)
+		return true
+	}
 }
 
 func loadListValues(ctx context.Context, pool *pgxpool.Pool, policyID string) ([]string, error) {

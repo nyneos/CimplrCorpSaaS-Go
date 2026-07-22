@@ -28,6 +28,8 @@ type createReq struct {
 	CanOverride       bool            `json:"can_override"`
 	Modules           []string        `json:"modules"`
 	TriggerEvents     []string        `json:"trigger_events"`
+	EntitiesInclude   []string        `json:"entities_include"`
+	EntitiesExclude   []string        `json:"entities_exclude"`
 	RuleType          string          `json:"rule_type"`
 	Config            json.RawMessage `json:"config"`
 	AddlExpression    string          `json:"addl_expression"`
@@ -170,7 +172,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := insertPolicyChildren(r, tx, policyID, req.TriggerEvents, req.Modules, req.RuleType, rf); err != nil {
+		if err := insertPolicyChildren(r, tx, policyID, req.TriggerEvents, req.Modules, req.EntitiesInclude, req.EntitiesExclude, req.RuleType, rf); err != nil {
 			api.LogErrorForResponse(w, "policy create children: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach triggers/modules/rule rows (unknown code?)", "POLICY_CREATE_FAILED")
 			return

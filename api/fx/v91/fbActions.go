@@ -12,6 +12,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
+	"CimplrCorpSaas/api/policyengine/common"
+	policyruntime "CimplrCorpSaas/api/policyengine/runtime"
 
 	"CimplrCorpSaas/api/constants"
 
@@ -65,6 +67,23 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			dt, err := parseFlexibleDate(p.NewValueDate)
 			if err != nil {
 				respondEnvelopeError(w, http.StatusBadRequest, fmt.Sprintf("invalid date at index %d: %v", i, err), v91ErrorCode(http.StatusBadRequest))
+				return
+			}
+			if ok, msg := policyruntime.EnforceInline(ctx, r, pool, policyruntime.EnforceInput{
+				EventCode:           common.TriggerPreEdit,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           v91ExposurePolicySubModule(r),
+				EntityCode:          p.ExposureHeaderID,
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkUpdateValueDates",
+				APIPath:             r.URL.Path,
+				DefaultBlockMessage: "Exposure value-date update blocked by policy",
+				Fields: map[string]interface{}{
+					"exposure_header_id": p.ExposureHeaderID,
+					"new_value_date":     p.NewValueDate,
+				},
+			}); !ok {
+				respondEnvelopeError(w, http.StatusUnprocessableEntity, msg, v91ErrorCode(http.StatusUnprocessableEntity))
 				return
 			}
 			q := `
@@ -204,6 +223,24 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
+		for _, id := range req.ExposureIDs {
+			if ok, msg := policyruntime.EnforceInline(ctx, r, pool, policyruntime.EnforceInput{
+				EventCode:           common.TriggerPreApprove,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           v91ExposurePolicySubModule(r),
+				EntityCode:          id,
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkApproveExposures",
+				APIPath:             r.URL.Path,
+				DefaultBlockMessage: "Exposure approval blocked by policy",
+				Fields: map[string]interface{}{
+					"exposure_header_id": id,
+				},
+			}); !ok {
+				respondEnvelopeError(w, http.StatusUnprocessableEntity, msg, v91ErrorCode(http.StatusUnprocessableEntity))
+				return
+			}
+		}
 
 		sel := `SELECT exposure_header_id, exposure_creation_status FROM public.exposure_headers WHERE exposure_header_id = ANY($1)`
 		rows, err := pool.Query(ctx, sel, req.ExposureIDs)
@@ -309,6 +346,24 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
+		for _, id := range req.ExposureIDs {
+			if ok, msg := policyruntime.EnforceInline(ctx, r, pool, policyruntime.EnforceInput{
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           v91ExposurePolicySubModule(r),
+				EntityCode:          id,
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkRejectExposures",
+				APIPath:             r.URL.Path,
+				DefaultBlockMessage: "Exposure rejection blocked by policy",
+				Fields: map[string]interface{}{
+					"exposure_header_id": id,
+				},
+			}); !ok {
+				respondEnvelopeError(w, http.StatusUnprocessableEntity, msg, v91ErrorCode(http.StatusUnprocessableEntity))
+				return
+			}
+		}
 
 		// q := `UPDATE public.exposure_headers SET approval_status='Rejected', rejection_comment=$1, rejected_by=$2, rejected_at=now(), updated_at=now() WHERE exposure_header_id = ANY($3) RETURNING exposure_header_id`
 		// rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), rejector, req.ExposureIDs)
@@ -369,6 +424,24 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
+		for _, id := range req.ExposureIDs {
+			if ok, msg := policyruntime.EnforceInline(ctx, r, pool, policyruntime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           v91ExposurePolicySubModule(r),
+				EntityCode:          id,
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkDeleteExposures",
+				APIPath:             r.URL.Path,
+				DefaultBlockMessage: "Exposure delete blocked by policy",
+				Fields: map[string]interface{}{
+					"exposure_header_id": id,
+				},
+			}); !ok {
+				respondEnvelopeError(w, http.StatusUnprocessableEntity, msg, v91ErrorCode(http.StatusUnprocessableEntity))
+				return
+			}
+		}
 
 		// q := `UPDATE public.exposure_headers SET approval_status='Delete-approval',delete_comment=$1, is_active = FALSE, updated_at=now() WHERE exposure_header_id = ANY($2) RETURNING exposure_header_id`
 		// rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), req.ExposureIDs)
@@ -405,6 +478,15 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			},
 		})
 	}
+}
+
+func v91ExposurePolicySubModule(r *http.Request) string {
+	// /fx/exposures/v91/upload/bulk-* → Exposure Upload (staging checker)
+	// /fx/exposures/v91/upload and /fx/exposures/v91/bulk-* → Exposure Creation (v91 SAP)
+	if r != nil && strings.HasPrefix(r.URL.Path, "/fx/exposures/v91/upload/") {
+		return "EXPOSURE_UPLOAD"
+	}
+	return "EXPOSURE_CREATION"
 }
 
 func v91ExposureActionSourceRoute(r *http.Request, fallback string) string {

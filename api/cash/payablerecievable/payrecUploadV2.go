@@ -3,6 +3,8 @@ package payablerecievable
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"context"
 	"crypto/sha256"
 	"encoding/csv"
@@ -375,6 +377,22 @@ func BatchUploadTransactionsV2(pool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 
 			respondWithErrorTransactionV2(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreUpload,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "PAYABLE_RECEIVABLE",
+			ActorUserID:         userID,
+			HandlerName:         "BatchUploadTransactionsV2",
+			APIPath:             "/cash/transactions/upload-payrec-batch",
+			DefaultBlockMessage: "Payable/receivable batch upload blocked by policy",
+			Fields: map[string]interface{}{
+				"file_field": fileField,
+				"filename":   fileHeader.Filename,
+			},
+		}) {
 			return
 		}
 

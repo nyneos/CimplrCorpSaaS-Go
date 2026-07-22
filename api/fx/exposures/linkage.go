@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 	"context"
@@ -468,6 +470,23 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || req.ExposureHeaderID == "" || req.BookingID == "" || req.HedgedAmount == 0 {
 			respondWithError(w, http.StatusBadRequest, "user_id, exposure_header_id, booking_id, and hedged_amount are required")
+			return
+		}
+		if !runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "HEDGE_LINK",
+			EntityCode:          req.ExposureHeaderID,
+			ActorUserID:         req.UserID,
+			HandlerName:         "LinkExposureHedge",
+			APIPath:             "/fx/exposures/link-exposure-hedge",
+			DefaultBlockMessage: "Exposure hedge link blocked by policy",
+			Fields: map[string]interface{}{
+				"exposure_header_id": req.ExposureHeaderID,
+				"booking_id":         req.BookingID,
+				"hedged_amount":      req.HedgedAmount,
+			},
+		}) {
 			return
 		}
 		// Upsert exposure_hedge_links

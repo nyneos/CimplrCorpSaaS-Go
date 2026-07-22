@@ -3,6 +3,8 @@ package additionalfiles
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"database/sql"
@@ -81,6 +83,11 @@ type Config struct {
 	AuditTableName          string
 	ParentIDField           string
 	FolderName              string
+	// PolicyModuleCode + PolicySubModule enable PRE_UPLOAD / PRE_DELETE RunCheck
+	// against the parent business sub-module (RequireVariables=false).
+	PolicyModuleCode string
+	PolicySubModule  string
+	PolicyAPIPath    string
 	List                    func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]FileRecord, error)
 	Create                  func(ctx context.Context, tx pgx.Tx, input CreateInput) error
 	CreateReturning         func(ctx context.Context, tx pgx.Tx, input CreateInput) (string, error)
@@ -194,6 +201,50 @@ func NewListHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 	}
 }
 
+// enforceAdditionalFilesPolicy runs PRE_UPLOAD / PRE_DELETE when PolicyModuleCode
+// + PolicySubModule are set on Config. Missing scope → no-op (pass).
+func enforceAdditionalFilesPolicy(
+	ctx context.Context,
+	w http.ResponseWriter,
+	r *http.Request,
+	pool *pgxpool.Pool,
+	cfg Config,
+	eventCode string,
+	parentID string,
+	actor string,
+	fileID string,
+	fileCount int,
+) bool {
+	mod := strings.TrimSpace(cfg.PolicyModuleCode)
+	sub := strings.TrimSpace(cfg.PolicySubModule)
+	if mod == "" || sub == "" {
+		return true
+	}
+	apiPath := strings.TrimSpace(cfg.PolicyAPIPath)
+	if apiPath == "" {
+		apiPath = "/additional-files/" + strings.TrimSpace(cfg.Module)
+	}
+	fields := map[string]interface{}{
+		cfg.ParentIDField: parentID,
+		"parent_id":       parentID,
+		"module_key":      cfg.Module,
+		"file_count":      fileCount,
+	}
+	if strings.TrimSpace(fileID) != "" {
+		fields["file_id"] = fileID
+	}
+	return runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
+		EventCode:           eventCode,
+		ModuleCode:          mod,
+		SubModule:           sub,
+		ActorUserID:         actor,
+		HandlerName:         "AdditionalFiles/" + cfg.Module,
+		APIPath:             apiPath,
+		DefaultBlockMessage: "Additional file action blocked by policy",
+		Fields:              fields,
+	})
+}
+
 func NewUploadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -222,6 +273,10 @@ func NewUploadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		fileHeaders := collectMultipartFiles(r, "file", "files")
 		if len(fileHeaders) == 0 {
 			respondEnvelopeError(w, http.StatusBadRequest, "no files provided")
+			return
+		}
+
+		if !enforceAdditionalFilesPolicy(r.Context(), w, r, pool, cfg, common.TriggerPreUpload, parentID, uploadedBy, "", len(fileHeaders)) {
 			return
 		}
 
@@ -606,6 +661,11 @@ func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			return
 		}
 
+		requestedBy := requestedByOrFallback(r.Context(), req.UserID)
+		if !enforceAdditionalFilesPolicy(r.Context(), w, r, pool, cfg, common.TriggerPreDelete, parentID, requestedBy, req.FileID, 1) {
+			return
+		}
+
 		pending, err := latestPendingDelete(r.Context(), pool, cfg, req.FileID)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
@@ -616,7 +676,6 @@ func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			return
 		}
 
-		requestedBy := requestedByOrFallback(r.Context(), req.UserID)
 		if err := recordDeleteRequestAudit(r.Context(), pool, cfg, parentID, *record, auditActorInfo{
 			RequestedBy: requestedBy,
 			RequestedIP: api.ClientIPFromRequest(r),
@@ -1099,6 +1158,9 @@ func deleteImmediate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool,
 	}
 
 	deletedBy := requestedByOrFallback(r.Context(), req.UserID)
+	if !enforceAdditionalFilesPolicy(r.Context(), w, r, pool, cfg, common.TriggerPreDelete, parentID, deletedBy, req.FileID, 1) {
+		return
+	}
 	deleted, err := cfg.SoftDelete(r.Context(), pool, parentID, req.FileID, deletedBy, time.Now().UTC())
 	if err != nil {
 		respondEnvelopeError(w, http.StatusInternalServerError, err.Error())

@@ -34,14 +34,10 @@ func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		var it Item
 		var createdAt, lastModifiedAt time.Time
 		err := pool.QueryRow(r.Context(), `
-			SELECT variable_id::text, name, data_type, unit, label, description, domain,
-			       COALESCE(source_system, ''), nullable, status, processing_status,
-			       COALESCE(created_by, ''), created_at, COALESCE(last_modified_by, ''), last_modified_at
+			SELECT `+itemSelectCols+`
 			FROM policyengine_svc.cdm_variable
 			WHERE variable_id = $1::uuid AND is_deleted = false`, req.VariableID,
-		).Scan(&it.VariableID, &it.Name, &it.DataType, &it.Unit, &it.Label, &it.Description,
-			&it.Domain, &it.SourceSystem, &it.Nullable, &it.Status, &it.ProcessingStatus,
-			&it.CreatedBy, &createdAt, &it.LastModifiedBy, &lastModifiedAt)
+		).Scan(scanItem(&it, &createdAt, &lastModifiedAt)...)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "CDM variable not found", "NOT_FOUND")
 			return

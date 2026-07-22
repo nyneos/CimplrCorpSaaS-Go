@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/logger"
 	"bytes"
@@ -69,6 +71,23 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if msg := validateBankLimitRecordScope(ctx, pgxPool, req.LimitID, req.CurrencyCode); msg != "" {
 			api.RespondWithResult(w, false, msg)
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "LIMIT_UTILIZATION",
+			ActorUserID:         req.UserID,
+			HandlerName:         "CreateUtilization",
+			APIPath:             "/cash/utilization/create",
+			DefaultBlockMessage: "Limit utilization create blocked by policy",
+			Fields: map[string]interface{}{
+				"limit_id":         req.LimitID,
+				"currency_code":    req.CurrencyCode,
+				"utilized_amount":  req.UtilizedAmount,
+			},
+		}) {
 			return
 		}
 
@@ -207,6 +226,27 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				entryMode = "MANUAL"
 			}
 
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreCreate,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "LIMIT_UTILIZATION",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkCreateUtilization",
+				APIPath:             "/cash/utilization/bulk-create",
+				DefaultBlockMessage: "Limit utilization create blocked by policy",
+				Fields: map[string]interface{}{
+					"limit_id":        util.LimitID,
+					"currency_code":   util.CurrencyCode,
+					"utilized_amount": util.UtilizedAmount,
+					"index":           i,
+				},
+			}); !ok {
+				result["success"] = false
+				result["error"] = msg
+				results = append(results, result)
+				continue
+			}
+
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				result["success"] = false
@@ -318,6 +358,22 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if requestedBy == "" {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "LIMIT_UTILIZATION",
+			ActorUserID:         req.UserID,
+			HandlerName:         "UpdateUtilization",
+			APIPath:             "/cash/utilization/update",
+			DefaultBlockMessage: "Limit utilization update blocked by policy",
+			Fields: map[string]interface{}{
+				"utilization_id": req.UtilizationID,
+				"fields":         req.Fields,
+			},
+		}) {
 			return
 		}
 
@@ -495,6 +551,22 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for i, utilizationID := range req.UtilizationIDs {
 			result := map[string]interface{}{"index": i, "utilization_id": utilizationID}
+
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "LIMIT_UTILIZATION",
+				ActorUserID:         req.UserID,
+				HandlerName:         "DeleteUtilization",
+				APIPath:             "/cash/utilization/delete",
+				DefaultBlockMessage: "Limit utilization delete blocked by policy",
+				Fields:              map[string]interface{}{"utilization_id": utilizationID},
+			}); !ok {
+				result["success"] = false
+				result["error"] = msg
+				results = append(results, result)
+				continue
+			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
@@ -1134,6 +1206,22 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		for _, utilizationID := range req.UtilizationIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreApprove,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "LIMIT_UTILIZATION",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkApproveUtilizations",
+				APIPath:             "/cash/utilization/approve",
+				DefaultBlockMessage: "Limit utilization approve blocked by policy",
+				Fields:              map[string]interface{}{"utilization_id": utilizationID},
+			}); !ok {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
+		}
+
 		upd := `UPDATE cimplrcorpsaas.auditactionbanklimitutilization 
 			SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
 			WHERE action_id = ANY($4)`
@@ -1242,6 +1330,22 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		for _, utilizationID := range req.UtilizationIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "LIMIT_UTILIZATION",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkRejectUtilizations",
+				APIPath:             "/cash/utilization/reject",
+				DefaultBlockMessage: "Limit utilization reject blocked by policy",
+				Fields:              map[string]interface{}{"utilization_id": utilizationID},
+			}); !ok {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
+		}
+
 		upd := `UPDATE cimplrcorpsaas.auditactionbanklimitutilization 
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
 			WHERE action_id = ANY($4)`
@@ -1339,6 +1443,22 @@ func UploadUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := ensureNoDuplicateUtilizationRows(ctx, pgxPool, rows); err != nil {
 			api.RespondWithError(w, http.StatusConflict, err.Error())
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreUpload,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "LIMIT_UTILIZATION",
+			ActorUserID:         userID,
+			HandlerName:         "UploadUtilization",
+			APIPath:             "/cash/utilization/upload",
+			DefaultBlockMessage: "Limit utilization upload blocked by policy",
+			Fields: map[string]interface{}{
+				"filename":  file.Filename,
+				"row_count": len(rows) - 1,
+			},
+		}) {
 			return
 		}
 

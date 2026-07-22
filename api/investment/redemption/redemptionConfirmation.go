@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/uploadutil"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	jobs "CimplrCorpSaas/internal/jobs/investment"
 	"CimplrCorpSaas/internal/logger"
@@ -309,6 +310,19 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
+		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateRedemptionConfirmationSingle",
+			"/investment/redemption/confirmation/create", mfSubRedemptionConf, req.RedemptionID, userEmail,
+			map[string]interface{}{
+				"redemption_id":  req.RedemptionID,
+				"actual_nav":     req.ActualNAV,
+				"actual_units":   req.ActualUnits,
+				"gross_proceeds": req.GrossProceeds,
+				"net_credited":   req.NetCredited,
+			}) {
+			cleanupUpload()
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			cleanupUpload()
@@ -484,6 +498,19 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 
+				if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "CreateRedemptionConfirmationBulk",
+					"/investment/redemption/confirmation/create-bulk", mfSubRedemptionConf, row.RedemptionID, userEmail,
+					map[string]interface{}{
+						"redemption_id":  row.RedemptionID,
+						"actual_nav":     row.ActualNAV,
+						"actual_units":   row.ActualUnits,
+						"gross_proceeds": row.GrossProceeds,
+						"net_credited":   row.NetCredited,
+					}); !ok {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: pmsg})
+					return
+				}
+
 				tx, err := pgxPool.Begin(ctx)
 				if err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
@@ -599,6 +626,12 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateRedemptionConfirmation",
+			"/investment/redemption/confirmation/update", mfSubRedemptionConf, req.RedemptionConfirmID, userEmail,
+			map[string]interface{}{"redemption_confirm_id": req.RedemptionConfirmID, "fields": req.Fields}) {
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -736,6 +769,15 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 
+				if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreEdit, "UpdateRedemptionConfirmationBulk",
+					"/investment/redemption/confirmation/update-bulk", mfSubRedemptionConf, row.RedemptionConfirmID, userEmail,
+					map[string]interface{}{"redemption_confirm_id": row.RedemptionConfirmID, "fields": row.Fields}); !ok {
+					results = append(results, map[string]interface{}{
+						constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: pmsg,
+					})
+					return
+				}
+
 				tx, err := pgxPool.Begin(ctx)
 				if err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
@@ -862,6 +904,15 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		for _, id := range req.RedemptionConfirmIDs {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreDelete, "DeleteRedemptionConfirmation",
+				"/investment/redemption/confirmation/delete", mfSubRedemptionConf, id, requestedBy,
+				map[string]interface{}{"redemption_confirm_id": id, "reason": req.Reason}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -924,6 +975,15 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		}
 
 		ctx := r.Context()
+		for _, id := range req.RedemptionConfirmIDs {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveRedemptionConfirmationActions",
+				"/investment/redemption/confirmation/approve", mfSubRedemptionConf, id, checkerBy,
+				map[string]interface{}{"redemption_confirm_id": id, "comment": req.Comment}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -1257,6 +1317,15 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 			}
 			api.RespondWithError(w, http.StatusBadRequest, msg)
 			return
+		}
+
+		for _, id := range req.RedemptionConfirmIDs {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectRedemptionConfirmationActions",
+				"/investment/redemption/confirmation/reject", mfSubRedemptionConf, id, checkerBy,
+				map[string]interface{}{"redemption_confirm_id": id, "comment": req.Comment}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+				return
+			}
 		}
 
 		if _, err := tx.Exec(ctx, `
@@ -1980,6 +2049,15 @@ func ConfirmRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		for _, id := range req.RedemptionConfirmationIDs {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "ConfirmRedemption",
+				"/investment/redemption/confirmation/confirm", mfSubRedemptionConf, id, confirmedBy,
+				map[string]interface{}{"redemption_confirm_id": id}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+				return
+			}
+		}
 
 		result, err := processRedemptionConfirmations(pgxPool, ctx, req.UserID, confirmedBy, req.RedemptionConfirmationIDs)
 		if err != nil {

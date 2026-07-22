@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	"context"
@@ -1038,6 +1040,22 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil || processingStatus != constants.StatusApproved {
 			api.RespondWithResult(w, false, "Sweep must be approved before manual execution")
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreSubmit,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "SWEEP_EXECUTION",
+			EntityCode:          entityName,
+			ActorUserID:         req.UserID,
+			HandlerName:         "ManualTriggerSweepV2",
+			APIPath:             "/cash/sweep-execution-v2/manual-trigger",
+			DefaultBlockMessage: "Sweep execution blocked by policy",
+			Fields: map[string]interface{}{
+				"sweep_id": req.SweepID,
+			},
+		}) {
 			return
 		}
 

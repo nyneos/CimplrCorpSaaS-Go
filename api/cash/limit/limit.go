@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/validation"
@@ -133,6 +135,24 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := checkLimitUniqueness(ctx, pgxPool, key); err != nil {
 			api.RespondWithResult(w, false, err.Error())
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "BANK_LIMIT",
+			EntityCode:          req.EntityName,
+			ActorUserID:         req.UserID,
+			HandlerName:         "CreateBankLimit",
+			APIPath:             "/cash/limit/create",
+			DefaultBlockMessage: "Bank limit create blocked by policy",
+			Fields: map[string]interface{}{
+				"entity_name":   req.EntityName,
+				"bank_name":     req.BankName,
+				"currency_code": req.CurrencyCode,
+			},
+		}) {
 			return
 		}
 
@@ -381,6 +401,28 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				fungibilityType := strings.ToUpper(strings.TrimSpace(lim.FungibilityType))
 				securityType := strings.ToUpper(strings.TrimSpace(lim.SecurityType))
 
+				if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+					EventCode:           common.TriggerPreCreate,
+					ModuleCode:          common.ModuleCash,
+					SubModule:           "BANK_LIMIT",
+					EntityCode:          lim.EntityName,
+					ActorUserID:         req.UserID,
+					HandlerName:         "BulkCreateBankLimit",
+					APIPath:             "/cash/limit/bulk-create",
+					DefaultBlockMessage: "Bank limit create blocked by policy",
+					Fields: map[string]interface{}{
+						"entity_name":   lim.EntityName,
+						"bank_name":     lim.BankName,
+						"currency_code": lim.CurrencyCode,
+						"index":         vl.Index,
+					},
+				}); !ok {
+					result["success"] = false
+					result["error"] = msg
+					results = append(results, result)
+					continue
+				}
+
 				tx, err := pgxPool.Begin(ctx)
 				if err != nil {
 					result["success"] = false
@@ -498,6 +540,22 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if requestedBy == "" {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "BANK_LIMIT",
+			ActorUserID:         req.UserID,
+			HandlerName:         "UpdateBankLimit",
+			APIPath:             "/cash/limit/update",
+			DefaultBlockMessage: "Bank limit update blocked by policy",
+			Fields: map[string]interface{}{
+				"limit_id": req.LimitID,
+				"fields":   req.Fields,
+			},
+		}) {
 			return
 		}
 
@@ -735,6 +793,22 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for i, limitID := range req.LimitIDs {
 			result := map[string]interface{}{"index": i, "limit_id": limitID}
+
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_LIMIT",
+				ActorUserID:         req.UserID,
+				HandlerName:         "DeleteBankLimit",
+				APIPath:             "/cash/limit/delete",
+				DefaultBlockMessage: "Bank limit delete blocked by policy",
+				Fields:              map[string]interface{}{"limit_id": limitID},
+			}); !ok {
+				result["success"] = false
+				result["error"] = msg
+				results = append(results, result)
+				continue
+			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
@@ -1063,6 +1137,22 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		for _, limitID := range req.LimitIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreApprove,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_LIMIT",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkApproveBankLimits",
+				APIPath:             "/cash/limit/approve",
+				DefaultBlockMessage: "Bank limit approve blocked by policy",
+				Fields:              map[string]interface{}{"limit_id": limitID},
+			}); !ok {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
+		}
+
 		// Update audit status to APPROVED
 		upd := `UPDATE cimplrcorpsaas.auditactionbanklimit 
 			SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3
@@ -1171,6 +1261,22 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(missing) > 0 {
 			api.RespondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
 			return
+		}
+
+		for _, limitID := range req.LimitIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_LIMIT",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkRejectBankLimits",
+				APIPath:             "/cash/limit/reject",
+				DefaultBlockMessage: "Bank limit reject blocked by policy",
+				Fields:              map[string]interface{}{"limit_id": limitID},
+			}); !ok {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
 		}
 
 		upd := `UPDATE cimplrcorpsaas.auditactionbanklimit 

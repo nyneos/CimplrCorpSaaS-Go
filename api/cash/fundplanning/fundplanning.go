@@ -3,6 +3,8 @@ package fundplanning
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1083,6 +1085,24 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "FUND_PLANNING",
+			EntityCode:          req.EntityName,
+			ActorUserID:         req.UserID,
+			HandlerName:         "CreateFundPlan",
+			APIPath:             "/cash/fund-planning/create",
+			DefaultBlockMessage: "Fund plan create blocked by policy",
+			Fields: map[string]interface{}{
+				"entity_name": req.EntityName,
+				"horizon":     req.Horizon,
+				"group_count": len(req.Groups),
+			},
+		}) {
+			return
+		}
+
 		// Start transaction
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -1607,6 +1627,19 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreApprove,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "FUND_PLANNING",
+			ActorUserID:         req.UserID,
+			HandlerName:         "BulkApproveFundPlans",
+			APIPath:             "/cash/fund-planning/bulk-approve",
+			DefaultBlockMessage: "Fund plan approve blocked by policy",
+			Fields:              map[string]interface{}{"plan_id": req.PlanID},
+		}) {
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
@@ -1720,6 +1753,19 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreReject,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "FUND_PLANNING",
+			ActorUserID:         req.UserID,
+			HandlerName:         "BulkRejectFundPlans",
+			APIPath:             "/cash/fund-planning/bulk-reject",
+			DefaultBlockMessage: "Fund plan reject blocked by policy",
+			Fields:              map[string]interface{}{"plan_id": req.PlanID},
+		}) {
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
@@ -1830,6 +1876,19 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreDelete,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "FUND_PLANNING",
+			ActorUserID:         req.UserID,
+			HandlerName:         "BulkRequestDeleteFundPlans",
+			APIPath:             "/cash/fund-planning/bulk-delete",
+			DefaultBlockMessage: "Fund plan delete blocked by policy",
+			Fields:              map[string]interface{}{"plan_id": req.PlanID},
+		}) {
 			return
 		}
 

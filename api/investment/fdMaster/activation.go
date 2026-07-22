@@ -14,6 +14,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/validation"
 
@@ -1046,6 +1047,20 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		if !fdEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "ActivateFD", "/investment/fd/master/activate",
+			fdSubMaster, rec.EntityID, userEmail, map[string]interface{}{
+				"fd_id":             req.ConfirmationID,
+				"confirmation_id":   req.ConfirmationID,
+				"entity_id":         rec.EntityID,
+				"entity_code":       rec.EntityID,
+				"bank_id":           rec.BankID,
+				"principal_amount":  rec.PrincipalAmount,
+				"interest_rate":     rec.InterestRate,
+				"interest_type_code": rec.InterestTypeCode,
+			}) {
+			return
+		}
+
 		fdID, _, err := insertFDMaster(ctx, tx, rec, bankRef, receiptDate, req.Notes, userEmail)
 		if err != nil {
 			msg, status := getFDMasterError(err, "FD activation failed")
@@ -1220,6 +1235,21 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
+			var approveEntityID string
+			var approvePrincipal float64
+			_ = pgxPool.QueryRow(ctx,
+				`SELECT COALESCE(entity_id,''), COALESCE(principal_amount,0) FROM investment.fd_master WHERE fd_id = $1`,
+				fdID,
+			).Scan(&approveEntityID, &approvePrincipal)
+			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveActivation",
+				"/investment/fd/master/bulk-approve", fdSubMaster, approveEntityID, userEmail, map[string]interface{}{
+					"fd_id": fdID, "entity_id": approveEntityID, "entity_code": approveEntityID,
+					"principal_amount": approvePrincipal,
+				}); !ok {
+				errors = append(errors, fdID+": "+pmsg)
+				continue
+			}
+
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: fdID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDMaster] RecordAction approve failed for fd %s: %v", fdID, actionErr)
@@ -1381,6 +1411,21 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				).Scan(&resolvedFDID); lookupErr2 == nil {
 					fdID = resolvedFDID
 				}
+			}
+
+			var rejectEntityID string
+			var rejectPrincipal float64
+			_ = pgxPool.QueryRow(ctx,
+				`SELECT COALESCE(entity_id,''), COALESCE(principal_amount,0) FROM investment.fd_master WHERE fd_id = $1`,
+				fdID,
+			).Scan(&rejectEntityID, &rejectPrincipal)
+			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectActivation",
+				"/investment/fd/master/bulk-reject", fdSubMaster, rejectEntityID, userEmail, map[string]interface{}{
+					"fd_id": fdID, "entity_id": rejectEntityID, "entity_code": rejectEntityID,
+					"principal_amount": rejectPrincipal,
+				}); !ok {
+				errors = append(errors, fdID+": "+pmsg)
+				continue
 			}
 
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: fdID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
@@ -2405,14 +2450,14 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		approved, skipped, errs := 0, 0, []string{}
 
 		for _, cashflowID := range req.CashflowIDs {
-			var auditID, requestedBy, status string
+			var auditID, requestedBy, status, cfFDID string
 			if err := pgxPool.QueryRow(ctx,
-				`SELECT audit_id, COALESCE(requested_by,''), COALESCE(processing_status,'')
+				`SELECT audit_id, COALESCE(requested_by,''), COALESCE(processing_status,''), COALESCE(fd_id,'')
 				 FROM investment.fd_audit_cashflow_schedule
 				 WHERE cashflow_id = $1 AND processing_status LIKE 'PENDING%'
 				 ORDER BY requested_at DESC LIMIT 1`,
 				cashflowID,
-			).Scan(&auditID, &requestedBy, &status); err != nil {
+			).Scan(&auditID, &requestedBy, &status, &cfFDID); err != nil {
 				errs = append(errs, cashflowID+constants.QuerryNoPendingAuditFound)
 				continue
 			}
@@ -2426,6 +2471,15 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if !strings.HasPrefix(status, "PENDING") {
 				skipped++
+				continue
+			}
+			var cfEntityID string
+			_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_master WHERE fd_id = $1`, cfFDID).Scan(&cfEntityID)
+			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveCashflowEdit",
+				"/investment/fd/master/cashflow/bulk-approve", fdSubCashflow, cfEntityID, userEmail, map[string]interface{}{
+					"cashflow_id": cashflowID, "fd_id": cfFDID, "entity_id": cfEntityID, "entity_code": cfEntityID,
+				}); !ok {
+				errs = append(errs, cashflowID+": "+pmsg)
 				continue
 			}
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: auditID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
@@ -2575,6 +2629,15 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if !strings.HasPrefix(status, "PENDING") {
 				skipped++
+				continue
+			}
+			var cfEntityID string
+			_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_master WHERE fd_id = $1`, fdID).Scan(&cfEntityID)
+			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectCashflowEdit",
+				"/investment/fd/master/cashflow/bulk-reject", fdSubCashflow, cfEntityID, userEmail, map[string]interface{}{
+					"cashflow_id": cashflowID, "fd_id": fdID, "entity_id": cfEntityID, "entity_code": cfEntityID,
+				}); !ok {
+				errs = append(errs, cashflowID+": "+pmsg)
 				continue
 			}
 
@@ -2765,6 +2828,15 @@ func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if !strings.HasPrefix(status, "PENDING") {
 				skipped++
+				continue
+			}
+			var cfEntityID string
+			_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_master WHERE fd_id = $1`, fdID).Scan(&cfEntityID)
+			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, common.TriggerPreDelete, "BulkDeleteCashflow",
+				"/investment/fd/master/cashflow/bulk-delete", fdSubCashflow, cfEntityID, userEmail, map[string]interface{}{
+					"cashflow_id": cashflowID, "fd_id": fdID, "entity_id": cfEntityID, "entity_code": cfEntityID,
+				}); !ok {
+				errs = append(errs, cashflowID+": "+pmsg)
 				continue
 			}
 			if table != "" {
@@ -2997,6 +3069,14 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`SELECT COALESCE(entity_id,''), COALESCE(principal_amount,0)
 			 FROM investment.fd_master WHERE fd_id = $1`, req.FDID,
 		).Scan(&entityID, &principalAmount)
+
+		if !fdEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "EditCashflowLineItem",
+			"/investment/fd/master/cashflow/edit", fdSubCashflow, entityID, userEmail, map[string]interface{}{
+				"fd_id": req.FDID, "cashflow_id": req.CashflowID,
+				"entity_id": entityID, "entity_code": entityID,
+			}) {
+			return
+		}
 
 		// ── Insert audit row into fd_audit_cashflow_schedule ─────────────────
 		var auditID string
@@ -3451,6 +3531,16 @@ func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		var cfEntityID string
+		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_master WHERE fd_id = $1`, fdID).Scan(&cfEntityID)
+		if !fdEnforce(ctx, w, r, pgxPool, common.TriggerPreApprove, "ApproveCashflowEdit",
+			"/investment/fd/master/cashflow/approve", fdSubCashflow, cfEntityID, userEmail, map[string]interface{}{
+				"audit_id": req.AuditID, "cashflow_id": cashflowID, "fd_id": fdID,
+				"entity_id": cfEntityID, "entity_code": cfEntityID,
+			}) {
+			return
+		}
+
 		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: req.AuditID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 		if actionErr != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "approval engine error: "+actionErr.Error())
@@ -3545,6 +3635,16 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if !strings.HasPrefix(status, "PENDING") {
 			api.RespondWithError(w, http.StatusConflict, "audit record is not in a pending state (current: "+status+")")
+			return
+		}
+
+		var cfEntityID string
+		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_master WHERE fd_id = $1`, fdID).Scan(&cfEntityID)
+		if !fdEnforce(ctx, w, r, pgxPool, common.TriggerPreReject, "RejectCashflowEdit",
+			"/investment/fd/master/cashflow/reject", fdSubCashflow, cfEntityID, userEmail, map[string]interface{}{
+				"audit_id": req.AuditID, "cashflow_id": cashflowID, "fd_id": fdID,
+				"entity_id": cfEntityID, "entity_code": cfEntityID,
+			}) {
 			return
 		}
 
@@ -3721,6 +3821,16 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&snap.receiptID, &snap.receiptClr,
 		)
 
+		var cfEntityID string
+		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_master WHERE fd_id = $1`, req.FDID).Scan(&cfEntityID)
+		if !fdEnforce(ctx, w, r, pgxPool, common.TriggerPreDelete, "DeleteCashflowLineItem",
+			"/investment/fd/master/cashflow/delete", fdSubCashflow, cfEntityID, userEmail, map[string]interface{}{
+				"fd_id": req.FDID, "cashflow_id": req.CashflowID,
+				"entity_id": cfEntityID, "entity_code": cfEntityID,
+			}) {
+			return
+		}
+
 		// Insert audit row for delete request
 		var auditID string
 		_ = pgxPool.QueryRow(ctx, `
@@ -3762,12 +3872,11 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			snap.receiptID, snap.receiptClr,
 		).Scan(&auditID)
 
-		var cfEntityID string
 		var cfPrincipal float64
 		_ = pgxPool.QueryRow(ctx,
-			`SELECT COALESCE(entity_id,''), COALESCE(principal_amount,0) FROM investment.fd_master WHERE fd_id = $1`,
+			`SELECT COALESCE(principal_amount,0) FROM investment.fd_master WHERE fd_id = $1`,
 			req.FDID,
-		).Scan(&cfEntityID, &cfPrincipal)
+		).Scan(&cfPrincipal)
 
 		if auditID != "" {
 			go func(aID, cfID, fdID, eID, uID, uEmail string, amount float64) {
@@ -3883,6 +3992,16 @@ func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 		if table == "" {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCashflowTableNotFound)
+			return
+		}
+
+		var cfEntityID string
+		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_master WHERE fd_id = $1`, fdID).Scan(&cfEntityID)
+		if !fdEnforce(ctx, w, r, pgxPool, common.TriggerPreApprove, "ApproveDeleteCashflow",
+			"/investment/fd/master/cashflow/approve-delete", fdSubCashflow, cfEntityID, userEmail, map[string]interface{}{
+				"audit_id": req.AuditID, "cashflow_id": cashflowID, "fd_id": fdID,
+				"entity_id": cfEntityID, "entity_code": cfEntityID,
+			}) {
 			return
 		}
 

@@ -3,6 +3,7 @@ package approvalMatrix
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/domaincatalog"
 	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
@@ -93,14 +94,9 @@ func logDBError(err error, context string) {
 
 // ─── Validation helpers ───────────────────────────────────────────────────────
 
-var validModuleCodes = map[string]bool{
-	"FIXED_DEPOSIT": true, "PAYMENTS": true, "RECONCILIATION": true,
-	"VENDOR": true, "GENERAL": true, "EMAIL_INBOX": true,
-}
-
-func validateMasterFields(moduleCode, approvalOrder string, minAmount, maxAmount *float64, slaHours *int) error {
-	if !validModuleCodes[moduleCode] {
-		return errors.New("module_code must be one of FIXED_DEPOSIT, PAYMENTS, RECONCILIATION, VENDOR, GENERAL, EMAIL_INBOX")
+func validateMasterFields(ctx context.Context, pool *pgxpool.Pool, moduleCode, approvalOrder string, minAmount, maxAmount *float64, slaHours *int) error {
+	if !domaincatalog.IsApprovalModuleAllowed(ctx, pool, moduleCode) {
+		return errors.New("module_code must be a known approval module (e.g. FIXED_DEPOSIT) or a domain_catalog APPROVAL alias")
 	}
 	if approvalOrder != "PARALLEL" && approvalOrder != "SEQUENTIAL" {
 		return errors.New("approval_order must be PARALLEL or SEQUENTIAL")
@@ -380,7 +376,7 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.IsActive != nil {
 			isActive = *req.IsActive
 		}
-		if err := validateMasterFields(req.ModuleCode, req.ApprovalOrder, req.MinAmount, req.MaxAmount, effectiveSla); err != nil {
+		if err := validateMasterFields(r.Context(), pgxPool, req.ModuleCode, req.ApprovalOrder, req.MinAmount, req.MaxAmount, effectiveSla); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, err.Error())
 			return
 		}

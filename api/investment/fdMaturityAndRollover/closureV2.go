@@ -7,6 +7,7 @@ import (
 	"CimplrCorpSaas/api/investment/fdMaster"
 	"CimplrCorpSaas/api/investment/fdNotifications"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -429,6 +430,14 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rolloverNewBankID, rolloverNewBankName := cimplrResolveInitiateRolloverBank(ctx, pool, req, src)
 
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "CimplrInitiateCreate",
+			"/investment/fd/closure/initiate/create", src.EntityID, userEmail, map[string]interface{}{
+				"fd_id": src.FDID, "entity_id": src.EntityID, "entity_code": src.EntityID,
+				"closure_type": req.ClosureType, "principal_amount": principal,
+			}) {
+			return
+		}
+
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
@@ -629,6 +638,14 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		netExpected := chooseFloat(req.NetExpectedAmount, calc.NetPayout)
 		rolloverNewBankID, rolloverNewBankName := cimplrResolveInitiateRolloverBank(ctx, pool, req, src)
 
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "CimplrInitiateEdit",
+			"/investment/fd/closure/initiate/edit", src.EntityID, userEmail, map[string]interface{}{
+				"closure_initiate_id": req.ClosureInitiateID, "fd_id": src.FDID,
+				"entity_id": src.EntityID, "entity_code": src.EntityID, "closure_type": req.ClosureType,
+			}) {
+			return
+		}
+
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
@@ -730,6 +747,16 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
+			if ok, pmsg := fdEnforceInline(r.Context(), r, pool, common.TriggerPreDelete, "CimplrInitiateDelete",
+				"/investment/fd/closure/initiate/delete", fmt.Sprint(oldRow["entity_id"]), userEmail, map[string]interface{}{
+					"closure_initiate_id": id, "fd_id": oldRow["fd_id"],
+					"entity_id": oldRow["entity_id"], "entity_code": oldRow["entity_id"],
+				}); !ok {
+				res["success"] = false
+				res["error"] = pmsg
+				results = append(results, res)
+				continue
+			}
 			if err := insertCimplrInitiateAudit(r.Context(), pool, initiateAuditEntry{ID: id, Action: constants.AuditActionDelete, Status: constants.StatusPendingDeleteApproval, Reason: req.Comment, RequestedBy: req.UserID, Old: oldRow}); err != nil {
 				res["success"] = false
 				res["error"] = err.Error()
@@ -770,7 +797,27 @@ func CimplrInitiateApprove(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrClosureInitiateIDRequired)
 			return
 		}
-		results := cimplrApproveInitiates(r.Context(), pool, ids, req.UserID, userEmail, req.Comment)
+		ctx := r.Context()
+		policyResults := make([]map[string]interface{}, 0)
+		filtered := make([]string, 0, len(ids))
+		for _, id := range ids {
+			oldRow, err := loadCimplrInitiateOld(ctx, pool, id)
+			if err != nil {
+				policyResults = append(policyResults, map[string]interface{}{"closure_initiate_id": id, "success": false, "error": "record not found"})
+				continue
+			}
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "CimplrInitiateApprove",
+				"/investment/fd/closure/initiate/approve", fmt.Sprint(oldRow["entity_id"]), userEmail, map[string]interface{}{
+					"closure_initiate_id": id, "fd_id": oldRow["fd_id"],
+					"entity_id": oldRow["entity_id"], "entity_code": oldRow["entity_id"],
+				}); !ok {
+				policyResults = append(policyResults, map[string]interface{}{"closure_initiate_id": id, "success": false, "error": pmsg})
+				continue
+			}
+			filtered = append(filtered, id)
+		}
+		results := cimplrApproveInitiates(ctx, pool, filtered, req.UserID, userEmail, req.Comment)
+		results = append(policyResults, results...)
 		ok, errStr := summarizeCimplrBatchResults(results)
 		go triggerClosureBulkNotif(context.Background(), pool, ids, constants.QuerryClosureInitiate, "initiate", "approve", userEmail)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
@@ -797,7 +844,27 @@ func CimplrInitiateReject(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrClosureInitiateIDRequired)
 			return
 		}
-		results := cimplrRejectInitiates(r.Context(), pool, ids, req.UserID, userEmail, req.Comment)
+		ctx := r.Context()
+		policyResults := make([]map[string]interface{}, 0)
+		filtered := make([]string, 0, len(ids))
+		for _, id := range ids {
+			oldRow, err := loadCimplrInitiateOld(ctx, pool, id)
+			if err != nil {
+				policyResults = append(policyResults, map[string]interface{}{"closure_initiate_id": id, "success": false, "error": "record not found"})
+				continue
+			}
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "CimplrInitiateReject",
+				"/investment/fd/closure/initiate/reject", fmt.Sprint(oldRow["entity_id"]), userEmail, map[string]interface{}{
+					"closure_initiate_id": id, "fd_id": oldRow["fd_id"],
+					"entity_id": oldRow["entity_id"], "entity_code": oldRow["entity_id"],
+				}); !ok {
+				policyResults = append(policyResults, map[string]interface{}{"closure_initiate_id": id, "success": false, "error": pmsg})
+				continue
+			}
+			filtered = append(filtered, id)
+		}
+		results := cimplrRejectInitiates(ctx, pool, filtered, req.UserID, userEmail, req.Comment)
+		results = append(policyResults, results...)
 		ok, errStr := summarizeCimplrBatchResults(results)
 		go triggerClosureBulkNotif(context.Background(), pool, ids, constants.QuerryClosureInitiate, "initiate", "reject", userEmail)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
@@ -904,6 +971,15 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				"blocked":  true,
 				"variance": varianceSummary,
 			})
+			return
+		}
+
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "CimplrConfirmCreate",
+			"/investment/fd/closure/confirm/create", src.EntityID, userEmail, map[string]interface{}{
+				"closure_initiate_id": req.ClosureInitiateID, "fd_id": src.FDID,
+				"entity_id": src.EntityID, "entity_code": src.EntityID, "closure_type": closureType,
+				"principal_expected": principalExpected,
+			}) {
 			return
 		}
 
@@ -1099,6 +1175,14 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				"blocked":  true,
 				"variance": varianceSummary,
 			})
+			return
+		}
+
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "CimplrPrematureCreate",
+			"/investment/fd/closure/premature/create", src.EntityID, userEmail, map[string]interface{}{
+				"fd_id": src.FDID, "entity_id": src.EntityID, "entity_code": src.EntityID,
+				"closure_type": "PREMATURE", "principal_expected": principalExpected,
+			}) {
 			return
 		}
 
@@ -1312,6 +1396,14 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "CimplrConfirmEdit",
+			"/investment/fd/closure/confirm/edit", src.EntityID, userEmail, map[string]interface{}{
+				"closure_confirm_id": req.ClosureConfirmID, "fd_id": src.FDID,
+				"entity_id": src.EntityID, "entity_code": src.EntityID, "closure_type": closureType,
+			}) {
+			return
+		}
+
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
@@ -1436,6 +1528,16 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
+			if ok, pmsg := fdEnforceInline(r.Context(), r, pool, common.TriggerPreDelete, "CimplrConfirmDelete",
+				"/investment/fd/closure/confirm/delete", fmt.Sprint(oldRow["entity_id"]), userEmail, map[string]interface{}{
+					"closure_confirm_id": id, "fd_id": oldRow["fd_id"],
+					"entity_id": oldRow["entity_id"], "entity_code": oldRow["entity_id"],
+				}); !ok {
+				res["success"] = false
+				res["error"] = pmsg
+				results = append(results, res)
+				continue
+			}
 			if err := insertCimplrConfirmAudit(r.Context(), pool, confirmAuditEntry{ConfirmID: id, InitiateID: fmt.Sprint(oldRow["closure_initiate_id"]), Action: constants.AuditActionDelete, Status: constants.StatusPendingDeleteApproval, Reason: req.Comment, RequestedBy: req.UserID, Old: oldRow}); err != nil {
 				res["success"] = false
 				res["error"] = err.Error()
@@ -1525,7 +1627,27 @@ func CimplrConfirmApprove(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
 			return
 		}
-		results := cimplrApproveConfirms(r.Context(), pool, ids, req.UserID, userEmail, req.Comment)
+		ctx := r.Context()
+		policyResults := make([]map[string]interface{}, 0)
+		filtered := make([]string, 0, len(ids))
+		for _, id := range ids {
+			oldRow, err := loadCimplrConfirmOld(ctx, pool, id)
+			if err != nil {
+				policyResults = append(policyResults, map[string]interface{}{"closure_confirm_id": id, "success": false, "error": "record not found"})
+				continue
+			}
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "CimplrConfirmApprove",
+				"/investment/fd/closure/confirm/approve", fmt.Sprint(oldRow["entity_id"]), userEmail, map[string]interface{}{
+					"closure_confirm_id": id, "fd_id": oldRow["fd_id"],
+					"entity_id": oldRow["entity_id"], "entity_code": oldRow["entity_id"],
+				}); !ok {
+				policyResults = append(policyResults, map[string]interface{}{"closure_confirm_id": id, "success": false, "error": pmsg})
+				continue
+			}
+			filtered = append(filtered, id)
+		}
+		results := cimplrApproveConfirms(ctx, pool, filtered, req.UserID, userEmail, req.Comment)
+		results = append(policyResults, results...)
 		ok, errStr := summarizeCimplrBatchResults(results)
 		go triggerClosureBulkNotif(context.Background(), pool, ids, constants.QuerryAuditClosureConfirm, "confirm", "approve", userEmail)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
@@ -1552,7 +1674,27 @@ func CimplrConfirmReject(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
 			return
 		}
-		results := cimplrRejectConfirms(r.Context(), pool, ids, req.UserID, userEmail, req.Comment)
+		ctx := r.Context()
+		policyResults := make([]map[string]interface{}, 0)
+		filtered := make([]string, 0, len(ids))
+		for _, id := range ids {
+			oldRow, err := loadCimplrConfirmOld(ctx, pool, id)
+			if err != nil {
+				policyResults = append(policyResults, map[string]interface{}{"closure_confirm_id": id, "success": false, "error": "record not found"})
+				continue
+			}
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "CimplrConfirmReject",
+				"/investment/fd/closure/confirm/reject", fmt.Sprint(oldRow["entity_id"]), userEmail, map[string]interface{}{
+					"closure_confirm_id": id, "fd_id": oldRow["fd_id"],
+					"entity_id": oldRow["entity_id"], "entity_code": oldRow["entity_id"],
+				}); !ok {
+				policyResults = append(policyResults, map[string]interface{}{"closure_confirm_id": id, "success": false, "error": pmsg})
+				continue
+			}
+			filtered = append(filtered, id)
+		}
+		results := cimplrRejectConfirms(ctx, pool, filtered, req.UserID, userEmail, req.Comment)
+		results = append(policyResults, results...)
 		ok, errStr := summarizeCimplrBatchResults(results)
 		go triggerClosureBulkNotif(context.Background(), pool, ids, constants.QuerryAuditClosureConfirm, "confirm", "reject", userEmail)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
@@ -1935,6 +2077,14 @@ func CimplrClosureUpload(pool *pgxpool.Pool) http.HandlerFunc {
 		if !requireCimplrClosureParentScope(r.Context(), pool, w, req.ClosureInitiateID, req.ClosureConfirmID) {
 			return
 		}
+		uploadEntityID := cimplrClosureUploadEntityID(r.Context(), pool, req.ClosureInitiateID, req.ClosureConfirmID)
+		if !fdEnforce(r.Context(), w, r, pool, common.TriggerPreUpload, "CimplrClosureUpload",
+			r.URL.Path, uploadEntityID, userEmail, map[string]interface{}{
+				"closure_initiate_id": req.ClosureInitiateID, "closure_confirm_id": req.ClosureConfirmID,
+				"entity_id": uploadEntityID, "entity_code": uploadEntityID, "file_type": req.FileType,
+			}) {
+			return
+		}
 		if isCimplrPrematureClosureRoute(r.URL.Path) {
 			if req.ClosureConfirmID == "" {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ClosureIDsRequired)
@@ -2006,6 +2156,14 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 		return
 	}
 	if !requireCimplrClosureParentScope(r.Context(), pool, w, closureInitiateID, closureConfirmID) {
+		return
+	}
+	uploadEntityID := cimplrClosureUploadEntityID(r.Context(), pool, closureInitiateID, closureConfirmID)
+	if !fdEnforce(r.Context(), w, r, pool, common.TriggerPreUpload, "CimplrClosureUploadMultipart",
+		r.URL.Path, uploadEntityID, userEmail, map[string]interface{}{
+			"closure_initiate_id": closureInitiateID, "closure_confirm_id": closureConfirmID,
+			"entity_id": uploadEntityID, "entity_code": uploadEntityID, "file_type": fileType,
+		}) {
 		return
 	}
 	file, header, err := r.FormFile("file")

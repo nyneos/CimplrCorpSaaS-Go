@@ -3,6 +3,7 @@ package investment
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/policyengine/common"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -40,6 +41,13 @@ func DeleteOnboardBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.BatchID,
 		).Scan(&batchStatus); err != nil {
 			api.RespondWithError(w, http.StatusNotFound, fmt.Sprintf("Batch '%s' not found", req.BatchID))
+			return
+		}
+
+		userEmail := api.GetUserNameFromCtx(ctx)
+		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreDelete, "DeleteOnboardBatch",
+			"/investment/onboard/batch/delete", req.BatchID, userEmail,
+			map[string]interface{}{"batch_id": req.BatchID, "batch_status": batchStatus}) {
 			return
 		}
 
@@ -113,6 +121,13 @@ func DeleteOnboardTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TransactionID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "transaction_id is required")
+			return
+		}
+
+		userEmail := api.GetUserNameFromCtx(ctx)
+		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreDelete, "DeleteOnboardTransaction",
+			"/investment/onboard/batch/delete-transaction", "", userEmail,
+			map[string]interface{}{"transaction_id": req.TransactionID}) {
 			return
 		}
 

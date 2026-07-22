@@ -3,6 +3,8 @@ package payablerecievable
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -537,6 +539,19 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		mapRows.Close()
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreUpload,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "PAYABLE_RECEIVABLE",
+			ActorUserID:         userID,
+			HandlerName:         "UploadPayRec",
+			APIPath:             "/cash/upload-payrec",
+			DefaultBlockMessage: "Payable/receivable upload blocked by policy",
+			Fields:              map[string]interface{}{"file_count": len(r.MultipartForm.File)},
+		}) {
+			return
+		}
 
 		batchIDs := make([]string, 0)
 		for txType, files := range r.MultipartForm.File {
@@ -1090,6 +1105,21 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		for _, id := range req.TransactionIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "PAYABLE_RECEIVABLE",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkRequestDeleteTransactions",
+				APIPath:             "/cash/transactions/bulk-delete",
+				DefaultBlockMessage: "Payable/receivable delete blocked by policy",
+				Fields:              map[string]interface{}{"transaction_id": id},
+			}); !ok {
+				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, msg, "")
+				return
+			}
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction, "")
@@ -1199,6 +1229,21 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		payEditActionIDs := make([]string, 0)
 		recEditActionIDs := make([]string, 0)
 
+		for _, id := range req.TransactionIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "PAYABLE_RECEIVABLE",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkRejectTransactions",
+				APIPath:             "/cash/transactions/bulk-reject",
+				DefaultBlockMessage: "Payable/receivable reject blocked by policy",
+				Fields:              map[string]interface{}{"transaction_id": id},
+			}); !ok {
+				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, msg, "")
+				return
+			}
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction, "")
@@ -1426,6 +1471,21 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "no valid actions found for provided ids", "")
 			return
 		}
+		for _, id := range req.TransactionIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreApprove,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "PAYABLE_RECEIVABLE",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkApproveTransactions",
+				APIPath:             "/cash/transactions/bulk-approve",
+				DefaultBlockMessage: "Payable/receivable approve blocked by policy",
+				Fields:              map[string]interface{}{"transaction_id": id},
+			}); !ok {
+				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, msg, "")
+				return
+			}
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction, "")
@@ -1606,6 +1666,28 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		for idx, itm := range req.Items {
+			entityName := fmt.Sprint(itm["entity_name"])
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreCreate,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "PAYABLE_RECEIVABLE",
+				EntityCode:          entityName,
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkCreateTransactions",
+				APIPath:             "/cash/transactions/create",
+				DefaultBlockMessage: "Payable/receivable create blocked by policy",
+				Fields: map[string]interface{}{
+					"transaction_type": itm["transaction_type"],
+					"entity_name":      entityName,
+					"index":            idx,
+				},
+			}); !ok {
+				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, msg, "")
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction, "")
@@ -1773,6 +1855,22 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		id := strings.TrimSpace(req.ID)
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "PAYABLE_RECEIVABLE",
+			ActorUserID:         req.UserID,
+			HandlerName:         "UpdateTransaction",
+			APIPath:             "/cash/transactions/update",
+			DefaultBlockMessage: "Payable/receivable update blocked by policy",
+			Fields: map[string]interface{}{
+				"transaction_id": id,
+				"fields":         req.Fields,
+			},
+		}) {
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())

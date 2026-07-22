@@ -12,6 +12,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
 
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
@@ -138,6 +139,17 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		runTimeDB, runTimeErr := parseRunTimeForDB(req.RunTime)
 		if runTimeErr != nil {
 			api.RespondWithError(w, http.StatusBadRequest, runTimeErr.Error())
+			return
+		}
+
+		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateScheduleConfig",
+			"/investment/fd/accrual/schedule/create", req.EntityID, userEmail, map[string]interface{}{
+				"entity_id":          req.EntityID,
+				"entity_code":        req.EntityID,
+				"schedule_frequency": req.ScheduleFrequency,
+				"period_coverage":    req.PeriodCoverage,
+				"default_run_mode":   req.DefaultRunMode,
+			}) {
 			return
 		}
 
@@ -292,6 +304,15 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(setParts) <= 2 {
 			api.RespondWithError(w, http.StatusBadRequest, "no valid updatable fields provided")
+			return
+		}
+
+		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateScheduleConfig",
+			"/investment/fd/accrual/schedule/update", entityID, userEmail, map[string]interface{}{
+				"config_id":  req.ConfigID,
+				"entity_id":  entityID,
+				"entity_code": entityID,
+			}) {
 			return
 		}
 
@@ -489,6 +510,15 @@ func DisableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
 			return
 		}
+		schedFields, disableEntityID, pfErr := accrualSchedulePolicyFields(ctx, pgxPool, req.ConfigID)
+		if pfErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
+			return
+		}
+		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "DisableSchedule",
+			"/investment/fd/accrual/schedule/disable", disableEntityID, userEmail, schedFields) {
+			return
+		}
 		ct, err := pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_schedule_config
 			SET is_active=false, updated_by=$1, updated_at=now()
@@ -545,6 +575,15 @@ func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		} else if !ok {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
+			return
+		}
+		schedFields, enableEntityID, pfErr := accrualSchedulePolicyFields(ctx, pgxPool, req.ConfigID)
+		if pfErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
+			return
+		}
+		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "EnableSchedule",
+			"/investment/fd/accrual/schedule/enable", enableEntityID, userEmail, schedFields) {
 			return
 		}
 		ct, err := pgxPool.Exec(ctx, `
@@ -610,6 +649,16 @@ func ApproveScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			comment := req.Comment
 			if strings.TrimSpace(comment) == "" {
 				comment = "Approved FD accrual schedule"
+			}
+			schedFields, approveEntityID, pfErr := accrualSchedulePolicyFields(ctx, pgxPool, configID)
+			if pfErr != nil {
+				errors = append(errors, configID+": "+pfErr.Error())
+				continue
+			}
+			if ok, pmsg := fdAccrualSchedEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "ApproveAccrualSchedule",
+				"/investment/fd/accrual/schedule/approve", approveEntityID, userEmail, schedFields); !ok {
+				errors = append(errors, configID+": "+pmsg)
+				continue
 			}
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: configID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: comment})
 			if actionErr != nil {
@@ -731,6 +780,16 @@ func RejectScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			comment := req.Comment
 			if strings.TrimSpace(comment) == "" {
 				comment = "Rejected FD accrual schedule"
+			}
+			schedFields, rejectEntityID, pfErr := accrualSchedulePolicyFields(ctx, pgxPool, configID)
+			if pfErr != nil {
+				errors = append(errors, configID+": "+pfErr.Error())
+				continue
+			}
+			if ok, pmsg := fdAccrualSchedEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "RejectAccrualSchedule",
+				"/investment/fd/accrual/schedule/reject", rejectEntityID, userEmail, schedFields); !ok {
+				errors = append(errors, configID+": "+pmsg)
+				continue
 			}
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: configID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: comment})
 			if actionErr != nil {
@@ -1003,6 +1062,15 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_ = pgxPool.QueryRow(ctx, `SELECT true FROM investment.fd_accrual_schedule_config WHERE config_id=$1`, req.ConfigID).Scan(&exists)
 		if !exists {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
+			return
+		}
+
+		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreDelete, "DeleteScheduleConfig",
+			"/investment/fd/accrual/schedule/delete", entityID, userEmail, map[string]interface{}{
+				"config_id":   req.ConfigID,
+				"entity_id":   entityID,
+				"entity_code": entityID,
+			}) {
 			return
 		}
 

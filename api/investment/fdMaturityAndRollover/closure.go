@@ -19,6 +19,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/uploadutil"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -799,6 +800,15 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			effectiveDateStr = time.Now().Format(constants.DateFormat)
 		}
 
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "InitiateClosure", "/investment/fd/closure/initiate",
+			entityID, userEmail, map[string]interface{}{
+				"fd_id": req.FDID, "entity_id": entityID, "entity_code": entityID,
+				"closure_type": req.ClosureType, "principal_amount": principalAmount,
+			}) {
+			cleanupUpload()
+			return
+		}
+
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			cleanupUpload()
@@ -1150,6 +1160,14 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			"closure_reason":         oldReason,
 			"closure_notes":          oldNotes,
 			"variance_remark":        oldVarianceRemark,
+		}
+
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "UpdateClosure", "/investment/fd/closure/update",
+			oldEntityID, userEmail, map[string]interface{}{
+				"closure_request_id": req.ClosureRequestID, "fd_id": oldFDID,
+				"entity_id": oldEntityID, "entity_code": oldEntityID,
+			}) {
+			return
 		}
 
 		tx, err := pool.Begin(ctx)
@@ -2065,6 +2083,15 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "BulkApproveClosureRequest",
+				"/investment/fd/closure/bulk-approve", entityID, userEmail, map[string]interface{}{
+					"closure_request_id": crID, "fd_id": fdID, "entity_id": entityID, "entity_code": entityID,
+					"closure_type": closureType,
+				}); !ok {
+				errors = append(errors, crID+": "+pmsg)
+				continue
+			}
+
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				errors = append(errors, crID+": "+actionErr.Error())
@@ -2201,6 +2228,16 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 
 			if !isDeleteApproval && curStatus != constants.StatusPendingApproval {
 				errors = append(errors, crID+": status is "+curStatus)
+				continue
+			}
+
+			var rejectEntityID, rejectFDID string
+			_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,''), COALESCE(fd_id,'') FROM investment.fd_closure_request WHERE closure_request_id=$1`, crID).Scan(&rejectEntityID, &rejectFDID)
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "BulkRejectClosureRequest",
+				"/investment/fd/closure/bulk-reject", rejectEntityID, userEmail, map[string]interface{}{
+					"closure_request_id": crID, "fd_id": rejectFDID, "entity_id": rejectEntityID, "entity_code": rejectEntityID,
+				}); !ok {
+				errors = append(errors, crID+": "+pmsg)
 				continue
 			}
 
@@ -2344,6 +2381,14 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			latestProcessingStatus == constants.StatusPendingDeleteApproval &&
 			strings.TrimSpace(approvalInstanceID) != "" {
 			api.RespondWithError(w, http.StatusBadRequest, "Delete approval is already pending for this closure request")
+			return
+		}
+
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreDelete, "DeleteClosureRequest", "/investment/fd/closure/delete",
+			entityID, userEmail, map[string]interface{}{
+				"closure_request_id": req.ClosureRequestID, "fd_id": fdID,
+				"entity_id": entityID, "entity_code": entityID,
+			}) {
 			return
 		}
 

@@ -3,6 +3,8 @@ package forwards
 import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
 	"bytes"
 	"context"
@@ -307,6 +309,25 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusForbidden, "You do not have access to this business unit")
 			return
 		}
+		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "FORWARD_BOOKING",
+			EntityCode:          req.EntityLevel0,
+			ActorUserID:         req.UserID,
+			HandlerName:         "AddForwardBookingManualEntry",
+			APIPath:             "/fx/forwards/manual-entry",
+			DefaultBlockMessage: "Forward booking create blocked by policy",
+			Fields: map[string]interface{}{
+				"entity_level_0":    req.EntityLevel0,
+				"currency_pair":     req.CurrencyPair,
+				"counterparty":      req.Counterparty,
+				"transaction_type":  req.TransactionType,
+				"internal_reference_id": req.InternalReferenceID,
+			},
+		}) {
+			return
+		}
 		query := `INSERT INTO forward_bookings (
 		       internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status
 	       ) VALUES (
@@ -483,6 +504,20 @@ func UploadForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
+			return
+		}
+		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreUpload,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "FORWARD_BOOKING",
+			ActorUserID:         r.FormValue(constants.KeyUserID),
+			HandlerName:         "UploadForwardBookingsMulti",
+			APIPath:             "/fx/forwards/upload-multi",
+			DefaultBlockMessage: "Forward booking upload blocked by policy",
+			Fields: map[string]interface{}{
+				"file_count": len(files),
+			},
+		}) {
 			return
 		}
 		// Delegate to service

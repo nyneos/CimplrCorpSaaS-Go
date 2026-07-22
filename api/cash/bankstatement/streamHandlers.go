@@ -7,6 +7,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 	apipreval "CimplrCorpSaas/api/middlewares"
 	notif "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -1047,6 +1049,29 @@ func CommitHandler(pool *pgxpool.Pool) http.Handler {
 		// 	http.Error(w, "failed to marshal clean json: "+err.Error(), http.StatusInternalServerError)
 		// 	return
 		// }
+
+		actorUserID := sessionUser
+		if actorUserID == "" {
+			actorUserID = strings.TrimSpace(payload.ID)
+		}
+		if !runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
+			EventCode:            common.TriggerPreCreate,
+			ModuleCode:           common.ModuleCash,
+			SubModule:            "BANK_STATEMENT",
+			EntityCode:           accountNumber,
+			ActorUserID:          actorUserID,
+			HandlerName:          "CommitHandler",
+			APIPath:              "/cash/commit",
+			DefaultBlockMessage:  "Bank statement commit blocked by policy",
+			Fields: map[string]interface{}{
+				"account_number":     accountNumber,
+				"staging_id":         stagingID,
+				"transaction_count":  len(payload.Clean.Transactions),
+				"opening_balance":    payload.Clean.OpeningBalance,
+			},
+		}) {
+			return
+		}
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {

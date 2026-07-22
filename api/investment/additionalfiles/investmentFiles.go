@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	cashfiles "CimplrCorpSaas/api/cash/additionalfiles"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/policyengine/common"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"bytes"
 	"context"
@@ -2137,6 +2138,49 @@ func RejectDeleteFDAccountingJournalAdditionalFileHandler(pool *pgxpool.Pool) ht
 	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdAccountingJournalFilesDefinition))
 }
 
+func investmentFilesPolicyScope(module string) (moduleCode, subModule, apiPath string) {
+	switch strings.TrimSpace(module) {
+	case onboardingFilesDefinition.Module:
+		return common.ModuleInvestmentMF, "MF_ONBOARD", "/investment/onboard/additional-files/upload"
+	case proposalFilesDefinition.Module:
+		return common.ModuleInvestmentMF, "MF_PROPOSAL", "/investment/proposal/additional-files/upload"
+	case initiationFilesDefinition.Module:
+		return common.ModuleInvestmentMF, "MF_INITIATION", "/investment/initiation/additional-files/upload"
+	case confirmationFilesDefinition.Module:
+		return common.ModuleInvestmentMF, "MF_CONFIRMATION", "/investment/confirmation/additional-files/upload"
+	case redemptionInitiationFilesDefinition.Module:
+		return common.ModuleInvestmentMF, "MF_REDEMPTION", "/investment/redemption/additional-files/upload"
+	case redemptionConfirmationFilesDefinition.Module:
+		return common.ModuleInvestmentMF, "MF_REDEMPTION_CONF", "/investment/redemption-confirmation/additional-files/upload"
+	case accountingActivityFilesDefinition.Module:
+		return common.ModuleInvestmentMF, "MF_ACCOUNTING", "/investment/accounting/additional-files/upload"
+	case fdBookingFilesDefinition.Module:
+		return common.ModuleInvestmentFD, "FD_BOOKING", "/investment/fd/booking/additional-files/upload"
+	case fdConfirmationFilesDefinition.Module:
+		return common.ModuleInvestmentFD, "FD_CONFIRMATION", "/investment/fd/confirmation/additional-files/upload"
+	case fdMasterFilesDefinition.Module:
+		return common.ModuleInvestmentFD, "FD_MASTER", "/investment/fd/master/additional-files/upload"
+	case fdClosureFilesDefinition.Module:
+		return common.ModuleInvestmentFD, "FD_CLOSURE", "/investment/fd/closure/additional-files/upload"
+	case fdRolloverFilesDefinition.Module:
+		return common.ModuleInvestmentFD, "FD_CLOSURE", "/investment/fd/rollover/additional-files/upload"
+	case fdCashflowFilesDefinition.Module:
+		return common.ModuleInvestmentFD, "FD_MASTER", "/investment/fd/cashflow/additional-files/upload"
+	case fdInterestReceiptFilesDefinition.Module:
+		return common.ModuleInvestmentFD, "FD_RECEIPT", "/investment/fd/receipt/additional-files/upload"
+	case fdTDSReceiptFilesDefinition.Module:
+		return common.ModuleInvestmentFD, "FD_TDS_REGISTER", "/investment/fd/tds/additional-files/upload"
+	case fdReconcileResultFilesDefinition.Module, fdReceiptExceptionFilesDefinition.Module, varianceExceptionFilesDefinition.Module:
+		return common.ModuleInvestmentFD, "FD_RECEIPT", "/investment/fd/receipt-exception/additional-files/upload"
+	case fdAccrualRunFilesDefinition.Module, fdAccrualLedgerFilesDefinition.Module, fdAccountingJournalFilesDefinition.Module:
+		return common.ModuleInvestmentFD, "FD_ACCRUAL", "/investment/fd/accrual/additional-files/upload"
+	case fdAccrualScheduleConfigFilesDefinition.Module:
+		return common.ModuleInvestmentFD, "FD_ACCRUAL_SCHED", "/investment/fd/accrual-schedule/additional-files/upload"
+	default:
+		return "", "", ""
+	}
+}
+
 func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Config {
 	cfg := cashfiles.Config{
 		Module:         def.Module,
@@ -2168,6 +2212,7 @@ func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Con
 			return deleteInvestmentAdditionalFile(ctx, tx, def, parentID, fileID, deletedBy, deletedAt)
 		},
 	}
+	cfg.PolicyModuleCode, cfg.PolicySubModule, cfg.PolicyAPIPath = investmentFilesPolicyScope(def.Module)
 
 	switch def.Module {
 	case proposalFilesDefinition.Module:

@@ -4,6 +4,8 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
 	"context"
@@ -373,6 +375,23 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "BANK_BALANCE",
+			ActorUserID:         req.UserID,
+			HandlerName:         "CreateBankBalance",
+			APIPath:             "/cash/bank-balances/create",
+			DefaultBlockMessage: "Bank balance create blocked by policy",
+			Fields: map[string]interface{}{
+				"bank_name":     req.BankName,
+				"account_no":    req.AccountNo,
+				"currency_code": req.CurrencyCode,
+			},
+		}) {
+			return
+		}
+
 		// generate balance_id if missing
 		balanceID := req.BalanceID
 		if balanceID == "" {
@@ -496,6 +515,22 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(missing) > 0 {
 			api.RespondWithResult(w, false, fmt.Sprintf("missing audit entries for: %v", missing))
 			return
+		}
+
+		for _, balanceID := range req.BalanceIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreApprove,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_BALANCE",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkApproveBankBalances",
+				APIPath:             "/cash/bank-balances/bulk-approve",
+				DefaultBlockMessage: "Bank balance approve blocked by policy",
+				Fields:              map[string]interface{}{"balance_id": balanceID},
+			}); !ok {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
 		}
 
 		tx, err := pgxPool.Begin(ctx)
@@ -641,6 +676,22 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		for _, balanceID := range req.BalanceIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_BALANCE",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkRejectBankBalances",
+				APIPath:             "/cash/bank-balances/bulk-reject",
+				DefaultBlockMessage: "Bank balance reject blocked by policy",
+				Fields:              map[string]interface{}{"balance_id": balanceID},
+			}); !ok {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+pgUserFriendlyMessage(err))
@@ -699,6 +750,22 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if code, msg := ensureBalanceIDsAccessible(ctx, pgxPool, req.BalanceIDs); code != 0 {
 			api.RespondWithError(w, code, msg)
 			return
+		}
+
+		for _, balanceID := range req.BalanceIDs {
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_BALANCE",
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkRequestDeleteBankBalances",
+				APIPath:             "/cash/bank-balances/bulk-delete",
+				DefaultBlockMessage: "Bank balance delete blocked by policy",
+				Fields:              map[string]interface{}{"balance_id": balanceID},
+			}); !ok {
+				api.RespondWithResult(w, false, msg)
+				return
+			}
 		}
 
 		tx, err := pgxPool.Begin(ctx)
@@ -1258,6 +1325,21 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if code, msg := ensureBalanceIDsAccessible(ctx, pgxPool, []string{req.BalanceID}); code != 0 {
 			api.RespondWithError(w, code, msg)
+			return
+		}
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "BANK_BALANCE",
+			ActorUserID:         req.UserID,
+			HandlerName:         "UpdateBankBalance",
+			APIPath:             "/cash/bank-balances/update",
+			DefaultBlockMessage: "Bank balance update blocked by policy",
+			Fields: map[string]interface{}{
+				"balance_id": req.BalanceID,
+				"fields":     req.Fields,
+			},
+		}) {
 			return
 		}
 		tx, err := pgxPool.Begin(ctx)

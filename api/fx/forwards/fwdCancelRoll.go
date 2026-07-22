@@ -4,6 +4,8 @@ import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxnotification "CimplrCorpSaas/api/fx/notification"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"database/sql"
@@ -345,6 +347,26 @@ func CancellationStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		requestedStatus := strings.TrimSpace(req.Status)
 		if requestedStatus == "" {
 			requestedStatus = "Approved"
+		}
+		cancelEventCode := common.TriggerPreApprove
+		if strings.EqualFold(requestedStatus, "Rejected") {
+			cancelEventCode = common.TriggerPreReject
+		}
+		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+			EventCode:           cancelEventCode,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "FORWARD_CANCELLATION",
+			ActorUserID:         req.UserID,
+			HandlerName:         "CancellationStatusRequest",
+			APIPath:             "/fx/forwards/cancellation-status-request",
+			DefaultBlockMessage: "Forward cancellation status change blocked by policy",
+			Fields: map[string]interface{}{
+				"status":              requestedStatus,
+				"cancellation_reason": req.CancellationReason,
+				"booking_count":       len(req.BookingAmounts),
+			},
+		}) {
+			return
 		}
 		notifItems := make([]fxnotification.CancelRollItem, 0, len(req.BookingAmounts))
 		for bid, amtCancelled := range req.BookingAmounts {
@@ -688,6 +710,28 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
+		actionEventCode := common.TriggerPreApprove
+		switch action {
+		case constants.AuditActionReject:
+			actionEventCode = common.TriggerPreReject
+		case constants.AuditActionDelete:
+			actionEventCode = common.TriggerPreDelete
+		}
+		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+			EventCode:           actionEventCode,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "FORWARD_CANCEL_ROLL",
+			ActorUserID:         req.UserID,
+			HandlerName:         "CancellationRolloverAction",
+			APIPath:             "/fx/forwards/cancel-roll/action",
+			DefaultBlockMessage: "Forward cancellation/rollover action blocked by policy",
+			Fields: map[string]interface{}{
+				"action":     action,
+				"item_count": len(req.Items),
+			},
+		}) {
+			return
+		}
 
 		processed := 0
 		notifItems := make([]fxnotification.CancelRollItem, 0, len(req.Items))
@@ -839,6 +883,24 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 		buNames := scope.EntityNames
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			return
+		}
+		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "FORWARD_ROLLOVER",
+			ActorUserID:         req.UserID,
+			HandlerName:         "RolloverForwardBooking",
+			APIPath:             "/fx/forwards/create-forward-rollover",
+			DefaultBlockMessage: "Forward rollover request blocked by policy",
+			Fields: map[string]interface{}{
+				"rollover_date":       req.CancellationDate,
+				"realized_gain_loss":  req.RealizedGainLoss,
+				"cancellation_reason": req.CancellationReason,
+				"new_forward_amount":  req.NewForward.Amount,
+				"booking_count":       len(req.BookingAmounts),
+			},
+		}) {
 			return
 		}
 
@@ -1146,6 +1208,24 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		buNames, _ := r.Context().Value(api.BusinessUnitsKey).([]string)
+		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "FORWARD_CANCELLATION",
+			ActorUserID:         req.UserID,
+			HandlerName:         "CreateForwardCancellations",
+			APIPath:             "/fx/forwards/create-forward-cancellations",
+			DefaultBlockMessage: "Forward cancellation request blocked by policy",
+			Fields: map[string]interface{}{
+				"cancellation_date":   req.CancellationDate,
+				"cancellation_rate":   req.CancellationRate,
+				"realized_gain_loss":  req.RealizedGainLoss,
+				"cancellation_reason": req.CancellationReason,
+				"booking_count":       len(req.BookingAmounts),
+			},
+		}) {
+			return
+		}
 		// Save cancellation request as pending
 		for bookingOrReferenceID, amtCancelled := range req.BookingAmounts {
 			bookingID, err := resolveForwardBookingID(r.Context(), pool, bookingOrReferenceID, buNames)
@@ -1194,6 +1274,25 @@ func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		requestedStatus := strings.TrimSpace(req.Status)
 		if requestedStatus == "" {
 			requestedStatus = "Approved"
+		}
+		rolloverEventCode := common.TriggerPreApprove
+		if strings.EqualFold(requestedStatus, "Rejected") {
+			rolloverEventCode = common.TriggerPreReject
+		}
+		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+			EventCode:           rolloverEventCode,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "FORWARD_ROLLOVER",
+			ActorUserID:         req.UserID,
+			HandlerName:         "RolloverStatusRequest",
+			APIPath:             "/fx/forwards/rollover-status-request",
+			DefaultBlockMessage: "Forward rollover status change blocked by policy",
+			Fields: map[string]interface{}{
+				"status":        requestedStatus,
+				"booking_count": len(req.BookingAmounts),
+			},
+		}) {
+			return
 		}
 		notifItems := make([]fxnotification.CancelRollItem, 0, len(req.BookingAmounts))
 		for bid, amtCancelled := range req.BookingAmounts {

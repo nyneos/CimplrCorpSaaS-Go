@@ -12,6 +12,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -178,6 +179,14 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tdsVariance := req.TDSDeductedActual - req.TDSExpected
 		exceptionRaised := tdsVariance != 0
+
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "CreateTDSRegister", "/investment/fd/tds-register/create",
+			req.EntityID, userEmail, map[string]interface{}{
+				"fd_id": req.FDID, "entity_id": req.EntityID, "entity_code": req.EntityID,
+				"tds_deducted_actual": req.TDSDeductedActual, "period_start": req.PeriodStart, "period_end": req.PeriodEnd,
+			}) {
+			return
+		}
 
 		// receipt_id is nullable — pass NULL when not provided
 		var receiptIDArg interface{}
@@ -502,6 +511,14 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreSubmit, "ReconcileTDSRegister", "/investment/fd/tds-register/reconcile",
+			req.EntityID, userEmail, map[string]interface{}{
+				"entity_id": req.EntityID, "entity_code": req.EntityID,
+				"reconcile_action": req.ReconcileAction,
+			}) {
+			return
+		}
+
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
@@ -643,6 +660,15 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		if currentStatus != "CAPTURED" {
 			api.RespondWithError(w, http.StatusBadRequest,
 				"only CAPTURED entries can be approved (current status: "+currentStatus+")")
+			return
+		}
+
+		var approveEntityID string
+		_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, req.TDSID).Scan(&approveEntityID)
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreApprove, "ApproveTDSRegister", "/investment/fd/tds-register/approve",
+			approveEntityID, userEmail, map[string]interface{}{
+				"tds_id": req.TDSID, "entity_id": approveEntityID, "entity_code": approveEntityID,
+			}) {
 			return
 		}
 
@@ -794,6 +820,15 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tdsVariance := req.TDSDeductedActual - req.TDSExpected
 
+		var editEntityID string
+		_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, req.TDSID).Scan(&editEntityID)
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "UpdateTDSRegister", "/investment/fd/tds-register/update",
+			editEntityID, userEmail, map[string]interface{}{
+				"tds_id": req.TDSID, "fd_id": fdIDForTDS, "entity_id": editEntityID, "entity_code": editEntityID,
+			}) {
+			return
+		}
+
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "tx start failed")
@@ -931,6 +966,15 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: msg})
 				continue
 			}
+			var bulkApproveEntityID string
+			_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, tdsID).Scan(&bulkApproveEntityID)
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "BulkApproveTDSRegister",
+				"/investment/fd/tds-register/approve-bulk", bulkApproveEntityID, userEmail, map[string]interface{}{
+					"tds_id": tdsID, "entity_id": bulkApproveEntityID, "entity_code": bulkApproveEntityID,
+				}); !ok {
+				results = append(results, result{TDSID: tdsID, OK: false, Message: pmsg})
+				continue
+			}
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: "tx start failed"})
@@ -1029,6 +1073,14 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			if msg := validateTDSRecordAccess(ctx, pool, tdsID); msg != "" {
 				continue
 			}
+			var bulkRejectEntityID string
+			_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, tdsID).Scan(&bulkRejectEntityID)
+			if ok, _ := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "BulkRejectTDSRegister",
+				"/investment/fd/tds-register/reject-bulk", bulkRejectEntityID, userEmail, map[string]interface{}{
+					"tds_id": tdsID, "entity_id": bulkRejectEntityID, "entity_code": bulkRejectEntityID,
+				}); !ok {
+				continue
+			}
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				continue
@@ -1116,6 +1168,15 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		if msg := validateTDSRecordAccess(ctx, pool, req.TDSID); msg != "" {
 			api.RespondWithError(w, http.StatusForbidden, msg)
+			return
+		}
+
+		var rejectEntityID string
+		_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, req.TDSID).Scan(&rejectEntityID)
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreReject, "RejectTDSRegister", "/investment/fd/tds-register/reject",
+			rejectEntityID, userEmail, map[string]interface{}{
+				"tds_id": req.TDSID, "entity_id": rejectEntityID, "entity_code": rejectEntityID,
+			}) {
 			return
 		}
 
@@ -1323,6 +1384,15 @@ func BulkDeleteTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, tdsID := range req.TDSIDs {
 			if msg := validateTDSRecordAccess(ctx, pool, tdsID); msg != "" {
+				failed++
+				continue
+			}
+			var deleteEntityID string
+			_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, tdsID).Scan(&deleteEntityID)
+			if ok, _ := fdEnforceInline(ctx, r, pool, common.TriggerPreDelete, "BulkDeleteTDSRegister",
+				"/investment/fd/tds-register/delete-bulk", deleteEntityID, userEmail, map[string]interface{}{
+					"tds_id": tdsID, "entity_id": deleteEntityID, "entity_code": deleteEntityID,
+				}); !ok {
 				failed++
 				continue
 			}

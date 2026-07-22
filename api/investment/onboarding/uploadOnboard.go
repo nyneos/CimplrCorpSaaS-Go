@@ -22,6 +22,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/portfolio"
 	"CimplrCorpSaas/api/investment/schemejoin"
+	"CimplrCorpSaas/api/policyengine/common"
 	_ "CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/validation"
@@ -478,6 +479,12 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		logger.LogInfo("[bulk] user %s (%s)", userID, userEmail)
+
+		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreUpload, "UploadInvestmentBulkk",
+			"/investment/onboard/upload", userID, userEmail,
+			map[string]interface{}{"user_id": userID, "batch_id": r.FormValue("batch_id")}) {
+			return
+		}
 
 		// begin tx (SERIALIZABLE)
 		tx, err := pgxPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})

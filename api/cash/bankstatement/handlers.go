@@ -6,6 +6,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/validation"
@@ -899,6 +901,39 @@ func RecomputeBankStatementSummaryHandler(pool *pgxpool.Pool) http.Handler {
 	})
 }
 
+// bankStatementPolicyFields maps statement scalars for domain_catalog CDM paths.
+func bankStatementPolicyFields(ctx context.Context, pool *pgxpool.Pool, bsid, entityID, actionType string) map[string]interface{} {
+	fields := map[string]interface{}{
+		"bank_statement_id": bsid,
+		"entity_id":         entityID,
+		"action_type":       actionType,
+	}
+	if pool == nil || strings.TrimSpace(bsid) == "" {
+		return fields
+	}
+	var openBal, closeBal float64
+	var uncat, total int
+	var acct string
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(s.opening_balance, 0), COALESCE(s.closing_balance, 0),
+		       COALESCE(s.account_number, ''),
+		       (SELECT COUNT(*)::int FROM cimplrcorpsaas.bank_statement_transactions t
+		         WHERE t.bank_statement_id = s.bank_statement_id),
+		       (SELECT COUNT(*)::int FROM cimplrcorpsaas.bank_statement_transactions t
+		         WHERE t.bank_statement_id = s.bank_statement_id AND t.category_id IS NULL)
+		FROM cimplrcorpsaas.bank_statements s
+		WHERE s.bank_statement_id = $1`, bsid).Scan(&openBal, &closeBal, &acct, &total, &uncat)
+	if err != nil {
+		return fields
+	}
+	fields["opening_balance"] = openBal
+	fields["closing_balance"] = closeBal
+	fields["account_number"] = acct
+	fields["total_transactions"] = total
+	fields["uncategorized_count"] = uncat
+	return fields
+}
+
 // 3. Approve a bank statement (POST, req: user_id, bank_statement_id)
 func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -973,6 +1008,24 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				}
 			}
 			if actionType == constants.AuditActionDelete && processingStatus == constants.StatusPendingDeleteApproval {
+				if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+					EventCode:           common.TriggerPreApprove,
+					ModuleCode:          common.ModuleCash,
+					SubModule:           "BANK_STATEMENT",
+					EntityCode:          entityID,
+					ActorUserID:         body.UserID,
+					HandlerName:         "ApproveBankStatementHandler",
+					APIPath:             "/cash/bank-statements/v2/approve",
+					DefaultBlockMessage: "Bank statement approval blocked by policy",
+					Fields:              bankStatementPolicyFields(ctx, pool, bsid, entityID, actionType),
+				}); !ok {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             msg,
+					})
+					continue
+				}
 				tx, err := pool.Begin(ctx)
 				if err != nil {
 					results = append(results, map[string]interface{}{
@@ -1069,6 +1122,24 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					"message":           "Bank statement soft deleted after approval",
 				})
 			} else {
+				if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+					EventCode:           common.TriggerPreApprove,
+					ModuleCode:          common.ModuleCash,
+					SubModule:           "BANK_STATEMENT",
+					EntityCode:          entityID,
+					ActorUserID:         body.UserID,
+					HandlerName:         "ApproveBankStatementHandler",
+					APIPath:             "/cash/bank-statements/v2/approve",
+					DefaultBlockMessage: "Bank statement approval blocked by policy",
+					Fields:              bankStatementPolicyFields(ctx, pool, bsid, entityID, actionType),
+				}); !ok {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             msg,
+					})
+					continue
+				}
 				tx, err := pool.Begin(ctx)
 				if err != nil {
 					results = append(results, map[string]interface{}{
@@ -1386,6 +1457,27 @@ func RejectBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					}
 				}
 			}
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_STATEMENT",
+				EntityCode:          entityID,
+				ActorUserID:         body.UserID,
+				HandlerName:         "RejectBankStatementHandler",
+				APIPath:             "/cash/bank-statements/v2/reject",
+				DefaultBlockMessage: "Bank statement rejection blocked by policy",
+				Fields: map[string]interface{}{
+					"bank_statement_id": bsid,
+					"entity_id":         entityID,
+				},
+			}); !ok {
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           false,
+					"error":             msg,
+				})
+				continue
+			}
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				results = append(results, map[string]interface{}{
@@ -1589,8 +1681,28 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 
 		isPDF := r.URL.Query().Get("is_pdf") == "true"
 
+		uploadActor := strings.TrimSpace(r.FormValue("user_id"))
+		if uploadActor == "" {
+			uploadActor = requestedByFromCtx(r.Context(), "")
+		}
+		enforceBankStatementUpload := func(fields map[string]interface{}) bool {
+			return runtime.Enforce(r.Context(), w, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreUpload,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_STATEMENT",
+				ActorUserID:         uploadActor,
+				HandlerName:         "UploadBankStatementV2Handler",
+				APIPath:             "/cash/upload-bank-statement",
+				DefaultBlockMessage: "Bank statement upload blocked by policy",
+				Fields:              fields,
+			})
+		}
+
 		if isPDF {
 			logger.LogInfo("[BANK_STATEMENT] PDF flag detected, processing from bank.json")
+			if !enforceBankStatementUpload(map[string]interface{}{"upload_type": "pdf"}) {
+				return
+			}
 			result, err := ProcessBankStatementFromJSON(r.Context(), pgxPool, apictx.ClientIPFromRequest(r))
 			if err != nil {
 				apictx.RespondEnvelopeError(w, http.StatusInternalServerError, userFriendlyUploadError(err), "")
@@ -1614,6 +1726,9 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 
 		multiFlag := r.FormValue("multi") == "true"
 		if multiFlag {
+			if !enforceBankStatementUpload(map[string]interface{}{"upload_type": "multi"}) {
+				return
+			}
 			// explicit multi=true: only try multi approach, surface error if it fails
 			UploadMultiAccountBankStatementHandler(pgxPool).ServeHTTP(w, r)
 			return
@@ -1760,6 +1875,13 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 			} else {
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] Multiple accounts, no weighted match found for %s — relying on file content extraction", uploadFileName)
 			}
+		}
+		if !enforceBankStatementUpload(map[string]interface{}{
+			"upload_file_name": uploadFileName,
+			"account_number":   accountOverride,
+			"use_mapping":      useMapping,
+		}) {
+			return
 		}
 		result, err := UploadBankStatementV2WithCategorization(
 			r.Context(),

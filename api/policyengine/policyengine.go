@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"CimplrCorpSaas/api/domaincatalog"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/policyengine/cdm"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -65,6 +66,8 @@ func NewPolicyEngineServer(pool *pgxpool.Pool, port string) (*http.Server, *pgxp
 	trigger.RegisterRoutes(mux, pool, chain)
 	policy.RegisterRoutes(mux, pool, chain)
 	execution.RegisterRoutes(mux, pool, chain)
+	// Shared domain catalog (FD booking first vertical) — also exposed at /domain-catalog/*
+	domaincatalog.RegisterRoutes(mux, pool, chain)
 
 	mux.Handle("/policy-engine/metrics", observability.MetricsHandler(serviceName))
 

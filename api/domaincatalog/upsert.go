@@ -1,0 +1,708 @@
+package domaincatalog
+
+import (
+	"net/http"
+	"strings"
+
+	"CimplrCorpSaas/api"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// upsert.go — write side of the domain catalog. Every handler here is a plain
+// authenticated upsert (no maker-checker workflow — that's the CDM Variables
+// page's job for policyengine_svc.cdm_variable, a different table). These
+// exist so seeding a module's module/sub_module/part/field/*_alias rows no
+// longer requires hand-writing a SQL migration file the way FD Booking's did
+// (database/2026-07-19/fd_booking_catalog_seed.sql) — call these instead.
+
+func actor(r *http.Request) string {
+	if name := api.GetUserNameFromCtx(r.Context()); name != "" {
+		return name
+	}
+	return "domain_catalog_api"
+}
+
+// ---------------------------------------------------------------------------
+// Module
+// ---------------------------------------------------------------------------
+
+type moduleUpsertReq struct {
+	ModuleCode   string `json:"module_code"`
+	ModuleName   string `json:"module_name"`
+	ParentModule string `json:"parent_module"`
+	Description  string `json:"description"`
+}
+
+func HandleModuleUpsert(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePOST(w, r) {
+			return
+		}
+		var req moduleUpsertReq
+		if err := decodeJSON(r, &req); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		req.ModuleCode = strings.TrimSpace(req.ModuleCode)
+		req.ModuleName = strings.TrimSpace(req.ModuleName)
+		if req.ModuleCode == "" || req.ModuleName == "" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "module_code and module_name are required", "VALIDATION_ERROR")
+			return
+		}
+		var parent interface{}
+		if p := strings.TrimSpace(req.ParentModule); p != "" {
+			parent = p
+		}
+		_, err := pool.Exec(r.Context(), `
+			INSERT INTO domain_catalog.module (module_code, module_name, parent_module, description, created_by)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (module_code) DO UPDATE SET
+				module_name = EXCLUDED.module_name,
+				parent_module = EXCLUDED.parent_module,
+				description = EXCLUDED.description,
+				last_modified_by = EXCLUDED.created_by,
+				last_modified_at = now(),
+				is_deleted = false`,
+			req.ModuleCode, req.ModuleName, parent, req.Description, actor(r))
+		if err != nil {
+			api.LogErrorForResponse(w, "domain-catalog module upsert: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upsert module", "")
+			return
+		}
+		api.RespondEnvelopeSuccess(w, "Module upserted", map[string]interface{}{"module_code": req.ModuleCode})
+	}
+}
+
+type moduleAliasUpsertReq struct {
+	ModuleCode     string `json:"module_code"`
+	ConsumerSystem string `json:"consumer_system"`
+	AliasCode      string `json:"alias_code"`
+}
+
+func HandleModuleAliasUpsert(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePOST(w, r) {
+			return
+		}
+		var req moduleAliasUpsertReq
+		if err := decodeJSON(r, &req); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		req.ModuleCode = strings.TrimSpace(req.ModuleCode)
+		req.ConsumerSystem = normalizeConsumer(req.ConsumerSystem)
+		req.AliasCode = strings.TrimSpace(req.AliasCode)
+		if req.ModuleCode == "" || req.ConsumerSystem == "" || req.AliasCode == "" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "module_code, consumer_system, and alias_code are required", "VALIDATION_ERROR")
+			return
+		}
+		_, err := pool.Exec(r.Context(), `
+			INSERT INTO domain_catalog.module_alias (module_code, consumer_system, alias_code)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (consumer_system, alias_code) DO UPDATE SET
+				module_code = EXCLUDED.module_code,
+				is_deleted = false`,
+			req.ModuleCode, req.ConsumerSystem, req.AliasCode)
+		if err != nil {
+			api.LogErrorForResponse(w, "domain-catalog module-alias upsert: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upsert module alias — check consumer_system is one of POLICY/NOTIFICATION/APPROVAL/DASHBOARD/DMS/NAV", "")
+			return
+		}
+		api.RespondEnvelopeSuccess(w, "Module alias upserted", map[string]interface{}{
+			"module_code": req.ModuleCode, "consumer_system": req.ConsumerSystem, "alias_code": req.AliasCode,
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Sub-module
+// ---------------------------------------------------------------------------
+
+type subModuleUpsertReq struct {
+	SubModuleCode string `json:"sub_module_code"`
+	ModuleCode    string `json:"module_code"`
+	SubModuleName string `json:"sub_module_name"`
+	Description   string `json:"description"`
+}
+
+func HandleSubModuleUpsert(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePOST(w, r) {
+			return
+		}
+		var req subModuleUpsertReq
+		if err := decodeJSON(r, &req); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
+		req.ModuleCode = strings.TrimSpace(req.ModuleCode)
+		req.SubModuleName = strings.TrimSpace(req.SubModuleName)
+		if req.SubModuleCode == "" || req.ModuleCode == "" || req.SubModuleName == "" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "sub_module_code, module_code, and sub_module_name are required", "VALIDATION_ERROR")
+			return
+		}
+		_, err := pool.Exec(r.Context(), `
+			INSERT INTO domain_catalog.sub_module (sub_module_code, module_code, sub_module_name, description, created_by)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (sub_module_code) DO UPDATE SET
+				module_code = EXCLUDED.module_code,
+				sub_module_name = EXCLUDED.sub_module_name,
+				description = EXCLUDED.description,
+				last_modified_by = EXCLUDED.created_by,
+				last_modified_at = now(),
+				is_deleted = false`,
+			req.SubModuleCode, req.ModuleCode, req.SubModuleName, req.Description, actor(r))
+		if err != nil {
+			api.LogErrorForResponse(w, "domain-catalog sub-module upsert: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upsert sub-module — check module_code exists", "")
+			return
+		}
+		api.RespondEnvelopeSuccess(w, "Sub-module upserted", map[string]interface{}{"sub_module_code": req.SubModuleCode})
+	}
+}
+
+type subModuleAliasUpsertReq struct {
+	SubModuleCode  string `json:"sub_module_code"`
+	ConsumerSystem string `json:"consumer_system"`
+	AliasCode      string `json:"alias_code"`
+}
+
+func HandleSubModuleAliasUpsert(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePOST(w, r) {
+			return
+		}
+		var req subModuleAliasUpsertReq
+		if err := decodeJSON(r, &req); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
+		req.ConsumerSystem = normalizeConsumer(req.ConsumerSystem)
+		req.AliasCode = strings.TrimSpace(req.AliasCode)
+		if req.SubModuleCode == "" || req.ConsumerSystem == "" || req.AliasCode == "" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "sub_module_code, consumer_system, and alias_code are required", "VALIDATION_ERROR")
+			return
+		}
+		_, err := pool.Exec(r.Context(), `
+			INSERT INTO domain_catalog.sub_module_alias (sub_module_code, consumer_system, alias_code)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (consumer_system, alias_code) DO UPDATE SET
+				sub_module_code = EXCLUDED.sub_module_code,
+				is_deleted = false`,
+			req.SubModuleCode, req.ConsumerSystem, req.AliasCode)
+		if err != nil {
+			api.LogErrorForResponse(w, "domain-catalog sub-module-alias upsert: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upsert sub-module alias", "")
+			return
+		}
+		api.RespondEnvelopeSuccess(w, "Sub-module alias upserted", map[string]interface{}{
+			"sub_module_code": req.SubModuleCode, "consumer_system": req.ConsumerSystem, "alias_code": req.AliasCode,
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Part
+// ---------------------------------------------------------------------------
+
+type partUpsertReq struct {
+	SubModuleCode    string `json:"sub_module_code"`
+	PartCode         string `json:"part_code"`
+	PartName         string `json:"part_name"`
+	Description      string `json:"description"`
+	APIPath          string `json:"api_path"`
+	HandlerName      string `json:"handler_name"`
+	StorageModuleKey string `json:"storage_module_key"`
+	S3Prefix         string `json:"s3_prefix"`
+	ParentField      string `json:"parent_field"`
+	FilesTable       string `json:"files_table"`
+	SortOrder        int    `json:"sort_order"`
+}
+
+func HandlePartUpsert(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePOST(w, r) {
+			return
+		}
+		var req partUpsertReq
+		if err := decodeJSON(r, &req); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
+		req.PartCode = strings.TrimSpace(req.PartCode)
+		req.PartName = strings.TrimSpace(req.PartName)
+		if req.SubModuleCode == "" || req.PartCode == "" || req.PartName == "" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "sub_module_code, part_code, and part_name are required", "VALIDATION_ERROR")
+			return
+		}
+		var partID string
+		err := pool.QueryRow(r.Context(), `
+			INSERT INTO domain_catalog.part (
+				sub_module_code, part_code, part_name, description, api_path, handler_name,
+				storage_module_key, s3_prefix, parent_field, files_table, sort_order, created_by
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			ON CONFLICT (sub_module_code, part_code) DO UPDATE SET
+				part_name = EXCLUDED.part_name,
+				description = EXCLUDED.description,
+				api_path = EXCLUDED.api_path,
+				handler_name = EXCLUDED.handler_name,
+				storage_module_key = EXCLUDED.storage_module_key,
+				s3_prefix = EXCLUDED.s3_prefix,
+				parent_field = EXCLUDED.parent_field,
+				files_table = EXCLUDED.files_table,
+				sort_order = EXCLUDED.sort_order,
+				last_modified_by = EXCLUDED.created_by,
+				last_modified_at = now(),
+				is_deleted = false
+			RETURNING part_id`,
+			req.SubModuleCode, req.PartCode, req.PartName, req.Description, req.APIPath, req.HandlerName,
+			req.StorageModuleKey, req.S3Prefix, req.ParentField, req.FilesTable, req.SortOrder, actor(r),
+		).Scan(&partID)
+		if err != nil {
+			api.LogErrorForResponse(w, "domain-catalog part upsert: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upsert part — check sub_module_code exists", "")
+			return
+		}
+		api.RespondEnvelopeSuccess(w, "Part upserted", map[string]interface{}{"part_id": partID, "part_code": req.PartCode})
+	}
+}
+
+type partAliasUpsertReq struct {
+	SubModuleCode  string `json:"sub_module_code"`
+	PartCode       string `json:"part_code"`
+	ConsumerSystem string `json:"consumer_system"`
+	AliasCode      string `json:"alias_code"`
+}
+
+func HandlePartAliasUpsert(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePOST(w, r) {
+			return
+		}
+		var req partAliasUpsertReq
+		if err := decodeJSON(r, &req); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
+		req.PartCode = strings.TrimSpace(req.PartCode)
+		req.ConsumerSystem = normalizeConsumer(req.ConsumerSystem)
+		req.AliasCode = strings.TrimSpace(req.AliasCode)
+		if req.SubModuleCode == "" || req.PartCode == "" || req.ConsumerSystem == "" || req.AliasCode == "" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "sub_module_code, part_code, consumer_system, and alias_code are required", "VALIDATION_ERROR")
+			return
+		}
+		tag, err := pool.Exec(r.Context(), `
+			INSERT INTO domain_catalog.part_alias (part_id, consumer_system, alias_code)
+			SELECT p.part_id, $3, $4
+			FROM domain_catalog.part p
+			WHERE p.sub_module_code = $1 AND p.part_code = $2 AND p.is_deleted = false
+			ON CONFLICT (consumer_system, alias_code) DO UPDATE SET
+				part_id = EXCLUDED.part_id,
+				is_deleted = false`,
+			req.SubModuleCode, req.PartCode, req.ConsumerSystem, req.AliasCode)
+		if err != nil {
+			api.LogErrorForResponse(w, "domain-catalog part-alias upsert: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upsert part alias", "")
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			api.RespondEnvelopeError(w, http.StatusNotFound, "no matching part found for sub_module_code/part_code", "NOT_FOUND")
+			return
+		}
+		api.RespondEnvelopeSuccess(w, "Part alias upserted", map[string]interface{}{
+			"sub_module_code": req.SubModuleCode, "part_code": req.PartCode,
+			"consumer_system": req.ConsumerSystem, "alias_code": req.AliasCode,
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Field — also syncs policyengine_svc.cdm_variable when cdm_path is set,
+// matching what fd_booking_catalog_seed.sql did by hand.
+// ---------------------------------------------------------------------------
+
+type fieldUpsertReq struct {
+	SubModuleCode string `json:"sub_module_code"`
+	FieldCode     string `json:"field_code"`
+	CDMPath       string `json:"cdm_path"`
+	DataType      string `json:"data_type"`
+	Unit          string `json:"unit"`
+	Label         string `json:"label"`
+	Description   string `json:"description"`
+	Nullable      *bool  `json:"nullable"`
+	SortOrder     int    `json:"sort_order"`
+}
+
+var validFieldDataTypes = map[string]bool{
+	"number": true, "string": true, "boolean": true, "date": true, "time": true, "datetime": true, "list": true,
+}
+
+func HandleFieldUpsert(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePOST(w, r) {
+			return
+		}
+		var req fieldUpsertReq
+		if err := decodeJSON(r, &req); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
+		req.FieldCode = strings.TrimSpace(req.FieldCode)
+		req.Label = strings.TrimSpace(req.Label)
+		req.DataType = strings.ToLower(strings.TrimSpace(req.DataType))
+		if req.SubModuleCode == "" || req.FieldCode == "" || req.Label == "" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "sub_module_code, field_code, and label are required", "VALIDATION_ERROR")
+			return
+		}
+		if req.DataType == "" {
+			req.DataType = "string"
+		}
+		if !validFieldDataTypes[req.DataType] {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "data_type must be one of number/string/boolean/date/time/datetime/list", "VALIDATION_ERROR")
+			return
+		}
+		nullable := true
+		if req.Nullable != nil {
+			nullable = *req.Nullable
+		}
+		var cdmPath interface{}
+		trimmedPath := strings.TrimSpace(req.CDMPath)
+		if trimmedPath != "" {
+			cdmPath = trimmedPath
+		}
+
+		tx, err := pool.Begin(r.Context())
+		if err != nil {
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to begin transaction", "")
+			return
+		}
+		defer tx.Rollback(r.Context())
+
+		var fieldID string
+		err = tx.QueryRow(r.Context(), `
+			INSERT INTO domain_catalog.field (
+				sub_module_code, field_code, cdm_path, data_type, unit, label, description, nullable, sort_order, created_by
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			ON CONFLICT (sub_module_code, field_code) DO UPDATE SET
+				cdm_path = EXCLUDED.cdm_path,
+				data_type = EXCLUDED.data_type,
+				unit = EXCLUDED.unit,
+				label = EXCLUDED.label,
+				description = EXCLUDED.description,
+				nullable = EXCLUDED.nullable,
+				sort_order = EXCLUDED.sort_order,
+				last_modified_by = EXCLUDED.created_by,
+				last_modified_at = now(),
+				is_deleted = false
+			RETURNING field_id`,
+			req.SubModuleCode, req.FieldCode, cdmPath, req.DataType, req.Unit, req.Label, req.Description, nullable, req.SortOrder, actor(r),
+		).Scan(&fieldID)
+		if err != nil {
+			api.LogErrorForResponse(w, "domain-catalog field upsert: %v", err)
+			msg := "failed to upsert field — check sub_module_code exists"
+			if trimmedPath != "" {
+				msg += " and cdm_path isn't already used by another field"
+			}
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, msg, "")
+			return
+		}
+
+		if trimmedPath != "" {
+			_, err = tx.Exec(r.Context(), `
+				INSERT INTO policyengine_svc.cdm_variable (
+					name, data_type, unit, label, description, domain, source_system,
+					nullable, status, is_deleted, processing_status, created_by
+				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Active', false, 'APPROVED', $9)
+				ON CONFLICT (name) DO UPDATE SET
+					data_type = EXCLUDED.data_type,
+					unit = EXCLUDED.unit,
+					label = EXCLUDED.label,
+					description = EXCLUDED.description,
+					domain = EXCLUDED.domain,
+					source_system = EXCLUDED.source_system,
+					nullable = EXCLUDED.nullable,
+					status = 'Active',
+					is_deleted = false,
+					processing_status = COALESCE(policyengine_svc.cdm_variable.processing_status, 'APPROVED'),
+					last_modified_at = now()`,
+				trimmedPath, req.DataType, req.Unit, req.Label, req.Description, req.SubModuleCode, "domain_catalog_api", nullable, actor(r))
+			if err != nil {
+				api.LogErrorForResponse(w, "domain-catalog field upsert: cdm_variable sync failed: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "field saved but cdm_variable sync failed", "")
+				return
+			}
+		}
+
+		if err := tx.Commit(r.Context()); err != nil {
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to commit", "")
+			return
+		}
+		api.RespondEnvelopeSuccess(w, "Field upserted", map[string]interface{}{
+			"field_id": fieldID, "field_code": req.FieldCode, "cdm_path": trimmedPath,
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Field alias
+// ---------------------------------------------------------------------------
+
+var validUsageKinds = map[string]bool{
+	"scalar": true, "list_field": true, "list_name": true, "parent_key": true, "storage_key": true,
+}
+
+type fieldAliasUpsertReq struct {
+	SubModuleCode  string `json:"sub_module_code"`
+	FieldCode      string `json:"field_code"`
+	ConsumerSystem string `json:"consumer_system"`
+	AliasKey       string `json:"alias_key"`
+	ContainerName  string `json:"container_name"`
+	UsageKind      string `json:"usage_kind"`
+	SortOrder      int    `json:"sort_order"`
+}
+
+func HandleFieldAliasUpsert(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePOST(w, r) {
+			return
+		}
+		var req fieldAliasUpsertReq
+		if err := decodeJSON(r, &req); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
+		req.FieldCode = strings.TrimSpace(req.FieldCode)
+		req.ConsumerSystem = normalizeConsumer(req.ConsumerSystem)
+		req.AliasKey = strings.TrimSpace(req.AliasKey)
+		req.UsageKind = strings.ToLower(strings.TrimSpace(req.UsageKind))
+		if req.SubModuleCode == "" || req.FieldCode == "" || req.ConsumerSystem == "" || req.AliasKey == "" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "sub_module_code, field_code, consumer_system, and alias_key are required", "VALIDATION_ERROR")
+			return
+		}
+		if req.UsageKind == "" {
+			req.UsageKind = "scalar"
+		}
+		if !validUsageKinds[req.UsageKind] {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "usage_kind must be one of scalar/list_field/list_name/parent_key/storage_key", "VALIDATION_ERROR")
+			return
+		}
+		tag, err := pool.Exec(r.Context(), `
+			INSERT INTO domain_catalog.field_alias (field_id, consumer_system, alias_key, container_name, usage_kind, sort_order)
+			SELECT f.field_id, $3, $4, $5, $6, $7
+			FROM domain_catalog.field f
+			WHERE f.sub_module_code = $1 AND f.field_code = $2 AND f.is_deleted = false
+			ON CONFLICT (consumer_system, alias_key, container_name) DO UPDATE SET
+				field_id = EXCLUDED.field_id,
+				usage_kind = EXCLUDED.usage_kind,
+				sort_order = EXCLUDED.sort_order,
+				is_deleted = false`,
+			req.SubModuleCode, req.FieldCode, req.ConsumerSystem, req.AliasKey, req.ContainerName, req.UsageKind, req.SortOrder)
+		if err != nil {
+			api.LogErrorForResponse(w, "domain-catalog field-alias upsert: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upsert field alias", "")
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			api.RespondEnvelopeError(w, http.StatusNotFound, "no matching field found for sub_module_code/field_code", "NOT_FOUND")
+			return
+		}
+		api.RespondEnvelopeSuccess(w, "Field alias upserted", map[string]interface{}{
+			"sub_module_code": req.SubModuleCode, "field_code": req.FieldCode,
+			"consumer_system": req.ConsumerSystem, "alias_key": req.AliasKey,
+			"container_name": req.ContainerName, "usage_kind": req.UsageKind,
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bulk field + aliases in one call — convenience for seeding a whole
+// sub-module without one HTTP round trip per field/alias.
+// ---------------------------------------------------------------------------
+
+type bulkFieldEntry struct {
+	FieldCode   string `json:"field_code"`
+	CDMPath     string `json:"cdm_path"`
+	DataType    string `json:"data_type"`
+	Unit        string `json:"unit"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	Nullable    *bool  `json:"nullable"`
+	SortOrder   int    `json:"sort_order"`
+	Aliases     []struct {
+		ConsumerSystem string `json:"consumer_system"`
+		AliasKey       string `json:"alias_key"`
+		ContainerName  string `json:"container_name"`
+		UsageKind      string `json:"usage_kind"`
+		SortOrder      int    `json:"sort_order"`
+	} `json:"aliases"`
+}
+
+type bulkFieldsUpsertReq struct {
+	SubModuleCode string           `json:"sub_module_code"`
+	Fields        []bulkFieldEntry `json:"fields"`
+}
+
+// HandleBulkFieldsUpsert upserts many fields (and each field's per-consumer
+// aliases) for one sub_module_code in a single request — the seeding-time
+// equivalent of the "Fields" + three alias VALUES blocks in
+// fd_booking_catalog_seed.sql.
+func HandleBulkFieldsUpsert(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requirePOST(w, r) {
+			return
+		}
+		var req bulkFieldsUpsertReq
+		if err := decodeJSON(r, &req); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
+		if req.SubModuleCode == "" || len(req.Fields) == 0 {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "sub_module_code and at least one field are required", "VALIDATION_ERROR")
+			return
+		}
+
+		tx, err := pool.Begin(r.Context())
+		if err != nil {
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to begin transaction", "")
+			return
+		}
+		defer tx.Rollback(r.Context())
+
+		fieldsUpserted := 0
+		aliasesUpserted := 0
+		who := actor(r)
+
+		for _, f := range req.Fields {
+			fieldCode := strings.TrimSpace(f.FieldCode)
+			label := strings.TrimSpace(f.Label)
+			dataType := strings.ToLower(strings.TrimSpace(f.DataType))
+			if fieldCode == "" || label == "" {
+				api.RespondEnvelopeError(w, http.StatusBadRequest, "each field needs field_code and label (offending field_code=\""+fieldCode+"\")", "VALIDATION_ERROR")
+				return
+			}
+			if dataType == "" {
+				dataType = "string"
+			}
+			if !validFieldDataTypes[dataType] {
+				api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid data_type for field_code="+fieldCode, "VALIDATION_ERROR")
+				return
+			}
+			nullable := true
+			if f.Nullable != nil {
+				nullable = *f.Nullable
+			}
+			var cdmPath interface{}
+			trimmedPath := strings.TrimSpace(f.CDMPath)
+			if trimmedPath != "" {
+				cdmPath = trimmedPath
+			}
+
+			var fieldID string
+			err = tx.QueryRow(r.Context(), `
+				INSERT INTO domain_catalog.field (
+					sub_module_code, field_code, cdm_path, data_type, unit, label, description, nullable, sort_order, created_by
+				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				ON CONFLICT (sub_module_code, field_code) DO UPDATE SET
+					cdm_path = EXCLUDED.cdm_path,
+					data_type = EXCLUDED.data_type,
+					unit = EXCLUDED.unit,
+					label = EXCLUDED.label,
+					description = EXCLUDED.description,
+					nullable = EXCLUDED.nullable,
+					sort_order = EXCLUDED.sort_order,
+					last_modified_by = EXCLUDED.created_by,
+					last_modified_at = now(),
+					is_deleted = false
+				RETURNING field_id`,
+				req.SubModuleCode, fieldCode, cdmPath, dataType, f.Unit, label, f.Description, nullable, f.SortOrder, who,
+			).Scan(&fieldID)
+			if err != nil {
+				api.LogErrorForResponse(w, "domain-catalog bulk field upsert (field_code=%s): %v", fieldCode, err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upsert field_code="+fieldCode+" — check sub_module_code exists and cdm_path isn't already used", "")
+				return
+			}
+			fieldsUpserted++
+
+			if trimmedPath != "" {
+				_, err = tx.Exec(r.Context(), `
+					INSERT INTO policyengine_svc.cdm_variable (
+						name, data_type, unit, label, description, domain, source_system,
+						nullable, status, is_deleted, processing_status, created_by
+					)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Active', false, 'APPROVED', $9)
+					ON CONFLICT (name) DO UPDATE SET
+						data_type = EXCLUDED.data_type,
+						unit = EXCLUDED.unit,
+						label = EXCLUDED.label,
+						description = EXCLUDED.description,
+						domain = EXCLUDED.domain,
+						source_system = EXCLUDED.source_system,
+						nullable = EXCLUDED.nullable,
+						status = 'Active',
+						is_deleted = false,
+						processing_status = COALESCE(policyengine_svc.cdm_variable.processing_status, 'APPROVED'),
+						last_modified_at = now()`,
+					trimmedPath, dataType, f.Unit, label, f.Description, req.SubModuleCode, "domain_catalog_api", nullable, who)
+				if err != nil {
+					api.LogErrorForResponse(w, "domain-catalog bulk field upsert: cdm_variable sync failed for %s: %v", trimmedPath, err)
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, "field_code="+fieldCode+" saved but cdm_variable sync failed", "")
+					return
+				}
+			}
+
+			for _, al := range f.Aliases {
+				consumer := normalizeConsumer(al.ConsumerSystem)
+				aliasKey := strings.TrimSpace(al.AliasKey)
+				usageKind := strings.ToLower(strings.TrimSpace(al.UsageKind))
+				if consumer == "" || aliasKey == "" {
+					api.RespondEnvelopeError(w, http.StatusBadRequest, "each alias needs consumer_system and alias_key (field_code="+fieldCode+")", "VALIDATION_ERROR")
+					return
+				}
+				if usageKind == "" {
+					usageKind = "scalar"
+				}
+				if !validUsageKinds[usageKind] {
+					api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid usage_kind for field_code="+fieldCode+" consumer_system="+consumer, "VALIDATION_ERROR")
+					return
+				}
+				_, err = tx.Exec(r.Context(), `
+					INSERT INTO domain_catalog.field_alias (field_id, consumer_system, alias_key, container_name, usage_kind, sort_order)
+					VALUES ($1, $2, $3, $4, $5, $6)
+					ON CONFLICT (consumer_system, alias_key, container_name) DO UPDATE SET
+						field_id = EXCLUDED.field_id,
+						usage_kind = EXCLUDED.usage_kind,
+						sort_order = EXCLUDED.sort_order,
+						is_deleted = false`,
+					fieldID, consumer, aliasKey, al.ContainerName, usageKind, al.SortOrder)
+				if err != nil {
+					api.LogErrorForResponse(w, "domain-catalog bulk field-alias upsert (field_code=%s consumer=%s): %v", fieldCode, consumer, err)
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upsert alias for field_code="+fieldCode+" consumer_system="+consumer, "")
+					return
+				}
+				aliasesUpserted++
+			}
+		}
+
+		if err := tx.Commit(r.Context()); err != nil {
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to commit", "")
+			return
+		}
+		api.RespondEnvelopeSuccess(w, "Bulk fields upserted", map[string]interface{}{
+			"sub_module_code":  req.SubModuleCode,
+			"fields_upserted":  fieldsUpserted,
+			"aliases_upserted": aliasesUpserted,
+		})
+	}
+}

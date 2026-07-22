@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/validation"
 	"bufio"
 	"bytes"
@@ -128,6 +129,20 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"An active initiation already exists for this proposal and scheme. Delete the existing initiation before creating a new one.")
 				return
 			}
+		}
+
+		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateInitiationSingle",
+			"/investment/initiation/create", mfSubInitiation, req.EntityName, userEmail,
+			map[string]interface{}{
+				"entity_name":      req.EntityName,
+				"scheme_id":        req.SchemeID,
+				"folio_id":         req.FolioID,
+				"demat_id":         req.DematID,
+				"amount":           req.Amount,
+				"transaction_date": req.TransactionDate,
+				"proposal_id":      req.ProposalID,
+			}) {
+			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
@@ -291,6 +306,23 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "CreateInitiationBulk",
+				"/investment/initiation/create-bulk", mfSubInitiation, entityName, userEmail,
+				map[string]interface{}{
+					"entity_name":      entityName,
+					"scheme_id":        schemeID,
+					"folio_id":         row.FolioID,
+					"demat_id":         row.DematID,
+					"amount":           row.Amount,
+					"transaction_date": txnDate,
+					"proposal_id":      proposalID,
+				}); !ok {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false, constants.ValueError: pmsg,
+				})
+				continue
+			}
+
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
@@ -407,6 +439,12 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateInitiation",
+			"/investment/initiation/update", mfSubInitiation, req.InitiationID, userEmail,
+			map[string]interface{}{"initiation_id": req.InitiationID, "fields": req.Fields}) {
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -529,6 +567,15 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, row := range req.Rows {
 			if row.InitiationID == "" {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "initiation_id missing"})
+				continue
+			}
+
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreEdit, "UpdateInitiationBulk",
+				"/investment/initiation/update-bulk", mfSubInitiation, row.InitiationID, userEmail,
+				map[string]interface{}{"initiation_id": row.InitiationID, "fields": row.Fields}); !ok {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false, "initiation_id": row.InitiationID, constants.ValueError: pmsg,
+				})
 				continue
 			}
 
@@ -659,6 +706,15 @@ func DeleteInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		for _, id := range req.InitiationIDs {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreDelete, "DeleteInitiation",
+				"/investment/initiation/delete", mfSubInitiation, id, requestedBy,
+				map[string]interface{}{"initiation_id": id, "reason": req.Reason}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -717,6 +773,15 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		for _, id := range req.InitiationIDs {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveInitiationActions",
+				"/investment/initiation/approve", mfSubInitiation, id, checkerBy,
+				map[string]interface{}{"initiation_id": id, "comment": req.Comment}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -925,6 +990,15 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			api.RespondWithError(w, http.StatusBadRequest, msg)
 			return
+		}
+
+		for _, id := range req.InitiationIDs {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectInitiationActions",
+				"/investment/initiation/reject", mfSubInitiation, id, checkerBy,
+				map[string]interface{}{"initiation_id": id, "comment": req.Comment}); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+				return
+			}
 		}
 
 		if _, err := tx.Exec(ctx, `

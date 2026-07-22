@@ -75,11 +75,13 @@ type DetailItem struct {
 	LastModifiedBy         string   `json:"last_modified_by"`
 	LastModifiedAt         string   `json:"last_modified_at"`
 
-	TriggerEvents []string                  `json:"trigger_events"`
-	Modules       []string                  `json:"modules"`
-	SlabRows      []slabRowConfig           `json:"slab_rows"`
-	CompBuckets   []compositionBucketConfig `json:"comp_buckets"`
-	ListValues    []string                  `json:"list_values"`
+	TriggerEvents     []string                  `json:"trigger_events"`
+	Modules           []string                  `json:"modules"`
+	EntitiesInclude   []string                  `json:"entities_include"`
+	EntitiesExclude   []string                  `json:"entities_exclude"`
+	SlabRows          []slabRowConfig           `json:"slab_rows"`
+	CompBuckets       []compositionBucketConfig `json:"comp_buckets"`
+	ListValues        []string                  `json:"list_values"`
 }
 
 func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
@@ -213,6 +215,26 @@ func loadPolicyDetail(r *http.Request, pool *pgxpool.Pool, policyID string) (*De
 			}
 		}
 		modRows.Close()
+	}
+
+	it.EntitiesInclude = make([]string, 0)
+	it.EntitiesExclude = make([]string, 0)
+	entRows, err := pool.Query(r.Context(), `
+		SELECT entity_code, filter_mode FROM policyengine_svc.policy_entity
+		WHERE policy_id = $1::uuid AND is_deleted = false
+		ORDER BY filter_mode, entity_code`, policyID)
+	if err == nil {
+		for entRows.Next() {
+			var code, mode string
+			if entRows.Scan(&code, &mode) == nil {
+				if mode == "exclude" {
+					it.EntitiesExclude = append(it.EntitiesExclude, code)
+				} else {
+					it.EntitiesInclude = append(it.EntitiesInclude, code)
+				}
+			}
+		}
+		entRows.Close()
 	}
 
 	it.SlabRows = make([]slabRowConfig, 0)

@@ -19,14 +19,14 @@ type updateReq struct {
 	Description  string `json:"description"`
 	Domain       string `json:"domain"`
 	SourceSystem string `json:"source_system"`
+	CanonicalRef string `json:"canonical_ref"`
+	UserAlias    string `json:"user_alias"`
 	Nullable     bool   `json:"nullable"`
 	Status       string `json:"status"`
 	ActorID      string `json:"actor_id"`
 	Reason       string `json:"reason"`
 }
 
-// HandleUpdate applies the edit to the master row immediately but flags it
-// PENDING_EDIT_APPROVAL; old_/new_ values are recorded so a reject can revert.
 func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !common.RequirePOST(w, r) {
@@ -43,6 +43,8 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		req.Domain = strings.TrimSpace(req.Domain)
 		req.DataType = strings.TrimSpace(req.DataType)
 		req.Description = strings.TrimSpace(req.Description)
+		req.CanonicalRef = strings.TrimSpace(req.CanonicalRef)
+		req.UserAlias = strings.TrimSpace(req.UserAlias)
 		req.Status = strings.TrimSpace(req.Status)
 		if req.VariableID == "" || req.Name == "" || req.Label == "" || req.Domain == "" || req.DataType == "" || req.Description == "" {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "variable_id, name, label, domain, data_type, description are required", "VALIDATION_ERROR")
@@ -64,12 +66,13 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 
 		var old Item
 		err = tx.QueryRow(r.Context(), `
-			SELECT name, data_type, unit, label, description, domain, COALESCE(source_system, ''), nullable, status, processing_status
+			SELECT name, data_type, unit, label, description, domain, COALESCE(source_system, ''),
+			       COALESCE(canonical_ref, ''), COALESCE(user_alias, ''), nullable, status, processing_status
 			FROM policyengine_svc.cdm_variable
 			WHERE variable_id = $1::uuid AND is_deleted = false
 			FOR UPDATE`, req.VariableID,
 		).Scan(&old.Name, &old.DataType, &old.Unit, &old.Label, &old.Description, &old.Domain,
-			&old.SourceSystem, &old.Nullable, &old.Status, &old.ProcessingStatus)
+			&old.SourceSystem, &old.CanonicalRef, &old.UserAlias, &old.Nullable, &old.Status, &old.ProcessingStatus)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "CDM variable not found", "NOT_FOUND")
 			return
@@ -82,11 +85,12 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(r.Context(), `
 			UPDATE policyengine_svc.cdm_variable
 			SET name = $1, data_type = $2, unit = $3, label = $4, description = $5, domain = $6,
-			    source_system = NULLIF($7,''), nullable = $8, status = $9,
-			    processing_status = 'PENDING_EDIT_APPROVAL', last_modified_by = $10, last_modified_at = now()
-			WHERE variable_id = $11::uuid`,
+			    source_system = NULLIF($7,''), canonical_ref = COALESCE($8,''), user_alias = NULLIF($9,''),
+			    nullable = $10, status = $11,
+			    processing_status = 'PENDING_EDIT_APPROVAL', last_modified_by = $12, last_modified_at = now()
+			WHERE variable_id = $13::uuid`,
 			req.Name, req.DataType, req.Unit, req.Label, req.Description, req.Domain,
-			req.SourceSystem, req.Nullable, req.Status, actor, req.VariableID,
+			req.SourceSystem, req.CanonicalRef, req.UserAlias, req.Nullable, req.Status, actor, req.VariableID,
 		)
 		if err != nil {
 			api.LogErrorForResponse(w, "cdm update exec: %v", err)
@@ -94,19 +98,35 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if req.UserAlias != "" {
+			_, _ = tx.Exec(r.Context(), `
+				INSERT INTO policyengine_svc.cdm_variable_alias (variable_id, alias_name, created_by)
+				SELECT $1::uuid, $2, $3
+				WHERE NOT EXISTS (
+					SELECT 1 FROM policyengine_svc.cdm_variable_alias
+					WHERE is_deleted = false AND alias_name = $2
+				)`, req.VariableID, req.UserAlias, actor)
+		}
+
 		_, err = tx.Exec(r.Context(), `
 			INSERT INTO policyengine_svc.cdm_variable_audit (
 				variable_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip,
 				old_name, new_name, old_data_type, new_data_type, old_unit, new_unit,
 				old_label, new_label, old_description, new_description, old_domain, new_domain,
-				old_source_system, new_source_system, old_nullable, new_nullable, old_status, new_status,
+				old_source_system, new_source_system,
+				old_canonical_ref, new_canonical_ref, old_user_alias, new_user_alias,
+				old_nullable, new_nullable, old_status, new_status,
 				old_is_deleted, new_is_deleted
 			) VALUES ($1::uuid, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now(), $4,
-				$5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, false, false)`,
+				$5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+				$19, $20, $21, $22, $23, $24, $25, $26, false, false)`,
 			req.VariableID, common.NullIfEmpty(req.Reason), actor, common.NullIfEmpty(ip),
 			old.Name, req.Name, old.DataType, req.DataType, old.Unit, req.Unit,
 			old.Label, req.Label, old.Description, req.Description, old.Domain, req.Domain,
-			old.SourceSystem, req.SourceSystem, old.Nullable, req.Nullable, old.Status, req.Status,
+			old.SourceSystem, req.SourceSystem,
+			old.CanonicalRef, req.CanonicalRef,
+			common.NullIfEmpty(old.UserAlias), common.NullIfEmpty(req.UserAlias),
+			old.Nullable, req.Nullable, old.Status, req.Status,
 		)
 		if err != nil {
 			api.LogErrorForResponse(w, "cdm update audit: %v", err)

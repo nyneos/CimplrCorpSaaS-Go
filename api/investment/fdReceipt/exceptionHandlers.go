@@ -11,6 +11,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -67,6 +68,15 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		auditOld := auditOldFromHeader(hdr)
+
+		excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "EditVariance", "/investment/fd/receipt/exception/edit",
+			fdSubException, excEntityID, userEmail, map[string]interface{}{
+				"exception_id": req.ExceptionID, "entity_id": excEntityID, "entity_code": excEntityID,
+				"fd_id": hdr.FDID, "receipt_id": hdr.ReceiptID,
+			}) {
+			return
+		}
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
@@ -187,6 +197,15 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		auditOld := auditOldFromHeader(hdr)
 
+		excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "ResolveVariance", "/investment/fd/receipt/exception/resolve",
+			fdSubException, excEntityID, userEmail, map[string]interface{}{
+				"exception_id": req.ExceptionID, "entity_id": excEntityID, "entity_code": excEntityID,
+				"fd_id": hdr.FDID, "receipt_id": hdr.ReceiptID,
+			}) {
+			return
+		}
+
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
@@ -304,6 +323,17 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if hasVarianceCheckerApproval(ctx, pool, eid) {
 				res["error"] = "already approved; use close to lock or reject to reopen"
+				results = append(results, res)
+				continue
+			}
+
+			excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "ApproveVariance",
+				"/investment/fd/receipt/exception/approve", fdSubException, excEntityID, userEmail, map[string]interface{}{
+					"exception_id": eid, "entity_id": excEntityID, "entity_code": excEntityID,
+					"fd_id": hdr.FDID, "receipt_id": hdr.ReceiptID,
+				}); !ok {
+				res["error"] = pmsg
 				results = append(results, res)
 				continue
 			}
@@ -588,6 +618,17 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if hdr.WorkflowStatus != "OPEN" && hdr.WorkflowStatus != "IN_REVIEW" {
 				res["error"] = "must be OPEN or IN_REVIEW"
+				results = append(results, res)
+				continue
+			}
+
+			excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "RejectVariance",
+				"/investment/fd/receipt/exception/reject", fdSubException, excEntityID, userEmail, map[string]interface{}{
+					"exception_id": eid, "entity_id": excEntityID, "entity_code": excEntityID,
+					"fd_id": hdr.FDID, "receipt_id": hdr.ReceiptID,
+				}); !ok {
+				res["error"] = pmsg
 				results = append(results, res)
 				continue
 			}

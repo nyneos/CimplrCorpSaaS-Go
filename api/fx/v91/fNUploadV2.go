@@ -6,6 +6,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
+	"CimplrCorpSaas/api/policyengine/common"
+	policyruntime "CimplrCorpSaas/api/policyengine/runtime"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"database/sql"
@@ -227,6 +229,20 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(1024 << 20); err != nil {
 			httpError(w, http.StatusBadRequest, "multipart parse error: "+err.Error())
+			return
+		}
+		if !policyruntime.Enforce(r.Context(), w, r, pool, policyruntime.EnforceInput{
+			EventCode:           common.TriggerPreUpload,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "EXPOSURE_CREATION",
+			ActorUserID:         r.FormValue(constants.KeyUserID),
+			HandlerName:         "BatchUploadStagingData",
+			APIPath:             "/fx/exposures/v91/upload",
+			DefaultBlockMessage: "Exposure upload blocked by policy",
+			Fields: map[string]interface{}{
+				"file_count": len(r.MultipartForm.File["files"]),
+			},
+		}) {
 			return
 		}
 		results, elapsed, status, err := processBatchUploadStagingData(r.Context(), pool, r)
@@ -2466,6 +2482,21 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		batchUUID, err := uuid.Parse(req.BatchID)
 		if err != nil {
 			httpError(w, http.StatusBadRequest, constants.ErrInvalidBatchID)
+			return
+		}
+		if !policyruntime.Enforce(ctx, w, r, pool, policyruntime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "EXPOSURE_CREATION",
+			EntityCode:          req.BatchID,
+			ActorUserID:         req.UserID,
+			HandlerName:         "EditAllocationsHandler",
+			APIPath:             r.URL.Path,
+			DefaultBlockMessage: "Exposure allocation edit blocked by policy",
+			Fields: map[string]interface{}{
+				"batch_id": req.BatchID,
+			},
+		}) {
 			return
 		}
 
