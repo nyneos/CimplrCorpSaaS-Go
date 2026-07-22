@@ -303,7 +303,7 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 	fileContentBytes, err := s3storage.GetObjectBytes(ctx, s3Key)
 	if err != nil {
 		log.Printf("[TransformWorker] Failed to download source file %s from S3: %v", s3Key, err)
-		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, "s3_download: "+err.Error())
+		saveTransformFailureByRuleID(ctx, pool, messageID, attachmentID, ruleID, "s3_download: "+err.Error())
 		return
 	}
 
@@ -332,12 +332,12 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 	part, err := writer.CreateFormFile("file", filepath.Base(s3Key))
 	if err != nil {
 		log.Printf("[TransformWorker] Failed to create multipart file part: %v", err)
-		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, "multipart: "+err.Error())
+		saveTransformFailureByRuleID(ctx, pool, messageID, attachmentID, ruleID, "multipart: "+err.Error())
 		return
 	}
 	if _, err := part.Write(fileContentBytes); err != nil {
 		log.Printf("[TransformWorker] Failed to write file bytes: %v", err)
-		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, "write_file: "+err.Error())
+		saveTransformFailureByRuleID(ctx, pool, messageID, attachmentID, ruleID, "write_file: "+err.Error())
 		return
 	}
 	_ = writer.Close()
@@ -345,7 +345,7 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bodyBuf)
 	if err != nil {
 		log.Printf("[TransformWorker] Failed to create request: %v", err)
-		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, "request: "+err.Error())
+		saveTransformFailureByRuleID(ctx, pool, messageID, attachmentID, ruleID, "request: "+err.Error())
 		return
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
@@ -354,7 +354,7 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[TransformWorker] Failed to call Transformation API: %v", err)
-		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, "api_call: "+err.Error())
+		saveTransformFailureByRuleID(ctx, pool, messageID, attachmentID, ruleID, "api_call: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
@@ -366,7 +366,7 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 			msg = msg[:500]
 		}
 		log.Printf("[TransformWorker] Transformation API returned %d: %s", resp.StatusCode, msg)
-		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, fmt.Sprintf("api_status_%d: %s", resp.StatusCode, msg))
+		saveTransformFailureByRuleID(ctx, pool, messageID, attachmentID, ruleID, fmt.Sprintf("api_status_%d: %s", resp.StatusCode, msg))
 		return
 	}
 
@@ -383,14 +383,23 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 	dest, destErr := loadRuleDestination(ctx, pool, ruleID)
 	if destErr != nil {
 		log.Printf("[TransformWorker] Failed to load destination for rule %s: %v", ruleID, destErr)
-		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, "load_destination: "+destErr.Error())
+		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, ruleDestination{}, "load_destination: "+destErr.Error())
 		return
 	}
 
-	location, s3Key, outName, delErr := deliverTransformed(ctx, dest, transformedExt, bodyBytes, contentType)
+	logTransformStep(ctx, pool, messageID, "TRANSFORM_CONVERT", "OK", map[string]interface{}{
+		"attachment_id": attachmentID,
+		"rule_id":       ruleID,
+		"mapping_id":    mappingID,
+		"output_format": transformedExt,
+		"byte_size":     len(bodyBytes),
+	})
+
+	location, s3KeyOut, outName, delErr := deliverTransformed(ctx, dest, transformedExt, bodyBytes, contentType)
+
 	if delErr != nil {
 		log.Printf("[TransformWorker] Failed to deliver transformed file (%s): %v", dest.DestinationType, delErr)
-		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, "deliver_"+strings.ToLower(dest.DestinationType)+": "+delErr.Error())
+		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, dest, "deliver_"+strings.ToLower(dest.DestinationType)+": "+delErr.Error())
 		return
 	}
 
@@ -407,7 +416,7 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 			output_filename = EXCLUDED.output_filename,
 			created_at = now()
 	`
-	_, err = pool.Exec(ctx, query, attachmentID, ruleID, s3Key, dest.DestinationType, location, outName)
+	_, err = pool.Exec(ctx, query, attachmentID, ruleID, s3KeyOut, dest.DestinationType, location, outName)
 	if err != nil {
 		log.Printf("[TransformWorker] Failed to save result to DB: %v", err)
 		logTransformStep(ctx, pool, messageID, "TRANSFORM", "FAIL", map[string]interface{}{
@@ -425,10 +434,13 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 		"destination_type":   dest.DestinationType,
 		"output_location":    location,
 		"output_filename":    outName,
-		"transformed_s3_key": s3Key,
+		"transformed_s3_key": s3KeyOut,
 	}
 	if strings.EqualFold(dest.DestinationType, "API") && strings.TrimSpace(dest.APIURL) != "" {
 		okDetail["api_url"] = dest.APIURL
+	}
+	for k, v := range deliveryAuditFromOutcome(dest.DestinationType, location, "") {
+		okDetail[k] = v
 	}
 	logTransformStep(ctx, pool, messageID, "TRANSFORM", "OK", okDetail)
 }
@@ -465,25 +477,48 @@ func loadRuleDestination(ctx context.Context, pool *pgxpool.Pool, ruleID string)
 	return d, nil
 }
 
-func saveTransformFailure(ctx context.Context, pool *pgxpool.Pool, messageID, attachmentID, ruleID, errMsg string) {
+func saveTransformFailureByRuleID(ctx context.Context, pool *pgxpool.Pool, messageID, attachmentID, ruleID, errMsg string) {
+	dest, _ := loadRuleDestination(ctx, pool, ruleID)
+	saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, dest, errMsg)
+}
+
+func saveTransformFailure(ctx context.Context, pool *pgxpool.Pool, messageID, attachmentID, ruleID string, dest ruleDestination, errMsg string) {
 	if pool == nil || attachmentID == "" || ruleID == "" {
 		return
 	}
 	EnsureTransformationSchema(ctx, pool)
+	destType := strings.TrimSpace(dest.DestinationType)
+	if destType == "" {
+		destType = "S3"
+	}
 	_, err := pool.Exec(ctx, `
-		INSERT INTO email_svc.transformation_results (attachment_id, rule_id, transformed_s3_key, status, error_message)
-		VALUES ($1::uuid, $2::uuid, '', 'FAILED', $3)
+		INSERT INTO email_svc.transformation_results
+			(attachment_id, rule_id, transformed_s3_key, status, error_message, destination_type)
+		VALUES ($1::uuid, $2::uuid, '', 'FAILED', $3, $4)
 		ON CONFLICT (attachment_id, rule_id) DO UPDATE SET
 			status = 'FAILED',
 			error_message = EXCLUDED.error_message,
+			destination_type = EXCLUDED.destination_type,
 			created_at = now()
-	`, attachmentID, ruleID, errMsg)
+	`, attachmentID, ruleID, errMsg, destType)
 	if err != nil {
 		log.Printf("[TransformWorker] Failed to persist failure row: %v", err)
 	}
-	logTransformStep(ctx, pool, messageID, "TRANSFORM", "FAIL", map[string]interface{}{
+	failDetail := map[string]interface{}{
 		"attachment_id": attachmentID,
 		"rule_id":       ruleID,
 		"error":         errMsg,
-	})
+		"destination_type": destType,
+	}
+	for k, v := range deliveryAuditFromOutcome(destType, "", errMsg) {
+		failDetail[k] = v
+	}
+	if strings.EqualFold(destType, "API") && strings.TrimSpace(dest.APIURL) != "" {
+		failDetail["api_url"] = dest.APIURL
+	}
+	if strings.EqualFold(destType, "SFTP") && strings.TrimSpace(dest.SftpHost) != "" {
+		failDetail["sftp_host"] = dest.SftpHost
+		failDetail["sftp_port"] = dest.SftpPort
+	}
+	logTransformStep(ctx, pool, messageID, "TRANSFORM", "FAIL", failDetail)
 }

@@ -16,6 +16,7 @@ func RegisterMessageRoutes(mux *http.ServeMux, pool *pgxpool.Pool, chain func(ht
 	mux.Handle("/email/transform-results/preview-content", chain(http.HandlerFunc(HandleTransformResultPreviewContent(pool))))
 	mux.Handle("/email/transform-results/download-local", chain(http.HandlerFunc(HandleTransformResultDownloadLocal(pool))))
 	mux.Handle("/email/transform-results/processing-log", chain(http.HandlerFunc(HandleTransformResultProcessingLog(pool))))
+	mux.Handle("/email/transform-execution-log/list", chain(http.HandlerFunc(HandleTransformExecutionLogList(pool))))
 	mux.Handle("/email/transform-results/bulk-download", chain(http.HandlerFunc(HandleTransformResultsBulkDownload(pool))))
 	mux.Handle("/email/messages/get", chain(http.HandlerFunc(HandleMessageGet(pool))))
 	mux.Handle("/email/messages/extract", chain(http.HandlerFunc(HandleMessageExtract(pool))))
