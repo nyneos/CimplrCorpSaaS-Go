@@ -252,7 +252,7 @@ func (c *Client) listFolderMessagesSince(ctx context.Context, mailbox, folder, d
 
 // folderMessagesPath builds a Graph list URL with correctly encoded OData query params.
 func folderMessagesPath(mailbox, folder, dateField string, since time.Time, top int) string {
-	sinceISO := since.UTC().Format("2006-01-02T15:04:05Z")
+	sinceISO := since.UTC().Format("2006-01-02T15:04:05.000Z")
 	q := url.Values{}
 	q.Set("$filter", fmt.Sprintf("%s gt %s", dateField, sinceISO))
 	q.Set("$orderby", dateField+" asc")

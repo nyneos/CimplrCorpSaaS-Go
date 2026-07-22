@@ -400,18 +400,19 @@ func (r *Runtime) VerifyGmailDWD(ctx context.Context, mailbox string, cfg GmailD
 }
 
 type IMAPPullRequest struct {
-	InboxID   string
-	Mailbox   string
-	Folder    string
-	Direction string
-	LastUID   uint32
-	PageSize  int
-	Conn      IMAPConnection
+	InboxID              string
+	Mailbox              string
+	Folder               string
+	Direction            string
+	LastUID              uint32
+	PageSize             int
+	Conn                 IMAPConnection
+	SkipIMAPMessageKeys  []string
 }
 
 func (r *Runtime) PullIMAPMessages(ctx context.Context, req IMAPPullRequest) (*IMAPPullResult, error) {
 	var out IMAPPullResult
-	err := r.invoke(ctx, "/v1/imap/poll-folder", map[string]interface{}{
+	payload := map[string]interface{}{
 		"inbox_id":        req.InboxID,
 		"mailbox_address": req.Mailbox,
 		"folder":          req.Folder,
@@ -419,39 +420,51 @@ func (r *Runtime) PullIMAPMessages(ctx context.Context, req IMAPPullRequest) (*I
 		"last_uid":        req.LastUID,
 		"batch":           req.PageSize,
 		"imap":            req.Conn,
-	}, &out, pullTimeout())
+	}
+	if len(req.SkipIMAPMessageKeys) > 0 {
+		payload["skip_imap_message_keys"] = req.SkipIMAPMessageKeys
+	}
+	err := r.invoke(ctx, "/v1/imap/poll-folder", payload, &out, pullTimeout())
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (r *Runtime) PullGraphMessages(ctx context.Context, inboxID, mailbox string, sentFolder bool, since string, pageSize int, cfg GraphConnection) (*GraphPullResult, error) {
+func (r *Runtime) PullGraphMessages(ctx context.Context, inboxID, mailbox string, sentFolder bool, since string, pageSize int, cfg GraphConnection, skipMessageIDs []string) (*GraphPullResult, error) {
 	var out GraphPullResult
-	err := r.invoke(ctx, "/v1/graph/poll-page", map[string]interface{}{
+	payload := map[string]interface{}{
 		"inbox_id":        inboxID,
 		"mailbox_address": mailbox,
 		"sent_folder":     sentFolder,
 		"since":           since,
 		"batch":           pageSize,
 		"graph":           cfg,
-	}, &out, pullTimeout())
+	}
+	if len(skipMessageIDs) > 0 {
+		payload["skip_message_ids"] = skipMessageIDs
+	}
+	err := r.invoke(ctx, "/v1/graph/poll-page", payload, &out, pullTimeout())
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (r *Runtime) PullGmailDWDMessages(ctx context.Context, inboxID, mailbox string, sentFolder bool, since string, pageSize int, cfg GmailDWDConnection) (*GraphPullResult, error) {
+func (r *Runtime) PullGmailDWDMessages(ctx context.Context, inboxID, mailbox string, sentFolder bool, since string, pageSize int, cfg GmailDWDConnection, skipMessageIDs []string) (*GraphPullResult, error) {
 	var out GraphPullResult
-	err := r.invoke(ctx, "/v1/gmail-dwd/poll-page", map[string]interface{}{
+	payload := map[string]interface{}{
 		"inbox_id":        inboxID,
 		"mailbox_address": mailbox,
 		"sent_folder":     sentFolder,
 		"since":           since,
 		"batch":           pageSize,
 		"gmail_dwd":       cfg,
-	}, &out, pullTimeout())
+	}
+	if len(skipMessageIDs) > 0 {
+		payload["skip_message_ids"] = skipMessageIDs
+	}
+	err := r.invoke(ctx, "/v1/gmail-dwd/poll-page", payload, &out, pullTimeout())
 	if err != nil {
 		return nil, err
 	}
@@ -510,18 +523,19 @@ func (r *Runtime) VerifyOAuth(ctx context.Context, provider, accessToken string)
 }
 
 type OAuthPullRequest struct {
-	InboxID    string
-	Mailbox    string
-	Provider   string
-	SentFolder bool
-	Since      string
-	PageSize   int
-	Conn       OAuthConnection
+	InboxID          string
+	Mailbox          string
+	Provider         string
+	SentFolder       bool
+	Since            string
+	PageSize         int
+	Conn             OAuthConnection
+	SkipMessageIDs   []string
 }
 
 func (r *Runtime) PullOAuthMessages(ctx context.Context, req OAuthPullRequest) (*OAuthPullResult, error) {
 	var out OAuthPullResult
-	err := r.invoke(ctx, "/v1/oauth/poll-page", map[string]interface{}{
+	payload := map[string]interface{}{
 		"inbox_id":        req.InboxID,
 		"mailbox_address": req.Mailbox,
 		"provider":        req.Provider,
@@ -529,7 +543,11 @@ func (r *Runtime) PullOAuthMessages(ctx context.Context, req OAuthPullRequest) (
 		"since":           req.Since,
 		"batch":           req.PageSize,
 		"access_token":    req.Conn.AccessToken,
-	}, &out, pullTimeout())
+	}
+	if len(req.SkipMessageIDs) > 0 {
+		payload["skip_message_ids"] = req.SkipMessageIDs
+	}
+	err := r.invoke(ctx, "/v1/oauth/poll-page", payload, &out, pullTimeout())
 	if err != nil {
 		return nil, err
 	}
@@ -585,6 +603,34 @@ func (r *Runtime) PutStorage(ctx context.Context, req StoragePutRequest) (*Stora
 		"api_auth_token":     req.APIAuthToken,
 	}
 	if err := r.invoke(ctx, "/v1/storage/put", payload, &out, 0); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ReadAPIInboxRequest fetches a file saved by the demo test-receive endpoints.
+type ReadAPIInboxRequest struct {
+	Filename string `json:"filename"`
+	Folder   string `json:"folder"` // api-inbox | api-inbox-2
+}
+
+// ReadAPIInboxResult is the data payload from /v1/storage/read-api-inbox.
+type ReadAPIInboxResult struct {
+	Filename      string `json:"filename"`
+	Folder        string `json:"folder"`
+	Path          string `json:"path"`
+	ContentBase64 string `json:"content_base64"`
+	ByteSize      int    `json:"byte_size"`
+}
+
+// ReadAPIInbox reads back a transformed file from the email service demo API inbox folders.
+func (r *Runtime) ReadAPIInbox(ctx context.Context, req ReadAPIInboxRequest) (*ReadAPIInboxResult, error) {
+	var out ReadAPIInboxResult
+	payload := map[string]interface{}{
+		"filename": req.Filename,
+		"folder":   req.Folder,
+	}
+	if err := r.invoke(ctx, "/v1/storage/read-api-inbox", payload, &out, 0); err != nil {
 		return nil, err
 	}
 	return &out, nil

@@ -279,7 +279,12 @@ func pollOAuthMailboxFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 	cursor := folder.lastSync
 	sinceStr := ""
 	if *cursor != nil {
-		sinceStr = (*cursor).UTC().Format(time.RFC3339)
+		sinceStr = formatPollSince(**cursor)
+	}
+
+	skipIDs, err := loadKnownGraphMessageIDs(ctx, pool, inbox.InboxID, *cursor)
+	if err != nil {
+		return 0, fmt.Errorf("load known graph message ids: %w", err)
 	}
 
 	conn := mailruntime.OAuthConnection{
@@ -292,13 +297,14 @@ func pollOAuthMailboxFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 		resp, err := rt.PullOAuthMessages(ctx, mailruntime.OAuthPullRequest{
 			InboxID: inbox.InboxID, Mailbox: inbox.MailboxAddress, Provider: inbox.Provider,
 			SentFolder: folder.sentFolder, Since: sinceStr, PageSize: oauthPullPageSize, Conn: conn,
+			SkipMessageIDs: skipIDs,
 		})
 		if err != nil {
 			return totalIngested, err
 		}
 
 		if resp.Initialized {
-			t, err := time.Parse(time.RFC3339, resp.NewSince)
+			t, err := parsePollSince(resp.NewSince)
 			if err != nil {
 				t = time.Now().UTC()
 			}
@@ -307,7 +313,7 @@ func pollOAuthMailboxFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 			}
 			*cursor = &t
 			logger.LogInfo("[oauth-poller] mailbox=%s direction=%s initialized cursor (new mail only from %s)",
-				inbox.MailboxAddress, folder.direction, t.Format(time.RFC3339))
+				inbox.MailboxAddress, folder.direction, formatPollSince(t))
 			return 0, nil
 		}
 
@@ -321,16 +327,11 @@ func pollOAuthMailboxFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 		}
 		totalIngested += n
 
-		if strings.TrimSpace(resp.NewSince) != "" {
-			nextSince, err := time.Parse(time.RFC3339, resp.NewSince)
-			if err == nil && (sinceStr == "" || nextSince.After(mustParseRFC3339(sinceStr))) {
-				sinceStr = resp.NewSince
-				if err := folder.setSyncFn(ctx, pool, inbox.InboxID, nextSince); err != nil {
-					return totalIngested, err
-				}
-				t := nextSince
-				*cursor = &t
-			}
+		if err := applyPollPageCursor(ctx, pool, inbox.InboxID, sinceStr, resp.NewSince, cursor, folder.setSyncFn); err != nil {
+			return totalIngested, err
+		}
+		if *cursor != nil {
+			sinceStr = formatPollSince(**cursor)
 		}
 
 		if resp.Fetched < oauthPullPageSize {

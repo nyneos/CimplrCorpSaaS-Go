@@ -418,7 +418,7 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 		return
 	}
 	log.Printf("[TransformWorker] Saved converted file %s (%s) for attachment %s rule %s", location, dest.DestinationType, attachmentID, ruleID)
-	logTransformStep(ctx, pool, messageID, "TRANSFORM", "OK", map[string]interface{}{
+	okDetail := map[string]interface{}{
 		"attachment_id":      attachmentID,
 		"rule_id":            ruleID,
 		"mapping_id":         mappingID,
@@ -426,7 +426,11 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 		"output_location":    location,
 		"output_filename":    outName,
 		"transformed_s3_key": s3Key,
-	})
+	}
+	if strings.EqualFold(dest.DestinationType, "API") && strings.TrimSpace(dest.APIURL) != "" {
+		okDetail["api_url"] = dest.APIURL
+	}
+	logTransformStep(ctx, pool, messageID, "TRANSFORM", "OK", okDetail)
 }
 
 func loadRuleDestination(ctx context.Context, pool *pgxpool.Pool, ruleID string) (ruleDestination, error) {

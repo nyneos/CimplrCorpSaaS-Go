@@ -30,8 +30,19 @@ func logAttachmentIngest(ctx context.Context, pool *pgxpool.Pool, info attachmen
 		"file_size":     info.FileSize,
 		"uploaded_by":   "Email parser",
 	})
+	logProcessingStep(ctx, pool, info.MessageID, "ATTACHMENT_INGEST", detail)
+}
+
+func logMessageIngest(ctx context.Context, pool *pgxpool.Pool, messageID, step string, detail []byte) {
+	logProcessingStep(ctx, pool, messageID, step, detail)
+}
+
+func logProcessingStep(ctx context.Context, pool *pgxpool.Pool, messageID, step string, detail []byte) {
+	if pool == nil || messageID == "" || step == "" {
+		return
+	}
 	_, _ = pool.Exec(ctx, `
 		INSERT INTO email_svc.processing_log (message_id, step, status, detail)
-		VALUES ($1::uuid, 'ATTACHMENT_INGEST', 'OK', $2::jsonb)
-	`, info.MessageID, detail)
+		VALUES ($1::uuid, $2, 'OK', $3::jsonb)
+	`, messageID, step, detail)
 }

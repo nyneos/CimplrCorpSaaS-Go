@@ -2,7 +2,6 @@ package emailjobs
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -283,10 +282,16 @@ func pollIMAPFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Run
 	var totalIngested int
 	lastUID := *folder.lastUID
 
+	skipKeys, err := loadKnownIMAPMessageKeys(ctx, pool, inbox.InboxID)
+	if err != nil {
+		return 0, fmt.Errorf("load known imap message keys: %w", err)
+	}
+
 	for {
 		resp, err := rt.PullIMAPMessages(ctx, mailruntime.IMAPPullRequest{
 			InboxID: inbox.InboxID, Mailbox: inbox.MailboxAddress, Folder: folder.folder,
-			Direction: folder.direction, LastUID: lastUID, PageSize: imapPullPageSize, Conn: inbox.IMAP.toPayload(),
+			Direction: folder.direction, LastUID: lastUID, PageSize: imapPullPageSize,
+			Conn: inbox.IMAP.toPayload(), SkipIMAPMessageKeys: skipKeys,
 		})
 		if err != nil {
 			return totalIngested, err
@@ -383,87 +388,9 @@ func setIMAPSentLastUID(ctx context.Context, pool *pgxpool.Pool, inboxID string,
 }
 
 func ingestIMAPMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow, msg mailruntime.ParsedEmail, imapKey, mailDirection string) error {
-	var exists bool
-	if err := pool.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM email_svc.message WHERE s3_raw_key = $1 OR imap_message_key = $2)
-	`, msg.S3RawKey, imapKey).Scan(&exists); err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-
-	matchInput := matchInputFromParsed(msg)
-	filterMatched, active := directionFilterMatch(inbox.FiltersJSON, mailDirection, matchInput)
-	if !active || !filterMatched {
-		return nil
-	}
-
-	preview := BodyPreviewForStorage(msg.Body.TextPlain, msg.Body.TextHTML)
-
-	toAddrs := msg.Envelope.To
-	if len(toAddrs) == 0 && !strings.EqualFold(mailDirection, mailDirectionSent) {
-		toAddrs = []string{inbox.MailboxAddress}
-	}
-	if mailDirection == "" {
-		mailDirection = mailDirectionReceived
-	}
-
-	var messageID string
-	err := pool.QueryRow(ctx, `
-		INSERT INTO email_svc.message (
-			inbox_id, s3_raw_key, s3_parsed_key, message_id_header, imap_message_key,
-			envelope_from, envelope_to, subject, received_at,
-			has_attachments, filter_matched, processing_status,
-			module, entity_id, body_text_preview, mail_direction, updated_at
-		) VALUES (
-			$1::uuid, $2, $3, $4, NULLIF($5,''),
-			$6, $7, $8, NULLIF($9,'')::timestamptz,
-			$10, $11, 'INGESTED',
-			NULLIF($12,''), NULLIF($13,''), $14, $15, now()
-		)
-		RETURNING message_id::text
-	`,
-		inbox.InboxID, msg.S3RawKey, msg.S3ParsedKey, msg.Envelope.MessageIDHeader, imapKey,
-		msg.Envelope.From, toAddrs, msg.Envelope.Subject, msg.Envelope.Date,
-		len(msg.Attachments) > 0, filterMatched,
-		inbox.Module, inbox.EntityID, preview, mailDirection,
-	).Scan(&messageID)
-	if err != nil {
-		return err
-	}
-
-	for _, att := range msg.Attachments {
-		var attachmentID string
-		err := pool.QueryRow(ctx, `
-			INSERT INTO email_svc.message_attachment (
-				message_id, filename, content_type, file_size, s3_key, file_hash
-			) VALUES ($1::uuid, $2, $3, $4, $5, $6)
-			RETURNING attachment_id::text
-		`, messageID, att.Filename, att.ContentType, att.SizeBytes, att.S3Key, att.SHA256).Scan(&attachmentID)
-		if err != nil {
-			return err
-		}
-		logAttachmentIngest(ctx, pool, attachmentIngestInfo{
-			MessageID: messageID, AttachmentID: attachmentID, Source: "IMAP",
-			Filename: att.Filename, ContentType: att.ContentType, S3Key: att.S3Key, FileSize: att.SizeBytes,
-		})
-
-		// Trigger transformation rules worker
-		go ProcessAttachmentRules(context.Background(), pool, inbox.InboxID, messageID, attachmentID, att.Filename, att.S3Key)
-	}
-
-	detail, _ := json.Marshal(map[string]string{
-		"source":           "IMAP",
-		"imap_message_key": imapKey,
-		"s3_raw_key":       msg.S3RawKey,
-		"mailbox":          inbox.MailboxAddress,
-		"mail_direction":   mailDirection,
-	})
-	_, _ = pool.Exec(ctx, `
-		INSERT INTO email_svc.processing_log (message_id, step, status, detail)
-		VALUES ($1::uuid, 'IMAP_INGEST', 'OK', $2::jsonb)
-	`, messageID, string(detail))
-
-	return nil
+	return ingestPollMessage(ctx, pool, inbox, msg, pollIngestIdentity{
+		IMAPMessageKey: imapKey,
+		SourceType:     "IMAP",
+		LogStep:        "IMAP_INGEST",
+	}, mailDirection)
 }

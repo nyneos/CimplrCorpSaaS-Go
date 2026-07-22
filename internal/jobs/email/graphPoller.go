@@ -2,9 +2,7 @@ package emailjobs
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"CimplrCorpSaas/internal/logger"
@@ -221,18 +219,23 @@ func pollGraphMailboxFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 	cursor := folder.lastSync
 	sinceStr := ""
 	if *cursor != nil {
-		sinceStr = (*cursor).UTC().Format(time.RFC3339)
+		sinceStr = formatPollSince(**cursor)
+	}
+
+	skipIDs, err := loadKnownGraphMessageIDs(ctx, pool, inbox.InboxID, *cursor)
+	if err != nil {
+		return 0, fmt.Errorf("load known graph message ids: %w", err)
 	}
 
 	var totalIngested int
 	for {
-		resp, err := rt.PullGraphMessages(ctx, inbox.InboxID, inbox.MailboxAddress, folder.sentFolder, sinceStr, graphPullPageSize, conn)
+		resp, err := rt.PullGraphMessages(ctx, inbox.InboxID, inbox.MailboxAddress, folder.sentFolder, sinceStr, graphPullPageSize, conn, skipIDs)
 		if err != nil {
 			return totalIngested, err
 		}
 
 		if resp.Initialized {
-			t, err := time.Parse(time.RFC3339, resp.NewSince)
+			t, err := parsePollSince(resp.NewSince)
 			if err != nil {
 				t = time.Now().UTC()
 			}
@@ -241,7 +244,7 @@ func pollGraphMailboxFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 			}
 			*cursor = &t
 			logger.LogInfo("[graph-poller] mailbox=%s direction=%s initialized cursor (new mail only from %s)",
-				inbox.MailboxAddress, folder.direction, t.Format(time.RFC3339))
+				inbox.MailboxAddress, folder.direction, formatPollSince(t))
 			return 0, nil
 		}
 
@@ -255,16 +258,11 @@ func pollGraphMailboxFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 		}
 		totalIngested += n
 
-		if strings.TrimSpace(resp.NewSince) != "" {
-			nextSince, err := time.Parse(time.RFC3339, resp.NewSince)
-			if err == nil && (sinceStr == "" || nextSince.After(mustParseRFC3339(sinceStr))) {
-				sinceStr = resp.NewSince
-				if err := folder.setSyncFn(ctx, pool, inbox.InboxID, nextSince); err != nil {
-					return totalIngested, err
-				}
-				t := nextSince
-				*cursor = &t
-			}
+		if err := applyPollPageCursor(ctx, pool, inbox.InboxID, sinceStr, resp.NewSince, cursor, folder.setSyncFn); err != nil {
+			return totalIngested, err
+		}
+		if *cursor != nil {
+			sinceStr = formatPollSince(**cursor)
 		}
 
 		if resp.Fetched < graphPullPageSize {
@@ -348,100 +346,15 @@ func setGraphSentLastSync(ctx context.Context, pool *pgxpool.Pool, inboxID strin
 }
 
 func ingestGraphMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow, msg mailruntime.ParsedMessage, graphMessageID, mailDirection, sourceType string) error {
-	var exists bool
-	if err := pool.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM email_svc.message WHERE s3_raw_key = $1 OR graph_message_id = $2)
-	`, msg.S3RawKey, graphMessageID).Scan(&exists); err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-
-	matchInput := matchInputFromParsed(msg)
-	filterMatched, active := directionFilterMatch(inbox.FiltersJSON, mailDirection, matchInput)
-	if !active || !filterMatched {
-		return nil
-	}
-
-	preview := BodyPreviewForStorage(msg.Body.TextPlain, msg.Body.TextHTML)
-
-	toAddrs := msg.Envelope.To
-	if len(toAddrs) == 0 {
-		if strings.EqualFold(mailDirection, mailDirectionSent) {
-			toAddrs = []string{}
-		} else {
-			toAddrs = []string{inbox.MailboxAddress}
-		}
-	}
-
-	if sourceType == "" {
-		sourceType = "OUTLOOK_GRAPH"
-	}
-
-	if mailDirection == "" {
-		mailDirection = mailDirectionReceived
-	}
-
-	var messageID string
-	err := pool.QueryRow(ctx, `
-		INSERT INTO email_svc.message (
-			inbox_id, s3_raw_key, s3_parsed_key, message_id_header, graph_message_id,
-			envelope_from, envelope_to, subject, received_at,
-			has_attachments, filter_matched, processing_status,
-			module, entity_id, body_text_preview, mail_direction, updated_at
-		) VALUES (
-			$1::uuid, $2, $3, $4, NULLIF($5,''),
-			$6, $7, $8, NULLIF($9,'')::timestamptz,
-			$10, $11, 'INGESTED',
-			NULLIF($12,''), NULLIF($13,''), $14, $15, now()
-		)
-		RETURNING message_id::text
-	`,
-		inbox.InboxID, msg.S3RawKey, msg.S3ParsedKey, msg.Envelope.MessageIDHeader, graphMessageID,
-		msg.Envelope.From, toAddrs, msg.Envelope.Subject, msg.Envelope.Date,
-		len(msg.Attachments) > 0, filterMatched,
-		inbox.Module, inbox.EntityID, preview, mailDirection,
-	).Scan(&messageID)
-	if err != nil {
-		return err
-	}
-
-	for _, att := range msg.Attachments {
-		var attachmentID string
-		err := pool.QueryRow(ctx, `
-			INSERT INTO email_svc.message_attachment (
-				message_id, filename, content_type, file_size, s3_key, file_hash
-			) VALUES ($1::uuid, $2, $3, $4, $5, $6)
-			RETURNING attachment_id::text
-		`, messageID, att.Filename, att.ContentType, att.SizeBytes, att.S3Key, att.SHA256).Scan(&attachmentID)
-		if err != nil {
-			return err
-		}
-		logAttachmentIngest(ctx, pool, attachmentIngestInfo{
-			MessageID: messageID, AttachmentID: attachmentID, Source: sourceType,
-			Filename: att.Filename, ContentType: att.ContentType, S3Key: att.S3Key, FileSize: att.SizeBytes,
-		})
-
-		// Trigger transformation rules worker
-		go ProcessAttachmentRules(context.Background(), pool, inbox.InboxID, messageID, attachmentID, att.Filename, att.S3Key)
-	}
-
-	detail, _ := json.Marshal(map[string]string{
-		"source":           sourceType,
-		"graph_message_id": graphMessageID,
-		"s3_raw_key":       msg.S3RawKey,
-		"mailbox":          inbox.MailboxAddress,
-		"mail_direction":   mailDirection,
-	})
 	step := "GRAPH_INGEST"
 	if sourceType == "GOOGLE_WORKSPACE" {
 		step = "GMAIL_DWD_INGEST"
+	} else if sourceType == "OAUTH" {
+		step = "OAUTH_INGEST"
 	}
-	_, _ = pool.Exec(ctx, `
-		INSERT INTO email_svc.processing_log (message_id, step, status, detail)
-		VALUES ($1::uuid, $2, 'OK', $3::jsonb)
-	`, messageID, step, string(detail))
-
-	return nil
+	return ingestPollMessage(ctx, pool, inbox, msg, pollIngestIdentity{
+		GraphMessageID: graphMessageID,
+		SourceType:     sourceType,
+		LogStep:        step,
+	}, mailDirection)
 }

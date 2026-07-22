@@ -1,6 +1,7 @@
 package emailmessages
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/services/mailruntime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -84,6 +86,25 @@ func HandleTransformResultPreviewContent(pool *pgxpool.Pool) http.HandlerFunc {
 					emailcommon.RespondNotFound(w, "local file not found: "+err.Error())
 					return
 				}
+			} else if strings.EqualFold(destType, "API") && strings.TrimSpace(outputFilename) != "" {
+				rt := mailruntime.NewRuntime()
+				if !rt.Ready() {
+					emailcommon.RespondInternal(w, "email service not configured")
+					return
+				}
+				readOut, readErr := rt.ReadAPIInbox(r.Context(), mailruntime.ReadAPIInboxRequest{
+					Filename: outputFilename,
+					Folder:   apiInboxFolderFromLocation(outputLocation),
+				})
+				if readErr != nil {
+					emailcommon.RespondNotFound(w, "API inbox file not found: "+readErr.Error())
+					return
+				}
+				raw, err = base64.StdEncoding.DecodeString(readOut.ContentBase64)
+				if err != nil {
+					emailcommon.RespondInternal(w, "Failed to decode API inbox file: "+err.Error())
+					return
+				}
 			} else {
 				s3Key = transformedKey
 				if strings.TrimSpace(s3Key) == "" {
@@ -150,4 +171,12 @@ func HandleTransformResultPreviewContent(pool *pgxpool.Pool) http.HandlerFunc {
 			"byte_size":  len(raw),
 		})
 	}
+}
+
+func apiInboxFolderFromLocation(outputLocation string) string {
+	loc := strings.ToLower(strings.TrimSpace(outputLocation))
+	if strings.Contains(loc, "test-receive-2") {
+		return "api-inbox-2"
+	}
+	return "api-inbox"
 }
