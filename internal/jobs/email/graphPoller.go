@@ -229,7 +229,7 @@ func pollGraphMailboxFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 
 	var totalIngested int
 	for {
-		resp, err := rt.PullGraphMessages(ctx, inbox.InboxID, inbox.MailboxAddress, folder.sentFolder, sinceStr, graphPullPageSize, conn, skipIDs)
+		resp, err := rt.PullGraphMessages(ctx, inbox.InboxID, inbox.MailboxAddress, folder.sentFolder, sinceStr, graphPullPageSize, conn, skipIDs, inbox.FiltersJSON)
 		if err != nil {
 			return totalIngested, err
 		}

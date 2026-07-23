@@ -400,14 +400,15 @@ func (r *Runtime) VerifyGmailDWD(ctx context.Context, mailbox string, cfg GmailD
 }
 
 type IMAPPullRequest struct {
-	InboxID              string
-	Mailbox              string
-	Folder               string
-	Direction            string
-	LastUID              uint32
-	PageSize             int
-	Conn                 IMAPConnection
-	SkipIMAPMessageKeys  []string
+	InboxID             string
+	Mailbox             string
+	Folder              string
+	Direction           string
+	LastUID             uint32
+	PageSize            int
+	Conn                IMAPConnection
+	SkipIMAPMessageKeys []string
+	FiltersJSON         json.RawMessage
 }
 
 func (r *Runtime) PullIMAPMessages(ctx context.Context, req IMAPPullRequest) (*IMAPPullResult, error) {
@@ -424,6 +425,9 @@ func (r *Runtime) PullIMAPMessages(ctx context.Context, req IMAPPullRequest) (*I
 	if len(req.SkipIMAPMessageKeys) > 0 {
 		payload["skip_imap_message_keys"] = req.SkipIMAPMessageKeys
 	}
+	if len(req.FiltersJSON) > 0 {
+		payload["filters_json"] = json.RawMessage(req.FiltersJSON)
+	}
 	err := r.invoke(ctx, "/v1/imap/poll-folder", payload, &out, pullTimeout())
 	if err != nil {
 		return nil, err
@@ -431,7 +435,7 @@ func (r *Runtime) PullIMAPMessages(ctx context.Context, req IMAPPullRequest) (*I
 	return &out, nil
 }
 
-func (r *Runtime) PullGraphMessages(ctx context.Context, inboxID, mailbox string, sentFolder bool, since string, pageSize int, cfg GraphConnection, skipMessageIDs []string) (*GraphPullResult, error) {
+func (r *Runtime) PullGraphMessages(ctx context.Context, inboxID, mailbox string, sentFolder bool, since string, pageSize int, cfg GraphConnection, skipMessageIDs []string, filtersJSON []byte) (*GraphPullResult, error) {
 	var out GraphPullResult
 	payload := map[string]interface{}{
 		"inbox_id":        inboxID,
@@ -444,6 +448,9 @@ func (r *Runtime) PullGraphMessages(ctx context.Context, inboxID, mailbox string
 	if len(skipMessageIDs) > 0 {
 		payload["skip_message_ids"] = skipMessageIDs
 	}
+	if len(filtersJSON) > 0 {
+		payload["filters_json"] = json.RawMessage(filtersJSON)
+	}
 	err := r.invoke(ctx, "/v1/graph/poll-page", payload, &out, pullTimeout())
 	if err != nil {
 		return nil, err
@@ -451,7 +458,7 @@ func (r *Runtime) PullGraphMessages(ctx context.Context, inboxID, mailbox string
 	return &out, nil
 }
 
-func (r *Runtime) PullGmailDWDMessages(ctx context.Context, inboxID, mailbox string, sentFolder bool, since string, pageSize int, cfg GmailDWDConnection, skipMessageIDs []string) (*GraphPullResult, error) {
+func (r *Runtime) PullGmailDWDMessages(ctx context.Context, inboxID, mailbox string, sentFolder bool, since string, pageSize int, cfg GmailDWDConnection, skipMessageIDs []string, filtersJSON []byte) (*GraphPullResult, error) {
 	var out GraphPullResult
 	payload := map[string]interface{}{
 		"inbox_id":        inboxID,
@@ -463,6 +470,9 @@ func (r *Runtime) PullGmailDWDMessages(ctx context.Context, inboxID, mailbox str
 	}
 	if len(skipMessageIDs) > 0 {
 		payload["skip_message_ids"] = skipMessageIDs
+	}
+	if len(filtersJSON) > 0 {
+		payload["filters_json"] = json.RawMessage(filtersJSON)
 	}
 	err := r.invoke(ctx, "/v1/gmail-dwd/poll-page", payload, &out, pullTimeout())
 	if err != nil {
@@ -523,14 +533,15 @@ func (r *Runtime) VerifyOAuth(ctx context.Context, provider, accessToken string)
 }
 
 type OAuthPullRequest struct {
-	InboxID          string
-	Mailbox          string
-	Provider         string
-	SentFolder       bool
-	Since            string
-	PageSize         int
-	Conn             OAuthConnection
-	SkipMessageIDs   []string
+	InboxID        string
+	Mailbox        string
+	Provider       string
+	SentFolder     bool
+	Since          string
+	PageSize       int
+	Conn           OAuthConnection
+	SkipMessageIDs []string
+	FiltersJSON    json.RawMessage
 }
 
 func (r *Runtime) PullOAuthMessages(ctx context.Context, req OAuthPullRequest) (*OAuthPullResult, error) {
@@ -546,6 +557,9 @@ func (r *Runtime) PullOAuthMessages(ctx context.Context, req OAuthPullRequest) (
 	}
 	if len(req.SkipMessageIDs) > 0 {
 		payload["skip_message_ids"] = req.SkipMessageIDs
+	}
+	if len(req.FiltersJSON) > 0 {
+		payload["filters_json"] = json.RawMessage(req.FiltersJSON)
 	}
 	err := r.invoke(ctx, "/v1/oauth/poll-page", payload, &out, pullTimeout())
 	if err != nil {

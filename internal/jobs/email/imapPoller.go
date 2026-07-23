@@ -291,7 +291,7 @@ func pollIMAPFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Run
 		resp, err := rt.PullIMAPMessages(ctx, mailruntime.IMAPPullRequest{
 			InboxID: inbox.InboxID, Mailbox: inbox.MailboxAddress, Folder: folder.folder,
 			Direction: folder.direction, LastUID: lastUID, PageSize: imapPullPageSize,
-			Conn: inbox.IMAP.toPayload(), SkipIMAPMessageKeys: skipKeys,
+			Conn: inbox.IMAP.toPayload(), SkipIMAPMessageKeys: skipKeys, FiltersJSON: inbox.FiltersJSON,
 		})
 		if err != nil {
 			return totalIngested, err

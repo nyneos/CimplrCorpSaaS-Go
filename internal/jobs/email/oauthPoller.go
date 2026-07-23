@@ -297,7 +297,7 @@ func pollOAuthMailboxFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 		resp, err := rt.PullOAuthMessages(ctx, mailruntime.OAuthPullRequest{
 			InboxID: inbox.InboxID, Mailbox: inbox.MailboxAddress, Provider: inbox.Provider,
 			SentFolder: folder.sentFolder, Since: sinceStr, PageSize: oauthPullPageSize, Conn: conn,
-			SkipMessageIDs: skipIDs,
+			SkipMessageIDs: skipIDs, FiltersJSON: inbox.FiltersJSON,
 		})
 		if err != nil {
 			return totalIngested, err

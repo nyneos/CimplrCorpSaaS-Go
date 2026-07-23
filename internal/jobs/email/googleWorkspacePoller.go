@@ -204,7 +204,7 @@ func pollGoogleWorkspaceMailboxFolder(ctx context.Context, pool *pgxpool.Pool, r
 
 	var totalIngested int
 	for {
-		resp, err := rt.PullGmailDWDMessages(ctx, inbox.InboxID, inbox.MailboxAddress, folder.sentFolder, sinceStr, googleWorkspacePullPageSize, conn, skipIDs)
+		resp, err := rt.PullGmailDWDMessages(ctx, inbox.InboxID, inbox.MailboxAddress, folder.sentFolder, sinceStr, googleWorkspacePullPageSize, conn, skipIDs, inbox.FiltersJSON)
 		if err != nil {
 			return totalIngested, err
 		}

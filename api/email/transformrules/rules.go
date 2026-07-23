@@ -50,10 +50,10 @@ type TransformationRule struct {
 	SftpHost         string `json:"sftp_host,omitempty"`
 	SftpPort         int    `json:"sftp_port,omitempty"`
 	SftpUser         string `json:"sftp_user,omitempty"`
-	SftpPassword     string `json:"sftp_password,omitempty"`
+	SftpPassword     string `json:"sftp_password"`
 	SftpFolder       string `json:"sftp_folder,omitempty"`
 	APIURL           string `json:"api_url,omitempty"`
-	APIAuthToken     string `json:"api_auth_token,omitempty"`
+	APIAuthToken     string `json:"api_auth_token"`
 }
 
 func appendDatetimeValue(v *bool) bool {
@@ -66,23 +66,23 @@ func appendDatetimeValue(v *bool) bool {
 func boolPtr(v bool) *bool { return &v }
 
 const ruleSelectCols = `
-		rule_id, inbox_id, rule_name, condition_type, condition_value,
-		COALESCE(NULLIF(match_mode, ''), 'CONTAINS'),
-		mapping_id, mapping_name, action_type, is_active,
-		processing_status, COALESCE(pending_edit_json, '{}'), submitted_by, approved_by, checker_comment, is_deleted,
-		created_at, updated_at,
-		COALESCE(NULLIF(destination_type, ''), 'S3'),
-		COALESCE(output_name_prefix, ''),
-		COALESCE(append_datetime, true),
-		COALESCE(s3_prefix, ''),
-		COALESCE(local_folder, ''),
-		COALESCE(sftp_host, ''),
-		COALESCE(sftp_port, 22),
-		COALESCE(sftp_user, ''),
-		COALESCE(sftp_password, ''),
-		COALESCE(sftp_folder, ''),
-		COALESCE(api_url, ''),
-		COALESCE(api_auth_token, '')
+		r.rule_id, r.inbox_id, r.rule_name, r.condition_type, r.condition_value,
+		COALESCE(NULLIF(r.match_mode, ''), 'CONTAINS'),
+		r.mapping_id, r.mapping_name, r.action_type, r.is_active,
+		r.processing_status, COALESCE(r.pending_edit_json, '{}'), r.submitted_by, r.approved_by, r.checker_comment, r.is_deleted,
+		r.created_at, r.updated_at,
+		COALESCE(NULLIF(r.destination_type, ''), 'S3'),
+		COALESCE(r.output_name_prefix, ''),
+		COALESCE(r.append_datetime, true),
+		COALESCE(r.s3_prefix, ''),
+		COALESCE(r.local_folder, ''),
+		COALESCE(r.sftp_host, ''),
+		COALESCE(r.sftp_port, 22),
+		COALESCE(r.sftp_user, ''),
+		COALESCE(r.sftp_password, ''),
+		COALESCE(r.sftp_folder, ''),
+		COALESCE(r.api_url, ''),
+		COALESCE(r.api_auth_token, '')
 `
 
 func scanRule(rows interface {
@@ -209,10 +209,25 @@ func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 
 	query := `
 		SELECT ` + ruleSelectCols + `
-		FROM email_svc.transformation_rules
-		WHERE ($1 = '' OR inbox_id::text = $1)
-		  AND (is_deleted = false OR is_deleted IS NULL)
-		ORDER BY created_at DESC
+		FROM email_svc.transformation_rules r
+		LEFT JOIN LATERAL (
+			SELECT
+				MAX(a.created_at) FILTER (
+					WHERE a.audit_action IN ('CREATE_PENDING', 'UPDATE_PENDING', 'DELETE_PENDING')
+				) AS requested_at,
+				MAX(a.created_at) FILTER (
+					WHERE a.audit_action IN ('APPROVED', 'REJECTED')
+				) AS checker_at
+			FROM email_svc.transformation_rules_audit a
+			WHERE a.rule_id = r.rule_id
+		) ra ON true
+		WHERE ($1 = '' OR r.inbox_id::text = $1)
+		  AND (r.is_deleted = false OR r.is_deleted IS NULL)
+		ORDER BY GREATEST(
+			COALESCE(ra.requested_at, '-infinity'::timestamptz),
+			COALESCE(ra.checker_at, '-infinity'::timestamptz),
+			COALESCE(r.updated_at, r.created_at, '-infinity'::timestamptz)
+		) DESC
 	`
 
 	rows, err := pool.Query(r.Context(), query, inboxID)
@@ -229,9 +244,6 @@ func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 			emailcommon.RespondInternal(w, "Failed to parse rules")
 			return
 		}
-		// Never echo secrets back to the UI list/view payload.
-		rule.SftpPassword = ""
-		rule.APIAuthToken = ""
 		rules = append(rules, rule)
 	}
 
@@ -293,8 +305,6 @@ func handleCreate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	}
 
 	logAudit(r, pool, req.RuleID, "CREATE_PENDING", req.UserID, req)
-	req.SftpPassword = ""
-	req.APIAuthToken = ""
 	emailcommon.RespondPayload(w, "transform-rules-create", req)
 }
 
@@ -313,6 +323,24 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		emailcommon.RespondBadRequest(w, "rule_id is required")
 		return
 	}
+
+	var currentStatus string
+	if err := pool.QueryRow(r.Context(), `
+		SELECT COALESCE(processing_status, '')
+		FROM email_svc.transformation_rules
+		WHERE rule_id = $1 AND (is_deleted = false OR is_deleted IS NULL)
+	`, req.RuleID).Scan(&currentStatus); err != nil {
+		emailcommon.RespondBadRequest(w, "rule not found")
+		return
+	}
+	statusNorm := strings.ToUpper(strings.TrimSpace(currentStatus))
+	switch statusNorm {
+	case "PENDING_APPROVAL", "PENDING_EDIT_APPROVAL", "REJECTED":
+	default:
+		emailcommon.RespondBadRequest(w, "cannot edit rule in status "+statusNorm)
+		return
+	}
+
 	mode, modeErr := normalizeMatchMode(req.ConditionType, req.MatchMode)
 	if modeErr != nil {
 		emailcommon.RespondBadRequest(w, modeErr.Error())
@@ -328,7 +356,7 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 
 	query := `
 		UPDATE email_svc.transformation_rules
-		SET processing_status = 'PENDING_APPROVAL',
+		SET processing_status = 'PENDING_EDIT_APPROVAL',
 		    pending_edit_json = $1,
 		    submitted_by = $2,
 		    updated_at = now()
@@ -342,8 +370,7 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	}
 
 	logAudit(r, pool, req.RuleID, "UPDATE_PENDING", req.UserID, req)
-	req.SftpPassword = ""
-	req.APIAuthToken = ""
+	req.ProcessingStatus = "PENDING_EDIT_APPROVAL"
 	emailcommon.RespondPayload(w, "transform-rules-update", req)
 }
 
@@ -481,7 +508,17 @@ func handleApprove(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		return
 	}
 
-	logAudit(r, pool, req.RuleID, "APPROVED", req.UserID, req)
+	var submittedBy string
+	_ = pool.QueryRow(r.Context(), `
+		SELECT COALESCE(submitted_by, '') FROM email_svc.transformation_rules WHERE rule_id = $1
+	`, req.RuleID).Scan(&submittedBy)
+	logAudit(r, pool, req.RuleID, "APPROVED", req.UserID, map[string]interface{}{
+		"rule_id":            req.RuleID,
+		"submitted_by":       submittedBy,
+		"approved_by":        req.UserID,
+		"checker_comment":    req.CheckerComment,
+		"processing_status":  "APPROVED",
+	})
 	emailcommon.RespondPayload(w, "transform-rules-approve", map[string]bool{"success": true})
 }
 
@@ -517,6 +554,96 @@ func handleReject(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		return
 	}
 
-	logAudit(r, pool, req.RuleID, "REJECTED", req.UserID, req)
+	var submittedBy string
+	_ = pool.QueryRow(r.Context(), `
+		SELECT COALESCE(submitted_by, '') FROM email_svc.transformation_rules WHERE rule_id = $1
+	`, req.RuleID).Scan(&submittedBy)
+	logAudit(r, pool, req.RuleID, "REJECTED", req.UserID, map[string]interface{}{
+		"rule_id":           req.RuleID,
+		"submitted_by":      submittedBy,
+		"rejected_by":       req.UserID,
+		"checker_comment":   req.CheckerComment,
+		"processing_status": "REJECTED",
+	})
 	emailcommon.RespondPayload(w, "transform-rules-reject", map[string]bool{"success": true})
+}
+
+func sanitizeTransformRuleAuditState(raw map[string]interface{}) map[string]interface{} {
+	if raw == nil {
+		return map[string]interface{}{}
+	}
+	out := make(map[string]interface{}, len(raw))
+	for k, v := range raw {
+		switch strings.ToLower(k) {
+		case "sftp_password", "api_auth_token":
+			continue
+		default:
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func handleAuditLog(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
+	if r.Method != http.MethodPost {
+		emailcommon.RespondMethodNotAllowed(w)
+		return
+	}
+
+	var req struct {
+		RuleID string `json:"rule_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		emailcommon.RespondBadRequest(w, "Invalid JSON body")
+		return
+	}
+	ruleID := strings.TrimSpace(req.RuleID)
+	if ruleID == "" {
+		emailcommon.RespondBadRequest(w, "rule_id is required")
+		return
+	}
+
+	rows, err := pool.Query(r.Context(), `
+		SELECT rule_id::text, audit_action, COALESCE(actor_id, ''), new_state_json, created_at
+		FROM email_svc.transformation_rules_audit
+		WHERE rule_id = $1::uuid
+		ORDER BY created_at DESC
+	`, ruleID)
+	if err != nil {
+		emailcommon.RespondInternal(w, "Failed to load transform rule audit log")
+		return
+	}
+	defer rows.Close()
+
+	type auditRow struct {
+		AuditID     string                 `json:"audit_id"`
+		RuleID      string                 `json:"rule_id"`
+		AuditAction string                 `json:"audit_action"`
+		ActorID     string                 `json:"actor_id"`
+		NewState    map[string]interface{} `json:"new_state_json"`
+		CreatedAt   string                 `json:"created_at"`
+	}
+	var items []auditRow
+	for rows.Next() {
+		var row auditRow
+		var rawState []byte
+		var createdAt time.Time
+		if err := rows.Scan(&row.RuleID, &row.AuditAction, &row.ActorID, &rawState, &createdAt); err != nil {
+			emailcommon.RespondInternal(w, "Failed to parse transform rule audit log")
+			return
+		}
+		row.AuditID = fmt.Sprintf("%s-%d", row.RuleID, createdAt.UnixNano())
+		row.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+		row.NewState = map[string]interface{}{}
+		if len(rawState) > 0 {
+			_ = json.Unmarshal(rawState, &row.NewState)
+		}
+		row.NewState = sanitizeTransformRuleAuditState(row.NewState)
+		items = append(items, row)
+	}
+	if items == nil {
+		items = []auditRow{}
+	}
+
+	emailcommon.RespondList(w, "transform-rules/audit-log", items, len(items))
 }

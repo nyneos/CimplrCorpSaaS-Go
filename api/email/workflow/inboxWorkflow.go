@@ -497,7 +497,11 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 			query += fmt.Sprintf(" AND i.processing_status = $%d", argN)
 			args = append(args, s)
 		}
-		query += " ORDER BY COALESCE(ia.requested_at, i.created_at) DESC NULLS LAST"
+		query += ` ORDER BY GREATEST(
+			COALESCE(ia.requested_at, '-infinity'::timestamptz),
+			COALESCE(ia.checker_at, '-infinity'::timestamptz),
+			COALESCE(i.updated_at, i.created_at, '-infinity'::timestamptz)
+		) DESC`
 
 		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {
@@ -1285,6 +1289,75 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 			rejected = append(rejected, inboxID)
 		}
 		emailcommon.RespondBulk(w, "inbox/workflow/reject", "rejected", rejected, errors)
+	}
+}
+
+func HandleWorkflowInboxAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			emailcommon.RespondMethodNotAllowed(w)
+			return
+		}
+		var req struct {
+			InboxID string `json:"inbox_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
+			return
+		}
+		inboxID := strings.TrimSpace(req.InboxID)
+		if inboxID == "" {
+			emailcommon.RespondBadRequest(w, "inbox_id is required")
+			return
+		}
+
+		rows, err := pool.Query(r.Context(), `
+			SELECT audit_id::text, inbox_id::text, action_type, status,
+			       COALESCE(performed_by, ''), COALESCE(comment, ''), detail, created_at
+			FROM email_svc.inbox_audit
+			WHERE inbox_id = $1::uuid
+			ORDER BY created_at DESC
+		`, inboxID)
+		if err != nil {
+			emailcommon.RespondInternal(w, "Failed to load inbox audit log")
+			return
+		}
+		defer rows.Close()
+
+		type auditRow struct {
+			AuditID     string                 `json:"audit_id"`
+			InboxID     string                 `json:"inbox_id"`
+			ActionType  string                 `json:"action_type"`
+			Status      string                 `json:"status"`
+			PerformedBy string                 `json:"performed_by"`
+			Comment     string                 `json:"comment"`
+			Detail      map[string]interface{} `json:"detail"`
+			CreatedAt   string                 `json:"created_at"`
+		}
+		var items []auditRow
+		for rows.Next() {
+			var row auditRow
+			var rawDetail []byte
+			var createdAt time.Time
+			if err := rows.Scan(
+				&row.AuditID, &row.InboxID, &row.ActionType, &row.Status,
+				&row.PerformedBy, &row.Comment, &rawDetail, &createdAt,
+			); err != nil {
+				emailcommon.RespondInternal(w, "Failed to parse inbox audit log")
+				return
+			}
+			row.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+			row.Detail = map[string]interface{}{}
+			if len(rawDetail) > 0 {
+				_ = json.Unmarshal(rawDetail, &row.Detail)
+			}
+			items = append(items, row)
+		}
+		if items == nil {
+			items = []auditRow{}
+		}
+
+		emailcommon.RespondList(w, "inbox/workflow/audit-log", items, len(items))
 	}
 }
 

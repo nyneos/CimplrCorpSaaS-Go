@@ -28,4 +28,7 @@ func RegisterTransformRuleRoutes(mux *http.ServeMux, pool *pgxpool.Pool, chain f
 	mux.Handle("/email/transform-rules/list-mappings", chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleListMappings(w, r)
 	})))
+	mux.Handle("/email/transform-rules/audit-log", chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleAuditLog(w, r, pool)
+	})))
 }
