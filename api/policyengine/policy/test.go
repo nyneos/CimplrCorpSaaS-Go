@@ -7,7 +7,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/policyengine/common"
-	"CimplrCorpSaas/internal/services/policysvc"
+	"CimplrCorpSaas/api/policyengine/runtime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -19,13 +19,18 @@ type testReq struct {
 	ActionOnBreach string            `json:"action_on_breach"`
 	NullHandling   string            `json:"null_handling"`
 	AddlExpression string            `json:"addl_expression"`
+	ModuleCode     string            `json:"module_code"`
+	EventCode      string            `json:"event_code"`
+	EntityCode     string            `json:"entity_code"`
+	// PolicyName echoes the draft's own name back in results[] so the
+	// workbench doesn't have to show the raw "TEST_HARNESS" placeholder code.
+	PolicyName string `json:"policy_name"`
 }
 
-// HandleTest runs the policy-builder workbench harness: one rule config against
-// a variable vector, no persistence and no execution_log rows (proxied to the
-// standalone CIMPLR-Policy-Service /v1/test, same evaluator as /check).
+// HandleTest runs the workbench harness: the draft rule plus (when module +
+// event are set) every related Active/APPROVED policy for that scope.
+// Response always includes results[] so the UI can list all PASS and BREACH.
 func HandleTest(pool *pgxpool.Pool) http.HandlerFunc {
-	client := policysvc.NewFromEnv()
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !common.RequirePOST(w, r) {
 			return
@@ -56,27 +61,122 @@ func HandleTest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		snapshot := buildTestSnapshot(req, rf)
-		resp, err := client.Test(r.Context(), policysvc.EvaluateRequest{
-			EventCode: "TEST_HARNESS",
-			Variables: req.Variables,
-			Policies:  []map[string]interface{}{snapshot},
+		policies := []map[string]interface{}{snapshot}
+
+		eventCode := strings.TrimSpace(req.EventCode)
+		moduleCode := strings.TrimSpace(req.ModuleCode)
+		entityCode := strings.TrimSpace(req.EntityCode)
+		if eventCode == "" {
+			eventCode = "TEST_HARNESS"
+		}
+
+		if moduleCode != "" && eventCode != "TEST_HARNESS" {
+			loaded, loadErr := runtime.LoadActivePolicySnapshots(r.Context(), pool, eventCode, moduleCode, entityCode)
+			if loadErr != nil {
+				api.LogErrorForResponse(w, "policy test load related: %v", loadErr)
+			} else {
+				policies = append(policies, loaded...)
+			}
+		}
+
+		checkRes, checkErr := runtime.RunCheck(r.Context(), pool, runtime.CheckRequest{
+			EventCode:   eventCode,
+			ModuleCode:  moduleCode,
+			EntityCode:  entityCode,
+			HandlerName: "PolicyWorkbenchTest",
+			APIPath:     "/policy-engine/policies/test",
+			Variables:   req.Variables,
+			Policies:    policies,
 		})
-		if err != nil {
-			api.LogErrorForResponse(w, "policy test: %v", err)
+		if checkErr != nil {
+			api.LogErrorForResponse(w, "policy test: %v", checkErr)
 			api.RespondEnvelopeError(w, http.StatusBadGateway, "policy test service failed", "POLICY_SERVICE_ERROR")
 			return
 		}
+
 		result, detail, message := "PASS", "", ""
-		if len(resp.Results) > 0 {
-			result = resp.Results[0].Result
-			message = resp.Results[0].Message
-			detail = resp.Results[0].Action
+		if len(checkRes.Results) > 0 {
+			picked := checkRes.Results[0]
+			for _, pr := range checkRes.Results {
+				if pr.Result == "BREACH" || pr.Result == "ERROR" {
+					picked = pr
+					break
+				}
+			}
+			result = picked.Result
+			message = picked.Message
+			detail = picked.Action
+			if checkRes.AggregatedAction != "" {
+				detail = checkRes.AggregatedAction
+			}
 		}
 		api.RespondEnvelopeSuccess(w, "Policy test completed", map[string]interface{}{
-			"result":  result,
-			"detail":  detail,
-			"message": message,
+			"result":            result,
+			"detail":            detail,
+			"message":           message,
+			"aggregated_action": checkRes.AggregatedAction,
+			"results":           enrichedResultsPayload(checkRes, policies, req.Variables),
+			"duration_ms":       checkRes.DurationMS,
 		})
+	}
+}
+
+// enrichedResultsPayload joins each check result with the human policy name
+// and the specific CDM variable/value it was tested against — the plain
+// policy_id/code from CheckResult.ResultsPayload() doesn't tell the workbench
+// UI what was actually evaluated, only pass/fail.
+func enrichedResultsPayload(checkRes runtime.CheckResult, policies []map[string]interface{}, variables map[string]string) []map[string]interface{} {
+	type meta struct {
+		name    string
+		testVar string
+	}
+	metaByID := make(map[string]meta, len(policies))
+	for _, p := range policies {
+		id, _ := p["policy_id"].(string)
+		if id == "" {
+			continue
+		}
+		name, _ := p["name"].(string)
+		metaByID[id] = meta{name: name, testVar: testedVariableForSnapshot(p)}
+	}
+
+	out := make([]map[string]interface{}, 0, len(checkRes.Results))
+	for _, pr := range checkRes.Results {
+		m := metaByID[pr.PolicyID]
+		row := map[string]interface{}{
+			"policy_id": pr.PolicyID,
+			"code":      pr.Code,
+			"name":      m.name,
+			"result":    pr.Result,
+			"action":    pr.Action,
+			"message":   pr.Message,
+		}
+		if m.testVar != "" {
+			row["tested_variable"] = m.testVar
+			row["tested_value"] = variables[m.testVar]
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// testedVariableForSnapshot returns the single CDM variable a policy
+// snapshot's rule was evaluated against, when the rule type has exactly one
+// (threshold/slabs/list). Composition and formula test multiple/derived
+// values, so there's no single variable to surface here.
+func testedVariableForSnapshot(snap map[string]interface{}) string {
+	switch ruleType, _ := snap["rule_type"].(string); ruleType {
+	case "threshold":
+		v, _ := snap["thr_variable"].(string)
+		return v
+	case "slabs":
+		v, _ := snap["slab_variable"].(string)
+		return v
+	case "list":
+		v, _ := snap["list_target_field"].(string)
+		return v
+	default:
+		return ""
 	}
 }
 
@@ -84,6 +184,7 @@ func buildTestSnapshot(req testReq, rf ruleFields) map[string]interface{} {
 	snap := map[string]interface{}{
 		"policy_id":           "test-harness",
 		"code":                "TEST_HARNESS",
+		"name":                req.PolicyName,
 		"rule_type":           req.RuleType,
 		"action_on_breach":    req.ActionOnBreach,
 		"null_handling":       req.NullHandling,
@@ -103,6 +204,9 @@ func buildTestSnapshot(req testReq, rf ruleFields) map[string]interface{} {
 	}
 	if rf.ThrValue != nil {
 		snap["thr_value"] = *rf.ThrValue
+	}
+	if rf.ThrValueDate != nil {
+		snap["thr_value_date"] = *rf.ThrValueDate
 	}
 	if rf.FormulaValue != nil {
 		snap["formula_value"] = *rf.FormulaValue

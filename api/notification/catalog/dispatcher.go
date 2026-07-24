@@ -96,8 +96,41 @@ func TriggerNotification(
 	if pool == nil || sourceRoute == "" || correlationID == "" {
 		return
 	}
-	if err := dispatchNotification(ctx, pool, sourceRoute, correlationID, payload); err != nil {
+	if err := dispatchNotification(ctx, pool, sourceRoute, correlationID, payload, nil); err != nil {
 		api.LogError("TriggerNotification sourceRoute=%s correlation=%s err=%v", sourceRoute, correlationID, err)
+	}
+}
+
+// TriggerNotificationForTemplates is TriggerNotification restricted to an
+// explicit set of notification_svc.template.template_id values — every other
+// resolution step (actor → entity → event → channel → recipients) is
+// unchanged, only the per-channel template list gets filtered down to this
+// set before sending. allowedTemplateIDs empty/nil behaves exactly like
+// TriggerNotification (no restriction). Used by the policy engine so a
+// policy's curated template multi-select overrides "every enabled channel
+// fires" without duplicating any of the resolution pipeline.
+func TriggerNotificationForTemplates(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	sourceRoute string,
+	correlationID string,
+	payload map[string]interface{},
+	allowedTemplateIDs []string,
+) {
+	if pool == nil || sourceRoute == "" || correlationID == "" {
+		return
+	}
+	var filter map[string]bool
+	if len(allowedTemplateIDs) > 0 {
+		filter = make(map[string]bool, len(allowedTemplateIDs))
+		for _, id := range allowedTemplateIDs {
+			if id = strings.TrimSpace(id); id != "" {
+				filter[id] = true
+			}
+		}
+	}
+	if err := dispatchNotification(ctx, pool, sourceRoute, correlationID, payload, filter); err != nil {
+		api.LogError("TriggerNotificationForTemplates sourceRoute=%s correlation=%s err=%v", sourceRoute, correlationID, err)
 	}
 }
 
@@ -119,6 +152,7 @@ type enabledChannel struct {
 
 type resolvedTemplate struct {
 	auditID      string // uuid (from audit_template)
+	templateID   string // notification_svc.template.template_id — stable across versions
 	channel      string
 	subject      string
 	bodyText     string
@@ -294,6 +328,7 @@ func dispatchNotification(
 	sourceRoute string,
 	correlationID string,
 	payload map[string]interface{},
+	allowedTemplateIDs map[string]bool,
 ) error {
 	api.LogInfo("[NOTIF] dispatchNotification START correlation=%s route=%s", correlationID, sourceRoute)
 
@@ -417,7 +452,7 @@ func dispatchNotification(
 	var firstErr error
 	for _, ev := range events {
 		ev := ev // capture
-		if err := dispatchForEvent(ctx, pool, sourceRoute, correlationID, payload, &ev, resolution); err != nil {
+		if err := dispatchForEvent(ctx, pool, sourceRoute, correlationID, payload, &ev, resolution, allowedTemplateIDs); err != nil {
 			api.LogError("[NOTIF] dispatchForEvent event=%s entity=%s err=%v", ev.eventID, ev.entityName, err)
 			if firstErr == nil {
 				firstErr = err
@@ -448,6 +483,8 @@ func dedupeResolvedEventsByEventID(events []resolvedEvent) []resolvedEvent {
 }
 
 // dispatchForEvent runs the full notification pipeline for one resolved event.
+// allowedTemplateIDs, when non-nil, restricts dispatch to templates whose
+// template_id is in the set — every other resolution step is unchanged.
 func dispatchForEvent(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -456,6 +493,7 @@ func dispatchForEvent(
 	payload map[string]interface{},
 	event *resolvedEvent,
 	actor actorResolution, // used to send system notifications back to the triggering user
+	allowedTemplateIDs map[string]bool,
 ) error {
 	api.LogInfo("[NOTIF] dispatchForEvent event=%s entity=%q correlation=%s", event.eventID, event.entityName, correlationID)
 	channels, err := lookupEnabledChannels(ctx, pool, event.eventID)
@@ -513,6 +551,15 @@ func dispatchForEvent(
 				CorrelationID: correlationID,
 			})
 			continue
+		}
+		if len(allowedTemplateIDs) > 0 {
+			filtered := tpls[:0]
+			for _, tpl := range tpls {
+				if allowedTemplateIDs[tpl.templateID] {
+					filtered = append(filtered, tpl)
+				}
+			}
+			tpls = filtered
 		}
 		if len(tpls) == 0 {
 			api.LogInfo("[NOTIF] no approved template for event=%s ch=%s (deferred warn)", event.eventID, ch.channel)
@@ -987,7 +1034,7 @@ func lookupTemplates(ctx context.Context, pool *pgxpool.Pool, eventID, channel s
 	for dbRows.Next() {
 		var tpl resolvedTemplate
 		if err := dbRows.Scan(
-			&tpl.auditID, new(string),
+			&tpl.auditID, &tpl.templateID,
 			&tpl.subject, &tpl.bodyText, &tpl.bodyHTML,
 			&tpl.isHTML, &tpl.versionLabel, &tpl.channel,
 		); err != nil {

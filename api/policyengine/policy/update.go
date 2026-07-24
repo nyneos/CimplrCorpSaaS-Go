@@ -72,7 +72,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 				breach_message = $10, requires_approval = $11, applicability = $12, can_override = $13,
 				instrument_filter = NULLIF($14,''), currency_filter = NULLIF($15,''), tenor_filter = NULLIF($16,''),
 				rating_filter = NULLIF($17,''), rule_type = $18, null_handling = $19,
-				thr_variable = NULLIF($20,''), thr_operator = NULLIF($21,''), thr_value = $22,
+				thr_variable = NULLIF($20,''), thr_operator = NULLIF($21,''), thr_value = $22, thr_value_date = $46::date,
 				thr_value_mode = NULLIF($23,''), thr_percent_base = NULLIF($24,''), thr_unit = NULLIF($25,''),
 				slab_variable = NULLIF($26,''), slab_unit = NULLIF($27,''),
 				comp_base = NULLIF($28,''), comp_total_check_variable = NULLIF($29,''),
@@ -95,7 +95,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			rf.ListTargetField, rf.ListMode, rf.ListSource, rf.ListDynamicRef, rf.ListCaseSensitive,
 			rf.FormulaExpression, rf.FormulaReturnType, rf.FormulaOperator, rf.FormulaValue,
 			req.AddlExpression, req.EffectiveStart, req.EffectiveEnd,
-			actor, req.PolicyID,
+			actor, req.PolicyID, rf.ThrValueDate,
 		); err != nil {
 			api.LogErrorForResponse(w, "policy update exec: %v", err)
 			api.RespondEnvelopeError(w, http.StatusConflict, "failed to update policy (duplicate code?)", "POLICY_UPDATE_FAILED")
@@ -105,6 +105,12 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		if err := replacePolicyChildren(r.Context(), tx, r, req.PolicyID, req.TriggerEvents, req.Modules, req.EntitiesInclude, req.EntitiesExclude, req.RuleType, rf); err != nil {
 			api.LogErrorForResponse(w, "policy update children: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach triggers/modules/rule rows (unknown code?)", "POLICY_UPDATE_FAILED")
+			return
+		}
+
+		if err := replacePolicyNotificationTemplates(r.Context(), tx, req.PolicyID, req.NotificationTemplateIDs, actor); err != nil {
+			api.LogErrorForResponse(w, "policy update notification templates: %v", err)
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach notification templates (unknown template_id?)", "POLICY_UPDATE_FAILED")
 			return
 		}
 

@@ -42,7 +42,7 @@ func HandleListApprovedActive(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE pmod.policy_id = p.policy_id AND pmod.is_deleted = false
 			) m ON true
 			WHERE p.is_deleted = false AND p.status = 'Active' AND p.processing_status = 'APPROVED'
-			ORDER BY p.code`)
+			` + common.PolicyListOrderBy)
 		if err != nil {
 			api.LogErrorForResponse(w, "policy list-approved-active: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to list policies", "POLICY_LIST_FAILED")

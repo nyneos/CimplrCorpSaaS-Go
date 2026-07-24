@@ -46,6 +46,7 @@ type DetailItem struct {
 	ThrVariable            string   `json:"thr_variable"`
 	ThrOperator            string   `json:"thr_operator"`
 	ThrValue               *float64 `json:"thr_value"`
+	ThrValueDate           *string  `json:"thr_value_date"`
 	ThrValueMode           string   `json:"thr_value_mode"`
 	ThrPercentBase         string   `json:"thr_percent_base"`
 	ThrUnit                string   `json:"thr_unit"`
@@ -75,13 +76,14 @@ type DetailItem struct {
 	LastModifiedBy         string   `json:"last_modified_by"`
 	LastModifiedAt         string   `json:"last_modified_at"`
 
-	TriggerEvents     []string                  `json:"trigger_events"`
-	Modules           []string                  `json:"modules"`
-	EntitiesInclude   []string                  `json:"entities_include"`
-	EntitiesExclude   []string                  `json:"entities_exclude"`
-	SlabRows          []slabRowConfig           `json:"slab_rows"`
-	CompBuckets       []compositionBucketConfig `json:"comp_buckets"`
-	ListValues        []string                  `json:"list_values"`
+	TriggerEvents           []string                  `json:"trigger_events"`
+	Modules                 []string                  `json:"modules"`
+	EntitiesInclude         []string                  `json:"entities_include"`
+	EntitiesExclude         []string                  `json:"entities_exclude"`
+	SlabRows                []slabRowConfig           `json:"slab_rows"`
+	CompBuckets             []compositionBucketConfig `json:"comp_buckets"`
+	ListValues              []string                  `json:"list_values"`
+	NotificationTemplateIDs []string                  `json:"notification_template_ids"`
 }
 
 func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
@@ -120,6 +122,7 @@ func loadPolicyDetail(r *http.Request, pool *pgxpool.Pool, policyID string) (*De
 		formulaExpression, formulaReturnType, formulaOperator, addlExpression,
 		createdBy, lastModifiedBy *string
 	var thrValue, compTotalCheckMin, compTotalCheckMax, formulaValue *float64
+	var thrValueDate *string
 	var createdAt, lastModifiedAt time.Time
 
 	err := pool.QueryRow(r.Context(), `
@@ -128,7 +131,7 @@ func loadPolicyDetail(r *http.Request, pool *pgxpool.Pool, policyID string) (*De
 		       breach_message, requires_approval, approval_workflow, applicability, can_override,
 		       instrument_filter, currency_filter, tenor_filter, rating_filter, rule_type,
 		       null_handling, null_handling_default,
-		       thr_variable, thr_operator, thr_value, thr_value_mode, thr_percent_base, thr_unit,
+		       thr_variable, thr_operator, thr_value, thr_value_date::text, thr_value_mode, thr_percent_base, thr_unit,
 		       slab_variable, slab_unit, comp_base, comp_total_check_variable, comp_total_check_min, comp_total_check_max,
 		       list_target_field, list_mode, list_source, list_dynamic_ref, list_case_sensitive,
 		       formula_expression, formula_return_type, formula_operator, formula_value, addl_expression,
@@ -141,7 +144,7 @@ func loadPolicyDetail(r *http.Request, pool *pgxpool.Pool, policyID string) (*De
 		&it.BreachMessage, &it.RequiresApproval, &approvalWorkflow, &it.Applicability, &it.CanOverride,
 		&instrumentFilter, &currencyFilter, &tenorFilter, &ratingFilter, &it.RuleType,
 		&it.NullHandling, &nullHandlingDefault,
-		&thrVariable, &thrOperator, &thrValue, &thrValueMode, &thrPercentBase, &thrUnit,
+		&thrVariable, &thrOperator, &thrValue, &thrValueDate, &thrValueMode, &thrPercentBase, &thrUnit,
 		&slabVariable, &slabUnit, &compBase, &compTotalCheckVariable, &compTotalCheckMin, &compTotalCheckMax,
 		&listTargetField, &listMode, &listSource, &listDynamicRef, &it.ListCaseSensitive,
 		&formulaExpression, &formulaReturnType, &formulaOperator, &formulaValue, &addlExpression,
@@ -165,6 +168,7 @@ func loadPolicyDetail(r *http.Request, pool *pgxpool.Pool, policyID string) (*De
 	it.ThrVariable = strOrEmpty(thrVariable)
 	it.ThrOperator = strOrEmpty(thrOperator)
 	it.ThrValue = thrValue
+	it.ThrValueDate = thrValueDate
 	it.ThrValueMode = strOrEmpty(thrValueMode)
 	it.ThrPercentBase = strOrEmpty(thrPercentBase)
 	it.ThrUnit = strOrEmpty(thrUnit)
@@ -285,6 +289,20 @@ func loadPolicyDetail(r *http.Request, pool *pgxpool.Pool, policyID string) (*De
 			}
 			listRows.Close()
 		}
+	}
+
+	it.NotificationTemplateIDs = make([]string, 0)
+	tplRows, err := pool.Query(r.Context(), `
+		SELECT template_id FROM policyengine_svc.policy_notification_template
+		WHERE policy_id = $1::uuid AND is_deleted = false ORDER BY template_id`, policyID)
+	if err == nil {
+		for tplRows.Next() {
+			var id string
+			if tplRows.Scan(&id) == nil {
+				it.NotificationTemplateIDs = append(it.NotificationTemplateIDs, id)
+			}
+		}
+		tplRows.Close()
 	}
 
 	return &it, nil

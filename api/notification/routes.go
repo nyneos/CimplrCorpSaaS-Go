@@ -44,6 +44,7 @@ func RegisterNotificationRoutes(mux *http.ServeMux, serviceName string, pool *pg
 	mux.Handle("/notification/template/all", midNotification(catalog.GetTemplatesWithAudit(pool)))
 	mux.Handle("/notification/template/versions", midNotification(catalog.GetTemplateVersions(pool)))
 	mux.Handle("/notification/template/approved-active", midNotification(catalog.GetTemplatesApprovedActive(pool)))
+	mux.Handle("/notification/template/approved-active-lite", midNotification(catalog.GetTemplatesApprovedActiveLite(pool)))
 	mux.Handle("/notification/template/get", midNotification(catalog.GetTemplate(pool)))
 	mux.Handle("/notification/template/audit-history", midNotification(catalog.GetTemplateAuditHistory(pool)))
 	mux.Handle("/notification/template/bulk-approve", midNotification(catalog.BulkApproveTemplate(pool)))

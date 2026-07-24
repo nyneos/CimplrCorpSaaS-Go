@@ -57,6 +57,37 @@ func (r CheckResult) FirstBreachMessage() string {
 	return ""
 }
 
+// ResultsPayload is the JSON-friendly shape for UI / API error data.
+func (r CheckResult) ResultsPayload() []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(r.Results))
+	for _, pr := range r.Results {
+		out = append(out, map[string]interface{}{
+			"policy_id": pr.PolicyID,
+			"code":      pr.Code,
+			"result":    pr.Result,
+			"action":    pr.Action,
+			"message":   pr.Message,
+		})
+	}
+	return out
+}
+
+// BlockPayload is attached to HardBlock HTTP responses so clients can list
+// every related policy that passed or failed.
+func (r CheckResult) BlockPayload() map[string]interface{} {
+	return map[string]interface{}{
+		"aggregated_action": r.AggregatedAction,
+		"policy_results":    r.ResultsPayload(),
+		"duration_ms":       r.DurationMS,
+	}
+}
+
+// LoadActivePolicySnapshots returns Active+APPROVED policy snapshots for the
+// given trigger/module/entity (same set RunCheck loads).
+func LoadActivePolicySnapshots(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, entityCode string) ([]map[string]interface{}, error) {
+	return loadActivePolicies(ctx, pool, eventCode, moduleCode, entityCode)
+}
+
 // RunCheck loads applicable policies, evaluates via CIMPLR-Policy-Service, writes execution_log.
 func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckResult, error) {
 	client := policysvc.NewFromEnv()
@@ -139,9 +170,10 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, entityCode string) ([]map[string]interface{}, error) {
 	codes := ExpandTriggerAliases(eventCode)
 	q := `
-		SELECT p.policy_id::text, p.code, p.rule_type, p.action_on_breach, p.null_handling,
+		SELECT p.policy_id::text, p.code, p.name, p.rule_type, p.action_on_breach, p.null_handling,
 		       COALESCE(p.null_handling_default, ''), COALESCE(p.addl_expression, ''),
 		       COALESCE(p.thr_variable, ''), COALESCE(p.thr_operator, ''), COALESCE(p.thr_value, 0),
+		       COALESCE(p.thr_value_date::text, ''),
 		       COALESCE(p.thr_value_mode, ''), COALESCE(p.thr_percent_base, ''),
 		       COALESCE(p.list_target_field, ''), COALESCE(p.list_mode, ''), COALESCE(p.list_case_sensitive, false),
 		       COALESCE(p.notification_group, ''),
@@ -177,21 +209,23 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 	policyIDs := make([]string, 0)
 	for rows.Next() {
 		var (
-			id, code, ruleType, action, nullH, nullDef, addl     string
-			thrVar, thrOp, thrMode, thrBase, listField, listMode string
-			notifGroup, formulaExpr, formulaRet, formulaOp       string
-			applicability                                        string
-			thrVal, formulaVal                                   float64
-			listCase                                             bool
+			id, code, name, ruleType, action, nullH, nullDef, addl string
+			thrVar, thrOp, thrValueDate, thrMode, thrBase          string
+			listField, listMode                                    string
+			notifGroup, formulaExpr, formulaRet, formulaOp         string
+			applicability                                          string
+			thrVal, formulaVal                                     float64
+			listCase                                               bool
 		)
-		if err := rows.Scan(&id, &code, &ruleType, &action, &nullH, &nullDef, &addl,
-			&thrVar, &thrOp, &thrVal, &thrMode, &thrBase, &listField, &listMode, &listCase,
+		if err := rows.Scan(&id, &code, &name, &ruleType, &action, &nullH, &nullDef, &addl,
+			&thrVar, &thrOp, &thrVal, &thrValueDate, &thrMode, &thrBase, &listField, &listMode, &listCase,
 			&notifGroup, &formulaExpr, &formulaRet, &formulaOp, &formulaVal, &applicability); err != nil {
 			return nil, err
 		}
 		snap := map[string]interface{}{
 			"policy_id":             id,
 			"code":                  code,
+			"name":                  name,
 			"rule_type":             ruleType,
 			"action_on_breach":      action,
 			"null_handling":         nullH,
@@ -200,6 +234,7 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 			"thr_variable":          thrVar,
 			"thr_operator":          thrOp,
 			"thr_value":             thrVal,
+			"thr_value_date":        thrValueDate,
 			"thr_value_mode":        thrMode,
 			"thr_percent_base":      thrBase,
 			"list_target_field":     listField,

@@ -540,9 +540,9 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if banks == nil {
 			banks = make([]map[string]interface{}, 0)
 		}
-		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
-			"data": banks,
-		})
+		// data must be the array itself — wrapping as {"data": banks} nests under
+		// envelope data and breaks clients that read response.data.data as []Bank.
+		api.RespondEnvelopeSuccess(w, "Success", banks)
 	}
 }
 

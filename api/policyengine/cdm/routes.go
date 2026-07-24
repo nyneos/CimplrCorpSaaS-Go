@@ -16,4 +16,5 @@ func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, chain func(http.Hand
 	mux.Handle("/policy-engine/cdm/approve", chain(http.HandlerFunc(HandleApprove(pool))))
 	mux.Handle("/policy-engine/cdm/reject", chain(http.HandlerFunc(HandleReject(pool))))
 	mux.Handle("/policy-engine/cdm/resolve", chain(http.HandlerFunc(HandleResolve(pool))))
+	mux.Handle("/policy-engine/cdm/audit-log", chain(http.HandlerFunc(HandleAuditLog(pool))))
 }

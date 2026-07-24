@@ -458,7 +458,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			if ok, pmsg := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreCreate,
+			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreCreate,
 				"CreateBookingBulk", "/investment/fd/booking/create-bulk",
 				row.EntityID, userEmail,
 				map[string]interface{}{
@@ -1058,7 +1058,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Soft-deleted / missing rows are skipped by the delete query below.
 				continue
 			}
-			if ok, pmsg := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreDelete,
+			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreDelete,
 				"DeleteBooking", "/investment/fd/booking/delete",
 				entityID, userEmail, fields,
 			); !ok {
@@ -1497,7 +1497,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, bID+": "+loadErr.Error())
 				continue
 			}
-			if ok, pmsg := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreApprove,
+			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreApprove,
 				"BulkApproveBooking", "/investment/fd/booking/approve",
 				entityID, userEmail, fields,
 			); !ok {
@@ -1642,7 +1642,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, bID+": "+loadErr.Error())
 				continue
 			}
-			if ok, pmsg := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreReject,
+			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreReject,
 				"BulkRejectBooking", "/investment/fd/booking/reject",
 				entityID, userEmail, fields,
 			); !ok {

@@ -306,9 +306,10 @@ func GetSettings(pool *pgxpool.Pool) http.HandlerFunc {
 			settings = append(settings, setting)
 		}
 
+		// Avoid nested "data" under envelope data — use rows for the list.
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"count": len(settings),
-			"data":  settings,
+			"rows":  settings,
 		})
 	}
 }

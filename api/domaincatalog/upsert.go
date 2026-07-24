@@ -1,11 +1,13 @@
 package domaincatalog
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
 	"CimplrCorpSaas/api"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,6 +23,36 @@ func actor(r *http.Request) string {
 		return name
 	}
 	return "domain_catalog_api"
+}
+
+// cdmDomainForSubModule resolves the policyengine_svc.cdm_variable.domain
+// value a field's sub_module belongs to. This MUST be the lowercase token the
+// frontend's filterCdmByModules() matches against a policy's selected module
+// codes (CASH/FX/INVESTMENT_FD/INVESTMENT_MF) — see
+// CimplrCorpSaaS-Web/src/features/policyEngine/UseCdmRegistry.ts. It is NOT
+// the sub_module_code itself: writing e.g. "FORWARD_BOOKING" as the domain
+// means the variable can never match any module filter, so it silently never
+// appears in the Rule step's "Tested variable" picker.
+func cdmDomainForSubModule(ctx context.Context, tx pgx.Tx, subModuleCode string) (string, error) {
+	var moduleCode string
+	err := tx.QueryRow(ctx, `
+		SELECT module_code FROM domain_catalog.sub_module
+		WHERE sub_module_code = $1 AND is_deleted = false`,
+		subModuleCode,
+	).Scan(&moduleCode)
+	if err != nil {
+		return "", err
+	}
+	switch moduleCode {
+	case "CASH":
+		return "cash", nil
+	case "FX":
+		return "fx", nil
+	case "INVESTMENT_FD", "INVESTMENT_MF":
+		return "investment", nil
+	default:
+		return strings.ToLower(moduleCode), nil
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +448,12 @@ func HandleFieldUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if trimmedPath != "" {
+			cdmDomain, err := cdmDomainForSubModule(r.Context(), tx, req.SubModuleCode)
+			if err != nil {
+				api.LogErrorForResponse(w, "domain-catalog field upsert: resolve cdm domain failed: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "field saved but could not resolve cdm domain for sub_module_code", "")
+				return
+			}
 			_, err = tx.Exec(r.Context(), `
 				INSERT INTO policyengine_svc.cdm_variable (
 					name, data_type, unit, label, description, domain, source_system,
@@ -434,7 +472,7 @@ func HandleFieldUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 					is_deleted = false,
 					processing_status = COALESCE(policyengine_svc.cdm_variable.processing_status, 'APPROVED'),
 					last_modified_at = now()`,
-				trimmedPath, req.DataType, req.Unit, req.Label, req.Description, req.SubModuleCode, "domain_catalog_api", nullable, actor(r))
+				trimmedPath, req.DataType, req.Unit, req.Label, req.Description, cdmDomain, "domain_catalog_api", nullable, actor(r))
 			if err != nil {
 				api.LogErrorForResponse(w, "domain-catalog field upsert: cdm_variable sync failed: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, "field saved but cdm_variable sync failed", "")
@@ -579,6 +617,13 @@ func HandleBulkFieldsUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(r.Context())
 
+		cdmDomain, err := cdmDomainForSubModule(r.Context(), tx, req.SubModuleCode)
+		if err != nil {
+			api.LogErrorForResponse(w, "domain-catalog bulk field upsert: resolve cdm domain failed: %v", err)
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "could not resolve cdm domain — check sub_module_code exists", "")
+			return
+		}
+
 		fieldsUpserted := 0
 		aliasesUpserted := 0
 		who := actor(r)
@@ -654,7 +699,7 @@ func HandleBulkFieldsUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 						is_deleted = false,
 						processing_status = COALESCE(policyengine_svc.cdm_variable.processing_status, 'APPROVED'),
 						last_modified_at = now()`,
-					trimmedPath, dataType, f.Unit, label, f.Description, req.SubModuleCode, "domain_catalog_api", nullable, who)
+					trimmedPath, dataType, f.Unit, label, f.Description, cdmDomain, "domain_catalog_api", nullable, who)
 				if err != nil {
 					api.LogErrorForResponse(w, "domain-catalog bulk field upsert: cdm_variable sync failed for %s: %v", trimmedPath, err)
 					api.RespondEnvelopeError(w, http.StatusInternalServerError, "field_code="+fieldCode+" saved but cdm_variable sync failed", "")

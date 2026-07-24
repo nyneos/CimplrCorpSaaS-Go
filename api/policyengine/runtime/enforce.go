@@ -35,39 +35,57 @@ type EnforceInput struct {
 	DefaultBlockMessage string
 }
 
+// EnforceOutcome is returned by EnforceDetailed / EnforceInlineDetailed so
+// callers (and HTTP) can surface every related policy pass/fail.
+type EnforceOutcome struct {
+	OK      bool
+	Message string
+	Result  CheckResult
+}
+
 // Enforce writes HTTP error and returns false when the handler must abort.
+// On HardBlock, the error envelope includes data.policy_results (pass + fail).
 func Enforce(ctx context.Context, w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, in EnforceInput) bool {
-	ok, msg := EnforceInline(ctx, r, pool, in)
-	if ok {
+	out := EnforceDetailed(ctx, r, pool, in)
+	if out.OK {
 		return true
 	}
 	status := http.StatusUnprocessableEntity
+	msg := out.Message
 	if msg == "" {
 		msg = "Blocked by policy"
 	}
 	if strings.HasPrefix(msg, "policy check failed") {
 		status = http.StatusBadGateway
+		api.RespondEnvelopeError(w, status, msg, "POLICY_SERVICE_ERROR")
+		return false
 	}
-	api.RespondWithError(w, status, msg)
+	api.RespondEnvelopeFailureWithData(w, status, msg, "POLICY_BREACH", out.Result.BlockPayload())
 	return false
 }
 
 // EnforceInline returns (ok, errorMessage) without writing HTTP — for bulk loops.
 func EnforceInline(ctx context.Context, r *http.Request, pool *pgxpool.Pool, in EnforceInput) (bool, string) {
+	out := EnforceDetailed(ctx, r, pool, in)
+	return out.OK, out.Message
+}
+
+// EnforceDetailed runs the check and returns the full CheckResult for UIs.
+func EnforceDetailed(ctx context.Context, r *http.Request, pool *pgxpool.Pool, in EnforceInput) EnforceOutcome {
 	vars := in.Variables
 	if len(vars) == 0 && len(in.Fields) > 0 && strings.TrimSpace(in.SubModule) != "" {
 		mapped, err := BuildVariablesFromCatalog(ctx, pool, in.SubModule, in.Fields, nil)
 		if err != nil {
 			api.LogError("policy CDM map %s/%s: %v", in.ModuleCode, in.SubModule, err)
 			if in.RequireVariables {
-				return false, "policy check failed — could not map fields to CDM"
+				return EnforceOutcome{OK: false, Message: "policy check failed — could not map fields to CDM"}
 			}
 		} else {
 			vars = mapped
 		}
 	}
 	if len(vars) == 0 && in.RequireVariables {
-		return false, "policy check failed — no CDM variables mapped"
+		return EnforceOutcome{OK: false, Message: "policy check failed — no CDM variables mapped"}
 	}
 	if vars == nil {
 		vars = map[string]string{}
@@ -93,7 +111,7 @@ func EnforceInline(ctx context.Context, r *http.Request, pool *pgxpool.Pool, in 
 	})
 	if err != nil {
 		api.LogError("policy check %s %s: %v", in.HandlerName, in.EventCode, err)
-		return false, "policy check failed — please try again later"
+		return EnforceOutcome{OK: false, Message: "policy check failed — please try again later"}
 	}
 	if result.BlocksSubmit() {
 		msg := result.FirstBreachMessage()
@@ -103,7 +121,7 @@ func EnforceInline(ctx context.Context, r *http.Request, pool *pgxpool.Pool, in 
 		if msg == "" {
 			msg = fmt.Sprintf("Blocked by policy (%s)", in.EventCode)
 		}
-		return false, msg
+		return EnforceOutcome{OK: false, Message: msg, Result: result}
 	}
-	return true, ""
+	return EnforceOutcome{OK: true, Result: result}
 }

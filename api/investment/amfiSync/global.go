@@ -177,8 +177,9 @@ LIMIT $%d OFFSET $%d`, where, limitArg, offsetArg)
 			schemes = append(schemes, s)
 		}
 
+		// Avoid nested "data" under envelope data — use rows for the list.
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
-			"data":  schemes,
+			"rows":  schemes,
 			"total": total,
 		})
 	}

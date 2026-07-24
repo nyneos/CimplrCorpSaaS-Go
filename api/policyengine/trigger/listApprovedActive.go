@@ -31,7 +31,7 @@ func HandleListApprovedActive(pool *pgxpool.Pool) http.HandlerFunc {
 			       allows_hard_block, allows_soft_warning, allows_trigger_approval, allows_notify_only
 			FROM policyengine_svc.trigger_event
 			WHERE is_deleted = false AND processing_status = 'APPROVED'
-			ORDER BY event_code`)
+			` + common.TriggerListOrderBy)
 		if err != nil {
 			api.LogErrorForResponse(w, "trigger list-approved-active: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to list trigger events", "TRIGGER_LIST_FAILED")

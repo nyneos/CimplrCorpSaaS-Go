@@ -16,7 +16,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const transformPreviewMaxBytes = 512 * 1024 // 512KB
+const transformPreviewMaxBytes = 512 * 1024       // 512KB text previews
+const transformSpreadsheetMaxBytes = 4 * 1024 * 1024 // 4MB spreadsheet / binary previews
+
+func isSpreadsheetFilename(name string) bool {
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
+	// ".excel" is used by some transform destinations; content is typically CSV/XLSX.
+	return ext == "xlsx" || ext == "xls" || ext == "csv" || ext == "excel"
+}
 
 // HandleTransformResultPreviewContent returns text content of original or transformed file
 // so the UI can show an in-app preview without relying on S3 CORS.
@@ -130,22 +137,45 @@ func HandleTransformResultPreviewContent(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		truncated := false
-		if len(raw) > transformPreviewMaxBytes {
-			raw = raw[:transformPreviewMaxBytes]
+		maxBytes := transformPreviewMaxBytes
+		if isSpreadsheetFilename(label) {
+			maxBytes = transformSpreadsheetMaxBytes
+		}
+		if len(raw) > maxBytes {
+			raw = raw[:maxBytes]
 			truncated = true
+		}
+
+		// Spreadsheets / CSV: return base64 so the UI can render Excel grid preview
+		// the same way as Email DMS (FilePreviewModal + parseExcel).
+		if isSpreadsheetFilename(label) {
+			emailcommon.RespondPayload(w, "transform-results/preview-content", map[string]interface{}{
+				"which":          which,
+				"filename":       label,
+				"s3_key":         s3Key,
+				"content":        "",
+				"content_base64": base64.StdEncoding.EncodeToString(raw),
+				"truncated":     truncated,
+				"is_binary":      true,
+				"is_spreadsheet": true,
+				"byte_size":      len(raw),
+			})
+			return
 		}
 
 		content := string(raw)
 		if !utf8.ValidString(content) {
-			// Binary / non-UTF8 — show a short hex-ish notice rather than garbage
+			// Binary / non-UTF8 — return base64 so UI can still offer download-style blob preview
 			emailcommon.RespondPayload(w, "transform-results/preview-content", map[string]interface{}{
-				"which":      which,
-				"filename":   label,
-				"s3_key":     s3Key,
-				"content":    "[Binary file — preview as text is not available. Use Download.]",
-				"truncated": truncated,
-				"is_binary":  true,
-				"byte_size":  len(raw),
+				"which":          which,
+				"filename":       label,
+				"s3_key":         s3Key,
+				"content":        "[Binary file — preview as text is not available. Use Download.]",
+				"content_base64": base64.StdEncoding.EncodeToString(raw),
+				"truncated":     truncated,
+				"is_binary":      true,
+				"is_spreadsheet": false,
+				"byte_size":      len(raw),
 			})
 			return
 		}
@@ -162,13 +192,15 @@ func HandleTransformResultPreviewContent(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		emailcommon.RespondPayload(w, "transform-results/preview-content", map[string]interface{}{
-			"which":      which,
-			"filename":   label,
-			"s3_key":     s3Key,
-			"content":    content,
-			"truncated": truncated,
-			"is_binary":  false,
-			"byte_size":  len(raw),
+			"which":          which,
+			"filename":       label,
+			"s3_key":         s3Key,
+			"content":        content,
+			"content_base64": "",
+			"truncated":     truncated,
+			"is_binary":      false,
+			"is_spreadsheet": false,
+			"byte_size":      len(raw),
 		})
 	}
 }

@@ -1298,6 +1298,72 @@ func GetTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // GetTemplatesApprovedActive returns active templates with latest approved audit content and resolved recipients
+// GetTemplatesApprovedActiveLite is a lean companion to GetTemplatesApprovedActive
+// for pickers (e.g. the policy engine's template multi-select) that only need
+// enough to render options — no subject/body/recipients. Optionally filtered
+// to one event_id. Same entity scoping as every other approved-active list
+// (buNames/isAdmin from the session middleware via callerContext).
+func GetTemplatesApprovedActiveLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		buNames, isAdmin := callerContext(ctx)
+
+		var req struct {
+			EventID string `json:"event_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		args := []interface{}{}
+		where := []string{"t.is_active = true"}
+		if eventID := strings.TrimSpace(req.EventID); eventID != "" {
+			args = append(args, eventID)
+			where = append(where, fmt.Sprintf("t.event_id = $%d", len(args)))
+		}
+		if !isAdmin && len(buNames) > 0 {
+			args = append(args, buNames)
+			where = append(where, fmt.Sprintf("(COALESCE(e.entity_name,'') = '' OR COALESCE(e.entity_name,'') = ANY($%d::text[]))", len(args)))
+		}
+
+		q := `
+			SELECT t.template_id, t.event_id, t.channel, t.template_name,
+			       EXISTS (
+			           SELECT 1 FROM notification_svc.audit_template a
+			           WHERE a.template_id = t.template_id
+			             AND a.processing_status = 'APPROVED' AND COALESCE(a.is_deleted, false) = false
+			       ) AS has_approved_version
+			FROM notification_svc.template t
+			JOIN notification_svc.event e ON e.event_id = t.event_id
+			WHERE ` + strings.Join(where, " AND ") + `
+			ORDER BY t.template_name`
+
+		rows, err := pgxPool.Query(ctx, q, args...)
+		if err != nil {
+			api.LogErrorForResponse(w, "GetTemplatesApprovedActiveLite: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to load templates", "")
+			return
+		}
+		defer rows.Close()
+		out := make([]map[string]interface{}, 0)
+		for rows.Next() {
+			var tplID, eventID, channel, tplName string
+			var hasApproved bool
+			if err := rows.Scan(&tplID, &eventID, &channel, &tplName, &hasApproved); err != nil {
+				continue
+			}
+			if !hasApproved {
+				continue // no point offering a template with no approved version to send
+			}
+			out = append(out, map[string]interface{}{
+				"template_id":   tplID,
+				"event_id":      eventID,
+				"channel":       channel,
+				"template_name": tplName,
+			})
+		}
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
+	}
+}
+
 func GetTemplatesApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()

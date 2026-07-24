@@ -85,7 +85,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 			listArgs = append(listArgs, search)
 			argN = 2
 		}
-		listQ += ` ORDER BY p.code LIMIT $` + strconv.Itoa(argN) + ` OFFSET $` + strconv.Itoa(argN+1)
+		listQ += ` ` + common.PolicyListOrderBy + ` LIMIT $` + strconv.Itoa(argN) + ` OFFSET $` + strconv.Itoa(argN+1)
 		listArgs = append(listArgs, pageSize, offset)
 
 		rows, err := pool.Query(ctx, listQ, listArgs...)

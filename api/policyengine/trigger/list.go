@@ -38,7 +38,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 			       processing_status, COALESCE(created_by, ''), created_at, COALESCE(last_modified_by, ''), last_modified_at
 			FROM policyengine_svc.trigger_event
 			WHERE is_deleted = false
-			ORDER BY event_code`)
+			` + common.TriggerListOrderBy)
 		if err != nil {
 			api.LogErrorForResponse(w, "trigger list: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to list trigger events", "TRIGGER_LIST_FAILED")

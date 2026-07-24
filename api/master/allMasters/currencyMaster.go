@@ -453,9 +453,9 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			currencies = make([]map[string]interface{}, 0)
 		}
 
-		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
-			"data": currencies,
-		})
+		// data must be the array itself — wrapping as {"data": currencies} nests under
+		// envelope data and breaks clients that read response.data.data as []Currency.
+		api.RespondEnvelopeSuccess(w, "Success", currencies)
 	}
 }
 

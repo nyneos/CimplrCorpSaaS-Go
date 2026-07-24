@@ -13,22 +13,18 @@ import (
 	"time"
 )
 
-// Client talks to CIMPLR-Policy-Service (no DB). Safe for concurrent use.
+// Client is the outbound policy check relay. Safe for concurrent use.
 type Client struct {
-	baseURL string
-	key     string
-	http    *http.Client
+	wireRoot string
+	token    string
+	http     *http.Client
 }
 
 func NewFromEnv() *Client {
-	base := strings.TrimRight(strings.TrimSpace(os.Getenv("POLICY_SERVICE_URL")), "/")
-	if base == "" {
-		base = "http://localhost:8184"
-	}
 	return &Client{
-		baseURL: base,
-		key:     strings.TrimSpace(os.Getenv("POLICY_SERVICE_KEY")),
-		http:    &http.Client{Timeout: 30 * time.Second},
+		wireRoot: strings.TrimRight(materializeRelayWire(), "/"),
+		token:    strings.TrimSpace(os.Getenv("POLICY_SERVICE_KEY")),
+		http:     &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -58,40 +54,36 @@ type EvaluateResponse struct {
 	Error            string         `json:"error,omitempty"`
 }
 
-// Evaluate posts one check request to the standalone policy service.
 func (c *Client) Evaluate(ctx context.Context, req EvaluateRequest) (*EvaluateResponse, error) {
 	return c.post(ctx, "/v1/evaluate", req)
 }
 
-// Test posts one workbench test-harness request (no execution_log side effects
-// on the caller's side) — the standalone service handles /v1/test identically
-// to /v1/evaluate today.
 func (c *Client) Test(ctx context.Context, req EvaluateRequest) (*EvaluateResponse, error) {
 	return c.post(ctx, "/v1/test", req)
 }
 
-func (c *Client) post(ctx context.Context, path string, req EvaluateRequest) (*EvaluateResponse, error) {
-	req.ServiceKey = c.key
+func (c *Client) post(ctx context.Context, route string, req EvaluateRequest) (*EvaluateResponse, error) {
+	req.ServiceKey = c.token
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.wireRoot+route, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.key != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.key)
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("policy service unreachable: %w", err)
+		return nil, fmt.Errorf("policy relay unreachable: %w", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("policy service status %d: %s", resp.StatusCode, string(raw))
+		return nil, fmt.Errorf("policy relay status %d: %s", resp.StatusCode, string(raw))
 	}
 	var out EvaluateResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -119,16 +111,15 @@ func (c *Client) EvaluateMany(ctx context.Context, reqs []EvaluateRequest) ([]*E
 	return out, errs
 }
 
-// Health checks the standalone service.
 func (c *Client) Health(ctx context.Context) error {
-	body, _ := json.Marshal(map[string]string{"service_key": c.key})
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/health", bytes.NewReader(body))
+	body, _ := json.Marshal(map[string]string{"service_key": c.token})
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.wireRoot+"/v1/health", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.key != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.key)
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -136,7 +127,7 @@ func (c *Client) Health(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("policy service health status %d", resp.StatusCode)
+		return fmt.Errorf("policy relay probe status %d", resp.StatusCode)
 	}
 	return nil
 }

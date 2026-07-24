@@ -15,7 +15,7 @@ import (
 
 // enforceFDBookingPolicy builds CDM variables from the booking field map
 // (domain_catalog → cdm_path) and runs RunCheck. Returns false when the
-// handler should abort (response already written).
+// handler should abort (response already written with full policy_results).
 func enforceFDBookingPolicy(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -32,12 +32,12 @@ func enforceFDBookingPolicy(
 	vars, err := runtime.BuildFdBookingVariables(ctx, pool, fields)
 	if err != nil {
 		api.LogErrorForResponse(w, "fd booking build CDM vars: %v", err)
-		api.RespondWithError(w, http.StatusBadGateway, "Policy check failed — could not map booking fields to CDM")
+		api.RespondEnvelopeError(w, http.StatusBadGateway, "Policy check failed — could not map booking fields to CDM", "POLICY_CDM_MAP")
 		return false
 	}
 	if len(vars) == 0 {
 		api.LogErrorForResponse(w, "fd booking policy check: empty CDM variable map for %s", handlerName)
-		api.RespondWithError(w, http.StatusBadGateway, "Policy check failed — no CDM variables mapped from booking")
+		api.RespondEnvelopeError(w, http.StatusBadGateway, "Policy check failed — no CDM variables mapped from booking", "POLICY_CDM_EMPTY")
 		return false
 	}
 
@@ -60,7 +60,7 @@ func enforceFDBookingPolicy(
 	})
 	if err != nil {
 		api.LogErrorForResponse(w, "fd booking policy check: %v", err)
-		api.RespondWithError(w, http.StatusBadGateway, "Policy check failed — please try again later")
+		api.RespondEnvelopeError(w, http.StatusBadGateway, "Policy check failed — please try again later", "POLICY_SERVICE_ERROR")
 		return false
 	}
 	if result.BlocksSubmit() {
@@ -68,14 +68,15 @@ func enforceFDBookingPolicy(
 		if msg == "" {
 			msg = "FD booking blocked by policy"
 		}
-		api.RespondWithError(w, http.StatusUnprocessableEntity, msg)
+		api.RespondEnvelopeFailureWithData(w, http.StatusUnprocessableEntity, msg, "POLICY_BREACH", result.BlockPayload())
 		return false
 	}
 	return true
 }
 
-// enforceFDBookingPolicyInline is for bulk loops — returns (ok, errorMessage)
-// without writing HTTP. Caller records the error on that row.
+// enforceFDBookingPolicyInline is for bulk loops — returns (ok, errorMessage, result)
+// without writing HTTP. Caller records the error on that row; result carries all
+// related policy pass/fail outcomes for that item.
 func enforceFDBookingPolicyInline(
 	ctx context.Context,
 	r *http.Request,
@@ -86,13 +87,13 @@ func enforceFDBookingPolicyInline(
 	entityCode string,
 	actorEmail string,
 	fields map[string]interface{},
-) (bool, string) {
+) (bool, string, runtime.CheckResult) {
 	vars, err := runtime.BuildFdBookingVariables(ctx, pool, fields)
 	if err != nil {
-		return false, fmt.Sprintf("policy CDM map failed: %v", err)
+		return false, fmt.Sprintf("policy CDM map failed: %v", err), runtime.CheckResult{}
 	}
 	if len(vars) == 0 {
-		return false, "policy CDM map empty — check domain_catalog FD_BOOKING cdm_path"
+		return false, "policy CDM map empty — check domain_catalog FD_BOOKING cdm_path", runtime.CheckResult{}
 	}
 	result, err := runtime.RunCheck(ctx, pool, runtime.CheckRequest{
 		EventCode:     eventCode,
@@ -107,16 +108,39 @@ func enforceFDBookingPolicyInline(
 		Variables:     vars,
 	})
 	if err != nil {
-		return false, "policy check failed — please try again later"
+		return false, "policy check failed — please try again later", runtime.CheckResult{}
 	}
 	if result.BlocksSubmit() {
 		msg := result.FirstBreachMessage()
 		if msg == "" {
 			msg = "FD booking blocked by policy"
 		}
-		return false, msg
+		return false, msg, result
 	}
-	return true, ""
+	return true, "", result
+}
+
+// EnforceFDConfirmationPolicy is used by confirmation handlers (shared module).
+func EnforceFDConfirmationPolicy(
+	ctx context.Context,
+	w http.ResponseWriter,
+	r *http.Request,
+	pool *pgxpool.Pool,
+	eventCode, handlerName, apiPath, entityCode, actorEmail string,
+	fields map[string]interface{},
+) bool {
+	return runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
+		EventCode:           eventCode,
+		ModuleCode:          common.ModuleInvestmentFD,
+		SubModule:           "FD_CONFIRMATION",
+		EntityCode:          entityCode,
+		ActorUserID:         actorEmail,
+		HandlerName:         handlerName,
+		APIPath:             apiPath,
+		Fields:              fields,
+		RequireVariables:    false,
+		DefaultBlockMessage: "FD confirmation blocked by policy",
+	})
 }
 
 // loadFDBookingCDMFields loads a booking row into a field map for CDM mapping.

@@ -165,3 +165,37 @@ func replacePolicyChildren(ctx context.Context, tx pgx.Tx, r *http.Request, poli
 	}
 	return insertPolicyChildren(r, tx, policyID, triggerEvents, modules, entitiesInclude, entitiesExclude, ruleType, rf)
 }
+
+// insertPolicyNotificationTemplates attaches the policy's curated
+// notification_svc.template picks (policy form's template multi-select) —
+// empty templateIDs is valid and means "every enabled channel for the event
+// fires" (dispatchNotifyBreaches' default), not "no notification".
+func insertPolicyNotificationTemplates(ctx context.Context, tx pgx.Tx, policyID string, templateIDs []string, actor string) error {
+	seen := make(map[string]struct{}, len(templateIDs))
+	for _, id := range templateIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO policyengine_svc.policy_notification_template (policy_id, template_id, created_by)
+			VALUES ($1::uuid, $2, $3)
+			ON CONFLICT (policy_id, template_id) DO UPDATE SET is_deleted = false`, policyID, id, actor); err != nil {
+			return fmt.Errorf("notification template %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// replacePolicyNotificationTemplates soft-deletes the policy's existing
+// template picks and re-inserts the current selection — used by HandleUpdate.
+func replacePolicyNotificationTemplates(ctx context.Context, tx pgx.Tx, policyID string, templateIDs []string, actor string) error {
+	if _, err := tx.Exec(ctx, `UPDATE policyengine_svc.policy_notification_template SET is_deleted = true WHERE policy_id = $1::uuid`, policyID); err != nil {
+		return err
+	}
+	return insertPolicyNotificationTemplates(ctx, tx, policyID, templateIDs, actor)
+}

@@ -55,7 +55,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT `+itemSelectCols+`
 			FROM policyengine_svc.cdm_variable
 			WHERE is_deleted = false
-			ORDER BY domain, name`)
+			`+common.CdmListOrderBy)
 		if err != nil {
 			api.LogErrorForResponse(w, "cdm list: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to list CDM variables", "CDM_LIST_FAILED")

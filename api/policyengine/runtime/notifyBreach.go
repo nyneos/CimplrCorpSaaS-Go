@@ -15,7 +15,14 @@ import (
 
 // dispatchNotifyBreaches fires notification catalog for NotifyOnly / SoftWarning
 // breaches. notification_group on the policy is treated as the notification
-// source_route (same string used by TriggerNotification). Empty group → skip.
+// source_route (same string used by TriggerNotification) — in practice this
+// is always the single, module-agnostic "policy-engine/breach" event
+// (module_code=POLICYENGINE, sub_module_code=POLICY_BREACH, seeded by
+// cmd/seedDomainCatalog) since a policy breach isn't tied to any one
+// handler's route. Empty group → skip (no dispatch at all — the policy form's
+// "None — log only" option). When the policy has curated template picks in
+// policyengine_svc.policy_notification_template, dispatch is restricted to
+// exactly those templates instead of every enabled channel for the event.
 func dispatchNotifyBreaches(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -40,6 +47,7 @@ func dispatchNotifyBreaches(
 			codeByPolicy[id] = c
 		}
 	}
+	templatesByPolicy := loadPolicyNotificationTemplates(ctx, pool, policies)
 
 	for _, pr := range results {
 		if pr.Result != "BREACH" {
@@ -84,13 +92,54 @@ func dispatchNotifyBreaches(
 		}
 
 		bg := context.WithoutCancel(ctx)
-		go func(sourceRoute, correlationID string, pl map[string]interface{}) {
+		templateIDs := templatesByPolicy[pr.PolicyID]
+		go func(sourceRoute, correlationID string, pl map[string]interface{}, tplIDs []string) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("policy NotifyOnly dispatch panic route=%s: %v", sourceRoute, rec)
 				}
 			}()
+			if len(tplIDs) > 0 {
+				notifcatalog.TriggerNotificationForTemplates(bg, pool, sourceRoute, correlationID, pl, tplIDs)
+				return
+			}
 			notifcatalog.TriggerNotification(bg, pool, sourceRoute, correlationID, pl)
-		}(route, corr+"-"+pr.PolicyID, payload)
+		}(route, corr+"-"+pr.PolicyID, payload, templateIDs)
 	}
+}
+
+// loadPolicyNotificationTemplates batches one query for every policy_id in
+// this check's policy set, returning the curated template_id list (if any)
+// for each. Policies with no rows here fall back to "every enabled channel
+// for the event" (TriggerNotification's default behavior).
+func loadPolicyNotificationTemplates(ctx context.Context, pool *pgxpool.Pool, policies []map[string]interface{}) map[string][]string {
+	out := map[string][]string{}
+	ids := make([]string, 0, len(policies))
+	for _, p := range policies {
+		if id, _ := p["policy_id"].(string); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return out
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT policy_id::text, template_id
+		FROM policyengine_svc.policy_notification_template
+		WHERE policy_id = ANY($1::uuid[]) AND is_deleted = false`,
+		ids,
+	)
+	if err != nil {
+		api.LogError("loadPolicyNotificationTemplates: %v", err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var policyID, templateID string
+		if err := rows.Scan(&policyID, &templateID); err != nil {
+			continue
+		}
+		out[policyID] = append(out[policyID], templateID)
+	}
+	return out
 }

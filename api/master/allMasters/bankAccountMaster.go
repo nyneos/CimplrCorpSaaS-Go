@@ -2463,7 +2463,9 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"deleted_at": auditInfo.DeletedAt,
 		}
 
-		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"data": out})
+		// data must be the record itself — wrapping as {"data": out} nests under
+		// envelope data and breaks clients that read response.data.data as the account.
+		api.RespondEnvelopeSuccess(w, "Success", out)
 	}
 }
 
@@ -2482,7 +2484,7 @@ func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// If user has no accessible entities, return empty result
 		if len(entityIDs) == 0 {
-			api.RespondWithPayload(w, true, "No bank accounts accessible with your current permissions", []map[string]interface{}{})
+			api.RespondEnvelopeSuccess(w, "No bank accounts accessible with your current permissions", []map[string]interface{}{})
 			return
 		} // build base query - include account_number and latest audit details plus action_id
 		baseQuery := `
@@ -2682,6 +2684,8 @@ WHERE COALESCE(a.is_deleted, false) = false`
 		if out == nil {
 			out = make([]map[string]interface{}, 0)
 		}
-		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"data": out})
+		// data must be the array itself — wrapping as {"data": out} nests under
+		// envelope data and breaks clients that read response.data.data as BankSummary[].
+		api.RespondEnvelopeSuccess(w, "Success", out)
 	}
 }

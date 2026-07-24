@@ -13,34 +13,38 @@ import (
 )
 
 type createReq struct {
-	Code              string          `json:"code"`
-	Name              string          `json:"name"`
-	Description       string          `json:"description"`
-	Category          string          `json:"category"`
-	SubCategory       string          `json:"sub_category"`
-	ValidationLevel   string          `json:"validation_level"`
-	Criticality       string          `json:"criticality"`
-	ActionOnBreach    string          `json:"action_on_breach"`
-	NotificationGroup string          `json:"notification_group"`
-	BreachMessage     string          `json:"breach_message"`
-	RequiresApproval  bool            `json:"requires_approval"`
-	Applicability     string          `json:"applicability"`
-	CanOverride       bool            `json:"can_override"`
-	Modules           []string        `json:"modules"`
-	TriggerEvents     []string        `json:"trigger_events"`
-	EntitiesInclude   []string        `json:"entities_include"`
-	EntitiesExclude   []string        `json:"entities_exclude"`
-	RuleType          string          `json:"rule_type"`
-	Config            json.RawMessage `json:"config"`
-	AddlExpression    string          `json:"addl_expression"`
-	NullHandling      string          `json:"null_handling"`
-	InstrumentFilter  string          `json:"instrument_filter"`
-	CurrencyFilter    string          `json:"currency_filter"`
-	TenorFilter       string          `json:"tenor_filter"`
-	RatingFilter      string          `json:"rating_filter"`
-	EffectiveStart    string          `json:"effective_start"`
-	EffectiveEnd      string          `json:"effective_end"`
-	ActorID           string          `json:"actor_id"`
+	Code              string `json:"code"`
+	Name              string `json:"name"`
+	Description       string `json:"description"`
+	Category          string `json:"category"`
+	SubCategory       string `json:"sub_category"`
+	ValidationLevel   string `json:"validation_level"`
+	Criticality       string `json:"criticality"`
+	ActionOnBreach    string `json:"action_on_breach"`
+	NotificationGroup string `json:"notification_group"`
+	// NotificationTemplateIDs — curated notification_svc.template picks from
+	// the policy form's template multi-select. Empty = every enabled channel
+	// for NotificationGroup's event fires (unchanged default behavior).
+	NotificationTemplateIDs []string        `json:"notification_template_ids"`
+	BreachMessage           string          `json:"breach_message"`
+	RequiresApproval        bool            `json:"requires_approval"`
+	Applicability           string          `json:"applicability"`
+	CanOverride             bool            `json:"can_override"`
+	Modules                 []string        `json:"modules"`
+	TriggerEvents           []string        `json:"trigger_events"`
+	EntitiesInclude         []string        `json:"entities_include"`
+	EntitiesExclude         []string        `json:"entities_exclude"`
+	RuleType                string          `json:"rule_type"`
+	Config                  json.RawMessage `json:"config"`
+	AddlExpression          string          `json:"addl_expression"`
+	NullHandling            string          `json:"null_handling"`
+	InstrumentFilter        string          `json:"instrument_filter"`
+	CurrencyFilter          string          `json:"currency_filter"`
+	TenorFilter             string          `json:"tenor_filter"`
+	RatingFilter            string          `json:"rating_filter"`
+	EffectiveStart          string          `json:"effective_start"`
+	EffectiveEnd            string          `json:"effective_end"`
+	ActorID                 string          `json:"actor_id"`
 }
 
 func (req *createReq) trim() {
@@ -132,7 +136,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				requires_approval, applicability, can_override,
 				instrument_filter, currency_filter, tenor_filter, rating_filter,
 				rule_type, null_handling,
-				thr_variable, thr_operator, thr_value, thr_value_mode, thr_percent_base, thr_unit,
+				thr_variable, thr_operator, thr_value, thr_value_date, thr_value_mode, thr_percent_base, thr_unit,
 				slab_variable, slab_unit,
 				comp_base, comp_total_check_variable, comp_total_check_min, comp_total_check_max,
 				list_target_field, list_mode, list_source, list_dynamic_ref, list_case_sensitive,
@@ -145,7 +149,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				$11,$12,$13,
 				NULLIF($14,''),NULLIF($15,''),NULLIF($16,''),NULLIF($17,''),
 				$18,$19,
-				NULLIF($20,''),NULLIF($21,''),$22,NULLIF($23,''),NULLIF($24,''),NULLIF($25,''),
+				NULLIF($20,''),NULLIF($21,''),$22,$45::date,NULLIF($23,''),NULLIF($24,''),NULLIF($25,''),
 				NULLIF($26,''),NULLIF($27,''),
 				NULLIF($28,''),NULLIF($29,''),$30,$31,
 				NULLIF($32,''),NULLIF($33,''),NULLIF($34,''),NULLIF($35,''),$36,
@@ -164,7 +168,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			rf.ListTargetField, rf.ListMode, rf.ListSource, rf.ListDynamicRef, rf.ListCaseSensitive,
 			rf.FormulaExpression, rf.FormulaReturnType, rf.FormulaOperator, rf.FormulaValue,
 			req.AddlExpression, req.EffectiveStart, req.EffectiveEnd,
-			actor,
+			actor, rf.ThrValueDate,
 		).Scan(&policyID)
 		if err != nil {
 			api.LogErrorForResponse(w, "policy create insert: %v", err)
@@ -175,6 +179,12 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		if err := insertPolicyChildren(r, tx, policyID, req.TriggerEvents, req.Modules, req.EntitiesInclude, req.EntitiesExclude, req.RuleType, rf); err != nil {
 			api.LogErrorForResponse(w, "policy create children: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach triggers/modules/rule rows (unknown code?)", "POLICY_CREATE_FAILED")
+			return
+		}
+
+		if err := insertPolicyNotificationTemplates(r.Context(), tx, policyID, req.NotificationTemplateIDs, actor); err != nil {
+			api.LogErrorForResponse(w, "policy create notification templates: %v", err)
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach notification templates (unknown template_id?)", "POLICY_CREATE_FAILED")
 			return
 		}
 

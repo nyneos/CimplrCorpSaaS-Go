@@ -12,9 +12,12 @@ type thresholdConfig struct {
 	Variable    string  `json:"variable"`
 	Operator    string  `json:"operator"`
 	Value       float64 `json:"value"`
-	ValueMode   string  `json:"valueMode"`
-	PercentBase string  `json:"percentBase"`
-	Unit        string  `json:"unit"`
+	// ValueDate (yyyy-mm-dd) is used instead of Value when the rule's CDM
+	// variable is date-typed — never both. See database/2026-07-24.sql.
+	ValueDate   string `json:"valueDate,omitempty"`
+	ValueMode   string `json:"valueMode"`
+	PercentBase string `json:"percentBase"`
+	Unit        string `json:"unit"`
 }
 
 type slabRowConfig struct {
@@ -74,6 +77,7 @@ type ruleFields struct {
 	ThrVariable    string
 	ThrOperator    string
 	ThrValue       *float64
+	ThrValueDate   *string
 	ThrValueMode   string
 	ThrPercentBase string
 	ThrUnit        string
@@ -115,8 +119,13 @@ func parseRuleConfig(ruleType string, raw json.RawMessage) (ruleFields, error) {
 		}
 		out.ThrVariable = c.Variable
 		out.ThrOperator = c.Operator
-		v := c.Value
-		out.ThrValue = &v
+		if c.ValueDate != "" {
+			d := c.ValueDate
+			out.ThrValueDate = &d
+		} else {
+			v := c.Value
+			out.ThrValue = &v
+		}
 		out.ThrValueMode = c.ValueMode
 		out.ThrPercentBase = c.PercentBase
 		out.ThrUnit = c.Unit
