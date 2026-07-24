@@ -64,13 +64,11 @@ func enforceFDBookingPolicy(
 		return false
 	}
 	if result.BlocksSubmit() {
-		msg := result.FirstBreachMessage()
-		if msg == "" {
-			msg = "FD booking blocked by policy"
-		}
+		msg := result.ClientMessage("FD booking blocked by policy")
 		api.RespondEnvelopeFailureWithData(w, http.StatusUnprocessableEntity, msg, "POLICY_BREACH", result.BlockPayload())
 		return false
 	}
+	result.WriteSummaryHeader(w)
 	return true
 }
 
@@ -111,10 +109,7 @@ func enforceFDBookingPolicyInline(
 		return false, "policy check failed — please try again later", runtime.CheckResult{}
 	}
 	if result.BlocksSubmit() {
-		msg := result.FirstBreachMessage()
-		if msg == "" {
-			msg = "FD booking blocked by policy"
-		}
+		msg := result.ClientMessage("FD booking blocked by policy")
 		return false, msg, result
 	}
 	return true, "", result

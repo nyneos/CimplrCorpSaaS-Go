@@ -656,7 +656,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}()
 				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer bgCancel()
+				defer bgCancel()
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "FIXED_DEPOSIT", EntityCode: entityID,
 					TransactionType: "FD_BOOKING", RecordID: bID,
@@ -825,19 +825,19 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Policy PRE_EDIT — merge current row + patch, map via domain_catalog CDM paths
 		merged := map[string]interface{}{
-			"booking_id":          req.BookingID,
-			"entity_id":           entityID,
-			"entity_code":         entityID,
-			"bank_id":             oldBankID,
-			"principal_amount":    oldPrincipal,
-			"interest_rate":       oldRate,
-			"tenor_days":          oldTenorDays,
-			"tenure_days":         oldTenorDays,
-			"tenor_months":        oldTenorMonths,
-			"tenure_months":       oldTenorMonths,
-			"value_date":          oldValueDate,
-			"maturity_date":       oldMaturityDate,
-			"interest_type_id":    oldInterestTypeID,
+			"booking_id":       req.BookingID,
+			"entity_id":        entityID,
+			"entity_code":      entityID,
+			"bank_id":          oldBankID,
+			"principal_amount": oldPrincipal,
+			"interest_rate":    oldRate,
+			"tenor_days":       oldTenorDays,
+			"tenure_days":      oldTenorDays,
+			"tenor_months":     oldTenorMonths,
+			"tenure_months":    oldTenorMonths,
+			"value_date":       oldValueDate,
+			"maturity_date":    oldMaturityDate,
+			"interest_type_id": oldInterestTypeID,
 		}
 		for k, v := range req.Fields {
 			merged[k] = v
@@ -1182,7 +1182,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}()
 				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer bgCancel()
+				defer bgCancel()
 				// Cancel any in-flight approval chain before submitting DELETE
 				if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", bID, uEmail); err != nil {
 					api.LogError("[FDBooking] CancelPendingInstances(DELETE) failed for booking %s: %v", bID, err)

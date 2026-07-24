@@ -48,6 +48,7 @@ type EnforceOutcome struct {
 func Enforce(ctx context.Context, w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, in EnforceInput) bool {
 	out := EnforceDetailed(ctx, r, pool, in)
 	if out.OK {
+		out.Result.WriteSummaryHeader(w)
 		return true
 	}
 	status := http.StatusUnprocessableEntity
@@ -114,10 +115,7 @@ func EnforceDetailed(ctx context.Context, r *http.Request, pool *pgxpool.Pool, i
 		return EnforceOutcome{OK: false, Message: "policy check failed — please try again later"}
 	}
 	if result.BlocksSubmit() {
-		msg := result.FirstBreachMessage()
-		if msg == "" {
-			msg = in.DefaultBlockMessage
-		}
+		msg := result.ClientMessage(in.DefaultBlockMessage)
 		if msg == "" {
 			msg = fmt.Sprintf("Blocked by policy (%s)", in.EventCode)
 		}

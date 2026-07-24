@@ -81,10 +81,21 @@ func HandleCheck(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondEnvelopeSuccess(w, "Policy check completed", map[string]interface{}{
+		passed, failed := result.CountPassedFailed()
+		msg := "Policy check completed"
+		if line := result.SummaryLine(); line != "" {
+			msg = line
+		}
+		if result.BlocksSubmit() {
+			msg = result.ClientMessage("Blocked by policy")
+		}
+		api.RespondEnvelopeSuccess(w, msg, map[string]interface{}{
 			"aggregated_action": result.AggregatedAction,
 			"results":           result.Results,
 			"duration_ms":       result.DurationMS,
+			"passed_count":      passed,
+			"failed_count":      failed,
+			"summary":           result.SummaryLine(),
 		})
 	}
 }

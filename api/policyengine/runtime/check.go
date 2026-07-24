@@ -3,6 +3,8 @@ package runtime
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -45,6 +47,49 @@ func (r CheckResult) BlocksSubmit() bool {
 	return r.AggregatedAction == "HardBlock"
 }
 
+// CountPassedFailed returns how many policies passed vs BREACH/ERROR.
+func (r CheckResult) CountPassedFailed() (passed, failed int) {
+	for _, pr := range r.Results {
+		if pr.Result == "BREACH" || pr.Result == "ERROR" {
+			failed++
+		} else {
+			passed++
+		}
+	}
+	return passed, failed
+}
+
+// SummaryLine is a short toast-friendly line, e.g. "Policy check: 3 passed, 2 failed".
+func (r CheckResult) SummaryLine() string {
+	passed, failed := r.CountPassedFailed()
+	if passed+failed == 0 {
+		return ""
+	}
+	if failed == 0 {
+		return fmt.Sprintf("Policy check: %d passed", passed)
+	}
+	return fmt.Sprintf("Policy check: %d passed, %d failed", passed, failed)
+}
+
+// ClientMessage pairs SummaryLine with the first breach detail for HTTP message/toasts.
+func (r CheckResult) ClientMessage(fallback string) string {
+	sum := r.SummaryLine()
+	detail := r.FirstBreachMessage()
+	if detail == "" {
+		detail = strings.TrimSpace(fallback)
+	}
+	switch {
+	case sum != "" && detail != "":
+		return sum + " — " + detail
+	case sum != "":
+		return sum
+	case detail != "":
+		return detail
+	default:
+		return "Blocked by policy"
+	}
+}
+
 // FirstBreachMessage returns the first BREACH/ERROR message, if any.
 func (r CheckResult) FirstBreachMessage() string {
 	for _, pr := range r.Results {
@@ -75,10 +120,24 @@ func (r CheckResult) ResultsPayload() []map[string]interface{} {
 // BlockPayload is attached to HardBlock HTTP responses so clients can list
 // every related policy that passed or failed.
 func (r CheckResult) BlockPayload() map[string]interface{} {
+	passed, failed := r.CountPassedFailed()
 	return map[string]interface{}{
 		"aggregated_action": r.AggregatedAction,
 		"policy_results":    r.ResultsPayload(),
 		"duration_ms":       r.DurationMS,
+		"passed_count":      passed,
+		"failed_count":      failed,
+		"summary":           r.SummaryLine(),
+	}
+}
+
+// WriteSummaryHeader sets X-Policy-Summary when at least one policy ran (pass path).
+func (r CheckResult) WriteSummaryHeader(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	if line := r.SummaryLine(); line != "" {
+		w.Header().Set("X-Policy-Summary", line)
 	}
 }
 

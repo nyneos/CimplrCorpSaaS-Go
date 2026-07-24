@@ -15,6 +15,7 @@ import (
 	"CimplrCorpSaas/api/utils"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -28,6 +29,50 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 func respondWithInternalError(w http.ResponseWriter, err error) {
 	log.Println("[ERROR] role:", err)
 	respondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
+}
+
+// formatOfficeClock turns Postgres TIME / time.Time / []byte into "HH:MM" for the UI.
+// Raw TIME values often JSON-encode in shapes that the FE date formatter cannot parse.
+func formatOfficeClock(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case time.Time:
+		if t.IsZero() {
+			return ""
+		}
+		return t.Format("15:04")
+	case pgtype.Time:
+		if !t.Valid {
+			return ""
+		}
+		// Microseconds since midnight
+		totalSec := t.Microseconds / 1_000_000
+		h := totalSec / 3600
+		m := (totalSec % 3600) / 60
+		return fmt.Sprintf("%02d:%02d", h, m)
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return ""
+		}
+		if len(s) >= 5 && s[2] == ':' {
+			return s[:5]
+		}
+		return s
+	case []byte:
+		return formatOfficeClock(string(t))
+	default:
+		s := strings.TrimSpace(fmt.Sprint(t))
+		if s == "" || s == "<nil>" {
+			return ""
+		}
+		if len(s) >= 5 && s[2] == ':' {
+			return s[:5]
+		}
+		return s
+	}
 }
 
 // Handler: Create role
@@ -248,8 +293,8 @@ func GetRolesPageData(pool *pgxpool.Pool) http.HandlerFunc {
 				"role_code":               roleCodeVal,
 				"roleCode":                fmt.Sprint(roleCodeVal),
 				"description":             rMap["description"],
-				"startTime":               rMap["office_start_time_ist"],
-				"endTime":                 rMap["office_end_time_ist"],
+				"startTime":               formatOfficeClock(rMap["office_start_time_ist"]),
+				"endTime":                 formatOfficeClock(rMap["office_end_time_ist"]),
 				"createdAt":               rMap["created_at"],
 				"editedBy":                rMap["edited_by"],
 				"editedAt":                rMap["edited_at"],
@@ -662,8 +707,8 @@ func GetPendingRoles(pool *pgxpool.Pool) http.HandlerFunc {
 				"name":                    rMap["name"],
 				"role_code":               rMap["role_code"],
 				"description":             rMap["description"],
-				"startTime":               rMap["office_start_time_ist"],
-				"endTime":                 rMap["office_end_time_ist"],
+				"startTime":               formatOfficeClock(rMap["office_start_time_ist"]),
+				"endTime":                 formatOfficeClock(rMap["office_end_time_ist"]),
 				"createdAt":               rMap["created_at"],
 				"editedBy":                rMap["edited_by"],
 				"editedAt":                rMap["edited_at"],

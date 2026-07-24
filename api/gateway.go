@@ -281,6 +281,13 @@ func createReverseProxy(target string) http.HandlerFunc {
 			resp.Header.Set(headerAccessControlAllowOrigin, allowOriginAll)
 			resp.Header.Set(headerAccessControlAllowMethods, allowMethodsAll)
 			resp.Header.Set(headerAccessControlAllowHeaders, allowHeadersAll)
+			// Let browsers read policy pass summary set by runtime.Enforce.
+			existing := resp.Header.Get("Access-Control-Expose-Headers")
+			if existing == "" {
+				resp.Header.Set("Access-Control-Expose-Headers", "X-Policy-Summary, X-Trace-Id")
+			} else if !strings.Contains(strings.ToLower(existing), "x-policy-summary") {
+				resp.Header.Set("Access-Control-Expose-Headers", existing+", X-Policy-Summary")
+			}
 			return nil
 		}
 
