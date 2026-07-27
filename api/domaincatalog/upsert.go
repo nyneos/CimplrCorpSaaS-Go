@@ -25,6 +25,137 @@ func actor(r *http.Request) string {
 	return "domain_catalog_api"
 }
 
+// catalogCDMText fills description / canonical_ref / user_alias for CDM rows
+// synced from domain_catalog (seeds often omit description; UI create fills these).
+func catalogCDMText(moduleCode, subModuleCode, fieldCode, label, description string) (desc, canonicalRef, userAlias string) {
+	fieldCode = strings.TrimSpace(fieldCode)
+	label = strings.TrimSpace(label)
+	desc = strings.TrimSpace(description)
+	if desc == "" {
+		if label != "" && fieldCode != "" {
+			desc = label + " (source field: " + fieldCode + ")"
+		} else if label != "" {
+			desc = label
+		} else {
+			desc = fieldCode
+		}
+	}
+	table := strings.ToLower(strings.TrimSpace(subModuleCode))
+	if table != "" && fieldCode != "" {
+		canonicalRef = table + "." + fieldCode
+	} else {
+		canonicalRef = fieldCode
+	}
+	mod := strings.ToLower(strings.TrimSpace(moduleCode))
+	switch strings.ToUpper(strings.TrimSpace(moduleCode)) {
+	case "CASH":
+		mod = "cash"
+	case "FX":
+		mod = "fx"
+	case "INVESTMENT_FD", "INVESTMENT_MF":
+		mod = "investment"
+	}
+	aliasPrefix := mod + "." + strings.ReplaceAll(table, "_", "")
+	if fieldCode != "" {
+		userAlias = aliasPrefix + "." + strings.ReplaceAll(fieldCode, "_", "")
+	}
+	return desc, canonicalRef, userAlias
+}
+
+// syncCDMVariableFromCatalog upserts policyengine_svc.cdm_variable for a catalog field.
+// source_system is the sub_module_code (matches CDM UI create) so View form can resolve Module/Sub-module.
+func syncCDMVariableFromCatalog(ctx context.Context, tx pgx.Tx, subModuleCode, fieldCode, cdmPath, dataType, unit, label, description string, nullable bool, who string) error {
+	cdmDomain, err := cdmDomainForSubModule(ctx, tx, subModuleCode)
+	if err != nil {
+		return err
+	}
+	var moduleCode string
+	_ = tx.QueryRow(ctx, `
+		SELECT module_code FROM domain_catalog.sub_module
+		WHERE sub_module_code = $1 AND is_deleted = false`, subModuleCode,
+	).Scan(&moduleCode)
+
+	desc, canonicalRef, userAlias := catalogCDMText(moduleCode, subModuleCode, fieldCode, label, description)
+	who = strings.TrimSpace(who)
+	if who == "" {
+		who = "domain_catalog_api"
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO policyengine_svc.cdm_variable (
+			name, data_type, unit, label, description, domain, source_system,
+			canonical_ref, user_alias, nullable, status, is_deleted, processing_status,
+			created_by, last_modified_by
+		)
+		VALUES ($1, $2, COALESCE($3,''), $4, $5, $6, $7,
+			$8, NULLIF($9,''), $10, 'Active', false, 'APPROVED',
+			$11, $11)
+		ON CONFLICT (name) DO UPDATE SET
+			data_type = EXCLUDED.data_type,
+			unit = EXCLUDED.unit,
+			label = EXCLUDED.label,
+			description = CASE
+				WHEN btrim(COALESCE(policyengine_svc.cdm_variable.description, '')) = '' THEN EXCLUDED.description
+				ELSE policyengine_svc.cdm_variable.description
+			END,
+			domain = EXCLUDED.domain,
+			source_system = CASE
+				WHEN policyengine_svc.cdm_variable.source_system IN ('domain_catalog_api', '') THEN EXCLUDED.source_system
+				ELSE policyengine_svc.cdm_variable.source_system
+			END,
+			canonical_ref = CASE
+				WHEN btrim(COALESCE(policyengine_svc.cdm_variable.canonical_ref, '')) = '' THEN EXCLUDED.canonical_ref
+				ELSE policyengine_svc.cdm_variable.canonical_ref
+			END,
+			user_alias = CASE
+				WHEN policyengine_svc.cdm_variable.user_alias IS NULL
+				  OR btrim(policyengine_svc.cdm_variable.user_alias) = '' THEN EXCLUDED.user_alias
+				ELSE policyengine_svc.cdm_variable.user_alias
+			END,
+			nullable = EXCLUDED.nullable,
+			status = 'Active',
+			is_deleted = false,
+			processing_status = COALESCE(policyengine_svc.cdm_variable.processing_status, 'APPROVED'),
+			last_modified_by = EXCLUDED.last_modified_by,
+			last_modified_at = now()`,
+		cdmPath, dataType, unit, label, desc, cdmDomain, subModuleCode,
+		canonicalRef, userAlias, nullable, who,
+	)
+	return err
+}
+
+// ensureCDMCreateAudit writes a CREATE+APPROVED audit when the synced cdm_variable
+// has no maker-checker trail yet (seed/upsert path skips the CDM UI create handler).
+func ensureCDMCreateAudit(ctx context.Context, tx pgx.Tx, cdmName, who string) error {
+	who = strings.TrimSpace(who)
+	if who == "" {
+		who = "system-seed"
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO policyengine_svc.cdm_variable_audit (
+			variable_id, action_type, processing_status, reason,
+			requested_by, requested_at, checker_by, checker_at, checker_comment,
+			new_name, new_data_type, new_unit, new_label, new_description, new_domain,
+			new_source_system, new_canonical_ref, new_user_alias, new_nullable, new_status, new_is_deleted
+		)
+		SELECT
+			c.variable_id, 'CREATE', 'APPROVED',
+			'domain_catalog sync — seeded Active/APPROVED',
+			COALESCE(NULLIF(TRIM(c.created_by), ''), $2),
+			COALESCE(c.created_at, now()),
+			COALESCE(NULLIF(TRIM(c.created_by), ''), $2),
+			COALESCE(c.created_at, now()),
+			'system seed via domain_catalog',
+			c.name, c.data_type, c.unit, c.label, c.description, c.domain,
+			c.source_system, c.canonical_ref, c.user_alias, c.nullable, c.status, c.is_deleted
+		FROM policyengine_svc.cdm_variable c
+		WHERE c.name = $1
+		  AND NOT EXISTS (
+			SELECT 1 FROM policyengine_svc.cdm_variable_audit a WHERE a.variable_id = c.variable_id
+		  )`, cdmName, who)
+	return err
+}
+
 // cdmDomainForSubModule resolves the policyengine_svc.cdm_variable.domain
 // value a field's sub_module belongs to. This MUST be the lowercase token the
 // frontend's filterCdmByModules() matches against a policy's selected module
@@ -448,34 +579,16 @@ func HandleFieldUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if trimmedPath != "" {
-			cdmDomain, err := cdmDomainForSubModule(r.Context(), tx, req.SubModuleCode)
-			if err != nil {
-				api.LogErrorForResponse(w, "domain-catalog field upsert: resolve cdm domain failed: %v", err)
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, "field saved but could not resolve cdm domain for sub_module_code", "")
-				return
-			}
-			_, err = tx.Exec(r.Context(), `
-				INSERT INTO policyengine_svc.cdm_variable (
-					name, data_type, unit, label, description, domain, source_system,
-					nullable, status, is_deleted, processing_status, created_by
-				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Active', false, 'APPROVED', $9)
-				ON CONFLICT (name) DO UPDATE SET
-					data_type = EXCLUDED.data_type,
-					unit = EXCLUDED.unit,
-					label = EXCLUDED.label,
-					description = EXCLUDED.description,
-					domain = EXCLUDED.domain,
-					source_system = EXCLUDED.source_system,
-					nullable = EXCLUDED.nullable,
-					status = 'Active',
-					is_deleted = false,
-					processing_status = COALESCE(policyengine_svc.cdm_variable.processing_status, 'APPROVED'),
-					last_modified_at = now()`,
-				trimmedPath, req.DataType, req.Unit, req.Label, req.Description, cdmDomain, "domain_catalog_api", nullable, actor(r))
-			if err != nil {
+			who := actor(r)
+			if err := syncCDMVariableFromCatalog(r.Context(), tx, req.SubModuleCode, req.FieldCode, trimmedPath,
+				req.DataType, req.Unit, req.Label, req.Description, nullable, who); err != nil {
 				api.LogErrorForResponse(w, "domain-catalog field upsert: cdm_variable sync failed: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, "field saved but cdm_variable sync failed", "")
+				return
+			}
+			if err := ensureCDMCreateAudit(r.Context(), tx, trimmedPath, who); err != nil {
+				api.LogErrorForResponse(w, "domain-catalog field upsert: cdm audit: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "field saved but cdm_variable audit failed", "")
 				return
 			}
 		}
@@ -617,8 +730,7 @@ func HandleBulkFieldsUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(r.Context())
 
-		cdmDomain, err := cdmDomainForSubModule(r.Context(), tx, req.SubModuleCode)
-		if err != nil {
+		if _, err := cdmDomainForSubModule(r.Context(), tx, req.SubModuleCode); err != nil {
 			api.LogErrorForResponse(w, "domain-catalog bulk field upsert: resolve cdm domain failed: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "could not resolve cdm domain — check sub_module_code exists", "")
 			return
@@ -681,28 +793,15 @@ func HandleBulkFieldsUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 			fieldsUpserted++
 
 			if trimmedPath != "" {
-				_, err = tx.Exec(r.Context(), `
-					INSERT INTO policyengine_svc.cdm_variable (
-						name, data_type, unit, label, description, domain, source_system,
-						nullable, status, is_deleted, processing_status, created_by
-					)
-					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Active', false, 'APPROVED', $9)
-					ON CONFLICT (name) DO UPDATE SET
-						data_type = EXCLUDED.data_type,
-						unit = EXCLUDED.unit,
-						label = EXCLUDED.label,
-						description = EXCLUDED.description,
-						domain = EXCLUDED.domain,
-						source_system = EXCLUDED.source_system,
-						nullable = EXCLUDED.nullable,
-						status = 'Active',
-						is_deleted = false,
-						processing_status = COALESCE(policyengine_svc.cdm_variable.processing_status, 'APPROVED'),
-						last_modified_at = now()`,
-					trimmedPath, dataType, f.Unit, label, f.Description, cdmDomain, "domain_catalog_api", nullable, who)
-				if err != nil {
+				if err := syncCDMVariableFromCatalog(r.Context(), tx, req.SubModuleCode, fieldCode, trimmedPath,
+					dataType, f.Unit, label, f.Description, nullable, who); err != nil {
 					api.LogErrorForResponse(w, "domain-catalog bulk field upsert: cdm_variable sync failed for %s: %v", trimmedPath, err)
 					api.RespondEnvelopeError(w, http.StatusInternalServerError, "field_code="+fieldCode+" saved but cdm_variable sync failed", "")
+					return
+				}
+				if err := ensureCDMCreateAudit(r.Context(), tx, trimmedPath, who); err != nil {
+					api.LogErrorForResponse(w, "domain-catalog bulk field upsert: cdm audit for %s: %v", trimmedPath, err)
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, "field_code="+fieldCode+" saved but cdm_variable audit failed", "")
 					return
 				}
 			}
