@@ -2,7 +2,6 @@ package fdAccrual
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 
 	"CimplrCorpSaas/api/policyengine/common"
@@ -12,7 +11,7 @@ import (
 )
 
 const (
-	fdSubAccrual     = "FD_ACCRUAL"
+	fdSubAccrual      = "FD_ACCRUAL"
 	fdSubAccrualSched = "FD_ACCRUAL_SCHED"
 )
 
@@ -98,67 +97,28 @@ func fdAccrualSchedEnforceInline(
 	})
 }
 
+// accrualRunPolicyFields loads the full canonical FD_ACCRUAL run row (see
+// accrualPolicyFields.go) and returns it as a policy Fields map plus the
+// entity_id for scoping — used by every run-level call site that only has a
+// run_id (RunAccrual, BulkApprove/Reject, RecomputeAccrualRun,
+// BulkGenerateMonthlyAccruals' execute step) instead of each hand-rolling
+// its own thinner ad hoc SELECT.
 func accrualRunPolicyFields(ctx context.Context, pool *pgxpool.Pool, runID string) (map[string]interface{}, string, error) {
-	var (
-		entityID, runType, runMode, runStatus, financialPeriod string
-		periodStart, periodEnd                                 interface{}
-		totalNet                                               float64
-	)
-	err := pool.QueryRow(ctx, `
-		SELECT COALESCE(entity_id,''),
-		       COALESCE(run_type,''),
-		       COALESCE(run_mode,''),
-		       COALESCE(run_status,''),
-		       accrual_period_start,
-		       accrual_period_end,
-		       COALESCE(financial_period,''),
-		       COALESCE(total_interest_accrued,0)
-		FROM investment.fd_accrual_run
-		WHERE run_id=$1 AND COALESCE(is_deleted,false)=false`, runID,
-	).Scan(&entityID, &runType, &runMode, &runStatus, &periodStart, &periodEnd, &financialPeriod, &totalNet)
+	row, err := loadFDAccrualRunRow(ctx, pool, runID)
 	if err != nil {
-		return nil, "", fmt.Errorf("load accrual run for policy: %w", err)
+		return nil, "", err
 	}
-	fields := map[string]interface{}{
-		"run_id":                  runID,
-		"entity_id":               entityID,
-		"entity_code":             entityID,
-		"run_type":                runType,
-		"run_mode":                runMode,
-		"run_status":              runStatus,
-		"accrual_period_start":    periodStart,
-		"accrual_period_end":      periodEnd,
-		"financial_period":        financialPeriod,
-		"total_interest_accrued":  totalNet,
-	}
-	return fields, entityID, nil
+	return buildFDAccrualPolicyFields(row), row.EntityID, nil
 }
 
+// accrualSchedulePolicyFields loads the full canonical FD_ACCRUAL_SCHED row
+// (see accrualSchedulePolicyFields.go) and returns it as a policy Fields map
+// plus the entity_id for scoping — used by every call site that only has a
+// config_id (DisableSchedule, EnableSchedule, Approve/RejectScheduleConfig).
 func accrualSchedulePolicyFields(ctx context.Context, pool *pgxpool.Pool, configID string) (map[string]interface{}, string, error) {
-	var (
-		entityID, scheduleFreq, periodCoverage, defaultRunMode string
-		isActive                                               bool
-	)
-	err := pool.QueryRow(ctx, `
-		SELECT COALESCE(entity_id,''),
-		       COALESCE(schedule_frequency,''),
-		       COALESCE(period_coverage,''),
-		       COALESCE(default_run_mode,''),
-		       COALESCE(is_active,false)
-		FROM investment.fd_accrual_schedule_config
-		WHERE config_id=$1 AND COALESCE(is_deleted,false)=false`, configID,
-	).Scan(&entityID, &scheduleFreq, &periodCoverage, &defaultRunMode, &isActive)
+	row, err := loadFDAccrualScheduleRow(ctx, pool, configID)
 	if err != nil {
-		return nil, "", fmt.Errorf("load schedule config for policy: %w", err)
+		return nil, "", err
 	}
-	fields := map[string]interface{}{
-		"config_id":          configID,
-		"entity_id":          entityID,
-		"entity_code":        entityID,
-		"schedule_frequency": scheduleFreq,
-		"period_coverage":    periodCoverage,
-		"default_run_mode":   defaultRunMode,
-		"is_active":          isActive,
-	}
-	return fields, entityID, nil
+	return buildFDAccrualSchedulePolicyFields(row), row.EntityID, nil
 }

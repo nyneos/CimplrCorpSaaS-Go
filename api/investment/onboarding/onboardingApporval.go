@@ -150,9 +150,14 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			approvalEventCode = common.TriggerPreReject
 		}
 		for _, batchID := range batchIDs {
+			batchRow, err := loadMFOnboardBatchRow(ctx, pgxPool, batchID)
+			if err != nil {
+				api.RespondWithError(w, 404, fmt.Sprintf("Batch '%s' not found", batchID))
+				return
+			}
 			if !mfEnforce(ctx, w, r, pgxPool, approvalEventCode, "BulkApproveBatch",
 				"/investment/onboard/batch/approve", batchID, userEmail,
-				map[string]interface{}{"batch_id": batchID, "action": req.Action, "comment": req.Comment}) {
+				buildMFOnboardBatchPolicyFields(batchRow, req.Action, req.Comment)) {
 				return
 			}
 		}
@@ -272,7 +277,7 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, bid := range batchIDsCopy {
 				BuildOnboardApprovalNotifPayload(context.Background(), poolRef, bid, actionCopy, userEmailCopy)
 			}
-			
+
 			// Refresh portfolio snapshot in background if APPROVED
 			if actionCopy == constants.AuditActionApprove {
 				if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), poolRef, nil); err != nil {

@@ -383,11 +383,25 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "CreateBankBalance",
 			APIPath:             "/cash/bank-balances/create",
 			DefaultBlockMessage: "Bank balance create blocked by policy",
-			Fields: map[string]interface{}{
-				"bank_name":     req.BankName,
-				"account_no":    req.AccountNo,
-				"currency_code": req.CurrencyCode,
-			},
+			Fields: buildBankBalancePolicyFields(bankBalanceRow{
+				BalanceID:      req.BalanceID,
+				BankName:       req.BankName,
+				AccountNo:      req.AccountNo,
+				IBAN:           req.IBAN,
+				CurrencyCode:   req.CurrencyCode,
+				Nickname:       req.Nickname,
+				Country:        req.Country,
+				AsOfDate:       req.AsOfDate,
+				AsOfTime:       req.AsOfTime,
+				BalanceType:    req.BalanceType,
+				BalanceAmount:  req.BalanceAmount,
+				StatementType:  req.StatementType,
+				SourceChannel:  req.SourceChannel,
+				OpeningBalance: req.OpeningBalance,
+				TotalCredits:   req.TotalCredits,
+				TotalDebits:    req.TotalDebits,
+				ClosingBalance: req.ClosingBalance,
+			}),
 		}) {
 			return
 		}
@@ -518,6 +532,11 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, balanceID := range req.BalanceIDs {
+			row, rowErr := loadBankBalanceRow(ctx, pgxPool, balanceID)
+			if rowErr != nil {
+				api.RespondWithResult(w, false, "failed to load bank balance for policy check: "+pgUserFriendlyMessage(rowErr))
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreApprove,
 				ModuleCode:          common.ModuleCash,
@@ -526,7 +545,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkApproveBankBalances",
 				APIPath:             "/cash/bank-balances/bulk-approve",
 				DefaultBlockMessage: "Bank balance approve blocked by policy",
-				Fields:              map[string]interface{}{"balance_id": balanceID},
+				Fields:              buildBankBalancePolicyFields(row),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
@@ -677,6 +696,11 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, balanceID := range req.BalanceIDs {
+			row, rowErr := loadBankBalanceRow(ctx, pgxPool, balanceID)
+			if rowErr != nil {
+				api.RespondWithResult(w, false, "failed to load bank balance for policy check: "+pgUserFriendlyMessage(rowErr))
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreReject,
 				ModuleCode:          common.ModuleCash,
@@ -685,7 +709,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkRejectBankBalances",
 				APIPath:             "/cash/bank-balances/bulk-reject",
 				DefaultBlockMessage: "Bank balance reject blocked by policy",
-				Fields:              map[string]interface{}{"balance_id": balanceID},
+				Fields:              buildBankBalancePolicyFields(row),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
@@ -753,6 +777,11 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, balanceID := range req.BalanceIDs {
+			row, rowErr := loadBankBalanceRow(ctx, pgxPool, balanceID)
+			if rowErr != nil {
+				api.RespondWithResult(w, false, "failed to load bank balance for policy check: "+pgUserFriendlyMessage(rowErr))
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
@@ -761,7 +790,7 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkRequestDeleteBankBalances",
 				APIPath:             "/cash/bank-balances/bulk-delete",
 				DefaultBlockMessage: "Bank balance delete blocked by policy",
-				Fields:              map[string]interface{}{"balance_id": balanceID},
+				Fields:              buildBankBalancePolicyFields(row),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
@@ -1327,6 +1356,12 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, code, msg)
 			return
 		}
+		existingRow, err := loadBankBalanceRow(ctx, pgxPool, req.BalanceID)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to load bank balance for policy check: "+pgUserFriendlyMessage(err))
+			return
+		}
+		mergedRow := applyBankBalanceEdits(existingRow, req.Fields)
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
@@ -1335,10 +1370,7 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "UpdateBankBalance",
 			APIPath:             "/cash/bank-balances/update",
 			DefaultBlockMessage: "Bank balance update blocked by policy",
-			Fields: map[string]interface{}{
-				"balance_id": req.BalanceID,
-				"fields":     req.Fields,
-			},
+			Fields:              buildBankBalancePolicyFields(mergedRow),
 		}) {
 			return
 		}

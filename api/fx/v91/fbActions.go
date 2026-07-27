@@ -11,6 +11,7 @@ import (
 
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
+	fxexposures "CimplrCorpSaas/api/fx/exposures"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/api/policyengine/common"
 	policyruntime "CimplrCorpSaas/api/policyengine/runtime"
@@ -69,6 +70,12 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 				respondEnvelopeError(w, http.StatusBadRequest, fmt.Sprintf("invalid date at index %d: %v", i, err), v91ErrorCode(http.StatusBadRequest))
 				return
 			}
+			creationRow, err := fxexposures.LoadExposureCreationRow(ctx, pool, p.ExposureHeaderID)
+			if err != nil {
+				respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error(), v91ErrorCode(http.StatusInternalServerError))
+				return
+			}
+			creationRow = fxexposures.ApplyExposureCreationEdits(creationRow, map[string]interface{}{"value_date": p.NewValueDate})
 			if ok, msg := policyruntime.EnforceInline(ctx, r, pool, policyruntime.EnforceInput{
 				EventCode:           common.TriggerPreEdit,
 				ModuleCode:          common.ModuleFX,
@@ -78,10 +85,7 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkUpdateValueDates",
 				APIPath:             r.URL.Path,
 				DefaultBlockMessage: "Exposure value-date update blocked by policy",
-				Fields: map[string]interface{}{
-					"exposure_header_id": p.ExposureHeaderID,
-					"new_value_date":     p.NewValueDate,
-				},
+				Fields:              fxexposures.BuildExposureCreationPolicyFields(creationRow),
 			}); !ok {
 				respondEnvelopeError(w, http.StatusUnprocessableEntity, msg, v91ErrorCode(http.StatusUnprocessableEntity))
 				return
@@ -224,6 +228,11 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		for _, id := range req.ExposureIDs {
+			creationRow, err := fxexposures.LoadExposureCreationRow(ctx, pool, id)
+			if err != nil {
+				respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error(), v91ErrorCode(http.StatusInternalServerError))
+				return
+			}
 			if ok, msg := policyruntime.EnforceInline(ctx, r, pool, policyruntime.EnforceInput{
 				EventCode:           common.TriggerPreApprove,
 				ModuleCode:          common.ModuleFX,
@@ -233,9 +242,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkApproveExposures",
 				APIPath:             r.URL.Path,
 				DefaultBlockMessage: "Exposure approval blocked by policy",
-				Fields: map[string]interface{}{
-					"exposure_header_id": id,
-				},
+				Fields:              fxexposures.BuildExposureCreationPolicyFields(creationRow),
 			}); !ok {
 				respondEnvelopeError(w, http.StatusUnprocessableEntity, msg, v91ErrorCode(http.StatusUnprocessableEntity))
 				return
@@ -347,6 +354,11 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		for _, id := range req.ExposureIDs {
+			creationRow, err := fxexposures.LoadExposureCreationRow(ctx, pool, id)
+			if err != nil {
+				respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error(), v91ErrorCode(http.StatusInternalServerError))
+				return
+			}
 			if ok, msg := policyruntime.EnforceInline(ctx, r, pool, policyruntime.EnforceInput{
 				EventCode:           common.TriggerPreReject,
 				ModuleCode:          common.ModuleFX,
@@ -356,9 +368,7 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkRejectExposures",
 				APIPath:             r.URL.Path,
 				DefaultBlockMessage: "Exposure rejection blocked by policy",
-				Fields: map[string]interface{}{
-					"exposure_header_id": id,
-				},
+				Fields:              fxexposures.BuildExposureCreationPolicyFields(creationRow),
 			}); !ok {
 				respondEnvelopeError(w, http.StatusUnprocessableEntity, msg, v91ErrorCode(http.StatusUnprocessableEntity))
 				return
@@ -425,6 +435,11 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		for _, id := range req.ExposureIDs {
+			creationRow, err := fxexposures.LoadExposureCreationRow(ctx, pool, id)
+			if err != nil {
+				respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error(), v91ErrorCode(http.StatusInternalServerError))
+				return
+			}
 			if ok, msg := policyruntime.EnforceInline(ctx, r, pool, policyruntime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleFX,
@@ -434,9 +449,7 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkDeleteExposures",
 				APIPath:             r.URL.Path,
 				DefaultBlockMessage: "Exposure delete blocked by policy",
-				Fields: map[string]interface{}{
-					"exposure_header_id": id,
-				},
+				Fields:              fxexposures.BuildExposureCreationPolicyFields(creationRow),
 			}); !ok {
 				respondEnvelopeError(w, http.StatusUnprocessableEntity, msg, v91ErrorCode(http.StatusUnprocessableEntity))
 				return

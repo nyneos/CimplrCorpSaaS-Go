@@ -17,7 +17,7 @@ const transformResultsDefaultLimit = 50
 
 // Success rows: S3 key and/or non-S3 output_location (SFTP, LOCAL, API).
 const transformResultsSuccessSQL = `
-			  AND COALESCE(tr.status, 'SUCCESS') = 'SUCCESS'
+			  AND COALESCE(tr.status, 'SUCCESS') IN ('SUCCESS', 'PARTIAL')
 			  AND (
 			    COALESCE(tr.transformed_s3_key, '') <> ''
 			    OR COALESCE(tr.output_location, '') <> ''

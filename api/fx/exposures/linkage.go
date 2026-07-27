@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -472,6 +473,29 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "user_id, exposure_header_id, booking_id, and hedged_amount are required")
 			return
 		}
+		// Get booking amount and prior utilization up front (read-only) so the
+		// policy check below sees the same running_open_amount/amount_changed
+		// values that will actually be written to forward_booking_ledger,
+		// instead of a thinner field set than the real HEDGE_LINK row shape.
+		var bookingAmount float64
+		_ = pool.QueryRow(ctx, "SELECT Booking_Amount FROM forward_bookings WHERE system_transaction_id = $1 AND COALESCE(is_deleted, false) = false", req.BookingID).Scan(&bookingAmount)
+		var totalUtilized float64
+		sumQuery := `SELECT COALESCE(SUM(amount_changed), 0) FROM forward_booking_ledger WHERE booking_id = $1 AND action_type IN ('UTILIZATION', 'CANCELLATION', 'ROLLOVER')`
+		_ = pool.QueryRow(ctx, sumQuery, req.BookingID).Scan(&totalUtilized)
+		newOpenAmount := math.Abs(math.Abs(bookingAmount) - math.Abs(totalUtilized))
+
+		hedgeRow := hedgeLinkRow{
+			ExposureHeaderID:  req.ExposureHeaderID,
+			BookingID:         req.BookingID,
+			HedgedAmount:      req.HedgedAmount,
+			LinkDate:          time.Now().Format("2006-01-02"),
+			IsActive:          true,
+			ActionType:        "UTILIZATION",
+			ActionDate:        time.Now().Format("2006-01-02"),
+			AmountChanged:     req.HedgedAmount,
+			RunningOpenAmount: newOpenAmount,
+			UserID:            req.UserID,
+		}
 		if !runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleFX,
@@ -481,11 +505,7 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "LinkExposureHedge",
 			APIPath:             "/fx/exposures/link-exposure-hedge",
 			DefaultBlockMessage: "Exposure hedge link blocked by policy",
-			Fields: map[string]interface{}{
-				"exposure_header_id": req.ExposureHeaderID,
-				"booking_id":         req.BookingID,
-				"hedged_amount":      req.HedgedAmount,
-			},
+			Fields:              buildHedgeLinkPolicyFields(hedgeRow),
 		}) {
 			return
 		}
@@ -518,14 +538,6 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 			"hedged_amount":      link.HedgedAmount,
 			"is_active":          link.IsActive,
 		}
-		// Get booking amount
-		var bookingAmount float64
-		_ = pool.QueryRow(ctx, "SELECT Booking_Amount FROM forward_bookings WHERE system_transaction_id = $1 AND COALESCE(is_deleted, false) = false", req.BookingID).Scan(&bookingAmount)
-		// Sum previous actions
-		var totalUtilized float64
-		sumQuery := `SELECT COALESCE(SUM(amount_changed), 0) FROM forward_booking_ledger WHERE booking_id = $1 AND action_type IN ('UTILIZATION', 'CANCELLATION', 'ROLLOVER')`
-		_ = pool.QueryRow(ctx, sumQuery, req.BookingID).Scan(&totalUtilized)
-		newOpenAmount := math.Abs(math.Abs(bookingAmount) - math.Abs(totalUtilized))
 		// Log to forward_booking_ledger
 		ledgerQuery := `INSERT INTO forward_booking_ledger (booking_id, action_type, action_id, action_date, amount_changed, running_open_amount, user_id) VALUES ($1, 'UTILIZATION', $2, CURRENT_DATE, $3, $4, $5)`
 		_, _ = pool.Exec(ctx, ledgerQuery, req.BookingID, req.ExposureHeaderID, req.HedgedAmount, newOpenAmount, req.UserID)

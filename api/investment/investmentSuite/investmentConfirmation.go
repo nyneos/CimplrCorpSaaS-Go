@@ -218,25 +218,6 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateConfirmationSingle",
-			"/investment/confirmation/create", mfSubConfirmation, req.InitiationID, userEmail,
-			map[string]interface{}{
-				"initiation_id": req.InitiationID,
-				"nav_date":      req.NAVDate,
-				"net_amount":    req.NetAmount,
-				"nav":           req.NAV,
-				"allotted_units": req.AllottedUnits,
-			}) {
-			return
-		}
-
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
-			return
-		}
-		defer tx.Rollback(ctx)
-
 		status := "PENDING_CONFIRMATION"
 		if strings.TrimSpace(req.Status) != "" {
 			status = req.Status
@@ -252,6 +233,41 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			diff := req.ActualUnits - req.AllottedUnits
 			varianceUnits = &diff
 		}
+
+		createRow := mfConfirmationRow{
+			InitiationID:       req.InitiationID,
+			NAVDate:            req.NAVDate,
+			NAV:                req.NAV,
+			AllottedUnits:      req.AllottedUnits,
+			StampDuty:          req.StampDuty,
+			NetAmount:          req.NetAmount,
+			VarianceNAV:        varianceNAV,
+			VarianceUnits:      varianceUnits,
+			Status:             status,
+			ResolutionComment:  req.ResolutionComments,
+			ResolutionVariance: req.ResolutionVariance,
+			UploadS3Key:        uploadS3Key,
+		}
+		if req.ActualNAV > 0 {
+			v := req.ActualNAV
+			createRow.ActualNAV = &v
+		}
+		if req.ActualUnits > 0 {
+			v := req.ActualUnits
+			createRow.ActualAllottedUnits = &v
+		}
+		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateConfirmationSingle",
+			"/investment/confirmation/create", mfSubConfirmation, req.InitiationID, userEmail,
+			buildMFConfirmationPolicyFields(createRow)) {
+			return
+		}
+
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
 
 		insertQ := `
 			INSERT INTO investment.investment_confirmation (
@@ -397,15 +413,43 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			bulkStatus := "PENDING_CONFIRMATION"
+			if strings.TrimSpace(row.Status) != "" {
+				bulkStatus = row.Status
+			}
+			var bulkVarianceNAV, bulkVarianceUnits *float64
+			if row.ActualNAV > 0 {
+				diff := row.ActualNAV - row.NAV
+				bulkVarianceNAV = &diff
+			}
+			if row.ActualUnits > 0 {
+				diff := row.ActualUnits - row.AllottedUnits
+				bulkVarianceUnits = &diff
+			}
+			bulkCreateRow := mfConfirmationRow{
+				InitiationID:       initiationID,
+				NAVDate:            navDate,
+				NAV:                row.NAV,
+				AllottedUnits:      row.AllottedUnits,
+				StampDuty:          row.StampDuty,
+				NetAmount:          row.NetAmount,
+				VarianceNAV:        bulkVarianceNAV,
+				VarianceUnits:      bulkVarianceUnits,
+				Status:             bulkStatus,
+				ResolutionComment:  row.ResolutionComments,
+				ResolutionVariance: row.ResolutionVariance,
+			}
+			if row.ActualNAV > 0 {
+				v := row.ActualNAV
+				bulkCreateRow.ActualNAV = &v
+			}
+			if row.ActualUnits > 0 {
+				v := row.ActualUnits
+				bulkCreateRow.ActualAllottedUnits = &v
+			}
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "CreateConfirmationBulk",
 				"/investment/confirmation/create-bulk", mfSubConfirmation, initiationID, userEmail,
-				map[string]interface{}{
-					"initiation_id":  initiationID,
-					"nav_date":       navDate,
-					"net_amount":     row.NetAmount,
-					"nav":            row.NAV,
-					"allotted_units": row.AllottedUnits,
-				}); !ok {
+				buildMFConfirmationPolicyFields(bulkCreateRow)); !ok {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, constants.ValueError: pmsg,
 				})
@@ -419,20 +463,8 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			defer tx.Rollback(ctx)
 
-			status := "PENDING_CONFIRMATION"
-			if strings.TrimSpace(row.Status) != "" {
-				status = row.Status
-			}
-
-			var varianceNAV, varianceUnits *float64
-			if row.ActualNAV > 0 {
-				diff := row.ActualNAV - row.NAV
-				varianceNAV = &diff
-			}
-			if row.ActualUnits > 0 {
-				diff := row.ActualUnits - row.AllottedUnits
-				varianceUnits = &diff
-			}
+			status := bulkStatus
+			varianceNAV, varianceUnits := bulkVarianceNAV, bulkVarianceUnits
 
 			var confirmationID string
 			if err := tx.QueryRow(ctx, `
@@ -528,9 +560,15 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		existingConfRow, loadErr := loadMFConfirmationRow(ctx, pgxPool, req.ConfirmationID)
+		if loadErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "load failed: "+loadErr.Error())
+			return
+		}
+		updatedConfRow := applyMFConfirmationEdits(existingConfRow, req.Fields)
 		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateConfirmation",
 			"/investment/confirmation/update", mfSubConfirmation, req.ConfirmationID, userEmail,
-			map[string]interface{}{"confirmation_id": req.ConfirmationID, "fields": req.Fields}) {
+			buildMFConfirmationPolicyFields(updatedConfRow)) {
 			return
 		}
 
@@ -671,9 +709,15 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			bulkExistingConfRow, loadErr := loadMFConfirmationRow(ctx, pgxPool, row.ConfirmationID)
+			if loadErr != nil {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "confirmation_id": row.ConfirmationID, constants.ValueError: "load failed: " + loadErr.Error()})
+				continue
+			}
+			bulkUpdatedConfRow := applyMFConfirmationEdits(bulkExistingConfRow, row.Fields)
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreEdit, "UpdateConfirmationBulk",
 				"/investment/confirmation/update-bulk", mfSubConfirmation, row.ConfirmationID, userEmail,
-				map[string]interface{}{"confirmation_id": row.ConfirmationID, "fields": row.Fields}); !ok {
+				buildMFConfirmationPolicyFields(bulkUpdatedConfRow)); !ok {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, "confirmation_id": row.ConfirmationID, constants.ValueError: pmsg,
 				})
@@ -816,9 +860,14 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		for _, id := range req.ConfirmationIDs {
+			delConfRow, loadErr := loadMFConfirmationRow(ctx, pgxPool, id)
+			if loadErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
+				return
+			}
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreDelete, "DeleteConfirmation",
 				"/investment/confirmation/delete", mfSubConfirmation, id, requestedBy,
-				map[string]interface{}{"confirmation_id": id, "reason": req.Reason}); !ok {
+				buildMFConfirmationPolicyFields(delConfRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -888,9 +937,14 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		for _, id := range req.ConfirmationIDs {
+			apprConfRow, loadErr := loadMFConfirmationRow(ctx, pgxPool, id)
+			if loadErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
+				return
+			}
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveConfirmationActions",
 				"/investment/confirmation/approve", mfSubConfirmation, id, checkerBy,
-				map[string]interface{}{"confirmation_id": id, "comment": req.Comment}); !ok {
+				buildMFConfirmationPolicyFields(apprConfRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -1142,9 +1196,14 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, id := range req.ConfirmationIDs {
+			rejConfRow, loadErr := loadMFConfirmationRow(ctx, pgxPool, id)
+			if loadErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
+				return
+			}
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectConfirmationActions",
 				"/investment/confirmation/reject", mfSubConfirmation, id, checkerBy,
-				map[string]interface{}{"confirmation_id": id, "comment": req.Comment}); !ok {
+				buildMFConfirmationPolicyFields(rejConfRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -1962,9 +2021,14 @@ func ConfirmInvestment(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		for _, id := range req.ConfirmationIDs {
+			confirmRow, loadErr := loadMFConfirmationRow(ctx, pgxPool, id)
+			if loadErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
+				return
+			}
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "ConfirmInvestment",
 				"/investment/confirmation/confirm", mfSubConfirmation, id, confirmedBy,
-				map[string]interface{}{"confirmation_id": id}); !ok {
+				buildMFConfirmationPolicyFields(confirmRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}

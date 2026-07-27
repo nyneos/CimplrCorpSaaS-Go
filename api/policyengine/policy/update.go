@@ -41,6 +41,21 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
 			return
 		}
+		if err := validatePELOnWrite(r.Context(), req.RuleType, rf.FormulaExpression, rf.FormulaReturnType, req.AddlExpression); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
+			return
+		}
+		draft := draftConstraintFromReq(req.createReq, rf)
+		conflictReport, conflictErr := evaluateLaneConflicts(r.Context(), pool, req.Modules, req.SubModules, req.TriggerEvents, req.PolicyID, draft)
+		if conflictErr != nil {
+			api.LogErrorForResponse(w, "policy update conflict check: %v", conflictErr)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to validate policy conflicts", "POLICY_CONFLICT_CHECK_FAILED")
+			return
+		}
+		if conflictReport.HasImpossible() {
+			api.RespondEnvelopeFailureWithData(w, http.StatusBadRequest, conflictErrorMessage(conflictReport), "POLICY_CONFLICT_IMPOSSIBLE", conflictPayload(conflictReport))
+			return
+		}
 		actor := common.RequestActor(r, req.ActorID)
 		ip := common.RequestIP(r)
 
@@ -102,7 +117,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := replacePolicyChildren(r.Context(), tx, r, req.PolicyID, req.TriggerEvents, req.Modules, req.EntitiesInclude, req.EntitiesExclude, req.RuleType, rf); err != nil {
+		if err := replacePolicyChildren(r.Context(), tx, r, req.PolicyID, req.TriggerEvents, req.Modules, req.SubModules, req.EntitiesInclude, req.EntitiesExclude, req.RuleType, rf); err != nil {
 			api.LogErrorForResponse(w, "policy update children: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach triggers/modules/rule rows (unknown code?)", "POLICY_UPDATE_FAILED")
 			return
@@ -125,6 +140,14 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update policy", "POLICY_UPDATE_FAILED")
 			return
 		}
-		api.RespondEnvelopeSuccess(w, "Policy edit submitted for approval", map[string]string{"policy_id": req.PolicyID})
+		data := map[string]interface{}{
+			"policy_id":         req.PolicyID,
+			"conflict_warnings": warnPayload(conflictReport),
+		}
+		msg := "Policy edit submitted for approval"
+		if summary := formatConflictWarnSummary(conflictReport); summary != "" {
+			msg = msg + " — warning: " + summary
+		}
+		api.RespondEnvelopeSuccess(w, msg, data)
 	}
 }

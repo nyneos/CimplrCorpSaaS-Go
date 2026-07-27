@@ -8,6 +8,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -26,7 +27,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/internal/logger"
-	"CimplrCorpSaas/internal/bindref"
 )
 
 const zipBatchConcurrency = 2
@@ -55,11 +55,13 @@ type zipBatchJob struct {
 	Immediate int // pre-counted failures (read errors, validation)
 }
 
-// handleZipBankStatementUpload accepts a ZIP, creates a staging batch, and returns
-// immediately while files are processed in the background (avoids gateway timeouts).
+// handleZipBankStatementUpload accepts a ZIP.
+//
+// Routing:
+//   - BANK_STATEMENT_USE_LLM=false and ZIP is tabular-only (csv/xls/xlsx, no PDF)
+//     → synchronous direct V2 ingest (same as normal zip upload — no staging).
+//   - Otherwise (LLM on, or ZIP contains PDF) → staging batch + async parse/preview.
 func handleZipBankStatementUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		respondWithError(w, err, constants.ErrFileUploadFailed, http.StatusBadRequest)
@@ -83,14 +85,247 @@ func handleZipBankStatementUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *
 		return
 	}
 
+	allowPDF := usePDFCoFromEnv() || bankStatementUseLLM() || r.FormValue("co_pdf") == "true"
 	allowedExt := map[string]bool{
 		".xls":  true,
 		".xlsx": true,
 		".csv":  true,
 	}
-	if usePDFCoFromEnv() {
+	if allowPDF {
 		allowedExt[".pdf"] = true
 	}
+
+	hasPDF := false
+	tabularCount := 0
+	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		filename := filepath.Base(zf.Name)
+		if isJunkFile(filename) {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(filename))
+		switch {
+		case ext == ".pdf" && allowPDF:
+			hasPDF = true
+		case allowedExt[ext] && ext != ".pdf":
+			tabularCount++
+		}
+	}
+
+	// CSV/XLS zip with LLM off → normal sync ingest (no staging).
+	if !bankStatementUseLLM() && !hasPDF && tabularCount > 0 {
+		logger.LogInfo("[ZIP-UPLOAD] direct ingest (LLM off, tabular-only zip) files=%d name=%s", tabularCount, header.Filename)
+		handleZipDirectIngest(pool, w, r, zr, header.Filename, allowPDF)
+		return
+	}
+
+	handleZipStagingUpload(pool, w, r, zipBytes, zr, header.Filename, allowedExt, allowPDF)
+}
+
+// handleZipDirectIngest processes a tabular-only ZIP synchronously via V2 upload
+// (same response shape FE already handles via results[]).
+func handleZipDirectIngest(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Request, zr *zip.Reader, zipName string, allowPDF bool) {
+	ctx := r.Context()
+
+	baseFormValues := map[string][]string{}
+	if r.MultipartForm != nil && r.MultipartForm.Value != nil {
+		for k, v := range r.MultipartForm.Value {
+			baseFormValues[k] = append([]string{}, v...)
+		}
+	}
+	accountNumbers := parseAccountNumbers(baseFormValues)
+	forceOverride := r.FormValue("force_override") == "true"
+
+	useMappingFlag := strings.ToLower(strings.TrimSpace(r.FormValue("mapping")))
+	useMapping := useMappingFlag == "true" || useMappingFlag == "1"
+	var mappings *ColumnMappings
+	if useMapping {
+		if mappingsJSON := r.FormValue("column_mappings"); mappingsJSON != "" {
+			mappings = &ColumnMappings{}
+			if err := json.Unmarshal([]byte(mappingsJSON), mappings); err != nil {
+				respondWithError(w, err, "Invalid column_mappings JSON", http.StatusBadRequest)
+				return
+			}
+		}
+	}
+
+	type zipEntry struct {
+		name     string
+		data     []byte
+		fileHash string
+	}
+	var fileEntries []zipEntry
+	type fileResult struct {
+		FileName string                 `json:"file_name"`
+		Success  bool                   `json:"success"`
+		Result   map[string]interface{} `json:"result,omitempty"`
+		Error    string                 `json:"error,omitempty"`
+	}
+	results := []fileResult{}
+	successCount, failureCount := 0, 0
+
+	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		base := filepath.Base(zf.Name)
+		if isJunkFile(base) {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(base))
+		if ext != ".csv" && ext != ".xls" && ext != ".xlsx" {
+			if ext == ".pdf" && !allowPDF {
+				results = append(results, fileResult{
+					FileName: zf.Name, Success: false,
+					Error: "Unsupported file type: .pdf (enable BANK_STATEMENT_USE_LLM or USE_PDFCO / co_pdf)",
+				})
+				failureCount++
+			} else if ext == ".pdf" {
+				// Should not reach here when tabular-only branch is taken.
+				results = append(results, fileResult{
+					FileName: zf.Name, Success: false,
+					Error: "PDF inside zip requires staging path (LLM or PDFCo)",
+				})
+				failureCount++
+			} else {
+				results = append(results, fileResult{
+					FileName: zf.Name, Success: false,
+					Error: fmt.Sprintf("Unsupported file type: %s", ext),
+				})
+				failureCount++
+			}
+			continue
+		}
+		rc, oErr := zf.Open()
+		if oErr != nil {
+			results = append(results, fileResult{FileName: zf.Name, Success: false, Error: oErr.Error()})
+			failureCount++
+			continue
+		}
+		data, rErr := io.ReadAll(rc)
+		rc.Close()
+		if rErr != nil {
+			results = append(results, fileResult{FileName: zf.Name, Success: false, Error: rErr.Error()})
+			failureCount++
+			continue
+		}
+		h := sha256.New()
+		h.Write(data)
+		fileEntries = append(fileEntries, zipEntry{name: zf.Name, data: data, fileHash: fmt.Sprintf("%x", h.Sum(nil))})
+	}
+
+	if len(fileEntries) == 0 {
+		respondWithError(w, nil, "Zip contains no supported tabular files (.csv, .xls, .xlsx)", http.StatusBadRequest)
+		return
+	}
+	if forceOverride && len(accountNumbers) > 1 && len(accountNumbers) != len(fileEntries) {
+		respondWithError(w, nil, fmt.Sprintf(
+			"force_override=true with %d account numbers but zip contains %d processable files — counts must match for 1:1 mapping",
+			len(accountNumbers), len(fileEntries),
+		), http.StatusBadRequest)
+		return
+	}
+
+	userID := apipreval.GetUserIDFromContext(ctx)
+	if userID == "" {
+		userID = strings.TrimSpace(r.FormValue("user_id"))
+	}
+	clientIP := api.ClientIPFromRequest(r)
+
+	for fileIdx, ze := range fileEntries {
+		accountOverride := ""
+		base := filepath.Base(ze.name)
+		switch {
+		case forceOverride && len(accountNumbers) > 1:
+			accountOverride = accountNumbers[fileIdx]
+		case forceOverride && len(accountNumbers) == 1:
+			accountOverride = accountNumbers[0]
+		case forceOverride && len(accountNumbers) == 0:
+			results = append(results, fileResult{
+				FileName: ze.name, Success: false,
+				Error: "force_override=true requires at least one account number in account_numbers",
+			})
+			failureCount++
+			continue
+		case !forceOverride && len(accountNumbers) > 0:
+			var fileContent [][]string
+			if parsedRows, parseErr := parseFileToRows(ze.data); parseErr == nil {
+				fileContent = parsedRows
+			}
+			matched := matchAccountNumberToFile(ctx, pool, ze.name, "", accountNumbers, fileContent)
+			if matched != "" {
+				accountOverride = matched
+			} else if len(accountNumbers) == 1 {
+				accountOverride = accountNumbers[0]
+			} else {
+				results = append(results, fileResult{
+					FileName: ze.name, Success: false,
+					Error: fmt.Sprintf("Could not match file '%s' to any of the provided account numbers", base),
+				})
+				failureCount++
+				continue
+			}
+		}
+
+		result, err := UploadBankStatementV2WithCategorization(
+			ctx, pool, &bytesFile{Reader: bytes.NewReader(ze.data)}, ze.fileHash,
+			UploadOpts{
+				UseMapping:            useMapping,
+				Mappings:              mappings,
+				AccountNumberOverride: accountOverride,
+				UploadFileName:        ze.name,
+				UploadedBy:            requestedByFromCtx(ctx, userID),
+				RequestedIP:           clientIP,
+				PgxPool:               pool,
+			},
+		)
+		if err != nil {
+			results = append(results, fileResult{FileName: ze.name, Success: false, Error: userFriendlyUploadError(err)})
+			failureCount++
+			continue
+		}
+		results = append(results, fileResult{FileName: ze.name, Success: true, Result: result})
+		successCount++
+	}
+
+	api.RespondEnvelopeSuccessCompat(w, fmt.Sprintf("Processed %d files from zip", len(results)), map[string]interface{}{
+		"zip_file_name": zipName,
+		"total_files":   len(results),
+		"success_count": successCount,
+		"failure_count": failureCount,
+		"results":       results,
+		"uploaded_by":   userID,
+		"upload_time":   time.Now().Format(time.RFC3339),
+	})
+
+	if pool != nil {
+		for i := range results {
+			fres := results[i]
+			if !fres.Success || fres.Result == nil {
+				continue
+			}
+			capturedResult := fres.Result
+			capturedZip := zipName
+			go func() {
+				notifPayload := BuildBankStatementPayloadFromV2Result(
+					capturedResult, userID, capturedZip, constants.StatusPendingApproval,
+				)
+				notif.TriggerNotification(context.Background(), pool,
+					"/cash/upload-bank-statement-zip",
+					fmt.Sprintf("BSUPLOAD/%s/%d", notifPayload.BankStatementID, time.Now().UnixMilli()),
+					notifPayload.ToMap(),
+				)
+			}()
+		}
+	}
+}
+
+// handleZipStagingUpload creates a staging batch and processes files asynchronously.
+func handleZipStagingUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Request, zipBytes []byte, zr *zip.Reader, zipName string, allowedExt map[string]bool, allowPDF bool) {
+	ctx := r.Context()
+	_ = zipBytes // reader already built from these bytes
 
 	baseFormValues := map[string][]string{}
 	if r.MultipartForm != nil && r.MultipartForm.Value != nil {
@@ -101,7 +336,7 @@ func handleZipBankStatementUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *
 
 	accountNumbers := parseAccountNumbers(baseFormValues)
 	forceOverride := r.FormValue("force_override") == "true"
-	logger.LogInfo("[ZIP-PREVIEW] async force_override=%v account_numbers=%v", forceOverride, accountNumbers)
+	logger.LogInfo("[ZIP-PREVIEW] async force_override=%v account_numbers=%v llm=%v allow_pdf=%v", forceOverride, accountNumbers, bankStatementUseLLM(), allowPDF)
 
 	// Count processable files for validation.
 	processableCount := 0
@@ -129,7 +364,12 @@ func handleZipBankStatementUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *
 	}
 
 	if processableCount == 0 {
-		respondWithError(w, nil, "Zip contains no supported files (only .xls, .xlsx, .csv, and .pdf when USE_PDFCO=true are allowed)", http.StatusBadRequest)
+		msg := "Zip contains no supported files (only .xls, .xlsx, .csv"
+		if allowPDF {
+			msg += ", .pdf"
+		}
+		msg += " are allowed)"
+		respondWithError(w, nil, msg, http.StatusBadRequest)
 		return
 	}
 
@@ -139,15 +379,16 @@ func handleZipBankStatementUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *
 	}
 
 	uploadParams := map[string]interface{}{
-		"force_override":   forceOverride,
-		"account_numbers":  accountNumbers,
-		"multi":            r.FormValue("multi"),
-		"co_pdf":           r.FormValue("co_pdf"),
-		"query":            r.URL.Query().Encode(),
+		"force_override":  forceOverride,
+		"account_numbers": accountNumbers,
+		"multi":           r.FormValue("multi"),
+		"co_pdf":          r.FormValue("co_pdf"),
+		"query":           r.URL.Query().Encode(),
+		"use_llm":         bankStatementUseLLM(),
 	}
 	paramsJSON, _ := json.Marshal(uploadParams)
 
-	batchID, err := insertZipStagingBatch(ctx, pool, userID, header.Filename, processableCount, paramsJSON)
+	batchID, err := insertZipStagingBatch(ctx, pool, userID, zipName, processableCount, paramsJSON)
 	if err != nil {
 		logger.LogError("[ZIP-PREVIEW] failed to create batch: %v", err)
 		respondWithError(w, err, "Failed to create processing batch", http.StatusInternalServerError)
@@ -272,7 +513,7 @@ func handleZipBankStatementUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *
 	job := zipBatchJob{
 		BatchID:   batchID,
 		UserID:    userID,
-		ZipName:   header.Filename,
+		ZipName:   zipName,
 		Query:     r.URL.Query(),
 		Items:     workItems,
 		Skipped:   skippedCount,
@@ -286,7 +527,7 @@ func handleZipBankStatementUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *
 		"batch_id":      batchID,
 		"total_files":   len(workItems),
 		"skipped_files": skippedCount,
-		"zip_file_name": header.Filename,
+		"zip_file_name": zipName,
 		"uploaded_by":   userID,
 		"upload_time":   time.Now().Format(time.RFC3339),
 	})
@@ -359,7 +600,7 @@ func processSinglePDFAsync(pool *pgxpool.Pool, j singlePDFJob) {
 }
 
 func zipWorkerConcurrency() int {
-	if bindref.BrOn() {
+	if bankStatementUseLLM() {
 		return zipBatchConcurrencyLLM
 	}
 	return zipBatchConcurrency

@@ -81,33 +81,37 @@ func RejectUtilizationAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.Handl
 
 func limitAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.WithCashCrossStageVisibility(additionalfiles.Config{
-		Module:          "limit-position",
-		AuditSource:     "LIMIT_POSITION",
-		ParentIDField:   "limit_id",
-		FolderName:      additionalfiles.AdditionalFilesFolder(),
-		List:            listLimitAdditionalFiles,
-		CreateReturning: createLimitAdditionalFile,
-		GetOne:          getLimitAdditionalFile,
-		GetAnyFile:      getAnyLimitAdditionalFile,
-		GetMany:         getLimitAdditionalFiles,
-		SoftDelete:      deleteLimitAdditionalFile,
-		SoftDeleteTx:    deleteLimitAdditionalFileTx,
+		Module:           "limit-position",
+		AuditSource:      "LIMIT_POSITION",
+		ParentIDField:    "limit_id",
+		FolderName:       additionalfiles.AdditionalFilesFolder(),
+		PolicyModuleCode: "CASH",
+		PolicySubModule:  "BANK_LIMIT",
+		List:             listLimitAdditionalFiles,
+		CreateReturning:  createLimitAdditionalFile,
+		GetOne:           getLimitAdditionalFile,
+		GetAnyFile:       getAnyLimitAdditionalFile,
+		GetMany:          getLimitAdditionalFiles,
+		SoftDelete:       deleteLimitAdditionalFile,
+		SoftDeleteTx:     deleteLimitAdditionalFileTx,
 	})
 }
 
 func utilizationAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.WithCashCrossStageVisibility(additionalfiles.Config{
-		Module:          "limit-utilization",
-		AuditSource:     "LIMIT_UTILIZATION",
-		ParentIDField:   "utilization_id",
-		FolderName:      additionalfiles.AdditionalFilesFolder(),
-		List:            listUtilizationAdditionalFiles,
-		CreateReturning: createUtilizationAdditionalFile,
-		GetOne:          getUtilizationAdditionalFile,
-		GetAnyFile:      getAnyUtilizationAdditionalFile,
-		GetMany:         getUtilizationAdditionalFiles,
-		SoftDelete:      deleteUtilizationAdditionalFile,
-		SoftDeleteTx:    deleteUtilizationAdditionalFileTx,
+		Module:           "limit-utilization",
+		AuditSource:      "LIMIT_UTILIZATION",
+		ParentIDField:    "utilization_id",
+		FolderName:       additionalfiles.AdditionalFilesFolder(),
+		PolicyModuleCode: "CASH",
+		PolicySubModule:  "LIMIT_UTILIZATION",
+		List:             listUtilizationAdditionalFiles,
+		CreateReturning:  createUtilizationAdditionalFile,
+		GetOne:           getUtilizationAdditionalFile,
+		GetAnyFile:       getAnyUtilizationAdditionalFile,
+		GetMany:          getUtilizationAdditionalFiles,
+		SoftDelete:       deleteUtilizationAdditionalFile,
+		SoftDeleteTx:     deleteUtilizationAdditionalFileTx,
 	})
 }
 

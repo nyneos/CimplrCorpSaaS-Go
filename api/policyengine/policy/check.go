@@ -96,6 +96,35 @@ func HandleCheck(pool *pgxpool.Pool) http.HandlerFunc {
 			"passed_count":      passed,
 			"failed_count":      failed,
 			"summary":           result.SummaryLine(),
+			"conflict_findings": conflictFindingsPayload(result.ConflictReport),
+			"conflict_warnings": conflictWarningsPayload(result.ConflictReport),
 		})
 	}
+}
+
+func conflictFindingsPayload(report runtime.ConflictReport) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(report.Findings))
+	for _, f := range report.Findings {
+		out = append(out, map[string]interface{}{
+			"severity":     f.Severity,
+			"variable":     f.Variable,
+			"message":      f.Message,
+			"policy_codes": f.PolicyCodes,
+		})
+	}
+	return out
+}
+
+func conflictWarningsPayload(report runtime.ConflictReport) []map[string]interface{} {
+	warns := report.Warnings()
+	out := make([]map[string]interface{}, 0, len(warns))
+	for _, f := range warns {
+		out = append(out, map[string]interface{}{
+			"severity":     f.Severity,
+			"variable":     f.Variable,
+			"message":      f.Message,
+			"policy_codes": f.PolicyCodes,
+		})
+	}
+	return out
 }

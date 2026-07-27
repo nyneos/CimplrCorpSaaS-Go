@@ -172,6 +172,21 @@ func BulkUpdateForwardBookingProcessingStatus(pool *pgxpool.Pool) http.HandlerFu
 			policyEvent = common.TriggerPreReject
 		}
 		enforceForwardStatusPolicy := func(entityCode, txnID string) (bool, string) {
+			fields := map[string]interface{}{
+				"system_transaction_id": txnID,
+				"processing_status":     req.ProcessingStatus,
+			}
+			// Approve/Reject only ever receive an id — load the full canonical
+			// row so the policy check sees the same field set Create does, not
+			// just the two touched keys. Fall back to the thin map if the row
+			// can't be loaded (e.g. already deleted) so the action still gets a
+			// policy decision.
+			if row, err := loadForwardBookingRow(r.Context(), pool, txnID); err == nil {
+				fields = buildForwardBookingPolicyFields(row)
+				// The check should see the target status this action is about to
+				// apply, not the pre-action status still on the loaded row.
+				fields["processing_status"] = req.ProcessingStatus
+			}
 			return runtime.EnforceInline(r.Context(), r, pool, runtime.EnforceInput{
 				EventCode:           policyEvent,
 				ModuleCode:          common.ModuleFX,
@@ -181,10 +196,7 @@ func BulkUpdateForwardBookingProcessingStatus(pool *pgxpool.Pool) http.HandlerFu
 				HandlerName:         "BulkUpdateForwardBookingProcessingStatus",
 				APIPath:             "/fx/forwards/bulk-update-processing-status",
 				DefaultBlockMessage: "Forward booking status update blocked by policy",
-				Fields: map[string]interface{}{
-					"system_transaction_id": txnID,
-					"processing_status":     req.ProcessingStatus,
-				},
+				Fields:              fields,
 			})
 		}
 		// Find which records are delete-approval and accessible
@@ -469,9 +481,31 @@ func BulkDeleteForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		oldValuesByID := make(map[string]map[string]interface{}, len(eligibleIds))
+		policyEligible := make([]string, 0, len(eligibleIds))
 		for _, id := range eligibleIds {
+			row, err := loadForwardBookingRow(r.Context(), pool, id)
+			if err != nil {
+				respondEnvelopeError(w, http.StatusInternalServerError, "Failed to load forward booking for policy check: "+err.Error())
+				return
+			}
+			if ok, msg := runtime.EnforceInline(r.Context(), r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "FORWARD_BOOKING",
+				EntityCode:          row.EntityLevel0,
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkDeleteForwardBookings",
+				APIPath:             "/fx/forwards/bulk-delete",
+				DefaultBlockMessage: "Forward booking delete blocked by policy",
+				Fields:              buildForwardBookingPolicyFields(row),
+			}); !ok {
+				respondEnvelopeError(w, http.StatusForbidden, msg)
+				return
+			}
 			oldValuesByID[id] = auditutil.FetchRowSnapshotPGX(r.Context(), pool, "public.forward_bookings", "system_transaction_id", id)
+			policyEligible = append(policyEligible, id)
 		}
+		eligibleIds = policyEligible
 		updateQuery := `
 			UPDATE forward_bookings
 			SET processing_status = $2
@@ -553,6 +587,41 @@ func AddForwardConfirmationManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusForbidden, "You do not have access to this business unit")
 			return
 		}
+		var systemTransactionID string
+		if err := pool.QueryRow(r.Context(), `
+			SELECT system_transaction_id::text
+			FROM forward_bookings
+			WHERE internal_reference_id = $1 AND entity_level_0 = $2
+			  AND status = $3 AND COALESCE(is_deleted,false) = false
+			LIMIT 1`,
+			req.InternalReferenceID, req.EntityLevel0, constants.FwdStatusPendingConfirmation,
+		).Scan(&systemTransactionID); err != nil || strings.TrimSpace(systemTransactionID) == "" {
+			respondEnvelopeError(w, http.StatusNotFound, "No matching record found or already confirmed")
+			return
+		}
+		bookingRow, err := loadForwardBookingRow(r.Context(), pool, systemTransactionID)
+		if err != nil {
+			respondEnvelopeError(w, http.StatusInternalServerError, "Failed to load forward booking for policy check: "+err.Error())
+			return
+		}
+		bookingRow.Status = constants.FwdStatusConfirmed
+		bookingRow.BankTransactionID = req.BankTransactionID
+		bookingRow.SwiftUniqueID = req.SwiftUniqueID
+		bookingRow.BankConfirmationDate = req.BankConfirmationDate
+		bookingRow.ProcessingStatus = constants.FwdProcessingStatusPending
+		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "FORWARD_BOOKING",
+			EntityCode:          req.EntityLevel0,
+			ActorUserID:         req.UserID,
+			HandlerName:         "AddForwardConfirmationManualEntry",
+			APIPath:             "/fx/forwards/manual-confirmation-entry",
+			DefaultBlockMessage: "Forward confirmation blocked by policy",
+			Fields:              buildForwardBookingPolicyFields(bookingRow),
+		}) {
+			return
+		}
 		// Convert empty string date fields to nil
 		bankConfirmationDate := req.BankConfirmationDate
 		if bankConfirmationDate == "" {
@@ -597,8 +666,6 @@ func AddForwardConfirmationManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 		for i, col := range cols {
 			result[col] = vals[i]
 		}
-		var systemTransactionID string
-		_ = pool.QueryRow(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 AND entity_level_0 = $2 LIMIT 1`, req.InternalReferenceID, req.EntityLevel0).Scan(&systemTransactionID)
 		if strings.TrimSpace(systemTransactionID) != "" {
 			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.FwdActionTypeConfirm, Status: constants.FwdProcessingStatusPendingEditApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: result})
 			triggerForwardConfirmationNotif(r.Context(), pool, routeForwardManualConfirmation, "CONFIRM", auditutil.Actor(req.UserID), constants.FwdProcessingStatusPending, []string{systemTransactionID})

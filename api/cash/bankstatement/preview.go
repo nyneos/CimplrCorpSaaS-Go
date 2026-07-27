@@ -4,7 +4,6 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
-	"CimplrCorpSaas/internal/bindref"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -137,7 +136,7 @@ func PreviewBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 			}
 		} else {
 			// Single file processing (XLSX, XLS, CSV)
-			transactions, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, header.Filename, useMapping, mappings, accountOverride)
+			transactions, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, header.Filename, useMapping, mappings, accountOverride, false)
 			if err != nil {
 				http.Error(w, "File processing failed: "+err.Error(), http.StatusInternalServerError)
 				return
@@ -187,7 +186,7 @@ func processZipPreviewFlat(ctx context.Context, pool *pgxpool.Pool, zipBytes []b
 			continue
 		}
 
-		transactions, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, f.Name, useMapping, mappings, "")
+		transactions, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, f.Name, useMapping, mappings, "", false)
 		if err != nil {
 			// Skip files with errors, continue processing others
 			continue
@@ -285,12 +284,14 @@ func resolveMasterBankAccountForPreview(ctx context.Context, pool *pgxpool.Pool,
 
 // resolveAccountForPreviewWithLLMFallback tries master lookup; when it fails and LLM is
 // enabled, asks the model for the account number and retries once (ZIP/single preview path).
-func resolveAccountForPreviewWithLLMFallback(ctx context.Context, pool *pgxpool.Pool, accountNumber, filename string, rows [][]string, accountOverride string) (matchedAccount, entityID, bankName, currency string, err error) {
+// alreadyTriedLLM skips a second SmartCat call when extractAccountInfoWithLLM already ran
+// for this file (common when the first pass found a number that still missed master).
+func resolveAccountForPreviewWithLLMFallback(ctx context.Context, pool *pgxpool.Pool, accountNumber, filename string, rows [][]string, accountOverride string, alreadyTriedLLM bool) (matchedAccount, entityID, bankName, currency string, err error) {
 	matchedAccount, entityID, bankName, currency, err = resolveMasterBankAccountForPreview(ctx, pool, accountNumber, filename, rows)
 	if err == nil {
 		return matchedAccount, entityID, bankName, currency, nil
 	}
-	if accountOverride != "" || !bindref.BrOn() {
+	if alreadyTriedLLM || accountOverride != "" || !bankStatementUseLLM() {
 		return "", "", "", "", err
 	}
 	info, llmErr := extractAccountInfoWithLLM(ctx, rows)
@@ -308,7 +309,7 @@ func resolveAccountForPreviewWithLLMFallback(ctx context.Context, pool *pgxpool.
 // processSingleFilePreviewFlat parses file and categorizes WITHOUT any DB writes
 // Uses EXACT same parsing logic as UploadBankStatementV2WithCategorization but ONLY reads DB for account lookup and rules.
 // When accountOverride is non-empty (force_override + single account from the client), it is used for master lookup instead of relying only on the file header.
-func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings, accountOverride string) ([]map[string]interface{}, error) {
+func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings, accountOverride string, fromPDFConvert bool) ([]map[string]interface{}, error) {
 
 	ext := strings.ToLower(filepath.Ext(filename))
 	var rows [][]string
@@ -502,7 +503,9 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 	}
 
 	// LLM account extraction when manual strategies found nothing.
-	if accountNumber == "" && bindref.BrOn() {
+	llmAccountTried := false
+	if accountNumber == "" && bankStatementUseLLM() {
+		llmAccountTried = true
 		if info, llmErr := extractAccountInfoWithLLM(ctx, rows); llmErr == nil && info.AccountNumber != "" {
 			accountNumber = info.AccountNumber
 			logger.LogInfo("[LLM-ACCT] preview extracted accountNumber=%q accountName=%q", accountNumber, info.AccountName)
@@ -516,8 +519,8 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 	}
 
 	// DB READ ONLY: Lookup account metadata (same candidate expansion as upload V2).
-	// If manual account is wrong (not in master), retry with LLM before failing.
-	matchedAcct, entityID, bankName, currency, err := resolveAccountForPreviewWithLLMFallback(ctx, pool, accountNumber, filename, rows, accountOverride)
+	// If manual account is wrong (not in master), retry with LLM before failing — unless we already tried.
+	matchedAcct, entityID, bankName, currency, err := resolveAccountForPreviewWithLLMFallback(ctx, pool, accountNumber, filename, rows, accountOverride, llmAccountTried)
 	if err != nil {
 		// Log error but DO NOT fail if this is a staging/preview operation
 		// This saves conversion credits for PDFs by allowing them to stage even if unmapped.
@@ -535,26 +538,23 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 		return nil, fmt.Errorf("failed to load category rules: %w", err)
 	}
 
-	// LLM-first extraction: the model reads the converted CSV semantically (a running total is a
-	// balance, a debit lowers it), which is far more robust to the converter scrambling columns or
-	// splitting one transaction across rows than position-based parsing. The result is validated
-	// against the running-balance identity; on low confidence (or when AI is disabled / fails) we
-	// fall through to the deterministic parser below.
-	if bindref.BrOn() {
-		if resp, lerr := extractTransactionsWithLLM(ctx, rows); lerr != nil {
-			logger.LogInfo("[LLM-TXN] extraction unavailable (%v) — using deterministic parser", lerr)
-		} else if maps, ok := buildTxnMapsFromLLM(resp, llmTxnContext{
-			accountNumber: accountNumber,
-			entityID:      entityID,
-			bankName:      bankName,
-			currency:      currency,
-			rules:         rules,
-			batchID:       generateBatchID(),
-			sourceRows:    rows,
-		}); ok {
-			logger.LogInfo("[LLM-TXN] using LLM-extracted transactions as primary path (count=%d)", len(maps))
+	// PDF-converted CSV: always LLM-first (converter scramble / split rows).
+	// Native CSV/XLS: positional first; LLM only if header/parse fails (see below).
+	llmMeta := llmTxnContext{
+		accountNumber: accountNumber,
+		entityID:      entityID,
+		bankName:      bankName,
+		currency:      currency,
+		rules:         rules,
+		batchID:       generateBatchID(),
+		sourceRows:    rows,
+	}
+	if fromPDFConvert && bankStatementUseLLM() {
+		if maps, ok := tryLLMTxnMaps(ctx, rows, llmMeta); ok {
+			logger.LogInfo("[LLM-TXN] PDF-convert path: using LLM transactions (count=%d)", len(maps))
 			return maps, nil
 		}
+		logger.LogInfo("[LLM-TXN] PDF-convert LLM unavailable/untrusted — positional fallback")
 	}
 
 	// Find transaction header row (EXACT upload logic)
@@ -698,6 +698,13 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 	txnHeaderIdx, colIdx = applyLLMColumnLayoutIfNeeded(ctx, rows, txnHeaderIdx, colIdx)
 
 	if txnHeaderIdx == -1 {
+		// Native file: positional header failed → LLM rescue (PDF already tried LLM-first above).
+		if !fromPDFConvert {
+			if maps, ok := tryLLMTxnMaps(ctx, rows, llmMeta); ok {
+				logger.LogInfo("[LLM-TXN] native header miss — LLM rescue (count=%d)", len(maps))
+				return maps, nil
+			}
+		}
 		return nil, fmt.Errorf("transaction header row not found even after LLM fallback")
 	}
 
@@ -1279,8 +1286,16 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileB
 
 	if len(transactions) > 0 {
 		transactions[0]["_parser_opening_balance"] = openingBalance
+		return transactions, nil
 	}
 
+	// Native: parser found a header but produced no rows → LLM rescue.
+	if !fromPDFConvert {
+		if maps, ok := tryLLMTxnMaps(ctx, rows, llmMeta); ok {
+			logger.LogInfo("[LLM-TXN] native parse empty — LLM rescue (count=%d)", len(maps))
+			return maps, nil
+		}
+	}
 	return transactions, nil
 }
 
@@ -1949,10 +1964,10 @@ func previewHasCoreColumns(colIdx map[string]int) bool {
 	return hasDate && hasDesc
 }
 
-// applyLLMColumnLayoutIfNeeded runs LLM column detection only when inference is enabled
+// applyLLMColumnLayoutIfNeeded runs LLM column detection only when BANK_STATEMENT_USE_LLM is on
 // and manual header/column mapping is incomplete — avoids slow LLM calls on well-formed files.
 func applyLLMColumnLayoutIfNeeded(ctx context.Context, rows [][]string, txnHeaderIdx int, colIdx map[string]int) (int, map[string]int) {
-	if !bindref.BrOn() {
+	if !bankStatementUseLLM() {
 		return txnHeaderIdx, colIdx
 	}
 	if txnHeaderIdx >= 0 && previewHasCoreColumns(colIdx) {

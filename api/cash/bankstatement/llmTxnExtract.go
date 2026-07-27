@@ -1,22 +1,15 @@
 package bankstatement
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
-	"net/http"
-	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"CimplrCorpSaas/api/constants"
-	"CimplrCorpSaas/internal/bindref"
 	"CimplrCorpSaas/internal/logger"
 )
 
@@ -64,46 +57,24 @@ type llmTxnResponse struct {
 	Transactions   []llmExtractedTxn `json:"transactions"`
 }
 
-// llmTxnChunkSize bounds how many CSV rows are sent per LLM call. We ALWAYS chunk (rather than
-// sending the whole statement) because a single large call is where transactions silently go
-// missing: the JSON output overruns the model's token budget and is truncated, or the model
-// "compresses" long repetitive runs. 150 rows keeps each call's structured output comfortably
-// within the budget. The header rows are repeated and the running balance is threaded into each
-// chunk so column meaning and the balance chain survive the boundaries; transactions are
-// concatenated across chunks.
-const llmTxnChunkSize = 150
+// llmTxnChunkSize bounds how many CSV rows are sent per LLM call. Chunking avoids
+// silent truncation on large statements. 200 keeps typical ~1000-txn files to ~5 calls
+// while staying within structured-output budget for most banks.
+const llmTxnChunkSize = 200
 
 // llmMinAdaptiveChunk is the floor for truncation-driven splitting: when a chunk still reports a
-// truncated (finish_reason="length") response, it is halved and retried down to this size. Below it
+// truncated response, it is halved and retried down to this size. Below it
 // we accept whatever came back (the count backstop in buildTxnMapsFromLLM then routes a genuine
 // shortfall to the deterministic parser).
 const llmMinAdaptiveChunk = 25
 
 // llmTxnMaxTokens caps the model's output per call. Set high enough that a full llmTxnChunkSize
-// chunk fits, so finish_reason="length" reliably signals a real overflow rather than a stingy cap.
+// chunk fits, so truncated=true reliably signals a real overflow rather than a stingy cap.
 const llmTxnMaxTokens = 16384
 
 // llmHeaderRowSpan is how many leading rows (column headers, opening-balance line, page banner) we
 // repeat at the top of every chunk so the model keeps column context.
 const llmHeaderRowSpan = 12
-
-// extractTransactionsWithLLM is the LLM-first extractor: it sends the converter CSV rows to
-// the inference endpoint and asks for the transactions as structured JSON. Because the model
-// reasons semantically (a running total is a balance, a debit lowers it), it is robust to the
-// converter scrambling columns or splitting one transaction across several rows — the exact
-// failures that defeat position-based parsing. The caller MUST validate the result against the
-// running-balance identity before trusting it (the model can mis-transcribe a digit).
-// llmTxnDefaultModel is the model used for bank-statement transaction extraction when neither the
-// BANK_STATEMENT_LLM_MODEL env var nor the bound config overrides it. gpt-4.1 is materially more
-// accurate and faster than gpt-4o-mini on the long, split-row statements this extractor sees.
-const llmTxnDefaultModel = "gpt-4.1"
-
-// llmInferenceConfig holds the endpoint credentials for one LLM extraction call.
-type llmInferenceConfig struct {
-	url   string
-	key   string
-	model string
-}
 
 // llmTxnChunkInput is the per-chunk context passed into the LLM extractor.
 type llmTxnChunkInput struct {
@@ -112,25 +83,10 @@ type llmTxnChunkInput struct {
 	isFirst     bool
 	prevBalance *float64
 }
-
-// resolveLLMTxnModel picks the extraction model: the BANK_STATEMENT_LLM_MODEL env var when set,
-// otherwise the gpt-4.1 default. The legacy bound model (bindref.BrG3) is intentionally NOT used
-// here — it is pinned to gpt-4o-mini, which is too weak for these statements.
-func resolveLLMTxnModel() string {
-	if m := strings.TrimSpace(os.Getenv("BANK_STATEMENT_LLM_MODEL")); m != "" {
-		return m
-	}
-	return llmTxnDefaultModel
-}
-
 func extractTransactionsWithLLM(ctx context.Context, rows [][]string) (*llmTxnResponse, error) {
-	inferURL := bindref.BrG1()
-	inferKey := bindref.BrG2()
-	if inferURL == "" || inferKey == "" {
-		return nil, fmt.Errorf("AI inference not configured")
+	if !bankStatementUseLLM() {
+		return nil, fmt.Errorf("LLM extraction disabled")
 	}
-	model := resolveLLMTxnModel()
-
 	// Always chunk. Sending the whole statement in one call is exactly where transactions go missing
 	// — the structured-JSON output overruns the token budget and is truncated, or the model collapses
 	// long repetitive runs. Each chunk repeats the header rows so column meaning survives, and the
@@ -138,7 +94,6 @@ func extractTransactionsWithLLM(ctx context.Context, rows [][]string) (*llmTxnRe
 	// debit/balance disambiguation that depends on it) does not reset across boundaries.
 	out := &llmTxnResponse{}
 	headerRows := rows[:min(llmHeaderRowSpan, len(rows))]
-	cfg := llmInferenceConfig{url: inferURL, key: inferKey, model: model}
 	var prevBalance *float64
 	for start := 0; start < len(rows); start += llmTxnChunkSize {
 		end := min(start+llmTxnChunkSize, len(rows))
@@ -148,7 +103,7 @@ func extractTransactionsWithLLM(ctx context.Context, rows [][]string) (*llmTxnRe
 			hdr = headerRows
 		}
 		in := llmTxnChunkInput{chunk: rows[start:end], headerRows: hdr, isFirst: isFirst, prevBalance: prevBalance}
-		resp, err := callLLMTxnChunkAdaptive(ctx, cfg, in)
+		resp, err := callLLMTxnChunkAdaptive(ctx, in)
 		if err != nil {
 			return nil, fmt.Errorf("llm-txn: chunk [%d:%d]: %w", start, end, err)
 		}
@@ -161,18 +116,49 @@ func extractTransactionsWithLLM(ctx context.Context, rows [][]string) (*llmTxnRe
 			prevBalance = &b
 		}
 	}
-	logger.LogInfo("[LLM-TXN] model=%s extracted %d transactions from %d rows (%d-row chunks)",
-		model, len(out.Transactions), len(rows), llmTxnChunkSize)
+	logger.LogInfo("[LLM-TXN] extracted %d transactions from %d rows (%d-row chunks)",
+		len(out.Transactions), len(rows), llmTxnChunkSize)
 	return out, nil
 }
 
-// callLLMTxnChunkAdaptive calls the model for one chunk and, if the response was truncated
-// (finish_reason="length") — meaning some transactions were cut off — halves the chunk and retries
-// each half, threading the running balance and repeating the header context, until the pieces fit or
-// the floor (llmMinAdaptiveChunk) is reached. This is what guarantees every row is returned on large
-// multi-page statements instead of silently losing the rows that overran the output budget.
-func callLLMTxnChunkAdaptive(ctx context.Context, cfg llmInferenceConfig, in llmTxnChunkInput) (*llmTxnResponse, error) {
-	resp, truncated, err := callLLMTxnChunk(ctx, cfg, in)
+// tryLLMTxnMaps runs txn LLM + validation. Returns ok=false when disabled, errored, or untrusted.
+func tryLLMTxnMaps(ctx context.Context, rows [][]string, meta llmTxnContext) ([]map[string]interface{}, bool) {
+	if !bankStatementUseLLM() {
+		return nil, false
+	}
+	resp, err := extractTransactionsWithLLM(ctx, rows)
+	if err != nil {
+		logger.LogInfo("[LLM-TXN] extraction unavailable: %v", err)
+		return nil, false
+	}
+	maps, ok := buildTxnMapsFromLLM(resp, meta)
+	if !ok || len(maps) == 0 {
+		return nil, false
+	}
+	return maps, true
+}
+
+// tryRescueRowsWithLLMSynth replaces rows with clean LLM-synthesized tabular rows when extraction
+// validates. Used as a fallback when the positional header/parser fails on native files.
+func tryRescueRowsWithLLMSynth(ctx context.Context, rows *[][]string, isCSV *bool, meta llmTxnContext) bool {
+	maps, ok := tryLLMTxnMaps(ctx, *rows, meta)
+	if !ok {
+		return false
+	}
+	logger.LogInfo("[LLM-TXN] positional path failed — rescuing with LLM synth (%d txns)", len(maps))
+	*rows = synthesizeStatementRowsFromLLM(maps)
+	if isCSV != nil {
+		*isCSV = true
+	}
+	return true
+}
+
+// callLLMTxnChunkAdaptive calls SmartCat for one chunk and, if the response was truncated
+// — meaning some transactions were cut off — halves the chunk and retries each half,
+// threading the running balance and repeating the header context, until the pieces fit or
+// the floor (llmMinAdaptiveChunk) is reached.
+func callLLMTxnChunkAdaptive(ctx context.Context, in llmTxnChunkInput) (*llmTxnResponse, error) {
+	resp, truncated, err := callLLMTxnChunk(ctx, in)
 	if err != nil {
 		return nil, err
 	}
@@ -180,16 +166,14 @@ func callLLMTxnChunkAdaptive(ctx context.Context, cfg llmInferenceConfig, in llm
 		return resp, nil
 	}
 
-	logger.LogInfo("[LLM-TXN] chunk of %d rows truncated (finish_reason=length) — splitting and retrying", len(in.chunk))
+	logger.LogInfo("[LLM-TXN] chunk of %d rows truncated — splitting and retrying", len(in.chunk))
 	mid := len(in.chunk) / 2
-	left, lerr := callLLMTxnChunkAdaptive(ctx, cfg, llmTxnChunkInput{
+	left, lerr := callLLMTxnChunkAdaptive(ctx, llmTxnChunkInput{
 		chunk: in.chunk[:mid], headerRows: in.headerRows, isFirst: in.isFirst, prevBalance: in.prevBalance,
 	})
 	if lerr != nil {
 		return nil, lerr
 	}
-	// Thread the left half's closing balance into the right half so the chain continues; on the right
-	// half the header rows are always supplied as context (it is never the statement's first chunk).
 	nextPrev := in.prevBalance
 	if n := len(left.Transactions); n > 0 {
 		b := float64(left.Transactions[n-1].Balance)
@@ -199,7 +183,7 @@ func callLLMTxnChunkAdaptive(ctx context.Context, cfg llmInferenceConfig, in llm
 	if rightHeader == nil {
 		rightHeader = in.chunk[:min(llmHeaderRowSpan, len(in.chunk))]
 	}
-	right, rerr := callLLMTxnChunkAdaptive(ctx, cfg, llmTxnChunkInput{
+	right, rerr := callLLMTxnChunkAdaptive(ctx, llmTxnChunkInput{
 		chunk: in.chunk[mid:], headerRows: rightHeader, isFirst: false, prevBalance: nextPrev,
 	})
 	if rerr != nil {
@@ -211,11 +195,9 @@ func callLLMTxnChunkAdaptive(ctx context.Context, cfg llmInferenceConfig, in llm
 	return merged, nil
 }
 
-// callLLMTxnChunk issues a single extraction request. It returns truncated=true when the model
-// stopped because it hit the output-token cap (finish_reason="length") — the signal that some
-// transactions were cut off — so the caller can split the chunk and retry instead of silently
-// accepting a short result.
-func callLLMTxnChunk(ctx context.Context, cfg llmInferenceConfig, in llmTxnChunkInput) (*llmTxnResponse, bool, error) {
+// callLLMTxnChunk issues a single extraction request via SmartCatAI.
+// truncated=true means the model hit its output budget — the caller should split and retry.
+func callLLMTxnChunk(ctx context.Context, in llmTxnChunkInput) (*llmTxnResponse, bool, error) {
 	var sb strings.Builder
 	if len(in.headerRows) > 0 {
 		sb.WriteString("Header/context rows (for column meaning only — do NOT extract transactions from these):\n")
@@ -306,90 +288,11 @@ Rows:
 	}
 	prompt += sb.String()
 
-	reqBody := map[string]interface{}{
-		"model": cfg.model,
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": prompt},
-		},
-		"response_format": map[string]string{"type": "json_object"},
-		"temperature":     0,
-		"max_tokens":      llmTxnMaxTokens,
-	}
-	bodyBytes, err := json.Marshal(reqBody)
+	content, truncated, err := smartCatInfer(ctx, prompt, llmTxnMaxTokens, 180)
 	if err != nil {
-		return nil, false, fmt.Errorf("marshal: %w", err)
+		return nil, false, err
 	}
-
-	var apiResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
-	}
-
-	// Retry transient failures — chiefly 429 (the org's gpt-4.1 TPM cap is easily hit when chunks
-	// fire back-to-back). Honour the API's Retry-After hint, falling back to exponential backoff.
-	const maxAttempts = 5
-	for attempt := 1; ; attempt++ {
-		httpCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
-		req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, cfg.url, bytes.NewReader(bodyBytes))
-		if err != nil {
-			cancel()
-			return nil, false, fmt.Errorf("build request: %w", err)
-		}
-		req.Header.Set("Authorization", "Bearer "+cfg.key)
-		req.Header.Set(constants.ContentTypeText, constants.ContentTypeJSON)
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			cancel()
-			return nil, false, fmt.Errorf("http: %w", err)
-		}
-		if resp.StatusCode == http.StatusOK {
-			decErr := json.NewDecoder(resp.Body).Decode(&apiResp)
-			resp.Body.Close()
-			cancel()
-			if decErr != nil {
-				return nil, false, fmt.Errorf("decode: %w", decErr)
-			}
-			break
-		}
-
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		wait := parseRetryAfter(resp.Header.Get("Retry-After"), string(body))
-		retryable := resp.StatusCode == http.StatusTooManyRequests ||
-			resp.StatusCode == http.StatusServiceUnavailable ||
-			resp.StatusCode == http.StatusInternalServerError ||
-			resp.StatusCode == http.StatusBadGateway ||
-			resp.StatusCode == http.StatusGatewayTimeout
-		statusCode := resp.StatusCode
-		resp.Body.Close()
-		cancel()
-		if !retryable || attempt >= maxAttempts {
-			return nil, false, fmt.Errorf("status=%d body=%.200s", statusCode, body)
-		}
-		if wait <= 0 {
-			wait = time.Duration(1<<uint(attempt-1)) * 4 * time.Second // 4s, 8s, 16s, 32s
-		}
-		wait += 500 * time.Millisecond // small cushion past the window boundary
-		logger.LogInfo("[LLM-TXN] status=%d — retrying in %s (attempt %d/%d)", statusCode, wait, attempt, maxAttempts)
-		select {
-		case <-time.After(wait):
-		case <-ctx.Done():
-			return nil, false, ctx.Err()
-		}
-	}
-
-	// finish_reason="length" means the model ran out of output budget mid-response — some
-	// transactions were cut off. Signal it so the adaptive caller splits the chunk and retries.
-	truncated := len(apiResp.Choices) > 0 && apiResp.Choices[0].FinishReason == "length"
-
-	content := ""
-	if len(apiResp.Choices) > 0 {
-		content = strings.TrimSpace(apiResp.Choices[0].Message.Content)
-	}
+	content = strings.TrimSpace(content)
 	if content == "" {
 		if truncated {
 			return &llmTxnResponse{}, true, nil
@@ -399,37 +302,13 @@ Rows:
 
 	var parsed llmTxnResponse
 	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
-		// A truncated response is often invalid JSON (cut mid-array); treat it as a split signal
-		// rather than a hard failure so the caller can retry the chunk in smaller pieces.
+		// A truncated response is often invalid JSON (cut mid-array); treat it as a split signal.
 		if truncated {
 			return &llmTxnResponse{}, true, nil
 		}
 		return nil, false, fmt.Errorf("parse json: %w — raw: %.200s", err, content)
 	}
 	return &parsed, truncated, nil
-}
-
-// retryAfterBodyRe extracts the "Please try again in 7.5s" / "try again in 200ms" hint OpenAI
-// embeds in 429 bodies when no Retry-After header is present.
-var retryAfterBodyRe = regexp.MustCompile(`try again in ([0-9.]+)(ms|s)`)
-
-// parseRetryAfter returns how long to wait before retrying, preferring the Retry-After header
-// (integer seconds) and falling back to the hint inside the response body. Zero means "no hint".
-func parseRetryAfter(header, body string) time.Duration {
-	if h := strings.TrimSpace(header); h != "" {
-		if secs, err := strconv.ParseFloat(h, 64); err == nil && secs > 0 {
-			return time.Duration(secs * float64(time.Second))
-		}
-	}
-	if m := retryAfterBodyRe.FindStringSubmatch(body); m != nil {
-		if v, err := strconv.ParseFloat(m[1], 64); err == nil && v > 0 {
-			if m[2] == "ms" {
-				return time.Duration(v * float64(time.Millisecond))
-			}
-			return time.Duration(v * float64(time.Second))
-		}
-	}
-	return 0
 }
 
 // llmTxnContext carries the master-data fields needed to shape extracted transactions exactly

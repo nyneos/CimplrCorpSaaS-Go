@@ -801,10 +801,30 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "InitiateClosure", "/investment/fd/closure/initiate",
-			entityID, userEmail, map[string]interface{}{
-				"fd_id": req.FDID, "entity_id": entityID, "entity_code": entityID,
-				"closure_type": req.ClosureType, "principal_amount": principalAmount,
-			}) {
+			entityID, userEmail, buildFDClosureRequestPolicyFields(fdClosureRequestRow{
+				FDID:                 req.FDID,
+				BookingID:            bookingID,
+				ConfirmationID:       confirmationID,
+				EntityID:             entityID,
+				EntityName:           firstNonEmpty(req.EntityName, entityName),
+				ClosureType:          req.ClosureType,
+				ClosureStatus:        constants.StatusPendingApproval,
+				EffectiveClosureDate: effectiveDateStr,
+				MaturityDate:         maturityDate.Format(constants.DateFormat),
+				PrincipalAmount:      principalAmount,
+				AccruedInterest:      roundToFour(accruedInterest),
+				TDSDeducted:          roundToFour(tdsDeducted),
+				PenaltyAmount:        roundToFour(penaltyAmount),
+				NetPayoutAmount:      netPayout,
+				SettlementAccountID:  req.SettlementAccountID,
+				RolloverAmount:       req.RolloverAmount,
+				RolloverTenorDays:    req.RolloverTenorDays,
+				RolloverInterestRate: req.RolloverInterestRate,
+				MaturityInstructions: req.MaturityInstructions,
+				ClosureReason:        req.ClosureReason,
+				ClosureNotes:         req.ClosureNotes,
+				VarianceRemark:       req.VarianceRemark,
+			})) {
 			cleanupUpload()
 			return
 		}
@@ -1162,11 +1182,87 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			"variance_remark":        oldVarianceRemark,
 		}
 
+		// Build the post-edit row: start from what's on record, overlay any
+		// field the caller actually sent (matching the SET-clause "only if
+		// provided" semantics just below), so the policy check sees the row
+		// as-it-will-be-after-the-edit rather than a 4-field id-only stub.
+		updatedRow := fdClosureRequestRow{
+			ClosureRequestID:     req.ClosureRequestID,
+			FDID:                 oldFDID,
+			EntityID:             oldEntityID,
+			EntityName:           oldEntityName,
+			ClosureType:          oldClosureType,
+			ClosureStatus:        oldStatus,
+			EffectiveClosureDate: oldEffDate,
+			MaturityDate:         oldMaturityDate,
+			PrincipalAmount:      oldPrincipalAmt,
+			AccruedInterest:      oldAccruedInterest,
+			TDSDeducted:          oldTDSDeducted,
+			PenaltyAmount:        oldPenaltyAmount,
+			NetPayoutAmount:      oldNetPayout,
+			SettlementAccountID:  oldSettlAcct,
+			RolloverAmount:       oldRolloverAmt,
+			RolloverTenorDays:    oldRolloverDays,
+			RolloverInterestRate: oldRolloverInterestRate,
+			MaturityInstructions: oldMatInstr,
+			ClosureReason:        oldReason,
+			ClosureNotes:         oldNotes,
+			VarianceRemark:       oldVarianceRemark,
+		}
+		if req.EntityID != "" {
+			updatedRow.EntityID = req.EntityID
+		}
+		if req.EntityName != "" {
+			updatedRow.EntityName = req.EntityName
+		}
+		if req.PrincipalAmount > 0 {
+			updatedRow.PrincipalAmount = req.PrincipalAmount
+		}
+		if req.MaturityDate != "" {
+			updatedRow.MaturityDate = req.MaturityDate
+		}
+		if req.AccruedInterest > 0 {
+			updatedRow.AccruedInterest = req.AccruedInterest
+		}
+		if req.TDSDeducted > 0 {
+			updatedRow.TDSDeducted = req.TDSDeducted
+		}
+		if req.PenaltyAmount > 0 {
+			updatedRow.PenaltyAmount = req.PenaltyAmount
+		}
+		if req.NetPayoutAmount > 0 {
+			updatedRow.NetPayoutAmount = req.NetPayoutAmount
+		}
+		if req.SettlementAccountID != "" {
+			updatedRow.SettlementAccountID = req.SettlementAccountID
+		}
+		if req.EffectiveClosureDate != "" {
+			updatedRow.EffectiveClosureDate = req.EffectiveClosureDate
+		}
+		if req.MaturityInstructions != "" {
+			updatedRow.MaturityInstructions = req.MaturityInstructions
+		}
+		if req.RolloverAmount > 0 {
+			updatedRow.RolloverAmount = req.RolloverAmount
+		}
+		if req.RolloverTenorDays > 0 {
+			updatedRow.RolloverTenorDays = req.RolloverTenorDays
+		}
+		if req.RolloverInterestRate > 0 {
+			updatedRow.RolloverInterestRate = req.RolloverInterestRate
+		}
+		if req.ClosureReason != "" {
+			updatedRow.ClosureReason = req.ClosureReason
+		}
+		if req.ClosureNotes != "" {
+			updatedRow.ClosureNotes = req.ClosureNotes
+		}
+		if req.VarianceRemark != "" {
+			updatedRow.VarianceRemark = req.VarianceRemark
+		}
+
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "UpdateClosure", "/investment/fd/closure/update",
-			oldEntityID, userEmail, map[string]interface{}{
-				"closure_request_id": req.ClosureRequestID, "fd_id": oldFDID,
-				"entity_id": oldEntityID, "entity_code": oldEntityID,
-			}) {
+			oldEntityID, userEmail, buildFDClosureRequestPolicyFields(updatedRow)) {
 			return
 		}
 
@@ -1178,26 +1274,22 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx) //nolint:errcheck
 
 		// ── Build SET clause for fd_closure_request ─────────────────────────────
+		// bank_id/bank_name/bank_fd_ref_no/interest_rate/tenure_days/start_date/
+		// interest_type_code/penalty_rate/rollover_type/rollover_principal/
+		// interest_credited/new_maturity_date/partial_withdrawal/new_fd_id were
+		// previously included below despite NONE of them being real columns on
+		// investment.fd_closure_request (confirmed via psql \d — those concepts
+		// belong to the joined fd_master/fd_booking_request, read-only here, see
+		// the SELECT above). Any request touching one of these fields guaranteed
+		// a Postgres "column does not exist" error on every call. Removed rather
+		// than invented as new columns — flagged 2026-07-27, fixed same day. If
+		// any of these were meant to be genuinely editable on a closure request,
+		// that needs an explicit schema decision (ALTER TABLE), not a silent
+		// column-rename guess.
 		setClauses := []string{"updated_by=$1", "updated_at=NOW()"}
 		updateArgs := []interface{}{userEmail}
 		argN := 2
 
-		// identity
-		if req.BankID != "" {
-			setClauses = append(setClauses, fmt.Sprintf("bank_id=$%d", argN))
-			updateArgs = append(updateArgs, req.BankID)
-			argN++
-		}
-		if req.BankName != "" {
-			setClauses = append(setClauses, fmt.Sprintf("bank_name=$%d", argN))
-			updateArgs = append(updateArgs, req.BankName)
-			argN++
-		}
-		if req.BankFDRefNo != "" {
-			setClauses = append(setClauses, fmt.Sprintf("bank_fd_ref_no=$%d", argN))
-			updateArgs = append(updateArgs, req.BankFDRefNo)
-			argN++
-		}
 		if req.EntityID != "" {
 			setClauses = append(setClauses, fmt.Sprintf("entity_id=$%d", argN))
 			updateArgs = append(updateArgs, req.EntityID)
@@ -1214,29 +1306,9 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			updateArgs = append(updateArgs, req.PrincipalAmount)
 			argN++
 		}
-		if req.InterestRate > 0 {
-			setClauses = append(setClauses, fmt.Sprintf("interest_rate=$%d", argN))
-			updateArgs = append(updateArgs, req.InterestRate)
-			argN++
-		}
-		if req.TenureDays > 0 {
-			setClauses = append(setClauses, fmt.Sprintf("tenure_days=$%d", argN))
-			updateArgs = append(updateArgs, req.TenureDays)
-			argN++
-		}
-		if req.StartDate != "" {
-			setClauses = append(setClauses, fmt.Sprintf("start_date=$%d::date", argN))
-			updateArgs = append(updateArgs, req.StartDate)
-			argN++
-		}
 		if req.MaturityDate != "" {
 			setClauses = append(setClauses, fmt.Sprintf("maturity_date=$%d::date", argN))
 			updateArgs = append(updateArgs, req.MaturityDate)
-			argN++
-		}
-		if req.InterestTypeCode != "" {
-			setClauses = append(setClauses, fmt.Sprintf("interest_type_code=$%d", argN))
-			updateArgs = append(updateArgs, req.InterestTypeCode)
 			argN++
 		}
 		// accrual & TDS
@@ -1251,11 +1323,6 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			argN++
 		}
 		// penalty
-		if req.PenaltyRate > 0 {
-			setClauses = append(setClauses, fmt.Sprintf("penalty_rate=$%d", argN))
-			updateArgs = append(updateArgs, req.PenaltyRate)
-			argN++
-		}
 		if req.PenaltyAmount > 0 {
 			setClauses = append(setClauses, fmt.Sprintf("penalty_amount=$%d", argN))
 			updateArgs = append(updateArgs, req.PenaltyAmount)
@@ -1283,24 +1350,9 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			argN++
 		}
 		// rollover
-		if req.RolloverType != "" {
-			setClauses = append(setClauses, fmt.Sprintf("rollover_type=$%d", argN))
-			updateArgs = append(updateArgs, req.RolloverType)
-			argN++
-		}
 		if req.RolloverAmount > 0 {
 			setClauses = append(setClauses, fmt.Sprintf("rollover_amount=$%d", argN))
 			updateArgs = append(updateArgs, req.RolloverAmount)
-			argN++
-		}
-		if req.RolloverPrincipal > 0 {
-			setClauses = append(setClauses, fmt.Sprintf("rollover_principal=$%d", argN))
-			updateArgs = append(updateArgs, req.RolloverPrincipal)
-			argN++
-		}
-		if req.InterestCredited > 0 {
-			setClauses = append(setClauses, fmt.Sprintf("interest_credited=$%d", argN))
-			updateArgs = append(updateArgs, req.InterestCredited)
 			argN++
 		}
 		if req.RolloverTenorDays > 0 {
@@ -1311,21 +1363,6 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.RolloverInterestRate > 0 {
 			setClauses = append(setClauses, fmt.Sprintf("rollover_interest_rate=$%d", argN))
 			updateArgs = append(updateArgs, req.RolloverInterestRate)
-			argN++
-		}
-		if req.NewMaturityDate != "" {
-			setClauses = append(setClauses, fmt.Sprintf("new_maturity_date=$%d::date", argN))
-			updateArgs = append(updateArgs, req.NewMaturityDate)
-			argN++
-		}
-		if req.PartialWithdrawal > 0 {
-			setClauses = append(setClauses, fmt.Sprintf("partial_withdrawal=$%d", argN))
-			updateArgs = append(updateArgs, req.PartialWithdrawal)
-			argN++
-		}
-		if req.NewFDID != "" {
-			setClauses = append(setClauses, fmt.Sprintf("new_fd_id=$%d", argN))
-			updateArgs = append(updateArgs, req.NewFDID)
 			argN++
 		}
 		// metadata
@@ -2083,11 +2120,13 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			closureRow, rowErr := loadFDClosureRequestRow(ctx, pool, crID)
+			if rowErr != nil {
+				errors = append(errors, crID+": "+rowErr.Error())
+				continue
+			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "BulkApproveClosureRequest",
-				"/investment/fd/closure/bulk-approve", entityID, userEmail, map[string]interface{}{
-					"closure_request_id": crID, "fd_id": fdID, "entity_id": entityID, "entity_code": entityID,
-					"closure_type": closureType,
-				}); !ok {
+				"/investment/fd/closure/bulk-approve", entityID, userEmail, buildFDClosureRequestPolicyFields(closureRow)); !ok {
 				errors = append(errors, crID+": "+pmsg)
 				continue
 			}
@@ -2231,12 +2270,13 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			var rejectEntityID, rejectFDID string
-			_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,''), COALESCE(fd_id,'') FROM investment.fd_closure_request WHERE closure_request_id=$1`, crID).Scan(&rejectEntityID, &rejectFDID)
+			closureRow, rowErr := loadFDClosureRequestRow(ctx, pool, crID)
+			if rowErr != nil {
+				errors = append(errors, crID+": "+rowErr.Error())
+				continue
+			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "BulkRejectClosureRequest",
-				"/investment/fd/closure/bulk-reject", rejectEntityID, userEmail, map[string]interface{}{
-					"closure_request_id": crID, "fd_id": rejectFDID, "entity_id": rejectEntityID, "entity_code": rejectEntityID,
-				}); !ok {
+				"/investment/fd/closure/bulk-reject", closureRow.EntityID, userEmail, buildFDClosureRequestPolicyFields(closureRow)); !ok {
 				errors = append(errors, crID+": "+pmsg)
 				continue
 			}
@@ -2384,11 +2424,13 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		deleteClosureRow, rowErr := loadFDClosureRequestRow(ctx, pool, req.ClosureRequestID)
+		if rowErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to load closure request for policy check")
+			return
+		}
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreDelete, "DeleteClosureRequest", "/investment/fd/closure/delete",
-			entityID, userEmail, map[string]interface{}{
-				"closure_request_id": req.ClosureRequestID, "fd_id": fdID,
-				"entity_id": entityID, "entity_code": entityID,
-			}) {
+			entityID, userEmail, buildFDClosureRequestPolicyFields(deleteClosureRow)) {
 			return
 		}
 

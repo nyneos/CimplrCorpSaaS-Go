@@ -40,6 +40,7 @@ type CheckResult struct {
 	AggregatedAction string
 	Results          []policysvc.PolicyResult
 	DurationMS       int
+	ConflictReport   ConflictReport
 }
 
 // BlocksSubmit is true when the aggregated breach action is HardBlock.
@@ -59,16 +60,42 @@ func (r CheckResult) CountPassedFailed() (passed, failed int) {
 	return passed, failed
 }
 
-// SummaryLine is a short toast-friendly line, e.g. "Policy check: 3 passed, 2 failed".
+// SummaryLine is a short toast-friendly line with policy names when available.
 func (r CheckResult) SummaryLine() string {
 	passed, failed := r.CountPassedFailed()
 	if passed+failed == 0 {
 		return ""
 	}
+	passNames, failNames := r.policyNameLists()
 	if failed == 0 {
+		if len(passNames) > 0 {
+			return fmt.Sprintf("Policy check passed: %s", strings.Join(passNames, ", "))
+		}
 		return fmt.Sprintf("Policy check: %d passed", passed)
 	}
-	return fmt.Sprintf("Policy check: %d passed, %d failed", passed, failed)
+	parts := []string{fmt.Sprintf("Policy check failed (%d of %d)", failed, passed+failed)}
+	if len(failNames) > 0 {
+		parts = append(parts, strings.Join(failNames, ", "))
+	}
+	return strings.Join(parts, " — ")
+}
+
+func (r CheckResult) policyNameLists() (passed, failed []string) {
+	for _, pr := range r.Results {
+		label := strings.TrimSpace(pr.Name)
+		if label == "" {
+			label = strings.TrimSpace(pr.Code)
+		}
+		if label == "" {
+			label = "policy"
+		}
+		if pr.Result == "BREACH" || pr.Result == "ERROR" {
+			failed = append(failed, label)
+		} else {
+			passed = append(passed, label)
+		}
+	}
+	return passed, failed
 }
 
 // ClientMessage pairs SummaryLine with the first breach detail for HTTP message/toasts.
@@ -78,15 +105,16 @@ func (r CheckResult) ClientMessage(fallback string) string {
 	if detail == "" {
 		detail = strings.TrimSpace(fallback)
 	}
+	// Prefer human policy label over raw evaluator internals when both exist.
 	switch {
-	case sum != "" && detail != "":
+	case sum != "" && detail != "" && !strings.Contains(sum, detail):
 		return sum + " — " + detail
 	case sum != "":
 		return sum
 	case detail != "":
-		return detail
+		return "Policy check failed — " + detail
 	default:
-		return "Blocked by policy"
+		return "Policy check failed — blocked by policy"
 	}
 }
 
@@ -94,8 +122,19 @@ func (r CheckResult) ClientMessage(fallback string) string {
 func (r CheckResult) FirstBreachMessage() string {
 	for _, pr := range r.Results {
 		if pr.Result == "BREACH" || pr.Result == "ERROR" {
-			if strings.TrimSpace(pr.Message) != "" {
-				return pr.Message
+			label := strings.TrimSpace(pr.Name)
+			if label == "" {
+				label = strings.TrimSpace(pr.Code)
+			}
+			msg := strings.TrimSpace(pr.Message)
+			if label != "" && msg != "" {
+				return label + ": " + msg
+			}
+			if msg != "" {
+				return msg
+			}
+			if label != "" {
+				return label
 			}
 		}
 	}
@@ -109,6 +148,7 @@ func (r CheckResult) ResultsPayload() []map[string]interface{} {
 		out = append(out, map[string]interface{}{
 			"policy_id": pr.PolicyID,
 			"code":      pr.Code,
+			"name":      pr.Name,
 			"result":    pr.Result,
 			"action":    pr.Action,
 			"message":   pr.Message,
@@ -142,13 +182,16 @@ func (r CheckResult) WriteSummaryHeader(w http.ResponseWriter) {
 }
 
 // LoadActivePolicySnapshots returns Active+APPROVED policy snapshots for the
-// given trigger/module/entity (same set RunCheck loads).
-func LoadActivePolicySnapshots(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, entityCode string) ([]map[string]interface{}, error) {
-	return loadActivePolicies(ctx, pool, eventCode, moduleCode, entityCode)
+// given trigger/module/sub-module/entity (same set RunCheck loads).
+func LoadActivePolicySnapshots(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, subModule, entityCode string) ([]map[string]interface{}, error) {
+	return loadActivePolicies(ctx, pool, eventCode, moduleCode, subModule, entityCode)
 }
 
 // RunCheck loads applicable policies, evaluates via CIMPLR-Policy-Service, writes execution_log.
 func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckResult, error) {
+	if !PolicyChecksEnabled() {
+		return CheckResult{AggregatedAction: ""}, nil
+	}
 	client := policysvc.NewFromEnv()
 	if req.Variables == nil {
 		req.Variables = map[string]string{}
@@ -156,11 +199,46 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 
 	policies := req.Policies
 	if len(policies) == 0 {
-		loaded, err := loadActivePolicies(ctx, pool, req.EventCode, req.ModuleCode, req.EntityCode)
+		loaded, err := loadActivePolicies(ctx, pool, req.EventCode, req.ModuleCode, req.SubModule, req.EntityCode)
 		if err != nil {
 			return CheckResult{}, err
 		}
 		policies = loaded
+	}
+
+	conflictReport := AnalyzeHardBlockThresholdConflicts(ConstraintsFromPolicySnapshots(policies))
+	if conflictReport.HasImpossible() {
+		msg := conflictReport.FirstImpossibleMessage()
+		synthetic := policysvc.PolicyResult{
+			PolicyID: "lane-conflict",
+			Code:     "POLICY_CONFLICT_IMPOSSIBLE",
+			Name:     "Lane HardBlock conflict",
+			Result:   "ERROR",
+			Action:   "HardBlock",
+			Message:  msg,
+		}
+		duration := 0
+		_, _ = pool.Exec(ctx, `
+			INSERT INTO policyengine_svc.execution_log (
+				correlation_id, trace_id, event_code, module_code, sub_module, form_id,
+				handler_name, api_path, actor_user_id, entity_code,
+				business_record_type, business_record_id, source_file_name, source_file_id, batch_id,
+				policy_code, result, action_fired, detail_message, fail_code, fail_reason, duration_ms
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+				$16,'ERROR','HardBlock',$17,'POLICY_CONFLICT_IMPOSSIBLE',$17,$18)`,
+			common.NullIfEmpty(req.CorrelationID), common.NullIfEmpty(req.TraceID), req.EventCode, common.NullIfEmpty(req.ModuleCode),
+			common.NullIfEmpty(req.SubModule), common.NullIfEmpty(req.FormID), common.NullIfEmpty(req.HandlerName), common.NullIfEmpty(req.APIPath),
+			common.NullIfEmpty(req.ActorUserID), common.NullIfEmpty(req.EntityCode),
+			common.NullIfEmpty(req.BusinessRecordType), common.NullIfEmpty(req.BusinessRecordID),
+			common.NullIfEmpty(req.SourceFileName), common.NullIfEmpty(req.SourceFileID), common.NullIfEmpty(req.BatchID),
+			"POLICY_CONFLICT_IMPOSSIBLE", msg, duration,
+		)
+		return CheckResult{
+			AggregatedAction: "HardBlock",
+			Results:          []policysvc.PolicyResult{synthetic},
+			DurationMS:       duration,
+			ConflictReport:   conflictReport,
+		}, nil
 	}
 
 	started := time.Now()
@@ -223,10 +301,11 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 		AggregatedAction: resp.AggregatedAction,
 		Results:          resp.Results,
 		DurationMS:       duration,
+		ConflictReport:   conflictReport,
 	}, nil
 }
 
-func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, entityCode string) ([]map[string]interface{}, error) {
+func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, subModule, entityCode string) ([]map[string]interface{}, error) {
 	codes := ExpandTriggerAliases(eventCode)
 	q := `
 		SELECT p.policy_id::text, p.code, p.name, p.rule_type, p.action_on_breach, p.null_handling,
@@ -234,10 +313,14 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 		       COALESCE(p.thr_variable, ''), COALESCE(p.thr_operator, ''), COALESCE(p.thr_value, 0),
 		       COALESCE(p.thr_value_date::text, ''),
 		       COALESCE(p.thr_value_mode, ''), COALESCE(p.thr_percent_base, ''),
-		       COALESCE(p.list_target_field, ''), COALESCE(p.list_mode, ''), COALESCE(p.list_case_sensitive, false),
+		       COALESCE(p.list_target_field, ''), COALESCE(p.list_mode, ''), COALESCE(p.list_source, ''),
+		       COALESCE(p.list_dynamic_ref, ''), COALESCE(p.list_case_sensitive, false),
 		       COALESCE(p.notification_group, ''),
 		       COALESCE(p.formula_expression, ''), COALESCE(p.formula_return_type, ''),
 		       COALESCE(p.formula_operator, ''), COALESCE(p.formula_value, 0),
+		       COALESCE(p.slab_variable, ''),
+		       COALESCE(p.comp_base, ''), COALESCE(p.comp_total_check_variable, ''),
+		       p.comp_total_check_min, p.comp_total_check_max,
 		       COALESCE(p.applicability, 'Global')
 		FROM policyengine_svc.policy_master p
 		INNER JOIN policyengine_svc.policy_trigger t
@@ -246,16 +329,31 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 		  AND p.effective_start <= CURRENT_DATE
 		  AND (p.effective_end IS NULL OR p.effective_end >= CURRENT_DATE)`
 	args := []interface{}{codes}
+	argN := 2
 	if strings.TrimSpace(moduleCode) != "" {
-		q += `
+		q += fmt.Sprintf(`
 		AND (
 			NOT EXISTS (SELECT 1 FROM policyengine_svc.policy_module m WHERE m.policy_id = p.policy_id AND m.is_deleted = false)
 			OR EXISTS (
 				SELECT 1 FROM policyengine_svc.policy_module m
-				WHERE m.policy_id = p.policy_id AND m.is_deleted = false AND m.module_code = $2
+				WHERE m.policy_id = p.policy_id AND m.is_deleted = false AND m.module_code = $%d
 			)
-		)`
+		)`, argN)
 		args = append(args, moduleCode)
+		argN++
+	}
+	// Sub-module filter (same shape as module): no rows → match any; else must include handler SubModule.
+	if strings.TrimSpace(subModule) != "" {
+		q += fmt.Sprintf(`
+		AND (
+			NOT EXISTS (SELECT 1 FROM policyengine_svc.policy_sub_module sm WHERE sm.policy_id = p.policy_id AND sm.is_deleted = false)
+			OR EXISTS (
+				SELECT 1 FROM policyengine_svc.policy_sub_module sm
+				WHERE sm.policy_id = p.policy_id AND sm.is_deleted = false AND sm.sub_module_code = $%d
+			)
+		)`, argN)
+		args = append(args, strings.TrimSpace(subModule))
+		argN++
 	}
 
 	rows, err := pool.Query(ctx, q, args...)
@@ -270,15 +368,17 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 		var (
 			id, code, name, ruleType, action, nullH, nullDef, addl string
 			thrVar, thrOp, thrValueDate, thrMode, thrBase          string
-			listField, listMode                                    string
+			listField, listMode, listSource, listDynRef            string
 			notifGroup, formulaExpr, formulaRet, formulaOp         string
-			applicability                                          string
+			slabVar, compBase, compTotalVar, applicability         string
 			thrVal, formulaVal                                     float64
+			compTotalMin, compTotalMax                             *float64
 			listCase                                               bool
 		)
 		if err := rows.Scan(&id, &code, &name, &ruleType, &action, &nullH, &nullDef, &addl,
-			&thrVar, &thrOp, &thrVal, &thrValueDate, &thrMode, &thrBase, &listField, &listMode, &listCase,
-			&notifGroup, &formulaExpr, &formulaRet, &formulaOp, &formulaVal, &applicability); err != nil {
+			&thrVar, &thrOp, &thrVal, &thrValueDate, &thrMode, &thrBase, &listField, &listMode, &listSource, &listDynRef, &listCase,
+			&notifGroup, &formulaExpr, &formulaRet, &formulaOp, &formulaVal, &slabVar,
+			&compBase, &compTotalVar, &compTotalMin, &compTotalMax, &applicability); err != nil {
 			return nil, err
 		}
 		snap := map[string]interface{}{
@@ -298,17 +398,36 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 			"thr_percent_base":      thrBase,
 			"list_target_field":     listField,
 			"list_mode":             listMode,
+			"list_source":           listSource,
+			"list_dynamic_ref":      listDynRef,
 			"list_case_sensitive":   listCase,
 			"notification_group":    notifGroup,
 			"formula_expression":    formulaExpr,
 			"formula_return_type":   formulaRet,
 			"formula_operator":      formulaOp,
 			"formula_value":         formulaVal,
+			"slab_variable":         slabVar,
+			"comp_base":             compBase,
+			"comp_total_check_variable": compTotalVar,
 			"applicability":         applicability,
+		}
+		if compTotalMin != nil {
+			snap["comp_total_check_min"] = *compTotalMin
+		}
+		if compTotalMax != nil {
+			snap["comp_total_check_max"] = *compTotalMax
 		}
 		if ruleType == "list" {
 			vals, _ := loadListValues(ctx, pool, id)
 			snap["list_values"] = vals
+		}
+		if ruleType == "slabs" {
+			slabRows, _ := loadSlabRows(ctx, pool, id)
+			snap["slab_rows"] = slabRows
+		}
+		if ruleType == "composition" {
+			buckets, _ := loadCompositionBuckets(ctx, pool, id)
+			snap["comp_buckets"] = buckets
 		}
 		out = append(out, snap)
 		policyIDs = append(policyIDs, id)
@@ -439,4 +558,71 @@ func loadListValues(ctx context.Context, pool *pgxpool.Pool, policyID string) ([
 		vals = append(vals, v)
 	}
 	return vals, nil
+}
+
+func loadSlabRows(ctx context.Context, pool *pgxpool.Pool, policyID string) ([]map[string]interface{}, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT from_value, to_value, mode, action, COALESCE(approval_ref, ''), COALESCE(label, '')
+		FROM policyengine_svc.policy_slab_row
+		WHERE policy_id = $1::uuid AND is_deleted = false
+		ORDER BY seq_order`, policyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var from float64
+		var to *float64
+		var mode, action, approvalRef, label string
+		if err := rows.Scan(&from, &to, &mode, &action, &approvalRef, &label); err != nil {
+			return nil, err
+		}
+		row := map[string]interface{}{
+			"from":         from,
+			"mode":         mode,
+			"action":       action,
+			"approval_ref": approvalRef,
+			"label":        label,
+		}
+		if to != nil {
+			row["to"] = *to
+		} else {
+			row["to"] = nil
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+func loadCompositionBuckets(ctx context.Context, pool *pgxpool.Pool, policyID string) ([]map[string]interface{}, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT label, variable, min_value, max_value
+		FROM policyengine_svc.policy_composition_bucket
+		WHERE policy_id = $1::uuid AND is_deleted = false
+		ORDER BY seq_order`, policyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var label, variable string
+		var minVal, maxVal *float64
+		if err := rows.Scan(&label, &variable, &minVal, &maxVal); err != nil {
+			return nil, err
+		}
+		bucket := map[string]interface{}{
+			"label":    label,
+			"variable": variable,
+		}
+		if minVal != nil {
+			bucket["min"] = *minVal
+		}
+		if maxVal != nil {
+			bucket["max"] = *maxVal
+		}
+		out = append(out, bucket)
+	}
+	return out, nil
 }

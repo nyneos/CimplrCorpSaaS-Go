@@ -35,11 +35,8 @@ func DeleteOnboardBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Verify batch exists and is still in a deletable state
-		var batchStatus string
-		if err := pgxPool.QueryRow(ctx,
-			`SELECT status FROM investment.onboard_batch WHERE batch_id=$1::uuid`,
-			req.BatchID,
-		).Scan(&batchStatus); err != nil {
+		batchRow, err := loadMFOnboardBatchRow(ctx, pgxPool, req.BatchID)
+		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, fmt.Sprintf("Batch '%s' not found", req.BatchID))
 			return
 		}
@@ -47,7 +44,7 @@ func DeleteOnboardBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		userEmail := api.GetUserNameFromCtx(ctx)
 		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreDelete, "DeleteOnboardBatch",
 			"/investment/onboard/batch/delete", req.BatchID, userEmail,
-			map[string]interface{}{"batch_id": req.BatchID, "batch_status": batchStatus}) {
+			buildMFOnboardBatchPolicyFields(batchRow, "DELETE", "")) {
 			return
 		}
 
@@ -125,14 +122,19 @@ func DeleteOnboardTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		userEmail := api.GetUserNameFromCtx(ctx)
+		txnRow, err := loadMFOnboardTransactionRow(ctx, pgxPool, req.TransactionID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusNotFound, fmt.Sprintf("transaction '%s' not found", req.TransactionID))
+			return
+		}
 		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreDelete, "DeleteOnboardTransaction",
-			"/investment/onboard/batch/delete-transaction", "", userEmail,
-			map[string]interface{}{"transaction_id": req.TransactionID}) {
+			"/investment/onboard/batch/delete-transaction", txnRow.BatchID, userEmail,
+			buildMFOnboardTransactionPolicyFields(txnRow)) {
 			return
 		}
 
 		tag, err := pgxPool.Exec(ctx,
-			`DELETE FROM investment.onboard_transaction WHERE transaction_id=$1::uuid`,
+			`DELETE FROM investment.onboard_transaction WHERE id=$1::bigint`,
 			req.TransactionID,
 		)
 		if err != nil {

@@ -901,37 +901,18 @@ func RecomputeBankStatementSummaryHandler(pool *pgxpool.Pool) http.Handler {
 	})
 }
 
-// bankStatementPolicyFields maps statement scalars for domain_catalog CDM paths.
-func bankStatementPolicyFields(ctx context.Context, pool *pgxpool.Pool, bsid, entityID, actionType string) map[string]interface{} {
-	fields := map[string]interface{}{
-		"bank_statement_id": bsid,
-		"entity_id":         entityID,
-		"action_type":       actionType,
-	}
-	if pool == nil || strings.TrimSpace(bsid) == "" {
-		return fields
-	}
-	var openBal, closeBal float64
-	var uncat, total int
-	var acct string
-	err := pool.QueryRow(ctx, `
-		SELECT COALESCE(s.opening_balance, 0), COALESCE(s.closing_balance, 0),
-		       COALESCE(s.account_number, ''),
-		       (SELECT COUNT(*)::int FROM cimplrcorpsaas.bank_statement_transactions t
-		         WHERE t.bank_statement_id = s.bank_statement_id),
-		       (SELECT COUNT(*)::int FROM cimplrcorpsaas.bank_statement_transactions t
-		         WHERE t.bank_statement_id = s.bank_statement_id AND t.category_id IS NULL)
-		FROM cimplrcorpsaas.bank_statements s
-		WHERE s.bank_statement_id = $1`, bsid).Scan(&openBal, &closeBal, &acct, &total, &uncat)
+// loadBankStatementPolicyFields loads the canonical bankStatementRow for bsid
+// and maps it to the domain_catalog Fields shape for actionType. On load
+// failure it falls back to a row carrying only bsid/entityID (still the full
+// canonical key shape, just with zero-valued fields) so every Enforce call
+// site sees the same field set whether or not the load succeeded — the
+// pre-existing ad hoc helper this replaces had the same fallback behavior.
+func loadBankStatementPolicyFields(ctx context.Context, pool *pgxpool.Pool, bsid, entityID, actionType string) map[string]interface{} {
+	row, err := loadBankStatementRow(ctx, pool, bsid)
 	if err != nil {
-		return fields
+		row = bankStatementRow{BankStatementID: bsid, EntityID: entityID}
 	}
-	fields["opening_balance"] = openBal
-	fields["closing_balance"] = closeBal
-	fields["account_number"] = acct
-	fields["total_transactions"] = total
-	fields["uncategorized_count"] = uncat
-	return fields
+	return buildBankStatementPolicyFields(row, actionType)
 }
 
 // 3. Approve a bank statement (POST, req: user_id, bank_statement_id)
@@ -1017,7 +998,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					HandlerName:         "ApproveBankStatementHandler",
 					APIPath:             "/cash/bank-statements/v2/approve",
 					DefaultBlockMessage: "Bank statement approval blocked by policy",
-					Fields:              bankStatementPolicyFields(ctx, pool, bsid, entityID, actionType),
+					Fields:              loadBankStatementPolicyFields(ctx, pool, bsid, entityID, actionType),
 				}); !ok {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1131,7 +1112,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					HandlerName:         "ApproveBankStatementHandler",
 					APIPath:             "/cash/bank-statements/v2/approve",
 					DefaultBlockMessage: "Bank statement approval blocked by policy",
-					Fields:              bankStatementPolicyFields(ctx, pool, bsid, entityID, actionType),
+					Fields:              loadBankStatementPolicyFields(ctx, pool, bsid, entityID, actionType),
 				}); !ok {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1457,6 +1438,36 @@ func RejectBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					}
 				}
 			}
+			// Determine the pending action type the same way ApproveBankStatementHandler
+			// does, so the policy check sees the same action_type semantics on Reject
+			// as it does on Approve for the same pending row.
+			var hasPendingDeleteReject bool
+			_ = pool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM cimplrcorpsaas.auditactionbankstatement
+					WHERE bankstatementid = $1
+					  AND actiontype = 'DELETE'
+					  AND processing_status = 'PENDING_DELETE_APPROVAL'
+				)
+			`, bsid).Scan(&hasPendingDeleteReject)
+			var rejectActionType string
+			if hasPendingDeleteReject {
+				rejectActionType = constants.AuditActionDelete
+			} else {
+				_ = pool.QueryRow(ctx, `
+					SELECT actiontype FROM cimplrcorpsaas.auditactionbankstatement
+					WHERE bankstatementid = $1
+					  AND actiontype IN ('CREATE', 'EDIT', 'RECAT')
+					ORDER BY
+						CASE
+							WHEN actiontype = 'RECAT' AND processing_status = 'PENDING_EDIT_APPROVAL' THEN 0
+							ELSE 1
+						END,
+						requested_at DESC,
+						action_id DESC
+					LIMIT 1
+				`, bsid).Scan(&rejectActionType)
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreReject,
 				ModuleCode:          common.ModuleCash,
@@ -1466,10 +1477,7 @@ func RejectBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				HandlerName:         "RejectBankStatementHandler",
 				APIPath:             "/cash/bank-statements/v2/reject",
 				DefaultBlockMessage: "Bank statement rejection blocked by policy",
-				Fields: map[string]interface{}{
-					"bank_statement_id": bsid,
-					"entity_id":         entityID,
-				},
+				Fields:              loadBankStatementPolicyFields(ctx, pool, bsid, entityID, rejectActionType),
 			}); !ok {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
@@ -1615,6 +1623,24 @@ func DeleteBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 			deleteComment := body.Comment
 			if strings.TrimSpace(deleteComment) == "" {
 				deleteComment = body.Reason
+			}
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_STATEMENT",
+				EntityCode:          entityID,
+				ActorUserID:         body.UserID,
+				HandlerName:         "DeleteBankStatementHandler",
+				APIPath:             "/cash/bank-statements/v2/delete",
+				DefaultBlockMessage: "Bank statement delete blocked by policy",
+				Fields:              loadBankStatementPolicyFields(ctx, pool, bsid, entityID, constants.AuditActionDelete),
+			}); !ok {
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           false,
+					"error":             msg,
+				})
+				continue
 			}
 			requestedBy := auditActorDisplayName(ctx, body.UserID)
 			_, err := pool.Exec(ctx, `

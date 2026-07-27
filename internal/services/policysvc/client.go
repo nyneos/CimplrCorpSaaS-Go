@@ -42,6 +42,7 @@ type EvaluateRequest struct {
 type PolicyResult struct {
 	PolicyID string `json:"policy_id"`
 	Code     string `json:"code"`
+	Name     string `json:"name,omitempty"`
 	Result   string `json:"result"`
 	Action   string `json:"action,omitempty"`
 	Message  string `json:"message,omitempty"`
@@ -60,6 +61,53 @@ func (c *Client) Evaluate(ctx context.Context, req EvaluateRequest) (*EvaluateRe
 
 func (c *Client) Test(ctx context.Context, req EvaluateRequest) (*EvaluateResponse, error) {
 	return c.post(ctx, "/v1/test", req)
+}
+
+type PelValidateRequest struct {
+	ServiceKey string `json:"service_key,omitempty"`
+	Expression string `json:"expression"`
+	ReturnType string `json:"return_type,omitempty"`
+}
+
+type PelValidateResponse struct {
+	Success bool   `json:"success"`
+	Valid   bool   `json:"valid"`
+	Message string `json:"message,omitempty"`
+}
+
+// ValidatePEL asks the Policy Service whether an expression compiles.
+func (c *Client) ValidatePEL(ctx context.Context, expression, returnType string) (*PelValidateResponse, error) {
+	req := PelValidateRequest{
+		ServiceKey: c.token,
+		Expression: strings.TrimSpace(expression),
+		ReturnType: strings.TrimSpace(returnType),
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.wireRoot+"/v1/pel/validate", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("policy relay unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("policy relay status %d: %s", resp.StatusCode, string(raw))
+	}
+	var out PelValidateResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (c *Client) post(ctx context.Context, route string, req EvaluateRequest) (*EvaluateResponse, error) {

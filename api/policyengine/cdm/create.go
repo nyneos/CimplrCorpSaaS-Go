@@ -67,20 +67,14 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			req.CanonicalRef, req.UserAlias, req.Nullable, actor,
 		).Scan(&id)
 		if err != nil {
-			api.LogErrorForResponse(w, "cdm create insert: %v", err)
-			api.RespondEnvelopeError(w, http.StatusConflict, "failed to create CDM variable (duplicate name or user_alias?)", "CDM_CREATE_FAILED")
+			respondCDMCreateError(w, "insert", err)
 			return
 		}
 
-		if req.UserAlias != "" {
-			_, _ = tx.Exec(r.Context(), `
-				INSERT INTO policyengine_svc.cdm_variable_alias (variable_id, alias_name, created_by)
-				SELECT $1::uuid, $2, $3
-				WHERE NOT EXISTS (
-					SELECT 1 FROM policyengine_svc.cdm_variable_alias
-					WHERE is_deleted = false AND alias_name = $2
-				)`, id, req.UserAlias, actor)
-		}
+		// Primary user_alias lives on cdm_variable.user_alias; cdm_variable_alias is
+		// for extra aliases only (see 2026-07-19/cdm_canonical_user_alias.sql). Do not
+		// duplicate user_alias into the alias table here — that caused unique violations
+		// to abort the tx while errors were swallowed (misleading "failed to audit").
 
 		_, err = tx.Exec(r.Context(), `
 			INSERT INTO policyengine_svc.cdm_variable_audit (
@@ -94,8 +88,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			req.CanonicalRef, common.NullIfEmpty(req.UserAlias), req.Nullable,
 		)
 		if err != nil {
-			api.LogErrorForResponse(w, "cdm create audit: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit CDM create", "CDM_CREATE_FAILED")
+			respondCDMCreateError(w, "audit", err)
 			return
 		}
 		if err := tx.Commit(r.Context()); err != nil {

@@ -123,20 +123,39 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"CreateBookingSingle", "/investment/fd/booking/create",
 			req.EntityID, userEmail, correlationID,
 			map[string]interface{}{
-				"entity_id":           req.EntityID,
-				"entity_code":         req.EntityID,
-				"bank_id":             req.BankID,
-				"principal_amount":    req.PrincipalAmount,
-				"interest_rate":       req.InterestRate,
-				"interest_type_code":  req.InterestType,
-				"tenor_days":          req.TenorDays,
-				"tenure_days":         req.TenorDays,
-				"tenor_months":        req.TenorMonths,
-				"tenure_months":       req.TenorMonths,
-				"expected_start_date": req.ExpectedStartDate,
-				"value_date":          req.ValueDate,
-				"maturity_date":       req.MaturityDate,
-				"requested_at":        time.Now().UTC().Format(time.RFC3339),
+				"entity_id":              req.EntityID,
+				"entity_code":            req.EntityID,
+				"entity_name":            req.EntityName,
+				"bank_id":                req.BankID,
+				"bank_name":              req.BankName,
+				"principal_amount":       req.PrincipalAmount,
+				"interest_rate":          req.InterestRate,
+				"interest_type_code":     req.InterestType,
+				"interest_type_id":       req.InterestTypeID,
+				"tenor_days":             req.TenorDays,
+				"tenure_days":            req.TenorDays,
+				"tenor_months":           req.TenorMonths,
+				"tenure_months":          req.TenorMonths,
+				"tenure_years":           req.TenureYears,
+				"tenor_type":             req.TenorType,
+				"expected_start_date":    req.ExpectedStartDate,
+				"value_date":             req.ValueDate,
+				"maturity_date":          req.MaturityDate,
+				"value_type":             req.ValueType,
+				"frequency_id":           freqID,
+				"payout_frequency_id":    req.PayoutFrequencyID,
+				"accrual_frequency_code": req.AccrualFrequencyCode,
+				"reset_type":             req.ResetType,
+				"day_count_code":         dcCode,
+				"tds_plan_id":            req.TdsPlanID,
+				"bank_config_id":         req.BankConfigID,
+				"source_account_id":      req.BankAccountID,
+				"source_account_number":  req.SourceAccountNumber,
+				"product_code":           req.ProductCode,
+				"booking_remarks":        req.BookingRemarks,
+				"offer_valid_till":       req.OfferValidTill,
+				"auto_renewal":           req.AutoRenewal,
+				"requested_at":           time.Now().UTC().Format(time.RFC3339),
 			},
 		) {
 			return
@@ -823,22 +842,27 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Policy PRE_EDIT — merge current row + patch, map via domain_catalog CDM paths
-		merged := map[string]interface{}{
-			"booking_id":       req.BookingID,
-			"entity_id":        entityID,
-			"entity_code":      entityID,
-			"bank_id":          oldBankID,
-			"principal_amount": oldPrincipal,
-			"interest_rate":    oldRate,
-			"tenor_days":       oldTenorDays,
-			"tenure_days":      oldTenorDays,
-			"tenor_months":     oldTenorMonths,
-			"tenure_months":    oldTenorMonths,
-			"value_date":       oldValueDate,
-			"maturity_date":    oldMaturityDate,
-			"interest_type_id": oldInterestTypeID,
+		// Policy PRE_EDIT — merge current row (full field set, same as Create/Approve/
+		// Reject/Delete) + patch, map via domain_catalog CDM paths. Base comes from
+		// loadFDBookingCDMFields (full column set); the FOR-UPDATE-locked values read
+		// above override the handful the update logic itself depends on, since those
+		// are guaranteed fresh within this transaction; req.Fields patch wins last.
+		merged, _, loadErr := loadFDBookingCDMFields(ctx, pgxPool, req.BookingID)
+		if loadErr != nil {
+			merged = map[string]interface{}{"booking_id": req.BookingID}
 		}
+		merged["entity_id"] = entityID
+		merged["entity_code"] = entityID
+		merged["bank_id"] = oldBankID
+		merged["principal_amount"] = oldPrincipal
+		merged["interest_rate"] = oldRate
+		merged["tenor_days"] = oldTenorDays
+		merged["tenure_days"] = oldTenorDays
+		merged["tenor_months"] = oldTenorMonths
+		merged["tenure_months"] = oldTenorMonths
+		merged["value_date"] = oldValueDate
+		merged["maturity_date"] = oldMaturityDate
+		merged["interest_type_id"] = oldInterestTypeID
 		for k, v := range req.Fields {
 			merged[k] = v
 		}

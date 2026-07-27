@@ -9,10 +9,11 @@ import (
 	"CimplrCorpSaas/internal/services/mailruntime"
 )
 
-// ruleDestination carries storage + naming config loaded from transformation_rules.
+// ruleDestination carries storage + naming config for one destination row.
 // S3 / SFTP / API → CIMPLR-Email-Service POST /v1/storage/put.
 // LOCAL → written on this Cimplr Go host (per-user folder under CIMPLR_TRANSFORMED_LOCAL_DIR).
 type ruleDestination struct {
+	DestinationID    string
 	DestinationType  string
 	OutputNamePrefix string
 	AppendDatetime   bool

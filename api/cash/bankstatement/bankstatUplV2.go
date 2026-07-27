@@ -5,7 +5,6 @@ import (
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
-	"CimplrCorpSaas/internal/bindref"
 	"CimplrCorpSaas/internal/ctxutil"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	"CimplrCorpSaas/internal/logger"
@@ -18,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -740,24 +738,17 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 	// unchanged. This also removes the single-amount-column ambiguity that otherwise duplicates an
 	// amount into both withdrawal and deposit. Falls through to positional parsing when AI is
 	// disabled, errors, or fails its own validation guards (count + closing-balance + reconcile).
+	// Native CSV/XLS: positional first. LLM only if header detection fails (rescue below).
+	// PDF-converted never hits this V2 ingest path — it stages via BuildPreviewResponseFromCSVBytes.
 	llmSynth := false
-	if bindref.BrOn() {
-		if resp, lerr := extractTransactionsWithLLM(ctx, rows); lerr != nil {
-			logger.LogInfo("[BANK-UPLOAD] LLM ingestion unavailable (%v) — using positional parser", lerr)
-		} else if llmMaps, ok := buildTxnMapsFromLLM(resp, llmTxnContext{
-			accountNumber: accountNumber,
-			entityID:      entityID,
-			bankName:      bankName,
-			currency:      currencyCode,
-			rules:         rules,
-			batchID:       generateBatchID(),
-			sourceRows:    rows,
-		}); ok && len(llmMaps) > 0 {
-			logger.LogInfo("[BANK-UPLOAD] using LLM-extracted transactions for ingestion (count=%d)", len(llmMaps))
-			rows = synthesizeStatementRowsFromLLM(llmMaps)
-			isCSV = true
-			llmSynth = true
-		}
+	llmMeta := llmTxnContext{
+		accountNumber: accountNumber,
+		entityID:      entityID,
+		bankName:      bankName,
+		currency:      currencyCode,
+		rules:         rules,
+		batchID:       generateBatchID(),
+		sourceRows:    rows,
 	}
 
 	// 5. Parse transactions, categorize, and collect KPIs
@@ -770,27 +761,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 	var findAmountLikeCSV func() int
 	var findDebitCreditCols func() (int, int)
 
-	// LLM column layout detection — seeds txnHeaderIdx and semantic colIdx keys.
-	// Manual detection below runs only when LLM fails or is not configured.
-	llmHeaderIdx := -1
-	llmColMap := map[string]int{}
-	// Skip the column-layout LLM call when rows are already LLM-synthesized: they have a clean,
-	// known header, so a second model call is wasted work (and could mis-map the synthetic columns).
-	if !llmSynth {
-		if layout, llmErr := extractColumnLayoutWithLLM(ctx, rows); llmErr == nil {
-			llmHeaderIdx = layout.HeaderRowIndex
-			llmColMap = layout.toColIdx()
-			logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM column layout: header_row=%d cols=%v", llmHeaderIdx, llmColMap)
-		} else {
-			logger.LogInfo("[BANK-UPLOAD-DEBUG] LLM column layout skipped or failed: %v", llmErr)
-		}
-	}
+	// Manual header scan first; LLM column layout deferred to applyLLMColumnLayoutIfNeeded
+	// after colIdx is built (skips SmartCat when headers already look complete / llmSynth).
 
 	if isCSV {
-		// Seed from LLM result if available; manual scan only runs when LLM failed.
-		if llmHeaderIdx >= 0 {
-			txnHeaderIdx = llmHeaderIdx
-		}
 		// For CSV, header often contains Date + Description (or Detail Description)
 		// and Debit/Credit (or Withdrawal/Deposit) columns. Try to find a row
 		// that looks like the transaction header instead of relying solely on
@@ -898,7 +872,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			for i := 0; i < 100 && i < len(rows); i++ {
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] CSV row[%d]=%q", i, rows[i])
 			}
-			return nil, errors.New("transaction header row not found in CSV file")
+			if tryRescueRowsWithLLMSynth(ctx, &rows, &isCSV, llmMeta) {
+				llmSynth = true
+				txnHeaderIdx = 0
+			} else {
+				return nil, errors.New("transaction header row not found in CSV file")
+			}
 		}
 		headerRow = rows[txnHeaderIdx]
 		colIdx = map[string]int{}
@@ -908,9 +887,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			colIdx[strings.TrimSpace(col)] = idx
 		}
 
-		// LLM-detected semantic columns take priority — overwrite base mapping unconditionally.
-		// Alias expansion below only fills keys LLM left unset (returned as -1).
-		maps.Copy(colIdx, llmColMap)
+		// LLM layout only when manual mapping is incomplete (skip when llmSynth).
+		if !llmSynth {
+			prevIdx := txnHeaderIdx
+			txnHeaderIdx, colIdx = applyLLMColumnLayoutIfNeeded(ctx, rows, txnHeaderIdx, colIdx)
+			if txnHeaderIdx != prevIdx && txnHeaderIdx >= 0 && txnHeaderIdx < len(rows) {
+				headerRow = rows[txnHeaderIdx]
+			}
+		}
 
 		// If custom mapping provided, apply mapping fields as overrides (partial mappings allowed)
 		if mappings != nil {
@@ -1092,7 +1076,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			return best
 		}
 		// Force remap Description column only when LLM did not already identify it.
-		if _, hasLLMDesc := llmColMap["Description"]; !hasLLMDesc {
+		if _, hasLLMDesc := colIdx["Description"]; !hasLLMDesc {
 			delete(colIdx, "Description")
 			delete(colIdx, "Detail Description")
 
@@ -1226,14 +1210,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 		logger.LogInfo("[BANK-UPLOAD-DEBUG] Headers: %v", headerRow)
 		// Only apply findDebitCreditCols result for columns LLM did not already identify.
 		if wIdx >= 0 {
-			if _, ok := llmColMap["Withdrawal"]; !ok {
+			if _, ok := colIdx["Withdrawal"]; !ok {
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] Setting Withdrawal to column %d (header: %s)", wIdx, headerRow[wIdx])
 				colIdx["Withdrawal"] = wIdx
 				colIdx[withdrawalAmtHeader] = wIdx
 			}
 		}
 		if dIdx >= 0 {
-			if _, ok := llmColMap["Deposit"]; !ok {
+			if _, ok := colIdx["Deposit"]; !ok {
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] Setting Deposit to column %d (header: %s)", dIdx, headerRow[dIdx])
 				colIdx["Deposit"] = dIdx
 				colIdx[depositAmtHeader] = dIdx
@@ -1262,10 +1246,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			return nil, errors.New("transaction header row not found in CSV file")
 		}
 	} else {
-		// Seed from LLM result if available; manual scan only runs when LLM failed.
-		if llmHeaderIdx >= 0 {
-			txnHeaderIdx = llmHeaderIdx
-		}
 		// For Excel/XLS, some statements don't include a constants.TranID column.
 		// Try the original Tran Id detection first, then fall back to a
 		// flexible detection similar to CSV: find a row that has Date and
@@ -1312,7 +1292,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			for i := 0; i < 30 && i < len(rows); i++ {
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] Excel row[%d]=%q", i, rows[i])
 			}
-			return nil, errors.New(constants.ErrTransactionHeaderRowNotFound)
+			if tryRescueRowsWithLLMSynth(ctx, &rows, &isCSV, llmMeta) {
+				llmSynth = true
+				txnHeaderIdx = 0
+			} else {
+				return nil, errors.New(constants.ErrTransactionHeaderRowNotFound)
+			}
 		}
 		headerRow = rows[txnHeaderIdx]
 		colIdx = map[string]int{}
@@ -1322,9 +1307,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			colIdx[strings.TrimSpace(col)] = idx
 		}
 
-		// LLM-detected semantic columns take priority — overwrite base mapping unconditionally.
-		// Alias expansion below only fills keys LLM left unset (returned as -1).
-		maps.Copy(colIdx, llmColMap)
+		// LLM layout only when manual mapping is incomplete (skip when llmSynth).
+		if !llmSynth {
+			prevIdx := txnHeaderIdx
+			txnHeaderIdx, colIdx = applyLLMColumnLayoutIfNeeded(ctx, rows, txnHeaderIdx, colIdx)
+			if txnHeaderIdx != prevIdx && txnHeaderIdx >= 0 && txnHeaderIdx < len(rows) {
+				headerRow = rows[txnHeaderIdx]
+			}
+		}
 
 		// If custom mapping provided, apply mapping fields as overrides (partial mappings allowed)
 		if mappings != nil {
@@ -1539,7 +1529,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 
 		// Detect Cr/Dr indicator column only when LLM did not already identify it.
 		if crDrIdx = findCrDrLike(); crDrIdx >= 0 {
-			if _, ok := llmColMap["CrDr"]; !ok {
+			if _, ok := colIdx["CrDr"]; !ok {
 				colIdx["CrDr"] = crDrIdx
 			}
 		}

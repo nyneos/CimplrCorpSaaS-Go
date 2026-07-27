@@ -180,11 +180,30 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		tdsVariance := req.TDSDeductedActual - req.TDSExpected
 		exceptionRaised := tdsVariance != 0
 
+		createRow := fdTDSRegisterRow{
+			FDID:              req.FDID,
+			FDRefNo:           fdRefNo,
+			EntityID:          req.EntityID,
+			BankID:            bankID,
+			ReceiptID:         req.ReceiptID,
+			IngestionSource:   "TDS_WORKBENCH",
+			PeriodStart:       req.PeriodStart,
+			PeriodEnd:         req.PeriodEnd,
+			DeductionDate:     deductionDate,
+			GrossInterest:     req.GrossInterest,
+			TDSRateApplied:    req.TDSRateApplied,
+			TDSRateExpected:   req.TDSRateApplied,
+			TDSExpected:       req.TDSExpected,
+			TDSDeductedActual: req.TDSDeductedActual,
+			TDSVariance:       tdsVariance,
+			HasPAN:            req.HasPAN,
+			TDSSection:        req.TDSSection,
+			TDSStatus:         "CAPTURED",
+			ReconcileStatus:   "PENDING",
+			ExceptionRaised:   exceptionRaised,
+		}
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "CreateTDSRegister", "/investment/fd/tds-register/create",
-			req.EntityID, userEmail, map[string]interface{}{
-				"fd_id": req.FDID, "entity_id": req.EntityID, "entity_code": req.EntityID,
-				"tds_deducted_actual": req.TDSDeductedActual, "period_start": req.PeriodStart, "period_end": req.PeriodEnd,
-			}) {
+			req.EntityID, userEmail, buildFDTDSRegisterPolicyFields(createRow)) {
 			return
 		}
 
@@ -511,10 +530,17 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		// Reconcile is a bulk/aggregate action (AUTO sweeps by entity+tolerance;
+		// MANUAL walks a list of items) — there is no single canonical TDS row to
+		// build fields from here, so this stays entity/request-scoped rather than
+		// using buildFDTDSRegisterPolicyFields. tolerance_amount added so a policy
+		// can actually see the value driving the AUTO branch's accept/flag split.
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreSubmit, "ReconcileTDSRegister", "/investment/fd/tds-register/reconcile",
 			req.EntityID, userEmail, map[string]interface{}{
-				"entity_id": req.EntityID, "entity_code": req.EntityID,
+				"entity_id":        req.EntityID,
+				"entity_code":      req.EntityID,
 				"reconcile_action": req.ReconcileAction,
+				"tolerance_amount": req.ToleranceAmount,
 			}) {
 			return
 		}
@@ -663,12 +689,14 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		var approveEntityID string
-		_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, req.TDSID).Scan(&approveEntityID)
+		approveRow, err := loadFDTDSRegisterRow(ctx, pool, req.TDSID)
+		if err != nil {
+			api.LogError("[TDSApprove] load row for policy failed for %s: %v", req.TDSID, err)
+			api.RespondWithError(w, http.StatusNotFound, "TDS entry not found")
+			return
+		}
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreApprove, "ApproveTDSRegister", "/investment/fd/tds-register/approve",
-			approveEntityID, userEmail, map[string]interface{}{
-				"tds_id": req.TDSID, "entity_id": approveEntityID, "entity_code": approveEntityID,
-			}) {
+			approveRow.EntityID, userEmail, buildFDTDSRegisterPolicyFields(approveRow)) {
 			return
 		}
 
@@ -820,12 +848,26 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tdsVariance := req.TDSDeductedActual - req.TDSExpected
 
-		var editEntityID string
-		_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, req.TDSID).Scan(&editEntityID)
+		editBaseRow, loadErr := loadFDTDSRegisterRow(ctx, pool, req.TDSID)
+		if loadErr != nil {
+			api.LogError("[TDSUpdate] load row for policy failed for %s: %v", req.TDSID, loadErr)
+			api.RespondWithError(w, http.StatusNotFound, "TDS entry not found")
+			return
+		}
+		editedRow := applyFDTDSRegisterEdits(editBaseRow, map[string]interface{}{
+			"period_start":        req.PeriodStart,
+			"period_end":          req.PeriodEnd,
+			"deduction_date":      deductionDate,
+			"gross_interest":      req.GrossInterest,
+			"tds_expected":        req.TDSExpected,
+			"tds_deducted_actual": req.TDSDeductedActual,
+			"tds_variance":        tdsVariance,
+			"tds_rate_applied":    req.TDSRateApplied,
+			"tds_section":         req.TDSSection,
+			"has_pan":             req.HasPAN,
+		})
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "UpdateTDSRegister", "/investment/fd/tds-register/update",
-			editEntityID, userEmail, map[string]interface{}{
-				"tds_id": req.TDSID, "fd_id": fdIDForTDS, "entity_id": editEntityID, "entity_code": editEntityID,
-			}) {
+			editedRow.EntityID, userEmail, buildFDTDSRegisterPolicyFields(editedRow)) {
 			return
 		}
 
@@ -966,12 +1008,14 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: msg})
 				continue
 			}
-			var bulkApproveEntityID string
-			_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, tdsID).Scan(&bulkApproveEntityID)
+			bulkApproveRow, rowErr := loadFDTDSRegisterRow(ctx, pool, tdsID)
+			if rowErr != nil {
+				results = append(results, result{TDSID: tdsID, OK: false, Message: "TDS entry not found"})
+				continue
+			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "BulkApproveTDSRegister",
-				"/investment/fd/tds-register/approve-bulk", bulkApproveEntityID, userEmail, map[string]interface{}{
-					"tds_id": tdsID, "entity_id": bulkApproveEntityID, "entity_code": bulkApproveEntityID,
-				}); !ok {
+				"/investment/fd/tds-register/approve-bulk", bulkApproveRow.EntityID, userEmail,
+				buildFDTDSRegisterPolicyFields(bulkApproveRow)); !ok {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: pmsg})
 				continue
 			}
@@ -1073,12 +1117,13 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			if msg := validateTDSRecordAccess(ctx, pool, tdsID); msg != "" {
 				continue
 			}
-			var bulkRejectEntityID string
-			_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, tdsID).Scan(&bulkRejectEntityID)
+			bulkRejectRow, rowErr := loadFDTDSRegisterRow(ctx, pool, tdsID)
+			if rowErr != nil {
+				continue
+			}
 			if ok, _ := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "BulkRejectTDSRegister",
-				"/investment/fd/tds-register/reject-bulk", bulkRejectEntityID, userEmail, map[string]interface{}{
-					"tds_id": tdsID, "entity_id": bulkRejectEntityID, "entity_code": bulkRejectEntityID,
-				}); !ok {
+				"/investment/fd/tds-register/reject-bulk", bulkRejectRow.EntityID, userEmail,
+				buildFDTDSRegisterPolicyFields(bulkRejectRow)); !ok {
 				continue
 			}
 			tx, err := pool.Begin(ctx)
@@ -1171,12 +1216,14 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		var rejectEntityID string
-		_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, req.TDSID).Scan(&rejectEntityID)
+		rejectRow, err := loadFDTDSRegisterRow(ctx, pool, req.TDSID)
+		if err != nil {
+			api.LogError("[TDSReject] load row for policy failed for %s: %v", req.TDSID, err)
+			api.RespondWithError(w, http.StatusNotFound, "TDS entry not found")
+			return
+		}
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreReject, "RejectTDSRegister", "/investment/fd/tds-register/reject",
-			rejectEntityID, userEmail, map[string]interface{}{
-				"tds_id": req.TDSID, "entity_id": rejectEntityID, "entity_code": rejectEntityID,
-			}) {
+			rejectRow.EntityID, userEmail, buildFDTDSRegisterPolicyFields(rejectRow)) {
 			return
 		}
 
@@ -1387,12 +1434,14 @@ func BulkDeleteTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				failed++
 				continue
 			}
-			var deleteEntityID string
-			_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, tdsID).Scan(&deleteEntityID)
+			deleteRow, rowErr := loadFDTDSRegisterRow(ctx, pool, tdsID)
+			if rowErr != nil {
+				failed++
+				continue
+			}
 			if ok, _ := fdEnforceInline(ctx, r, pool, common.TriggerPreDelete, "BulkDeleteTDSRegister",
-				"/investment/fd/tds-register/delete-bulk", deleteEntityID, userEmail, map[string]interface{}{
-					"tds_id": tdsID, "entity_id": deleteEntityID, "entity_code": deleteEntityID,
-				}); !ok {
+				"/investment/fd/tds-register/delete-bulk", deleteRow.EntityID, userEmail,
+				buildFDTDSRegisterPolicyFields(deleteRow)); !ok {
 				failed++
 				continue
 			}

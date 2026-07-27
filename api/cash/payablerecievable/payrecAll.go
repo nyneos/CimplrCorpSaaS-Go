@@ -1114,7 +1114,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkRequestDeleteTransactions",
 				APIPath:             "/cash/transactions/bulk-delete",
 				DefaultBlockMessage: "Payable/receivable delete blocked by policy",
-				Fields:              map[string]interface{}{"transaction_id": id},
+				Fields:              loadTransactionPolicyFields(ctx, pgxPool, id),
 			}); !ok {
 				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, msg, "")
 				return
@@ -1147,7 +1147,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
 			if latestErr == nil && latestActionType == constants.AuditActionDelete && latestStatus == constants.StatusPendingDeleteApproval {
-				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "delete request already pending for transaction: " + id, "")
+				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "delete request already pending for transaction: "+id, "")
 				return
 			}
 			var actionID string
@@ -1167,7 +1167,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
 			if latestErr == nil && latestActionType == constants.AuditActionDelete && latestStatus == constants.StatusPendingDeleteApproval {
-				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "delete request already pending for transaction: " + id, "")
+				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "delete request already pending for transaction: "+id, "")
 				return
 			}
 			var actionID string
@@ -1238,7 +1238,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkRejectTransactions",
 				APIPath:             "/cash/transactions/bulk-reject",
 				DefaultBlockMessage: "Payable/receivable reject blocked by policy",
-				Fields:              map[string]interface{}{"transaction_id": id},
+				Fields:              loadTransactionPolicyFields(ctx, pgxPool, id),
 			}); !ok {
 				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, msg, "")
 				return
@@ -1261,15 +1261,15 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, pid := range payIDs {
 				var aid, atype, status string
 				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionpayable WHERE payable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1`, pid).Scan(&aid, &atype, &status); err != nil {
-					api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction + pid, "")
+					api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction+pid, "")
 					return
 				}
 				if aid == "" {
-					api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction + pid, "")
+					api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction+pid, "")
 					return
 				}
 				if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
-					api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "cannot reject non-pending transaction: " + pid, "")
+					api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "cannot reject non-pending transaction: "+pid, "")
 					return
 				}
 				payActionIDs = append(payActionIDs, aid)
@@ -1284,15 +1284,15 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, rid := range recIDs {
 				var aid, atype, status string
 				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionreceivable WHERE receivable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1`, rid).Scan(&aid, &atype, &status); err != nil {
-					api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction + rid, "")
+					api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction+rid, "")
 					return
 				}
 				if aid == "" {
-					api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction + rid, "")
+					api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction+rid, "")
 					return
 				}
 				if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
-					api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "cannot reject non-pending transaction: " + rid, "")
+					api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "cannot reject non-pending transaction: "+rid, "")
 					return
 				}
 				recActionIDs = append(recActionIDs, aid)
@@ -1421,15 +1421,15 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, pid).Scan(&aid, &atype, &status); err != nil {
-				api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction + pid, "")
+				api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction+pid, "")
 				return
 			}
 			if aid == "" {
-				api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction + pid, "")
+				api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction+pid, "")
 				return
 			}
 			if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
-				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "cannot approve non-pending transaction: " + pid, "")
+				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "cannot approve non-pending transaction: "+pid, "")
 				return
 			}
 			payActionIDs = append(payActionIDs, aid)
@@ -1448,15 +1448,15 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			`, rid).Scan(&aid, &atype, &status); err != nil {
-				api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction + rid, "")
+				api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction+rid, "")
 				return
 			}
 			if aid == "" {
-				api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction + rid, "")
+				api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction+rid, "")
 				return
 			}
 			if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
-				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "cannot approve non-pending transaction: " + rid, "")
+				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "cannot approve non-pending transaction: "+rid, "")
 				return
 			}
 			recActionIDs = append(recActionIDs, aid)
@@ -1480,7 +1480,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkApproveTransactions",
 				APIPath:             "/cash/transactions/bulk-approve",
 				DefaultBlockMessage: "Payable/receivable approve blocked by policy",
-				Fields:              map[string]interface{}{"transaction_id": id},
+				Fields:              loadTransactionPolicyFields(ctx, pgxPool, id),
 			}); !ok {
 				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, msg, "")
 				return
@@ -1530,7 +1530,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM tr_payables p
 				WHERE aa.action_id = ANY($1) AND aa.payable_id = p.payable_id
 			`, payEditActionIDs); err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to capture old payable values: " + err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to capture old payable values: "+err.Error(), "")
 				return
 			}
 			if _, err := tx.Exec(ctx, `
@@ -1546,7 +1546,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM auditactionpayable aa
 				WHERE aa.action_id = ANY($1) AND aa.payable_id = p.payable_id
 			`, payEditActionIDs); err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to apply new payable values: " + err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to apply new payable values: "+err.Error(), "")
 				return
 			}
 		}
@@ -1565,7 +1565,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM tr_receivables r
 				WHERE aa.action_id = ANY($1) AND aa.receivable_id = r.receivable_id
 			`, recEditActionIDs); err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to capture old receivable values: " + err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to capture old receivable values: "+err.Error(), "")
 				return
 			}
 			if _, err := tx.Exec(ctx, `
@@ -1581,7 +1581,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM auditactionreceivable aa
 				WHERE aa.action_id = ANY($1) AND aa.receivable_id = r.receivable_id
 			`, recEditActionIDs); err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to apply new receivable values: " + err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to apply new receivable values: "+err.Error(), "")
 				return
 			}
 		}
@@ -1599,7 +1599,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND aa.payable_id = p.payable_id
 			`, payDeleteActionIDs)
 			if err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to soft delete payables: " + err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to soft delete payables: "+err.Error(), "")
 				return
 			}
 			if payDeleteTag.RowsAffected() != int64(len(payDeleteActionIDs)) {
@@ -1620,7 +1620,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND aa.receivable_id = r.receivable_id
 			`, recDeleteActionIDs)
 			if err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to soft delete receivables: " + err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to soft delete receivables: "+err.Error(), "")
 				return
 			}
 			if recDeleteTag.RowsAffected() != int64(len(recDeleteActionIDs)) {
@@ -1677,11 +1677,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkCreateTransactions",
 				APIPath:             "/cash/transactions/create",
 				DefaultBlockMessage: "Payable/receivable create blocked by policy",
-				Fields: map[string]interface{}{
-					"transaction_type": itm["transaction_type"],
-					"entity_name":      entityName,
-					"index":            idx,
-				},
+				Fields:              buildPayableReceivablePolicyFieldsFromItem(idx, itm),
 			}); !ok {
 				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, msg, "")
 				return
@@ -1855,6 +1851,24 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		id := strings.TrimSpace(req.ID)
+
+		// Load the current row and overlay the requested edits so the policy
+		// check sees the full post-edit business state — not just the raw
+		// touched-keys blob (see applyPayableEdits/applyReceivableEdits in
+		// payableReceivablePolicyFields.go). Falls back to a thin id/fields
+		// map if the row can't be loaded (e.g. unknown id prefix) so the
+		// enforcement call still gets *a* policy decision.
+		updateFields := map[string]interface{}{"transaction_id": id, "fields": req.Fields}
+		if strings.HasPrefix(id, constants.ErrPrefixPayable) {
+			if oldRow, err := loadPayableRow(ctx, pgxPool, id); err == nil {
+				updateFields = buildPayablePolicyFields(applyPayableEdits(oldRow, req.Fields))
+			}
+		} else if strings.HasPrefix(id, constants.ErrPrefixReceivable) {
+			if oldRow, err := loadReceivableRow(ctx, pgxPool, id); err == nil {
+				updateFields = buildReceivablePolicyFields(applyReceivableEdits(oldRow, req.Fields))
+			}
+		}
+
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
@@ -1863,10 +1877,7 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "UpdateTransaction",
 			APIPath:             "/cash/transactions/update",
 			DefaultBlockMessage: "Payable/receivable update blocked by policy",
-			Fields: map[string]interface{}{
-				"transaction_id": id,
-				"fields":         req.Fields,
-			},
+			Fields:              updateFields,
 		}) {
 			return
 		}

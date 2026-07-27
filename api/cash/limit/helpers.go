@@ -75,6 +75,15 @@ func nullifyBool(b *bool) interface{} {
 	return *b
 }
 
+// mergeIndexField adds a bulk-request "index" key onto an already-built
+// canonical policy Fields map, for bulk-create call sites (BulkCreateBankLimit,
+// BulkCreateUtilization) whose policy checks are evaluated per-item inside a
+// loop and want the item's position in the request for error correlation.
+func mergeIndexField(fields map[string]interface{}, index int) map[string]interface{} {
+	fields["index"] = index
+	return fields
+}
+
 // validateUtilizationLimit checks if the new utilization would exceed the sanctioned limit
 func validateUtilizationLimit(ctx context.Context, pgxPool *pgxpool.Pool, limitID string, newUtilizedAmount float64) error {
 	query := `

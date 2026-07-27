@@ -41,7 +41,7 @@ type TransformationRule struct {
 	UpdatedAt        *time.Time      `json:"updated_at,omitempty"`
 	UserID           string          `json:"user_id,omitempty"`
 
-	// Output destination + naming (1:1 on the rule master — no JSONB).
+	// Legacy primary destination fields (mirrored from destinations[0] for old clients).
 	DestinationType  string `json:"destination_type"`            // S3 | LOCAL | SFTP | API
 	OutputNamePrefix string `json:"output_name_prefix"`          // user base name
 	AppendDatetime   *bool  `json:"append_datetime"`             // nil → true; append _YYYYMMDD_HHMMSS
@@ -54,6 +54,9 @@ type TransformationRule struct {
 	SftpFolder       string `json:"sftp_folder,omitempty"`
 	APIURL           string `json:"api_url,omitempty"`
 	APIAuthToken     string `json:"api_auth_token"`
+
+	// Multi-destination (1:many child rows). Prefer this over flat fields when present.
+	Destinations []RuleDestination `json:"destinations,omitempty"`
 }
 
 func appendDatetimeValue(v *bool) bool {
@@ -246,6 +249,7 @@ func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		}
 		rules = append(rules, rule)
 	}
+	attachDestinations(r.Context(), pool, rules)
 
 	emailcommon.RespondList(w, "transform-rules-list", rules, len(rules))
 }
@@ -271,10 +275,12 @@ func handleCreate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		return
 	}
 	req.MatchMode = mode
-	if destErr := normalizeDestination(&req); destErr != nil {
+	dests, destErr := resolveDestinations(&req)
+	if destErr != nil {
 		emailcommon.RespondBadRequest(w, destErr.Error())
 		return
 	}
+	applyPrimaryMirror(&req, dests)
 	appendDT := appendDatetimeValue(req.AppendDatetime)
 	req.AppendDatetime = boolPtr(appendDT)
 	req.ProcessingStatus = "PENDING_APPROVAL"
@@ -302,6 +308,14 @@ func handleCreate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 			emailcommon.RespondInternal(w, "Failed to create rule: "+err.Error())
 		}
 		return
+	}
+
+	if written, werr := replaceDestinations(r.Context(), pool, req.RuleID, req.UserID, dests); werr != nil {
+		emailcommon.RespondInternal(w, "Failed to save destinations: "+werr.Error())
+		return
+	} else {
+		req.Destinations = written
+		applyPrimaryMirror(&req, written)
 	}
 
 	logAudit(r, pool, req.RuleID, "CREATE_PENDING", req.UserID, req)
@@ -347,10 +361,12 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		return
 	}
 	req.MatchMode = mode
-	if destErr := normalizeDestination(&req); destErr != nil {
+	dests, destErr := resolveDestinations(&req)
+	if destErr != nil {
 		emailcommon.RespondBadRequest(w, destErr.Error())
 		return
 	}
+	applyPrimaryMirror(&req, dests)
 
 	pendingJSON, _ := json.Marshal(req)
 
@@ -456,11 +472,23 @@ func handleApprove(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 			SET processing_status = 'APPROVED', is_deleted = true, approved_by = $1, checker_comment = $2, deleted_at = now(), deleted_by = $1
 			WHERE rule_id = $3
 		`, req.UserID, req.CheckerComment, req.RuleID)
+		if err == nil {
+			_, _ = pool.Exec(r.Context(), `
+				UPDATE email_svc.transformation_rule_destinations
+				SET is_deleted = true, updated_at = now()
+				WHERE rule_id = $1::uuid AND is_deleted = false
+			`, req.RuleID)
+		}
 	} else if pendingJSON != nil && len(pendingJSON) > 2 {
 		var edits TransformationRule
 		_ = json.Unmarshal(pendingJSON, &edits)
 		editMode, _ := normalizeMatchMode(edits.ConditionType, edits.MatchMode)
-		_ = normalizeDestination(&edits)
+		editDests, editDestErr := resolveDestinations(&edits)
+		if editDestErr != nil {
+			emailcommon.RespondBadRequest(w, editDestErr.Error())
+			return
+		}
+		applyPrimaryMirror(&edits, editDests)
 		editAppendDT := appendDatetimeValue(edits.AppendDatetime)
 		_, err = pool.Exec(r.Context(), `
 			UPDATE email_svc.transformation_rules
@@ -495,6 +523,11 @@ func handleApprove(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 			edits.SftpHost, edits.SftpPort, edits.SftpUser, edits.SftpPassword, edits.SftpFolder,
 			edits.APIURL, edits.APIAuthToken,
 			req.UserID, req.CheckerComment, req.RuleID)
+		if err == nil {
+			if _, werr := replaceDestinations(r.Context(), pool, req.RuleID, req.UserID, editDests); werr != nil {
+				err = werr
+			}
+		}
 	} else {
 		_, err = pool.Exec(r.Context(), `
 			UPDATE email_svc.transformation_rules
@@ -577,11 +610,39 @@ func sanitizeTransformRuleAuditState(raw map[string]interface{}) map[string]inte
 		switch strings.ToLower(k) {
 		case "sftp_password", "api_auth_token":
 			continue
+		case "destinations":
+			out[k] = sanitizeDestinationsAudit(v)
 		default:
 			out[k] = v
 		}
 	}
 	return out
+}
+
+func sanitizeDestinationsAudit(v interface{}) interface{} {
+	arr, ok := v.([]interface{})
+	if !ok {
+		return v
+	}
+	clean := make([]interface{}, 0, len(arr))
+	for _, item := range arr {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			clean = append(clean, item)
+			continue
+		}
+		row := make(map[string]interface{}, len(m))
+		for dk, dv := range m {
+			switch strings.ToLower(dk) {
+			case "sftp_password", "api_auth_token":
+				continue
+			default:
+				row[dk] = dv
+			}
+		}
+		clean = append(clean, row)
+	}
+	return clean
 }
 
 func handleAuditLog(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {

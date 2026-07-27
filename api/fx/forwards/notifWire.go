@@ -12,18 +12,18 @@ import (
 )
 
 const (
-	routeForwardManualEntry           = "/fx/forwards/manual-entry"
-	routeForwardUploadMulti           = "/fx/forwards/upload-multi"
-	routeForwardBulkUpdateStatus      = "/fx/forwards/bulk-update-processing-status"
-	routeForwardBulkDelete            = "/fx/forwards/bulk-delete"
-	routeForwardUpdateFields          = "/fx/forwards/update-fields"
-	routeForwardManualConfirmation    = "/fx/forwards/manual-confirmation-entry"
-	routeForwardUploadConfirmations   = "/fx/forwards/upload-confirmations-multi"
-	routeForwardCancellationStatus    = "/fx/forwards/cancellation-status-request"
-	routeForwardRolloverStatus        = "/fx/forwards/rollover-status-request"
-	routeForwardCancelRollAction      = "/fx/forwards/cancel-roll/action"
-	routeForwardUploadMTM             = "/fx/forwards/upload-mtm"
-	routeForwardMTMUpdateStatus       = "/fx/forwards/mtm/update-processing-status"
+	routeForwardManualEntry         = "/fx/forwards/manual-entry"
+	routeForwardUploadMulti         = "/fx/forwards/upload-multi"
+	routeForwardBulkUpdateStatus    = "/fx/forwards/bulk-update-processing-status"
+	routeForwardBulkDelete          = "/fx/forwards/bulk-delete"
+	routeForwardUpdateFields        = "/fx/forwards/update-fields"
+	routeForwardManualConfirmation  = "/fx/forwards/manual-confirmation-entry"
+	routeForwardUploadConfirmations = "/fx/forwards/upload-confirmations-multi"
+	routeForwardCancellationStatus  = "/fx/forwards/cancellation-status-request"
+	routeForwardRolloverStatus      = "/fx/forwards/rollover-status-request"
+	routeForwardCancelRollAction    = "/fx/forwards/cancel-roll/action"
+	routeForwardUploadMTM           = "/fx/forwards/upload-mtm"
+	routeForwardMTMUpdateStatus     = "/fx/forwards/mtm/update-processing-status"
 )
 
 func triggerForwardBookingNotif(ctx context.Context, pool *pgxpool.Pool, route, action, requestedBy, processingStatus string, bookingIDs []string) {

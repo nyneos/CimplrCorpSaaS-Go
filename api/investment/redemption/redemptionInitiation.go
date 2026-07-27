@@ -17,6 +17,7 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,19 +28,19 @@ import (
 // ---------------------------
 
 type CreateRedemptionRequestSingle struct {
-	UserID              string  `json:"user_id"`
-	FolioID             string  `json:"folio_id,omitempty"`
-	DematID             string  `json:"demat_id,omitempty"`
-	SchemeID            string  `json:"scheme_id"`
-	EntityName          string  `json:"entity_name,omitempty"`
-	ByAmount            float64 `json:"by_amount,omitempty"`
-	ByUnits             float64 `json:"by_units,omitempty"`
-	Method              string  `json:"method,omitempty"`
-	TransactionDate     string  `json:"transaction_date,omitempty"`
-	EstimatedProceeds   float64 `json:"estimated_proceeds,omitempty"`
-	GainLoss            float64 `json:"gain_loss,omitempty"`
-	Status              string  `json:"status,omitempty"`
-	CreditBankAccount   string  `json:"credit_bank_account,omitempty"`
+	UserID            string  `json:"user_id"`
+	FolioID           string  `json:"folio_id,omitempty"`
+	DematID           string  `json:"demat_id,omitempty"`
+	SchemeID          string  `json:"scheme_id"`
+	EntityName        string  `json:"entity_name,omitempty"`
+	ByAmount          float64 `json:"by_amount,omitempty"`
+	ByUnits           float64 `json:"by_units,omitempty"`
+	Method            string  `json:"method,omitempty"`
+	TransactionDate   string  `json:"transaction_date,omitempty"`
+	EstimatedProceeds float64 `json:"estimated_proceeds,omitempty"`
+	GainLoss          float64 `json:"gain_loss,omitempty"`
+	Status            string  `json:"status,omitempty"`
+	CreditBankAccount string  `json:"credit_bank_account,omitempty"`
 }
 
 type UpdateRedemptionRequest struct {
@@ -149,16 +150,25 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if entityCode == "" {
 			entityCode = req.SchemeID
 		}
+		schemeName, amcName := lookupRedemptionSchemeEnrichment(ctx, pgxPool, req.SchemeID)
 		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateRedemptionSingle",
 			"/investment/redemption/initiation/create", mfSubRedemption, entityCode, userEmail,
-			map[string]interface{}{
-				"entity_name": req.EntityName,
-				"scheme_id":   req.SchemeID,
-				"folio_id":    req.FolioID,
-				"demat_id":    req.DematID,
-				"by_amount":   req.ByAmount,
-				"by_units":    req.ByUnits,
-			}) {
+			buildRedemptionInitiationPolicyFields(redemptionInitiationRow{
+				FolioID:           req.FolioID,
+				DematID:           req.DematID,
+				SchemeID:          req.SchemeID,
+				SchemeName:        schemeName,
+				AMCName:           amcName,
+				RequestedBy:       userEmail,
+				RequestedDate:     time.Now().Format("2006-01-02"),
+				TransactionDate:   req.TransactionDate,
+				ByAmount:          &req.ByAmount,
+				ByUnits:           &req.ByUnits,
+				Method:            "FIFO",
+				EntityName:        req.EntityName,
+				EstimatedProceeds: &req.EstimatedProceeds,
+				GainLoss:          &req.GainLoss,
+			})) {
 			return
 		}
 
@@ -421,16 +431,25 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if entityCode == "" {
 				entityCode = row.SchemeID
 			}
+			bulkSchemeName, bulkAMCName := lookupRedemptionSchemeEnrichment(ctx, pgxPool, row.SchemeID)
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "CreateRedemptionBulk",
 				"/investment/redemption/initiation/create-bulk", mfSubRedemption, entityCode, userEmail,
-				map[string]interface{}{
-					"entity_name": row.EntityName,
-					"scheme_id":   row.SchemeID,
-					"folio_id":    row.FolioID,
-					"demat_id":    row.DematID,
-					"by_amount":   row.ByAmount,
-					"by_units":    row.ByUnits,
-				}); !ok {
+				buildRedemptionInitiationPolicyFields(redemptionInitiationRow{
+					FolioID:           row.FolioID,
+					DematID:           row.DematID,
+					SchemeID:          row.SchemeID,
+					SchemeName:        bulkSchemeName,
+					AMCName:           bulkAMCName,
+					RequestedBy:       userEmail,
+					RequestedDate:     time.Now().Format("2006-01-02"),
+					TransactionDate:   row.TransactionDate,
+					ByAmount:          &row.ByAmount,
+					ByUnits:           &row.ByUnits,
+					Method:            "FIFO",
+					EntityName:        row.EntityName,
+					EstimatedProceeds: &row.EstimatedProceeds,
+					GainLoss:          &row.GainLoss,
+				})); !ok {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: pmsg})
 				continue
 			}
@@ -654,9 +673,15 @@ func UpdateRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		existingRow, err := loadRedemptionInitiationRow(ctx, pgxPool, req.RedemptionID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to load redemption for policy check: "+err.Error())
+			return
+		}
+		mergedRow := applyRedemptionInitiationEdits(existingRow, req.Fields)
 		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateRedemption",
 			"/investment/redemption/initiation/update", mfSubRedemption, req.RedemptionID, userEmail,
-			map[string]interface{}{"redemption_id": req.RedemptionID, "fields": req.Fields}) {
+			buildRedemptionInitiationPolicyFields(mergedRow)) {
 			return
 		}
 
@@ -784,9 +809,17 @@ func UpdateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			existingRow, err := loadRedemptionInitiationRow(ctx, pgxPool, row.RedemptionID)
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: "failed to load redemption for policy check: " + err.Error(),
+				})
+				continue
+			}
+			mergedRow := applyRedemptionInitiationEdits(existingRow, row.Fields)
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreEdit, "UpdateRedemptionBulk",
 				"/investment/redemption/initiation/update-bulk", mfSubRedemption, row.RedemptionID, userEmail,
-				map[string]interface{}{"redemption_id": row.RedemptionID, "fields": row.Fields}); !ok {
+				buildRedemptionInitiationPolicyFields(mergedRow)); !ok {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: pmsg,
 				})
@@ -915,9 +948,14 @@ func DeleteRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		for _, id := range req.RedemptionIDs {
+			row, rowErr := loadRedemptionInitiationRow(ctx, pgxPool, id)
+			if rowErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption for policy check: "+rowErr.Error())
+				return
+			}
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreDelete, "DeleteRedemption",
 				"/investment/redemption/initiation/delete", mfSubRedemption, id, requestedBy,
-				map[string]interface{}{"redemption_id": id, "reason": req.Reason}); !ok {
+				buildRedemptionInitiationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -981,9 +1019,14 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		for _, id := range req.RedemptionIDs {
+			row, rowErr := loadRedemptionInitiationRow(ctx, pgxPool, id)
+			if rowErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption for policy check: "+rowErr.Error())
+				return
+			}
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveRedemptionActions",
 				"/investment/redemption/initiation/approve", mfSubRedemption, id, checkerBy,
-				map[string]interface{}{"redemption_id": id, "comment": req.Comment}); !ok {
+				buildRedemptionInitiationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -1273,9 +1316,14 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, id := range req.RedemptionIDs {
+			row, rowErr := loadRedemptionInitiationRow(ctx, pgxPool, id)
+			if rowErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption for policy check: "+rowErr.Error())
+				return
+			}
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectRedemptionActions",
 				"/investment/redemption/initiation/reject", mfSubRedemption, id, checkerBy,
-				map[string]interface{}{"redemption_id": id, "comment": req.Comment}); !ok {
+				buildRedemptionInitiationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}

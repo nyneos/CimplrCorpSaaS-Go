@@ -204,15 +204,20 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "CreateSweepInitiation",
 				APIPath:             "/cash/sweep-initiation/create",
 				DefaultBlockMessage: "Sweep initiation create blocked by policy",
-				Fields: map[string]interface{}{
-					"entity_name":         req.EntityName,
-					"source_bank_account": req.SourceBankAccount,
-					"target_bank_account": req.TargetBankAccount,
-					"sweep_type":          sweepType,
-					"auto_create_sweep":   true,
-					"sweep_amount":        req.SweepAmount,
-					"buffer_amount":       req.BufferAmount,
-				},
+				Fields: buildSweepInitiationPolicyFields(sweepInitiationRow{
+					SweepID:                     "", // not yet created
+					EntityName:                  req.EntityName,
+					SourceBankAccount:           req.SourceBankAccount,
+					TargetBankAccount:           req.TargetBankAccount,
+					SweepType:                   sweepType,
+					BufferAmount:                req.BufferAmount,
+					SweepAmount:                 req.SweepAmount,
+					OverriddenAmount:            req.OverriddenAmount,
+					OverriddenExecutionTime:     req.OverriddenExecutionTime,
+					OverriddenSourceBankAccount: derefStr(req.OverriddenSourceBankAccount),
+					OverriddenTargetBankAccount: derefStr(req.OverriddenTargetBankAccount),
+					AutoCreateSweep:             true,
+				}),
 			}) {
 				return
 			}
@@ -395,28 +400,11 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
-			EventCode:           common.TriggerPreCreate,
-			ModuleCode:          common.ModuleCash,
-			SubModule:           "SWEEP_INITIATION",
-			EntityCode:          entityName,
-			ActorUserID:         req.UserID,
-			HandlerName:         "CreateSweepInitiation",
-			APIPath:             "/cash/sweep-initiation/create",
-			DefaultBlockMessage: "Sweep initiation create blocked by policy",
-			Fields: map[string]interface{}{
-				"sweep_id":            sweepID,
-				"entity_name":         entityName,
-				"source_bank_account": sourceAccount,
-				"target_bank_account": targetAccount,
-				"sweep_amount":        req.SweepAmount,
-				"buffer_amount":       req.BufferAmount,
-			},
-		}) {
-			return
-		}
-
-		// Fetch sweep configuration fields needed for duplicate detection
+		// Fetch sweep configuration fields needed for the policy check and for
+		// duplicate detection below (moved above the Enforce call so the
+		// policy check sees the sweep's real sweep_type/buffer_amount/
+		// sweep_amount instead of the create request's own, which are only
+		// meaningful for the auto-create branch above).
 		var sweepType, frequency, cfgEffectiveDate, executionTime string
 		var cfgBufferAmount, cfgSweepAmount sqlNullFloat
 		err = pgxPool.QueryRow(ctx, `
@@ -437,6 +425,33 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if cfgSweepAmount.Valid {
 			v := cfgSweepAmount.F
 			sweepPtr = &v
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "SWEEP_INITIATION",
+			EntityCode:          entityName,
+			ActorUserID:         req.UserID,
+			HandlerName:         "CreateSweepInitiation",
+			APIPath:             "/cash/sweep-initiation/create",
+			DefaultBlockMessage: "Sweep initiation create blocked by policy",
+			Fields: buildSweepInitiationPolicyFields(sweepInitiationRow{
+				SweepID:                     sweepID,
+				EntityName:                  entityName,
+				SourceBankAccount:           sourceAccount,
+				TargetBankAccount:           targetAccount,
+				SweepType:                   sweepType,
+				BufferAmount:                bufPtr,
+				SweepAmount:                 sweepPtr,
+				OverriddenAmount:            req.OverriddenAmount,
+				OverriddenExecutionTime:     req.OverriddenExecutionTime,
+				OverriddenSourceBankAccount: derefStr(req.OverriddenSourceBankAccount),
+				OverriddenTargetBankAccount: derefStr(req.OverriddenTargetBankAccount),
+				AutoCreateSweep:             false,
+			}),
+		}) {
+			return
 		}
 
 		// Insert initiation record (removed status and initiation_type, added overridden accounts)
@@ -1096,15 +1111,21 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, initiationID := range req.InitiationIDs {
+			policyRow, perr := loadSweepInitiationRow(ctx, pgxPool, initiationID)
+			if perr != nil {
+				api.RespondWithResult(w, false, "failed to fetch sweep initiation for policy check: "+perr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreApprove,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "SWEEP_INITIATION",
+				EntityCode:          policyRow.EntityName,
 				ActorUserID:         req.UserID,
 				HandlerName:         "BulkApproveSweepInitiations",
 				APIPath:             "/cash/sweep-initiation/bulk-approve",
 				DefaultBlockMessage: "Sweep initiation approve blocked by policy",
-				Fields:              map[string]interface{}{"initiation_id": initiationID},
+				Fields:              buildSweepInitiationPolicyFields(policyRow),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
@@ -1248,15 +1269,21 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, initiationID := range req.InitiationIDs {
+			policyRow, perr := loadSweepInitiationRow(ctx, pgxPool, initiationID)
+			if perr != nil {
+				api.RespondWithResult(w, false, "failed to fetch sweep initiation for policy check: "+perr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreReject,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "SWEEP_INITIATION",
+				EntityCode:          policyRow.EntityName,
 				ActorUserID:         req.UserID,
 				HandlerName:         "BulkRejectSweepInitiations",
 				APIPath:             "/cash/sweep-initiation/bulk-reject",
 				DefaultBlockMessage: "Sweep initiation reject blocked by policy",
-				Fields:              map[string]interface{}{"initiation_id": initiationID},
+				Fields:              buildSweepInitiationPolicyFields(policyRow),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
@@ -1384,15 +1411,21 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, initiationID := range req.InitiationIDs {
+			policyRow, perr := loadSweepInitiationRow(ctx, pgxPool, initiationID)
+			if perr != nil {
+				api.RespondWithResult(w, false, "failed to fetch sweep initiation for policy check: "+perr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "SWEEP_INITIATION",
+				EntityCode:          policyRow.EntityName,
 				ActorUserID:         req.UserID,
 				HandlerName:         "BulkDeleteSweepInitiations",
 				APIPath:             "/cash/sweep-initiation/bulk-delete",
 				DefaultBlockMessage: "Sweep initiation delete blocked by policy",
-				Fields:              map[string]interface{}{"initiation_id": initiationID},
+				Fields:              buildSweepInitiationPolicyFields(policyRow),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
@@ -1523,8 +1556,47 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		for i, item := range req.Initiations {
+		for _, item := range req.Initiations {
 			entityCode := strings.TrimSpace(item.EntityName)
+
+			policyRow := sweepInitiationRow{
+				SweepID:                     derefStr(item.SweepID),
+				EntityName:                  entityCode,
+				SourceBankAccount:           item.SourceBankAccount,
+				TargetBankAccount:           item.TargetBankAccount,
+				SweepType:                   strings.ToUpper(strings.TrimSpace(item.SweepType)),
+				BufferAmount:                item.BufferAmount,
+				SweepAmount:                 item.SweepAmount,
+				OverriddenAmount:            item.OverriddenAmount,
+				OverriddenExecutionTime:     item.OverriddenExecutionTime,
+				OverriddenSourceBankAccount: derefStr(item.OverriddenSourceBankAccount),
+				OverriddenTargetBankAccount: derefStr(item.OverriddenTargetBankAccount),
+				AutoCreateSweep:             item.SweepID == nil || *item.SweepID == "",
+			}
+			if policyRow.SweepType == "" {
+				policyRow.SweepType = "ZBA"
+			}
+			if !policyRow.AutoCreateSweep {
+				// existing sweep_id: pull authoritative values from the config
+				// row rather than the request's own (auto-create-only) fields.
+				var cfgEntity, cfgSource, cfgTarget, cfgType string
+				var cfgBuf, cfgSwAmt *float64
+				if qerr := pgxPool.QueryRow(ctx, `
+					SELECT COALESCE(entity_name,''), COALESCE(source_bank_account,''), COALESCE(target_bank_account,''),
+					       COALESCE(sweep_type,''), buffer_amount, sweep_amount
+					FROM cimplrcorpsaas.sweepconfiguration
+					WHERE sweep_id = $1 AND is_deleted = false
+				`, policyRow.SweepID).Scan(&cfgEntity, &cfgSource, &cfgTarget, &cfgType, &cfgBuf, &cfgSwAmt); qerr == nil {
+					policyRow.EntityName = cfgEntity
+					policyRow.SourceBankAccount = cfgSource
+					policyRow.TargetBankAccount = cfgTarget
+					policyRow.SweepType = cfgType
+					policyRow.BufferAmount = cfgBuf
+					policyRow.SweepAmount = cfgSwAmt
+					entityCode = cfgEntity
+				}
+			}
+
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreCreate,
 				ModuleCode:          common.ModuleCash,
@@ -1534,15 +1606,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkCreateSweepInitiation",
 				APIPath:             "/cash/sweep-initiation/bulk-create",
 				DefaultBlockMessage: "Sweep initiation create blocked by policy",
-				Fields: map[string]interface{}{
-					"entity_name":         entityCode,
-					"sweep_id":            item.SweepID,
-					"source_bank_account": item.SourceBankAccount,
-					"target_bank_account": item.TargetBankAccount,
-					"sweep_amount":        item.SweepAmount,
-					"buffer_amount":       item.BufferAmount,
-					"index":               i,
-				},
+				Fields:              buildSweepInitiationPolicyFields(policyRow),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
@@ -2488,17 +2552,51 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		currentRow, perr := loadSweepInitiationRow(ctx, pgxPool, req.InitiationID)
+		if perr != nil {
+			api.RespondWithResult(w, false, "failed to fetch sweep initiation for policy check: "+perr.Error())
+			return
+		}
+		// Build an edits map from whatever the caller actually set. Note:
+		// req can also carry Frequency/EffectiveDate/ExecutionTime, which the
+		// real UPDATE below applies to the parent sweepconfiguration row too
+		// — see the "flagged for reviewer" note in
+		// sweepInitiationPolicyFields.go's applySweepInitiationEdits doc
+		// comment for why those three are not represented here.
+		edits := map[string]interface{}{}
+		if req.OverriddenAmount != nil {
+			edits["overridden_amount"] = *req.OverriddenAmount
+		}
+		if req.OverriddenExecutionTime != nil {
+			edits["overridden_execution_time"] = *req.OverriddenExecutionTime
+		}
+		if req.OverriddenSourceBankAccount != nil {
+			edits["overridden_source_bank_account"] = *req.OverriddenSourceBankAccount
+		}
+		if req.OverriddenTargetBankAccount != nil {
+			edits["overridden_target_bank_account"] = *req.OverriddenTargetBankAccount
+		}
+		if req.SweepType != nil {
+			edits["sweep_type"] = *req.SweepType
+		}
+		if req.BufferAmount != nil {
+			edits["buffer_amount"] = *req.BufferAmount
+		}
+		if req.SweepAmount != nil {
+			edits["sweep_amount"] = *req.SweepAmount
+		}
+		updatedRow := applySweepInitiationEdits(currentRow, edits)
+
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "SWEEP_INITIATION",
+			EntityCode:          updatedRow.EntityName,
 			ActorUserID:         req.UserID,
 			HandlerName:         "UpdateSweepInitiation",
 			APIPath:             "/cash/sweep-initiation/update",
 			DefaultBlockMessage: "Sweep initiation update blocked by policy",
-			Fields: map[string]interface{}{
-				"initiation_id": req.InitiationID,
-			},
+			Fields:              buildSweepInitiationPolicyFields(updatedRow),
 		}) {
 			return
 		}

@@ -57,18 +57,20 @@ func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 func fundPlanAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:                "fund-planning",
-		AuditSource:           "FUND_PLANNING",
-		ParentIDField:         "plan_id",
-		FolderName:            additionalfiles.AdditionalFilesFolder(),
-		List:                  listFundPlanAdditionalFiles,
-		CreateReturning:       createFundPlanAdditionalFile,
-		GetOne:                getFundPlanAdditionalFile,
-		GetAnyFile:            getAnyFundPlanAdditionalFile,
-		GetMany:               getFundPlanAdditionalFiles,
-		SoftDelete:            deleteFundPlanAdditionalFile,
-		SoftDeleteTx:          deleteFundPlanAdditionalFileTx,
-		RecordMainUploadAudit: recordFundPlanMainUploadAudit,
+		Module:                  "fund-planning",
+		AuditSource:             "FUND_PLANNING",
+		ParentIDField:           "plan_id",
+		FolderName:              additionalfiles.AdditionalFilesFolder(),
+		PolicyModuleCode:        "CASH",
+		PolicySubModule:         "FUND_PLANNING",
+		List:                    listFundPlanAdditionalFiles,
+		CreateReturning:         createFundPlanAdditionalFile,
+		GetOne:                  getFundPlanAdditionalFile,
+		GetAnyFile:              getAnyFundPlanAdditionalFile,
+		GetMany:                 getFundPlanAdditionalFiles,
+		SoftDelete:              deleteFundPlanAdditionalFile,
+		SoftDeleteTx:            deleteFundPlanAdditionalFileTx,
+		RecordMainUploadAudit:   recordFundPlanMainUploadAudit,
 		RecordMainDownloadAudit: recordFundPlanMainDownloadAudit,
 	}
 }

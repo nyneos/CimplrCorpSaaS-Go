@@ -1094,11 +1094,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "CreateFundPlan",
 			APIPath:             "/cash/fund-planning/create",
 			DefaultBlockMessage: "Fund plan create blocked by policy",
-			Fields: map[string]interface{}{
-				"entity_name": req.EntityName,
-				"horizon":     req.Horizon,
-				"group_count": len(req.Groups),
-			},
+			Fields:              buildFundPlanningPolicyFields(fundPlanningRowFromCreateRequest(planID, req)),
 		}) {
 			return
 		}
@@ -1627,6 +1623,12 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		fundPlanRow, err := loadFundPlanningRow(ctx, pgxPool, req.PlanID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToGetGroups+err.Error())
+			return
+		}
+
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreApprove,
 			ModuleCode:          common.ModuleCash,
@@ -1635,7 +1637,7 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "BulkApproveFundPlans",
 			APIPath:             "/cash/fund-planning/bulk-approve",
 			DefaultBlockMessage: "Fund plan approve blocked by policy",
-			Fields:              map[string]interface{}{"plan_id": req.PlanID},
+			Fields:              buildFundPlanningPolicyFields(fundPlanRow),
 		}) {
 			return
 		}
@@ -1753,6 +1755,12 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		fundPlanRow, err := loadFundPlanningRow(ctx, pgxPool, req.PlanID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToGetGroups+err.Error())
+			return
+		}
+
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreReject,
 			ModuleCode:          common.ModuleCash,
@@ -1761,7 +1769,7 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "BulkRejectFundPlans",
 			APIPath:             "/cash/fund-planning/bulk-reject",
 			DefaultBlockMessage: "Fund plan reject blocked by policy",
-			Fields:              map[string]interface{}{"plan_id": req.PlanID},
+			Fields:              buildFundPlanningPolicyFields(fundPlanRow),
 		}) {
 			return
 		}
@@ -1879,6 +1887,12 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		fundPlanRow, err := loadFundPlanningRow(ctx, pgxPool, req.PlanID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToGetGroups+err.Error())
+			return
+		}
+
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreDelete,
 			ModuleCode:          common.ModuleCash,
@@ -1887,7 +1901,7 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "BulkRequestDeleteFundPlans",
 			APIPath:             "/cash/fund-planning/bulk-delete",
 			DefaultBlockMessage: "Fund plan delete blocked by policy",
-			Fields:              map[string]interface{}{"plan_id": req.PlanID},
+			Fields:              buildFundPlanningPolicyFields(fundPlanRow),
 		}) {
 			return
 		}

@@ -515,6 +515,29 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 			headerFields["value_date"] = val
 			delete(headerFields, "document_date")
 		}
+
+		creationRow, loadErr := LoadExposureCreationRow(ctx, pool, exposureHeaderID)
+		if loadErr != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to load exposure for policy check: "+loadErr.Error())
+			return
+		}
+		creationRow = ApplyExposureCreationEdits(creationRow, req.Fields)
+		creationRow.ApprovalStatus = constants.StatusPendingEditApproval
+		if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleFX,
+			SubModule:           "EXPOSURE_CREATION",
+			EntityCode:          entity,
+			ActorUserID:         req.UserID,
+			HandlerName:         "EditExposureHeadersLineItemsJoined",
+			APIPath:             "/fx/exposures/edit",
+			DefaultBlockMessage: "Exposure edit blocked by policy",
+			Fields:              BuildExposureCreationPolicyFields(creationRow),
+		}); !ok {
+			respondWithError(w, http.StatusForbidden, msg)
+			return
+		}
+
 		oldValues := auditutil.FetchRowSnapshotPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", exposureHeaderID)
 		// Update header if needed
 		if len(headerFields) > 0 {
@@ -792,6 +815,11 @@ func DeleteExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, id := range req.ExposureHeaderIds {
+			creationRow, err := LoadExposureCreationRow(ctx, pool, id)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleFX,
@@ -801,9 +829,7 @@ func DeleteExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "DeleteExposureHeaders",
 				APIPath:             "/fx/exposures/delete-multiple-headers",
 				DefaultBlockMessage: "Exposure delete blocked by policy",
-				Fields: map[string]interface{}{
-					"exposure_header_id": id,
-				},
+				Fields:              BuildExposureCreationPolicyFields(creationRow),
 			}); !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
@@ -878,6 +904,11 @@ func RejectMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, id := range req.ExposureHeaderIds {
+			creationRow, err := LoadExposureCreationRow(ctx, pool, id)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreReject,
 				ModuleCode:          common.ModuleFX,
@@ -887,9 +918,7 @@ func RejectMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "RejectMultipleExposureHeaders",
 				APIPath:             "/fx/exposures/reject-multiple-headers",
 				DefaultBlockMessage: "Exposure rejection blocked by policy",
-				Fields: map[string]interface{}{
-					"exposure_header_id": id,
-				},
+				Fields:              BuildExposureCreationPolicyFields(creationRow),
 			}); !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
@@ -990,6 +1019,11 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		approvalComment := strings.TrimSpace(req.ApprovalComment)
 
 		for _, id := range req.ExposureHeaderIds {
+			creationRow, err := LoadExposureCreationRow(ctx, pool, id)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreApprove,
 				ModuleCode:          common.ModuleFX,
@@ -999,9 +1033,7 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "ApproveMultipleExposureHeaders",
 				APIPath:             "/fx/exposures/approve-multiple-headers",
 				DefaultBlockMessage: "Exposure approval blocked by policy",
-				Fields: map[string]interface{}{
-					"exposure_header_id": id,
-				},
+				Fields:              BuildExposureCreationPolicyFields(creationRow),
 			}); !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return

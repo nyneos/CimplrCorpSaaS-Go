@@ -20,6 +20,7 @@ type testReq struct {
 	NullHandling   string            `json:"null_handling"`
 	AddlExpression string            `json:"addl_expression"`
 	ModuleCode     string            `json:"module_code"`
+	SubModule      string            `json:"sub_module"`
 	EventCode      string            `json:"event_code"`
 	EntityCode     string            `json:"entity_code"`
 	// PolicyName echoes the draft's own name back in results[] so the
@@ -65,13 +66,14 @@ func HandleTest(pool *pgxpool.Pool) http.HandlerFunc {
 
 		eventCode := strings.TrimSpace(req.EventCode)
 		moduleCode := strings.TrimSpace(req.ModuleCode)
+		subModule := strings.TrimSpace(req.SubModule)
 		entityCode := strings.TrimSpace(req.EntityCode)
 		if eventCode == "" {
 			eventCode = "TEST_HARNESS"
 		}
 
 		if moduleCode != "" && eventCode != "TEST_HARNESS" {
-			loaded, loadErr := runtime.LoadActivePolicySnapshots(r.Context(), pool, eventCode, moduleCode, entityCode)
+			loaded, loadErr := runtime.LoadActivePolicySnapshots(r.Context(), pool, eventCode, moduleCode, subModule, entityCode)
 			if loadErr != nil {
 				api.LogErrorForResponse(w, "policy test load related: %v", loadErr)
 			} else {
@@ -82,6 +84,7 @@ func HandleTest(pool *pgxpool.Pool) http.HandlerFunc {
 		checkRes, checkErr := runtime.RunCheck(r.Context(), pool, runtime.CheckRequest{
 			EventCode:   eventCode,
 			ModuleCode:  moduleCode,
+			SubModule:   subModule,
 			EntityCode:  entityCode,
 			HandlerName: "PolicyWorkbenchTest",
 			APIPath:     "/policy-engine/policies/test",
@@ -117,6 +120,8 @@ func HandleTest(pool *pgxpool.Pool) http.HandlerFunc {
 			"aggregated_action": checkRes.AggregatedAction,
 			"results":           enrichedResultsPayload(checkRes, policies, req.Variables),
 			"duration_ms":       checkRes.DurationMS,
+			"conflict_findings": conflictFindingsPayload(checkRes.ConflictReport),
+			"conflict_warnings": conflictWarningsPayload(checkRes.ConflictReport),
 		})
 	}
 }
@@ -216,6 +221,14 @@ func buildTestSnapshot(req testReq, rf ruleFields) map[string]interface{} {
 	}
 	if len(rf.CompBuckets) > 0 {
 		snap["comp_buckets"] = rf.CompBuckets
+	}
+	snap["comp_base"] = rf.CompBase
+	snap["comp_total_check_variable"] = rf.CompTotalCheckVariable
+	if rf.CompTotalCheckMin != nil {
+		snap["comp_total_check_min"] = *rf.CompTotalCheckMin
+	}
+	if rf.CompTotalCheckMax != nil {
+		snap["comp_total_check_max"] = *rf.CompTotalCheckMax
 	}
 	return snap
 }

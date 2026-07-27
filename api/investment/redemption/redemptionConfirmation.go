@@ -310,15 +310,29 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
+		status := "PENDING_CONFIRMATION"
+		if strings.TrimSpace(req.Status) != "" {
+			status = req.Status
+		}
+
 		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateRedemptionConfirmationSingle",
 			"/investment/redemption/confirmation/create", mfSubRedemptionConf, req.RedemptionID, userEmail,
-			map[string]interface{}{
-				"redemption_id":  req.RedemptionID,
-				"actual_nav":     req.ActualNAV,
-				"actual_units":   req.ActualUnits,
-				"gross_proceeds": req.GrossProceeds,
-				"net_credited":   req.NetCredited,
-			}) {
+			buildRedemptionConfirmationPolicyFields(redemptionConfirmationRow{
+				RedemptionID:                 req.RedemptionID,
+				ActualNAV:                    &req.ActualNAV,
+				ActualUnits:                  &req.ActualUnits,
+				GrossProceeds:                &req.GrossProceeds,
+				ExitLoad:                     &req.ExitLoad,
+				TDS:                          &req.TDS,
+				NetCredited:                  &req.NetCredited,
+				Status:                       status,
+				STTCharges:                   &req.STTCharges,
+				ResolutionVariance:           req.ResolutionVariance,
+				ResolutionComment:            req.ResolutionComment,
+				VarianceProceeds:             &req.VarianceProceeds,
+				FinalRealisedCapitalGainLoss: &req.FinalRealisedCapitalGainLoss,
+				UploadS3Key:                  uploadS3Key,
+			})) {
 			cleanupUpload()
 			return
 		}
@@ -354,11 +368,6 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot confirm %.2f units. Initiation has %.2f units, already confirmed %.2f units. Only %.2f units available.",
 				req.ActualUnits, initiationUnits, existingConfirmedUnits, initiationUnits-existingConfirmedUnits))
 			return
-		}
-
-		status := "PENDING_CONFIRMATION"
-		if strings.TrimSpace(req.Status) != "" {
-			status = req.Status
 		}
 
 		insertQ := `
@@ -498,15 +507,28 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 
+				bulkStatus := "PENDING_CONFIRMATION"
+				if strings.TrimSpace(row.Status) != "" {
+					bulkStatus = row.Status
+				}
+
 				if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "CreateRedemptionConfirmationBulk",
 					"/investment/redemption/confirmation/create-bulk", mfSubRedemptionConf, row.RedemptionID, userEmail,
-					map[string]interface{}{
-						"redemption_id":  row.RedemptionID,
-						"actual_nav":     row.ActualNAV,
-						"actual_units":   row.ActualUnits,
-						"gross_proceeds": row.GrossProceeds,
-						"net_credited":   row.NetCredited,
-					}); !ok {
+					buildRedemptionConfirmationPolicyFields(redemptionConfirmationRow{
+						RedemptionID:                 row.RedemptionID,
+						ActualNAV:                    &row.ActualNAV,
+						ActualUnits:                  &row.ActualUnits,
+						GrossProceeds:                &row.GrossProceeds,
+						ExitLoad:                     &row.ExitLoad,
+						TDS:                          &row.TDS,
+						NetCredited:                  &row.NetCredited,
+						Status:                       bulkStatus,
+						STTCharges:                   &row.STTCharges,
+						ResolutionVariance:           row.ResolutionVariance,
+						ResolutionComment:            row.ResolutionComment,
+						VarianceProceeds:             &row.VarianceProceeds,
+						FinalRealisedCapitalGainLoss: &row.FinalRealisedCapitalGainLoss,
+					})); !ok {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: pmsg})
 					return
 				}
@@ -541,11 +563,6 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 
-				status := "PENDING_CONFIRMATION"
-				if strings.TrimSpace(row.Status) != "" {
-					status = row.Status
-				}
-
 				var confirmID string
 				if err := tx.QueryRow(ctx, `
 					INSERT INTO investment.redemption_confirmation (
@@ -555,7 +572,7 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 					RETURNING redemption_confirm_id
 				`, row.RedemptionID, row.ActualNAV, row.ActualUnits, row.GrossProceeds,
-					row.ExitLoad, row.TDS, row.NetCredited, nullIfZeroFloat(row.STTCharges), row.ResolutionVariance, row.ResolutionComment, nullIfZeroFloat(row.VarianceProceeds), nullIfZeroFloat(row.FinalRealisedCapitalGainLoss), status).Scan(&confirmID); err != nil {
+					row.ExitLoad, row.TDS, row.NetCredited, nullIfZeroFloat(row.STTCharges), row.ResolutionVariance, row.ResolutionComment, nullIfZeroFloat(row.VarianceProceeds), nullIfZeroFloat(row.FinalRealisedCapitalGainLoss), bulkStatus).Scan(&confirmID); err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Insert failed: " + err.Error()})
 					return
 				}
@@ -626,9 +643,15 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		existingRow, err := loadRedemptionConfirmationRow(ctx, pgxPool, req.RedemptionConfirmID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to load redemption confirmation for policy check: "+err.Error())
+			return
+		}
+		mergedRow := applyRedemptionConfirmationEdits(existingRow, req.Fields)
 		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateRedemptionConfirmation",
 			"/investment/redemption/confirmation/update", mfSubRedemptionConf, req.RedemptionConfirmID, userEmail,
-			map[string]interface{}{"redemption_confirm_id": req.RedemptionConfirmID, "fields": req.Fields}) {
+			buildRedemptionConfirmationPolicyFields(mergedRow)) {
 			return
 		}
 
@@ -769,9 +792,17 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 
+				existingRow, err := loadRedemptionConfirmationRow(ctx, pgxPool, row.RedemptionConfirmID)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: "failed to load redemption confirmation for policy check: " + err.Error(),
+					})
+					return
+				}
+				mergedRow := applyRedemptionConfirmationEdits(existingRow, row.Fields)
 				if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreEdit, "UpdateRedemptionConfirmationBulk",
 					"/investment/redemption/confirmation/update-bulk", mfSubRedemptionConf, row.RedemptionConfirmID, userEmail,
-					map[string]interface{}{"redemption_confirm_id": row.RedemptionConfirmID, "fields": row.Fields}); !ok {
+					buildRedemptionConfirmationPolicyFields(mergedRow)); !ok {
 					results = append(results, map[string]interface{}{
 						constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: pmsg,
 					})
@@ -905,9 +936,14 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		for _, id := range req.RedemptionConfirmIDs {
+			row, rowErr := loadRedemptionConfirmationRow(ctx, pgxPool, id)
+			if rowErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption confirmation for policy check: "+rowErr.Error())
+				return
+			}
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreDelete, "DeleteRedemptionConfirmation",
 				"/investment/redemption/confirmation/delete", mfSubRedemptionConf, id, requestedBy,
-				map[string]interface{}{"redemption_confirm_id": id, "reason": req.Reason}); !ok {
+				buildRedemptionConfirmationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -976,9 +1012,14 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 
 		ctx := r.Context()
 		for _, id := range req.RedemptionConfirmIDs {
+			row, rowErr := loadRedemptionConfirmationRow(ctx, pgxPool, id)
+			if rowErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption confirmation for policy check: "+rowErr.Error())
+				return
+			}
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveRedemptionConfirmationActions",
 				"/investment/redemption/confirmation/approve", mfSubRedemptionConf, id, checkerBy,
-				map[string]interface{}{"redemption_confirm_id": id, "comment": req.Comment}); !ok {
+				buildRedemptionConfirmationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -1320,9 +1361,14 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 		}
 
 		for _, id := range req.RedemptionConfirmIDs {
+			row, rowErr := loadRedemptionConfirmationRow(ctx, pgxPool, id)
+			if rowErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption confirmation for policy check: "+rowErr.Error())
+				return
+			}
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectRedemptionConfirmationActions",
 				"/investment/redemption/confirmation/reject", mfSubRedemptionConf, id, checkerBy,
-				map[string]interface{}{"redemption_confirm_id": id, "comment": req.Comment}); !ok {
+				buildRedemptionConfirmationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -2051,9 +2097,14 @@ func ConfirmRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		for _, id := range req.RedemptionConfirmationIDs {
+			row, rowErr := loadRedemptionConfirmationRow(ctx, pgxPool, id)
+			if rowErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption confirmation for policy check: "+rowErr.Error())
+				return
+			}
 			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "ConfirmRedemption",
 				"/investment/redemption/confirmation/confirm", mfSubRedemptionConf, id, confirmedBy,
-				map[string]interface{}{"redemption_confirm_id": id}); !ok {
+				buildRedemptionConfirmationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}

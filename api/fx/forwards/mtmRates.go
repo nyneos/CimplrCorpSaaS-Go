@@ -859,10 +859,10 @@ func GetMTMData(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer rows.Close()
 		fieldDescs := rows.FieldDescriptions()
-	cols := make([]string, len(fieldDescs))
-	for i, fd := range fieldDescs {
-		cols[i] = fd.Name
-	}
+		cols := make([]string, len(fieldDescs))
+		for i, fd := range fieldDescs {
+			cols[i] = fd.Name
+		}
 		data := []map[string]interface{}{}
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))

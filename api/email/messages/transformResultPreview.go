@@ -11,7 +11,6 @@ import (
 
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/api/utils/s3storage"
-	"CimplrCorpSaas/internal/services/mailruntime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -83,7 +82,55 @@ func HandleTransformResultPreviewContent(pool *pgxpool.Pool) http.HandlerFunc {
 				label = filepath.Base(transformedKey)
 			}
 
-			if strings.EqualFold(destType, "LOCAL") && strings.TrimSpace(outputLocation) != "" {
+			// Prefer S3 whenever any delivery stored there (S3+API / S3+SFTP mixes).
+			s3FromDelivery := ""
+			s3NameFromDelivery := ""
+			drows, derr := pool.Query(r.Context(), `
+				SELECT COALESCE(transformed_s3_key, ''),
+				       COALESCE(output_location, ''),
+				       COALESCE(output_filename, '')
+				FROM email_svc.transformation_result_deliveries
+				WHERE result_id = $1::uuid
+				  AND UPPER(COALESCE(destination_type, '')) = 'S3'
+				  AND UPPER(COALESCE(status, 'SUCCESS')) = 'SUCCESS'
+				ORDER BY created_at ASC
+			`, resultID)
+			if derr == nil {
+				defer drows.Close()
+				for drows.Next() {
+					var key, loc, name string
+					if scanErr := drows.Scan(&key, &loc, &name); scanErr != nil {
+						continue
+					}
+					key = strings.TrimSpace(key)
+					if key == "" {
+						key = strings.TrimSpace(loc)
+					}
+					if key == "" {
+						continue
+					}
+					s3FromDelivery = key
+					s3NameFromDelivery = strings.TrimSpace(name)
+					break
+				}
+			}
+			if s3FromDelivery != "" {
+				transformedKey = s3FromDelivery
+				if s3NameFromDelivery != "" {
+					label = s3NameFromDelivery
+				} else {
+					label = filepath.Base(s3FromDelivery)
+				}
+			}
+
+			if strings.TrimSpace(transformedKey) != "" {
+				s3Key = transformedKey
+				raw, err = s3storage.GetObjectBytes(r.Context(), s3Key)
+				if err != nil {
+					emailcommon.RespondInternal(w, "Failed to read file: "+err.Error())
+					return
+				}
+			} else if strings.EqualFold(destType, "LOCAL") && strings.TrimSpace(outputLocation) != "" {
 				if !isUnderTransformedLocalBase(outputLocation) {
 					emailcommon.RespondBadRequest(w, "local file path is outside allowed directory")
 					return
@@ -93,36 +140,10 @@ func HandleTransformResultPreviewContent(pool *pgxpool.Pool) http.HandlerFunc {
 					emailcommon.RespondNotFound(w, "local file not found: "+err.Error())
 					return
 				}
-			} else if strings.EqualFold(destType, "API") && strings.TrimSpace(outputFilename) != "" {
-				rt := mailruntime.NewRuntime()
-				if !rt.Ready() {
-					emailcommon.RespondInternal(w, "email service not configured")
-					return
-				}
-				readOut, readErr := rt.ReadAPIInbox(r.Context(), mailruntime.ReadAPIInboxRequest{
-					Filename: outputFilename,
-					Folder:   apiInboxFolderFromLocation(outputLocation),
-				})
-				if readErr != nil {
-					emailcommon.RespondNotFound(w, "API inbox file not found: "+readErr.Error())
-					return
-				}
-				raw, err = base64.StdEncoding.DecodeString(readOut.ContentBase64)
-				if err != nil {
-					emailcommon.RespondInternal(w, "Failed to decode API inbox file: "+err.Error())
-					return
-				}
 			} else {
-				s3Key = transformedKey
-				if strings.TrimSpace(s3Key) == "" {
-					emailcommon.RespondNotFound(w, which+" file not available")
-					return
-				}
-				raw, err = s3storage.GetObjectBytes(r.Context(), s3Key)
-				if err != nil {
-					emailcommon.RespondInternal(w, "Failed to read file: "+err.Error())
-					return
-				}
+				// API / SFTP (and mixes without S3) are store-only — no preview bytes.
+				emailcommon.RespondNotFound(w, "preview not available for this destination (no S3 copy)")
+				return
 			}
 		} else {
 			if strings.TrimSpace(s3Key) == "" {
@@ -203,12 +224,4 @@ func HandleTransformResultPreviewContent(pool *pgxpool.Pool) http.HandlerFunc {
 			"byte_size":      len(raw),
 		})
 	}
-}
-
-func apiInboxFolderFromLocation(outputLocation string) string {
-	loc := strings.ToLower(strings.TrimSpace(outputLocation))
-	if strings.Contains(loc, "test-receive-2") {
-		return "api-inbox-2"
-	}
-	return "api-inbox"
 }

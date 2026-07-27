@@ -6,6 +6,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 	"encoding/json"
@@ -211,7 +213,7 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 					updated["header"] = rowMap
 				}
 				rows.Close()
-				if _, err := pool.Exec(ctx, "UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
+				if _, err := pool.Exec(ctx, "UPDATE exposure_bucketing SET status_bucketing = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
 					logger.LogError("update exposure_bucketing status after header update: exec failed: %v", err)
 				}
 			}
@@ -256,7 +258,7 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 				}
 				updated["lineItems"] = lineItems
 				rows.Close()
-				if _, err := pool.Exec(ctx, "UPDATE exposure_bucketing SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
+				if _, err := pool.Exec(ctx, "UPDATE exposure_bucketing SET status_bucketing = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
 					logger.LogError("update exposure_bucketing status after line items update: exec failed: %v", err)
 				}
 			}
@@ -271,6 +273,28 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 			}
 			req.BucketingFields = safeBucketingFields
 			req.BucketingFields["status_bucketing"] = constants.StatusPendingEditApproval
+
+			bucketingRow, err := loadExposureBucketingRow(ctx, pool, req.ExposureHeaderID)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to load exposure_bucketing row for policy check: "+err.Error())
+				return
+			}
+			bucketingRow = applyExposureBucketingEdits(bucketingRow, req.BucketingFields)
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreEdit,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "EXPOSURE_BUCKETING",
+				EntityCode:          req.ExposureHeaderID,
+				ActorUserID:         req.UserID,
+				HandlerName:         "UpdateExposureHeadersLineItemsBucketing",
+				APIPath:             "/fx/exposures/update-bucketing",
+				DefaultBlockMessage: "Exposure bucketing update blocked by policy",
+				Fields:              buildExposureBucketingPolicyFields(bucketingRow),
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
+
 			setParts := []string{}
 			values := []interface{}{}
 			i := 1
@@ -344,7 +368,7 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 				}
 				updated["hedging"] = hedging
 				rows.Close()
-				if _, err := pool.Exec(ctx, "UPDATE hedging_proposal SET status = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
+				if _, err := pool.Exec(ctx, "UPDATE hedging_proposal SET status_hedging = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
 					logger.LogError("update hedging_proposal status: exec failed: %v", err)
 				}
 			}
@@ -546,6 +570,28 @@ func DeleteBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			deleteComment = strings.TrimSpace(req.Reason)
 		}
 
+		for _, id := range req.ExposureHeaderIds {
+			bucketingRow, err := loadExposureBucketingRow(ctx, pool, id)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to load exposure_bucketing row for policy check: "+err.Error())
+				return
+			}
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "EXPOSURE_BUCKETING",
+				EntityCode:          id,
+				ActorUserID:         req.UserID,
+				HandlerName:         "DeleteBucketingStatus",
+				APIPath:             "/fx/exposures/bucketing/delete-multiple-headers",
+				DefaultBlockMessage: "Exposure bucketing delete blocked by policy",
+				Fields:              buildExposureBucketingPolicyFields(bucketingRow),
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
+		}
+
 		rows, err := pool.Query(ctx,
 			`WITH target AS (
 				SELECT b.exposure_header_id,
@@ -665,6 +711,28 @@ func ApproveBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		statusRows.Close()
+
+		for _, id := range req.ExposureHeaderIds {
+			bucketingRow, err := loadExposureBucketingRow(ctx, pool, id)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to load exposure_bucketing row for policy check: "+err.Error())
+				return
+			}
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreApprove,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "EXPOSURE_BUCKETING",
+				EntityCode:          id,
+				ActorUserID:         req.UserID,
+				HandlerName:         "ApproveBucketingStatus",
+				APIPath:             "/fx/exposures/approve-bucketing-status",
+				DefaultBlockMessage: "Exposure bucketing approval blocked by policy",
+				Fields:              buildExposureBucketingPolicyFields(bucketingRow),
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
+		}
 
 		approved := []map[string]interface{}{}
 		if len(toApprove) > 0 {
@@ -795,6 +863,28 @@ func RejectBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 		if updatedBy == "" {
 			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+
+		for _, id := range req.ExposureHeaderIds {
+			bucketingRow, err := loadExposureBucketingRow(ctx, pool, id)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to load exposure_bucketing row for policy check: "+err.Error())
+				return
+			}
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "EXPOSURE_BUCKETING",
+				EntityCode:          id,
+				ActorUserID:         req.UserID,
+				HandlerName:         "RejectBucketingStatus",
+				APIPath:             "/fx/exposures/reject-bucketing-status",
+				DefaultBlockMessage: "Exposure bucketing rejection blocked by policy",
+				Fields:              buildExposureBucketingPolicyFields(bucketingRow),
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
 		}
 
 		rows, err := pool.Query(ctx,

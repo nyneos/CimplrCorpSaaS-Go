@@ -142,14 +142,23 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		schedDraftRow := fdAccrualScheduleRow{
+			EntityID:              req.EntityID,
+			EntityName:            req.EntityName,
+			ScheduleFrequency:     req.ScheduleFrequency,
+			RunDayOfMonth:         req.RunDayOfMonth,
+			RunTime:               req.RunTime,
+			DefaultBankIDFilter:   req.DefaultBankIDFilter,
+			DefaultFDStatusFilter: req.DefaultFDStatusFilter,
+			DefaultRunMode:        req.DefaultRunMode,
+			AutoSubmitForApproval: req.AutoSubmitForApproval,
+			IsActive:              false,
+			AccrualGranularity:    req.AcrualGranularity,
+			PeriodCoverage:        req.PeriodCoverage,
+			CreatedBy:             userEmail,
+		}
 		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateScheduleConfig",
-			"/investment/fd/accrual/schedule/create", req.EntityID, userEmail, map[string]interface{}{
-				"entity_id":          req.EntityID,
-				"entity_code":        req.EntityID,
-				"schedule_frequency": req.ScheduleFrequency,
-				"period_coverage":    req.PeriodCoverage,
-				"default_run_mode":   req.DefaultRunMode,
-			}) {
+			"/investment/fd/accrual/schedule/create", req.EntityID, userEmail, buildFDAccrualSchedulePolicyFields(schedDraftRow)) {
 			return
 		}
 
@@ -307,12 +316,14 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		updateBaseRow, pfErr := loadFDAccrualScheduleRow(ctx, pgxPool, req.ConfigID)
+		if pfErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+pfErr.Error())
+			return
+		}
+		updatedRow := applyFDAccrualScheduleEdits(updateBaseRow, req.Fields)
 		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateScheduleConfig",
-			"/investment/fd/accrual/schedule/update", entityID, userEmail, map[string]interface{}{
-				"config_id":  req.ConfigID,
-				"entity_id":  entityID,
-				"entity_code": entityID,
-			}) {
+			"/investment/fd/accrual/schedule/update", entityID, userEmail, buildFDAccrualSchedulePolicyFields(updatedRow)) {
 			return
 		}
 
@@ -1065,12 +1076,13 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		deleteRow, pfErr := loadFDAccrualScheduleRow(ctx, pgxPool, req.ConfigID)
+		if pfErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+pfErr.Error())
+			return
+		}
 		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreDelete, "DeleteScheduleConfig",
-			"/investment/fd/accrual/schedule/delete", entityID, userEmail, map[string]interface{}{
-				"config_id":   req.ConfigID,
-				"entity_id":   entityID,
-				"entity_code": entityID,
-			}) {
+			"/investment/fd/accrual/schedule/delete", entityID, userEmail, buildFDAccrualSchedulePolicyFields(deleteRow)) {
 			return
 		}
 

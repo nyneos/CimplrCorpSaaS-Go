@@ -31,6 +31,9 @@ type createReq struct {
 	Applicability           string          `json:"applicability"`
 	CanOverride             bool            `json:"can_override"`
 	Modules                 []string        `json:"modules"`
+	// SubModules — domain_catalog sub_module codes (UI "forms"), e.g. FD_BOOKING.
+	// Empty = match any sub-module under the selected modules (legacy behaviour).
+	SubModules              []string        `json:"sub_modules"`
 	TriggerEvents           []string        `json:"trigger_events"`
 	EntitiesInclude         []string        `json:"entities_include"`
 	EntitiesExclude         []string        `json:"entities_exclude"`
@@ -86,8 +89,28 @@ func (req *createReq) validate() string {
 	if req.RuleType == "" {
 		return "rule_type is required"
 	}
+	if len(req.Modules) == 0 {
+		return "modules must include at least one module"
+	}
+	if len(req.SubModules) == 0 {
+		return "sub_modules must include at least one sub-module"
+	}
 	if len(req.TriggerEvents) == 0 {
 		return "trigger_events must include at least one event"
+	}
+	if strings.EqualFold(req.Applicability, "Entity") && len(req.EntitiesInclude) == 0 {
+		return "entities_include is required when applicability is Entity"
+	}
+	if req.NullHandling == "" {
+		req.NullHandling = "FailSafe"
+	}
+	switch req.NullHandling {
+	case "FailSafe", "PassThrough", "UseDefault":
+	default:
+		return "null_handling must be FailSafe, PassThrough, or UseDefault"
+	}
+	if req.NullHandling == "UseDefault" {
+		return "null_handling UseDefault is not supported yet — use FailSafe or PassThrough (missing vars ERROR→HardBlock otherwise)"
 	}
 	return ""
 }
@@ -112,6 +135,21 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		rf, err := parseRuleConfig(req.RuleType, req.Config)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
+			return
+		}
+		if err := validatePELOnWrite(r.Context(), req.RuleType, rf.FormulaExpression, rf.FormulaReturnType, req.AddlExpression); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
+			return
+		}
+		draft := draftConstraintFromReq(req, rf)
+		conflictReport, conflictErr := evaluateLaneConflicts(r.Context(), pool, req.Modules, req.SubModules, req.TriggerEvents, "", draft)
+		if conflictErr != nil {
+			api.LogErrorForResponse(w, "policy create conflict check: %v", conflictErr)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to validate policy conflicts", "POLICY_CONFLICT_CHECK_FAILED")
+			return
+		}
+		if conflictReport.HasImpossible() {
+			api.RespondEnvelopeFailureWithData(w, http.StatusBadRequest, conflictErrorMessage(conflictReport), "POLICY_CONFLICT_IMPOSSIBLE", conflictPayload(conflictReport))
 			return
 		}
 		if req.EffectiveStart == "" {
@@ -176,7 +214,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := insertPolicyChildren(r, tx, policyID, req.TriggerEvents, req.Modules, req.EntitiesInclude, req.EntitiesExclude, req.RuleType, rf); err != nil {
+		if err := insertPolicyChildren(r, tx, policyID, req.TriggerEvents, req.Modules, req.SubModules, req.EntitiesInclude, req.EntitiesExclude, req.RuleType, rf); err != nil {
 			api.LogErrorForResponse(w, "policy create children: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach triggers/modules/rule rows (unknown code?)", "POLICY_CREATE_FAILED")
 			return
@@ -199,6 +237,15 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create policy", "POLICY_CREATE_FAILED")
 			return
 		}
-		api.RespondEnvelopeSuccess(w, "Policy submitted for approval", map[string]string{"policy_id": policyID, "code": req.Code})
+		data := map[string]interface{}{
+			"policy_id":         policyID,
+			"code":              req.Code,
+			"conflict_warnings": warnPayload(conflictReport),
+		}
+		msg := "Policy submitted for approval"
+		if summary := formatConflictWarnSummary(conflictReport); summary != "" {
+			msg = msg + " — warning: " + summary
+		}
+		api.RespondEnvelopeSuccess(w, msg, data)
 	}
 }

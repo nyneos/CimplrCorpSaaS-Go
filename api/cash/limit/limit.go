@@ -147,11 +147,22 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "CreateBankLimit",
 			APIPath:             "/cash/limit/create",
 			DefaultBlockMessage: "Bank limit create blocked by policy",
-			Fields: map[string]interface{}{
-				"entity_name":   req.EntityName,
-				"bank_name":     req.BankName,
-				"currency_code": req.CurrencyCode,
-			},
+			Fields: buildBankLimitPolicyFields(bankLimitRow{
+				EntityName:         req.EntityName,
+				BankName:           req.BankName,
+				CoreLimitType:      coreLimitType,
+				LimitType:          req.LimitType,
+				LimitSubType:       req.LimitSubType,
+				SanctionDate:       req.SanctionDate,
+				EffectiveDate:      req.EffectiveDate,
+				CurrencyCode:       req.CurrencyCode,
+				SanctionedAmount:   req.SanctionedAmount,
+				FungibilityType:    fungibilityType,
+				FungibilityPct:     req.FungibilityPct,
+				SecurityType:       securityType,
+				Remarks:            req.Remarks,
+				InitialUtilization: req.InitialUtilization,
+			}),
 		}) {
 			return
 		}
@@ -410,12 +421,22 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					HandlerName:         "BulkCreateBankLimit",
 					APIPath:             "/cash/limit/bulk-create",
 					DefaultBlockMessage: "Bank limit create blocked by policy",
-					Fields: map[string]interface{}{
-						"entity_name":   lim.EntityName,
-						"bank_name":     lim.BankName,
-						"currency_code": lim.CurrencyCode,
-						"index":         vl.Index,
-					},
+					Fields: mergeIndexField(buildBankLimitPolicyFields(bankLimitRow{
+						EntityName:         lim.EntityName,
+						BankName:           lim.BankName,
+						CoreLimitType:      coreLimitType,
+						LimitType:          lim.LimitType,
+						LimitSubType:       lim.LimitSubType,
+						SanctionDate:       lim.SanctionDate,
+						EffectiveDate:      lim.EffectiveDate,
+						CurrencyCode:       lim.CurrencyCode,
+						SanctionedAmount:   lim.SanctionedAmount,
+						FungibilityType:    fungibilityType,
+						FungibilityPct:     lim.FungibilityPct,
+						SecurityType:       securityType,
+						Remarks:            lim.Remarks,
+						InitialUtilization: lim.InitialUtilization,
+					}), vl.Index),
 				}); !ok {
 					result["success"] = false
 					result["error"] = msg
@@ -543,6 +564,12 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		existingRow, err := loadBankLimitRow(ctx, pgxPool, req.LimitID)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to load bank limit for policy check: "+err.Error())
+			return
+		}
+		mergedRow := applyBankLimitEdits(existingRow, req.Fields)
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
@@ -551,10 +578,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "UpdateBankLimit",
 			APIPath:             "/cash/limit/update",
 			DefaultBlockMessage: "Bank limit update blocked by policy",
-			Fields: map[string]interface{}{
-				"limit_id": req.LimitID,
-				"fields":   req.Fields,
-			},
+			Fields:              buildBankLimitPolicyFields(mergedRow),
 		}) {
 			return
 		}
@@ -794,6 +818,14 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for i, limitID := range req.LimitIDs {
 			result := map[string]interface{}{"index": i, "limit_id": limitID}
 
+			policyRow, perr := loadBankLimitRow(ctx, pgxPool, limitID)
+			if perr != nil {
+				result["success"] = false
+				result["error"] = "failed to load bank limit for policy check: " + perr.Error()
+				results = append(results, result)
+				continue
+			}
+
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
@@ -802,7 +834,7 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "DeleteBankLimit",
 				APIPath:             "/cash/limit/delete",
 				DefaultBlockMessage: "Bank limit delete blocked by policy",
-				Fields:              map[string]interface{}{"limit_id": limitID},
+				Fields:              buildBankLimitPolicyFields(policyRow),
 			}); !ok {
 				result["success"] = false
 				result["error"] = msg
@@ -1138,6 +1170,11 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, limitID := range req.LimitIDs {
+			policyRow, perr := loadBankLimitRow(ctx, pgxPool, limitID)
+			if perr != nil {
+				api.RespondWithResult(w, false, "failed to load bank limit for policy check: "+perr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreApprove,
 				ModuleCode:          common.ModuleCash,
@@ -1146,7 +1183,7 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkApproveBankLimits",
 				APIPath:             "/cash/limit/approve",
 				DefaultBlockMessage: "Bank limit approve blocked by policy",
-				Fields:              map[string]interface{}{"limit_id": limitID},
+				Fields:              buildBankLimitPolicyFields(policyRow),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
@@ -1264,6 +1301,11 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, limitID := range req.LimitIDs {
+			policyRow, perr := loadBankLimitRow(ctx, pgxPool, limitID)
+			if perr != nil {
+				api.RespondWithResult(w, false, "failed to load bank limit for policy check: "+perr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreReject,
 				ModuleCode:          common.ModuleCash,
@@ -1272,7 +1314,7 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkRejectBankLimits",
 				APIPath:             "/cash/limit/reject",
 				DefaultBlockMessage: "Bank limit reject blocked by policy",
-				Fields:              map[string]interface{}{"limit_id": limitID},
+				Fields:              buildBankLimitPolicyFields(policyRow),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return

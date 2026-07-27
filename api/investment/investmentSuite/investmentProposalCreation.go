@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/investment/portfolio"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/validation"
 	"context"
@@ -217,6 +218,12 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if !mfEnforce(ctx, w, r, pool, common.TriggerPreCreate, "CreateInvestmentProposal",
+			"/investment/proposal/create", mfSubProposal, req.EntityName, userEmail,
+			buildMFProposalPolicyFields(mfProposalRowFromCreate(&req))) {
+			return
+		}
+
 		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction)
@@ -296,6 +303,12 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 		batchUUID, err := parseBatchID(req.BatchID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		if !mfEnforce(ctx, w, r, pool, common.TriggerPreEdit, "UpdateInvestmentProposal",
+			"/investment/proposal/update", mfSubProposal, req.ProposalID, userEmail,
+			buildMFProposalPolicyFields(mfProposalRowFromUpdate(&req))) {
 			return
 		}
 
@@ -461,6 +474,31 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			} else {
 				rejectedActions = append(rejectedActions, snap.actionID)
 				rejectedProposals = append(rejectedProposals, proposalID)
+			}
+		}
+
+		// Enforce policy before any audit/master mutation below. Approving a
+		// pending-delete proposal is still gated under TriggerPreApprove (same
+		// precedent as BulkApproveInitiationActions in investmentInitiation.go,
+		// which treats "approve" and "finalize pending delete via approve" as one
+		// event type since both happen on the /approve route/actor decision).
+		enforceIDs := append(append([]string{}, approvedProposals...), deletedProposals...)
+		enforceIDs = append(enforceIDs, rejectedProposals...)
+		enforceEvent := common.TriggerPreApprove
+		if action != constants.AuditActionApprove {
+			enforceEvent = common.TriggerPreReject
+		}
+		for _, proposalID := range enforceIDs {
+			proposalRow, loadErr := loadMFProposalRow(ctx, pool, proposalID)
+			if loadErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, proposalID+": load failed: "+loadErr.Error())
+				return
+			}
+			if ok, pmsg := mfEnforceInline(ctx, r, pool, enforceEvent, "bulkProposalDecision",
+				"/investment/proposal/"+strings.ToLower(action), mfSubProposal, proposalID, userEmail,
+				buildMFProposalPolicyFields(proposalRow)); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, proposalID+": "+pmsg)
+				return
 			}
 		}
 
@@ -666,6 +704,20 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 		if len(readyForDelete) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "no proposals eligible for delete submission")
 			return
+		}
+
+		for _, id := range readyForDelete {
+			proposalRow, loadErr := loadMFProposalRow(ctx, pool, id)
+			if loadErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
+				return
+			}
+			if ok, pmsg := mfEnforceInline(ctx, r, pool, common.TriggerPreDelete, "BulkDeleteProposals",
+				"/investment/proposal/delete-request", mfSubProposal, id, userEmail,
+				buildMFProposalPolicyFields(proposalRow)); !ok {
+				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+				return
+			}
 		}
 
 		if _, err := tx.Exec(ctx, `

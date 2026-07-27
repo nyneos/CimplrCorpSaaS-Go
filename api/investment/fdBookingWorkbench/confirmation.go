@@ -351,36 +351,6 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
-			EventCode:     common.TriggerPreCreate,
-			ModuleCode:    common.ModuleInvestmentFD,
-			SubModule:     "FD_CONFIRMATION",
-			EntityCode:    entityID,
-			ActorUserID:   userEmail,
-			HandlerName:   "CaptureConfirmation",
-			APIPath:       "/investment/fd/confirmation/capture",
-			DefaultBlockMessage: "FD confirmation blocked by policy",
-			Fields: map[string]interface{}{
-				"booking_id":                 req.BookingID,
-				"entity_id":                  entityID,
-				"entity_code":                entityID,
-				"confirmed_principal_amount": req.ConfirmedPrincipalAmount,
-				"actual_principal":           req.ConfirmedPrincipalAmount,
-				"confirmed_rate":             req.ConfirmedInterestRate,
-				"confirmed_interest_rate":    req.ConfirmedInterestRate,
-				"confirmed_tenor_days":       req.ConfirmedTenorDays,
-				"confirmed_tenor_months":     req.ConfirmedTenorMonths,
-				"confirmed_tenor_years":      req.ConfirmedTenorYears,
-				"confirmed_value_date":       req.ConfirmedValueDate,
-				"confirmed_maturity_date":    req.ConfirmedMaturityDate,
-				"confirmed_interest_type":    req.ConfirmedInterestType,
-				"bank_fd_reference":          bankFDRef,
-			},
-		}) {
-			cleanupUpload()
-			return
-		}
-
 		// ── No variance: insert confirmation and confirm directly ─────────────
 		receivedDate := req.ReceiptDate
 		if receivedDate == "" {
@@ -389,6 +359,48 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tenorType := strings.ToUpper(strings.TrimSpace(req.ConfirmedTenorType))
 		if tenorType == "" {
 			tenorType = "DAYS"
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleInvestmentFD,
+			SubModule:           "FD_CONFIRMATION",
+			EntityCode:          entityID,
+			ActorUserID:         userEmail,
+			HandlerName:         "CaptureConfirmation",
+			APIPath:             "/investment/fd/confirmation/capture",
+			DefaultBlockMessage: "FD confirmation blocked by policy",
+			Fields: buildFDConfirmationPolicyFields(fdConfirmationRow{
+				ConfirmationID:            existingConfirmationID,
+				BookingID:                 req.BookingID,
+				EntityID:                  entityID,
+				ConfirmationMode:          "MANUAL",
+				ConfirmationReceivedDate:  receivedDate,
+				BankFDRefNo:               bankFDRef,
+				BankReferenceNumber:       req.BankReferenceNumber,
+				ActualPrincipal:           req.ConfirmedPrincipalAmount,
+				ConfirmedRate:             req.ConfirmedInterestRate,
+				ActualStartDate:           req.ConfirmedValueDate,
+				ActualMaturityDate:        req.ConfirmedMaturityDate,
+				ConfirmedInterestTypeCode: req.ConfirmedInterestType,
+				ConfirmedFrequencyID:      req.ConfirmedFrequencyID,
+				TenorType:                 tenorType,
+				TenorDays:                 req.ConfirmedTenorDays,
+				TenorMonths:               req.ConfirmedTenorMonths,
+				TenorYears:                req.ConfirmedTenorYears,
+				PayoutFrequencyID:         req.PayoutFrequencyID,
+				AccrualFrequencyCode:      req.AccrualFrequencyCode,
+				ResetType:                 req.ResetType,
+				PenaltyID:                 req.PenaltyID,
+				FirstPayoutDate:           req.FirstPayoutDate,
+				FirstCapitalizationDate:   req.FirstCapitalizationDate,
+				PrematureClosureTerms:     req.PrematureClosureTerms,
+				ValueType:                 req.ValueType,
+				ConfirmationStatus:        "PENDING_APPROVAL",
+			}),
+		}) {
+			cleanupUpload()
+			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
@@ -880,29 +892,6 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
 			return
 		}
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
-			EventCode:           common.TriggerPreEdit,
-			ModuleCode:          common.ModuleInvestmentFD,
-			SubModule:           "FD_CONFIRMATION",
-			EntityCode:          entityID,
-			ActorUserID:         userEmail,
-			HandlerName:         "VarianceResolve",
-			APIPath:             "/investment/fd/confirmation/resolve-variance",
-			DefaultBlockMessage: "FD confirmation variance resolve blocked by policy",
-			Fields: map[string]interface{}{
-				"booking_id":                 bookingID,
-				"confirmation_id":            confirmationID,
-				"entity_id":                  entityID,
-				"entity_code":                entityID,
-				"confirmed_principal_amount": req.ConfirmedPrincipalAmount,
-				"confirmed_interest_rate":    req.ConfirmedInterestRate,
-				"confirmed_tenor_days":       req.ConfirmedTenorDays,
-				"confirmed_value_date":       req.ConfirmedValueDate,
-				"confirmed_maturity_date":    req.ConfirmedMaturityDate,
-			},
-		}) {
-			return
-		}
 		if errMsg := validation.ValidateFDMasterReferences(r.Context(), map[string]interface{}{
 			"interest_type":          req.ConfirmedInterestType,
 			"frequency_id":           firstNonEmpty(req.ConfirmedFrequencyID, bookedFrequencyID),
@@ -949,6 +938,44 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ExcludeConfirmationID: confirmationID,
 		}); msg != "" {
 			api.RespondWithError(w, status, msg)
+			return
+		}
+
+		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleInvestmentFD,
+			SubModule:           "FD_CONFIRMATION",
+			EntityCode:          entityID,
+			ActorUserID:         userEmail,
+			HandlerName:         "VarianceResolve",
+			APIPath:             "/investment/fd/confirmation/resolve-variance",
+			DefaultBlockMessage: "FD confirmation variance resolve blocked by policy",
+			Fields: buildFDConfirmationPolicyFields(fdConfirmationRow{
+				ConfirmationID:            confirmationID,
+				BookingID:                 bookingID,
+				EntityID:                  entityID,
+				ConfirmationMode:          "MANUAL",
+				ConfirmationReceivedDate:  req.ReceiptDate,
+				BankFDRefNo:               bankFDRef,
+				BankReferenceNumber:       req.BankReferenceNumber,
+				ActualPrincipal:           req.ConfirmedPrincipalAmount,
+				ConfirmedRate:             req.ConfirmedInterestRate,
+				ActualStartDate:           req.ConfirmedValueDate,
+				ActualMaturityDate:        req.ConfirmedMaturityDate,
+				ConfirmedInterestTypeCode: req.ConfirmedInterestType,
+				ConfirmedFrequencyID:      req.ConfirmedFrequencyID,
+				TenorType:                 tenorType,
+				TenorDays:                 req.ConfirmedTenorDays,
+				TenorMonths:               req.ConfirmedTenorMonths,
+				TenorYears:                req.ConfirmedTenorYears,
+				PayoutFrequencyID:         req.PayoutFrequencyID,
+				AccrualFrequencyCode:      req.AccrualFrequencyCode,
+				ResetType:                 req.ResetType,
+				PenaltyID:                 req.PenaltyID,
+				FirstPayoutDate:           req.FirstPayoutDate,
+				FirstCapitalizationDate:   req.FirstCapitalizationDate,
+			}),
+		}) {
 			return
 		}
 
@@ -1670,31 +1697,48 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Base from the FOR-UPDATE-locked old* values (guaranteed fresh within this
+		// transaction), overridden by the effective post-edit values already merged
+		// above, then req.Fields patch wins last for anything not tracked in eff*.
+		editedRow := fdConfirmationRow{
+			ConfirmationID:            req.ConfirmationID,
+			BookingID:                 bookingID,
+			EntityID:                  entityID,
+			BankFDRefNo:               oldBankFDRefNo,
+			BankReferenceNumber:       oldBankReferenceNumber,
+			ActualPrincipal:           effPrincipal,
+			ConfirmedRate:             effRate,
+			ActualStartDate:           effValueDate,
+			ActualMaturityDate:        effMaturityDate,
+			ConfirmedInterestTypeCode: effInterestTypeCode,
+			ConfirmedFrequencyID:      oldFrequencyID,
+			TenorType:                 oldTenorType,
+			TenorDays:                 effTenorDays,
+			TenorMonths:               effTenorMonths,
+			TenorYears:                effTenorYears,
+			PayoutFrequencyID:         oldPayoutFreqID,
+			AccrualFrequencyCode:      oldAccrualFreqCode,
+			ResetType:                 oldResetType,
+			PenaltyID:                 oldPenaltyID,
+			FirstPayoutDate:           oldFirstPayoutDate,
+			FirstCapitalizationDate:   oldFirstCapDate,
+			ConfirmationStatus:        currentStatus,
+		}
+		editedFields := buildFDConfirmationPolicyFields(editedRow)
+		for k, v := range req.Fields {
+			editedFields[k] = v
+		}
+
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
-			EventCode:     common.TriggerPreEdit,
-			ModuleCode:    common.ModuleInvestmentFD,
-			SubModule:     "FD_CONFIRMATION",
-			EntityCode:    entityID,
-			ActorUserID:   userEmail,
-			HandlerName:   "EditConfirmation",
-			APIPath:       "/investment/fd/confirmation/edit",
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleInvestmentFD,
+			SubModule:           "FD_CONFIRMATION",
+			EntityCode:          entityID,
+			ActorUserID:         userEmail,
+			HandlerName:         "EditConfirmation",
+			APIPath:             "/investment/fd/confirmation/edit",
 			DefaultBlockMessage: "FD confirmation edit blocked by policy",
-			Fields: map[string]interface{}{
-				"confirmation_id":            req.ConfirmationID,
-				"booking_id":                 bookingID,
-				"entity_id":                  entityID,
-				"entity_code":                entityID,
-				"confirmed_principal_amount": effPrincipal,
-				"actual_principal":           effPrincipal,
-				"confirmed_rate":             effRate,
-				"confirmed_interest_rate":    effRate,
-				"confirmed_tenor_days":       effTenorDays,
-				"confirmed_tenor_months":     effTenorMonths,
-				"confirmed_tenor_years":      effTenorYears,
-				"confirmed_value_date":       effValueDate,
-				"confirmed_maturity_date":    effMaturityDate,
-				"confirmed_interest_type":    effInterestTypeCode,
-			},
+			Fields:              editedFields,
 		}) {
 			return
 		}
@@ -1891,6 +1935,17 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Full canonical field set; fall back to the minimal status-query values
+		// above (which have their own schema-drift handling) if the fixed-column
+		// load fails for a legacy-schema deployment.
+		veRow, veLoadErr := loadFDConfirmationRow(ctx, pgxPool, req.ConfirmationID)
+		if veLoadErr != nil {
+			veRow = fdConfirmationRow{ConfirmationID: req.ConfirmationID, BookingID: bookingID, EntityID: entityID, ActualPrincipal: confPrincipal}
+		}
+		veRow.EntityID = entityID
+		veFields := buildFDConfirmationPolicyFields(veRow)
+		veFields["reason"] = req.Reason
+
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleInvestmentFD,
@@ -1900,14 +1955,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "VarianceException",
 			APIPath:             "/investment/fd/confirmation/variance-exception",
 			DefaultBlockMessage: "FD confirmation variance accept blocked by policy",
-			Fields: map[string]interface{}{
-				"booking_id":       bookingID,
-				"confirmation_id":  req.ConfirmationID,
-				"entity_id":        entityID,
-				"entity_code":      entityID,
-				"actual_principal": confPrincipal,
-				"reason":           req.Reason,
-			},
+			Fields:              veFields,
 		}) {
 			return
 		}
@@ -2108,46 +2156,21 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			var approveEntityID, approveBookingID string
-			var approvePrincipal, approveRate float64
-			var approveTenorDays int
-			var approveValueDate, approveMaturityDate string
-			if loadErr := pgxPool.QueryRow(ctx, `
-				SELECT COALESCE(b.entity_id,''), COALESCE(c.booking_id,''),
-				       COALESCE(c.actual_principal,0), COALESCE(c.confirmed_rate,0),
-				       COALESCE(c.tenor_days,0),
-				       COALESCE(TO_CHAR(c.actual_start_date,'YYYY-MM-DD'),''),
-				       COALESCE(TO_CHAR(c.actual_maturity_date,'YYYY-MM-DD'),'')
-				FROM investment.fd_confirmation c
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
-				WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false`, cID).
-				Scan(&approveEntityID, &approveBookingID, &approvePrincipal, &approveRate,
-					&approveTenorDays, &approveValueDate, &approveMaturityDate); loadErr != nil {
+			approveRow, loadErr := loadFDConfirmationRow(ctx, pgxPool, cID)
+			if loadErr != nil {
 				errors = append(errors, cID+": confirmation not found")
 				continue
 			}
 			if ok, pmsg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
-				EventCode:     common.TriggerPreApprove,
-				ModuleCode:    common.ModuleInvestmentFD,
-				SubModule:     "FD_CONFIRMATION",
-				EntityCode:    approveEntityID,
-				ActorUserID:   userEmail,
-				HandlerName:   "BulkApproveConfirmation",
-				APIPath:       "/investment/fd/confirmation/approve",
+				EventCode:           common.TriggerPreApprove,
+				ModuleCode:          common.ModuleInvestmentFD,
+				SubModule:           "FD_CONFIRMATION",
+				EntityCode:          approveRow.EntityID,
+				ActorUserID:         userEmail,
+				HandlerName:         "BulkApproveConfirmation",
+				APIPath:             "/investment/fd/confirmation/approve",
 				DefaultBlockMessage: "FD confirmation approval blocked by policy",
-				Fields: map[string]interface{}{
-					"confirmation_id":            cID,
-					"booking_id":                 approveBookingID,
-					"entity_id":                  approveEntityID,
-					"entity_code":                approveEntityID,
-					"confirmed_principal_amount": approvePrincipal,
-					"actual_principal":           approvePrincipal,
-					"confirmed_rate":             approveRate,
-					"confirmed_interest_rate":    approveRate,
-					"confirmed_tenor_days":       approveTenorDays,
-					"confirmed_value_date":       approveValueDate,
-					"confirmed_maturity_date":    approveMaturityDate,
-				},
+				Fields:              buildFDConfirmationPolicyFields(approveRow),
 			}); !ok {
 				errors = append(errors, cID+": "+pmsg)
 				continue
@@ -2358,46 +2381,21 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			var rejectEntityID, rejectBookingID string
-			var rejectPrincipal, rejectRate float64
-			var rejectTenorDays int
-			var rejectValueDate, rejectMaturityDate string
-			if loadErr := pgxPool.QueryRow(ctx, `
-				SELECT COALESCE(b.entity_id,''), COALESCE(c.booking_id,''),
-				       COALESCE(c.actual_principal,0), COALESCE(c.confirmed_rate,0),
-				       COALESCE(c.tenor_days,0),
-				       COALESCE(TO_CHAR(c.actual_start_date,'YYYY-MM-DD'),''),
-				       COALESCE(TO_CHAR(c.actual_maturity_date,'YYYY-MM-DD'),'')
-				FROM investment.fd_confirmation c
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
-				WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false`, cID).
-				Scan(&rejectEntityID, &rejectBookingID, &rejectPrincipal, &rejectRate,
-					&rejectTenorDays, &rejectValueDate, &rejectMaturityDate); loadErr != nil {
+			rejectRow, loadErr := loadFDConfirmationRow(ctx, pgxPool, cID)
+			if loadErr != nil {
 				errors = append(errors, cID+": confirmation not found")
 				continue
 			}
 			if ok, pmsg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
-				EventCode:     common.TriggerPreReject,
-				ModuleCode:    common.ModuleInvestmentFD,
-				SubModule:     "FD_CONFIRMATION",
-				EntityCode:    rejectEntityID,
-				ActorUserID:   userEmail,
-				HandlerName:   "BulkRejectConfirmation",
-				APIPath:       "/investment/fd/confirmation/reject",
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleInvestmentFD,
+				SubModule:           "FD_CONFIRMATION",
+				EntityCode:          rejectRow.EntityID,
+				ActorUserID:         userEmail,
+				HandlerName:         "BulkRejectConfirmation",
+				APIPath:             "/investment/fd/confirmation/reject",
 				DefaultBlockMessage: "FD confirmation rejection blocked by policy",
-				Fields: map[string]interface{}{
-					"confirmation_id":            cID,
-					"booking_id":                 rejectBookingID,
-					"entity_id":                  rejectEntityID,
-					"entity_code":                rejectEntityID,
-					"confirmed_principal_amount": rejectPrincipal,
-					"actual_principal":           rejectPrincipal,
-					"confirmed_rate":             rejectRate,
-					"confirmed_interest_rate":    rejectRate,
-					"confirmed_tenor_days":       rejectTenorDays,
-					"confirmed_value_date":       rejectValueDate,
-					"confirmed_maturity_date":    rejectMaturityDate,
-				},
+				Fields:              buildFDConfirmationPolicyFields(rejectRow),
 			}); !ok {
 				errors = append(errors, cID+": "+pmsg)
 				continue
@@ -3448,22 +3446,20 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var policyErrors []string
 		for _, cm := range validConfs {
+			deleteRow, loadErr := loadFDConfirmationRow(ctx, pgxPool, cm.id)
+			if loadErr != nil {
+				deleteRow = fdConfirmationRow{ConfirmationID: cm.id, EntityID: cm.entity, ActualPrincipal: cm.amount}
+			}
 			if ok, pmsg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
-				EventCode:     common.TriggerPreDelete,
-				ModuleCode:    common.ModuleInvestmentFD,
-				SubModule:     "FD_CONFIRMATION",
-				EntityCode:    cm.entity,
-				ActorUserID:   userEmail,
-				HandlerName:   "DeleteConfirmation",
-				APIPath:       "/investment/fd/confirmation/delete",
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleInvestmentFD,
+				SubModule:           "FD_CONFIRMATION",
+				EntityCode:          cm.entity,
+				ActorUserID:         userEmail,
+				HandlerName:         "DeleteConfirmation",
+				APIPath:             "/investment/fd/confirmation/delete",
 				DefaultBlockMessage: "FD confirmation delete blocked by policy",
-				Fields: map[string]interface{}{
-					"confirmation_id":            cm.id,
-					"entity_id":                  cm.entity,
-					"entity_code":                cm.entity,
-					"confirmed_principal_amount": cm.amount,
-					"actual_principal":           cm.amount,
-				},
+				Fields:              buildFDConfirmationPolicyFields(deleteRow),
 			}); !ok {
 				policyErrors = append(policyErrors, cm.id+": "+pmsg)
 			}
@@ -3507,7 +3503,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}()
 				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer bgCancel()
+				defer bgCancel()
 				// Cancel any in-flight approval chain before submitting DELETE
 				if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", cID, uEmail); err != nil {
 					api.LogError("[FDBooking] CancelPendingInstances(DELETE) failed for confirmation %s: %v", cID, err)

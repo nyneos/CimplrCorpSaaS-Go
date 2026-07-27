@@ -93,19 +93,8 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			req.SourceSystem, req.CanonicalRef, req.UserAlias, req.Nullable, req.Status, actor, req.VariableID,
 		)
 		if err != nil {
-			api.LogErrorForResponse(w, "cdm update exec: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update CDM variable", "CDM_UPDATE_FAILED")
+			respondCDMUpdateError(w, "exec", err)
 			return
-		}
-
-		if req.UserAlias != "" {
-			_, _ = tx.Exec(r.Context(), `
-				INSERT INTO policyengine_svc.cdm_variable_alias (variable_id, alias_name, created_by)
-				SELECT $1::uuid, $2, $3
-				WHERE NOT EXISTS (
-					SELECT 1 FROM policyengine_svc.cdm_variable_alias
-					WHERE is_deleted = false AND alias_name = $2
-				)`, req.VariableID, req.UserAlias, actor)
 		}
 
 		_, err = tx.Exec(r.Context(), `
@@ -129,8 +118,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			old.Nullable, req.Nullable, old.Status, req.Status,
 		)
 		if err != nil {
-			api.LogErrorForResponse(w, "cdm update audit: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit CDM update", "CDM_UPDATE_FAILED")
+			respondCDMUpdateError(w, "audit", err)
 			return
 		}
 		if err := tx.Commit(r.Context()); err != nil {

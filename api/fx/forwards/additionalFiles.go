@@ -63,18 +63,18 @@ func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 func forwardAdditionalFilesConfig() additionalfiles.Config {
 	return withForwardCrossStage(additionalfiles.Config{
-		Module:                "fx-forward",
-		AuditSource:           "FX_FORWARD",
-		AuditTableName:        fxAdditionalFileAuditTable,
-		ParentIDField:         "system_transaction_id",
-		List:                  listForwardAdditionalFiles,
-		CreateReturning:       createForwardAdditionalFile,
-		GetOne:                getForwardAdditionalFile,
-		GetAnyFile:            getAnyForwardAdditionalFile,
-		GetMany:               getForwardAdditionalFiles,
-		SoftDelete:            deleteForwardAdditionalFile,
-		SoftDeleteTx:          deleteForwardAdditionalFileTx,
-		RecordMainUploadAudit: recordForwardMainUploadAudit,
+		Module:                  "fx-forward",
+		AuditSource:             "FX_FORWARD",
+		AuditTableName:          fxAdditionalFileAuditTable,
+		ParentIDField:           "system_transaction_id",
+		List:                    listForwardAdditionalFiles,
+		CreateReturning:         createForwardAdditionalFile,
+		GetOne:                  getForwardAdditionalFile,
+		GetAnyFile:              getAnyForwardAdditionalFile,
+		GetMany:                 getForwardAdditionalFiles,
+		SoftDelete:              deleteForwardAdditionalFile,
+		SoftDeleteTx:            deleteForwardAdditionalFileTx,
+		RecordMainUploadAudit:   recordForwardMainUploadAudit,
 		RecordMainDownloadAudit: recordForwardMainDownloadAudit,
 	})
 }

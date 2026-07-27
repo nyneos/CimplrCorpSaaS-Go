@@ -139,47 +139,88 @@ func EnforceFDConfirmationPolicy(
 }
 
 // loadFDBookingCDMFields loads a booking row into a field map for CDM mapping.
+// Covers the full real column set on fd_booking_request so Approve/Reject/Delete
+// see the same field universe as Create/Update, not just the original curated subset.
 func loadFDBookingCDMFields(ctx context.Context, pool *pgxpool.Pool, bookingID string) (map[string]interface{}, string, error) {
 	var (
-		entityID, bankID, interestType string
-		principal, rate                float64
-		tenorDays, tenorMonths         int
-		valueDate, maturity, startDate string
-		requestedAt                    interface{}
+		entityID, entityName, bankID, bankName, interestTypeCode, interestTypeID string
+		principal, rate                                                          float64
+		tenorDays, tenorMonths, tenureYears                                      int
+		valueDate, maturity, startDate, tenorType, valueType                     string
+		frequencyID, payoutFrequencyID, accrualFrequencyCode, resetType          string
+		dayCountCode, tdsPlanID, bankConfigID                                    string
+		sourceAccountID, sourceAccountNumber, productCode                        string
+		bookingRemarks, bookingStatus, offerValidTill                            string
+		autoRenewal                                                              bool
+		requestedAt                                                              interface{}
 	)
 	err := pool.QueryRow(ctx, `
-		SELECT COALESCE(entity_id,''), COALESCE(bank_id,''),
+		SELECT COALESCE(entity_id,''), COALESCE(entity_name,''),
+		       COALESCE(bank_id,''), COALESCE(bank_name,''),
 		       COALESCE(principal_amount,0), COALESCE(interest_rate,0),
-		       COALESCE(interest_type_code,''),
-		       COALESCE(tenure_days,0), COALESCE(tenure_months,0),
+		       COALESCE(interest_type_code,''), COALESCE(interest_type_id,''),
+		       COALESCE(tenure_days,0), COALESCE(tenure_months,0), COALESCE(tenure_years,0),
 		       COALESCE(TO_CHAR(value_date,'YYYY-MM-DD'),''),
 		       COALESCE(TO_CHAR(expected_maturity_date,'YYYY-MM-DD'),''),
 		       COALESCE(TO_CHAR(expected_start_date,'YYYY-MM-DD'),''),
+		       COALESCE(tenor_type,''), COALESCE(value_type,''),
+		       COALESCE(frequency_id,''), COALESCE(payout_frequency_id,''),
+		       COALESCE(accrual_frequency_code,''), COALESCE(reset_type,''),
+		       COALESCE(day_count_code,''), COALESCE(tds_plan_id,''), COALESCE(bank_config_id,''),
+		       COALESCE(source_account_id,''), COALESCE(source_account_number,''), COALESCE(product_code,''),
+		       COALESCE(booking_remarks,''), COALESCE(booking_status,''), COALESCE(TO_CHAR(offer_valid_till,'YYYY-MM-DD'),''),
+		       COALESCE(auto_renewal,false),
 		       requested_at
 		FROM investment.fd_booking_request
 		WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false`, bookingID).Scan(
-		&entityID, &bankID, &principal, &rate, &interestType,
-		&tenorDays, &tenorMonths, &valueDate, &maturity, &startDate, &requestedAt,
+		&entityID, &entityName, &bankID, &bankName, &principal, &rate,
+		&interestTypeCode, &interestTypeID, &tenorDays, &tenorMonths, &tenureYears,
+		&valueDate, &maturity, &startDate, &tenorType, &valueType,
+		&frequencyID, &payoutFrequencyID, &accrualFrequencyCode, &resetType,
+		&dayCountCode, &tdsPlanID, &bankConfigID,
+		&sourceAccountID, &sourceAccountNumber, &productCode,
+		&bookingRemarks, &bookingStatus, &offerValidTill,
+		&autoRenewal, &requestedAt,
 	)
 	if err != nil {
 		return nil, "", fmt.Errorf("load booking for policy: %w", err)
 	}
 	fields := map[string]interface{}{
-		"booking_id":          bookingID,
-		"entity_id":           entityID,
-		"entity_code":         entityID,
-		"bank_id":             bankID,
-		"principal_amount":    principal,
-		"interest_rate":       rate,
-		"interest_type_code":  interestType,
-		"tenor_days":          tenorDays,
-		"tenure_days":         tenorDays,
-		"tenor_months":        tenorMonths,
-		"tenure_months":       tenorMonths,
-		"value_date":          valueDate,
-		"maturity_date":       maturity,
-		"expected_start_date": startDate,
-		"requested_at":        requestedAt,
+		"booking_id":             bookingID,
+		"entity_id":              entityID,
+		"entity_code":            entityID,
+		"entity_name":            entityName,
+		"bank_id":                bankID,
+		"bank_name":              bankName,
+		"principal_amount":       principal,
+		"interest_rate":          rate,
+		"interest_type_code":     interestTypeCode,
+		"interest_type_id":       interestTypeID,
+		"tenor_days":             tenorDays,
+		"tenure_days":            tenorDays,
+		"tenor_months":           tenorMonths,
+		"tenure_months":          tenorMonths,
+		"tenure_years":           tenureYears,
+		"tenor_type":             tenorType,
+		"value_date":             valueDate,
+		"maturity_date":          maturity,
+		"expected_start_date":    startDate,
+		"value_type":             valueType,
+		"frequency_id":           frequencyID,
+		"payout_frequency_id":    payoutFrequencyID,
+		"accrual_frequency_code": accrualFrequencyCode,
+		"reset_type":             resetType,
+		"day_count_code":         dayCountCode,
+		"tds_plan_id":            tdsPlanID,
+		"bank_config_id":         bankConfigID,
+		"source_account_id":      sourceAccountID,
+		"source_account_number":  sourceAccountNumber,
+		"product_code":           productCode,
+		"booking_remarks":        bookingRemarks,
+		"booking_status":         bookingStatus,
+		"offer_valid_till":       offerValidTill,
+		"auto_renewal":           autoRenewal,
+		"requested_at":           requestedAt,
 	}
 	return fields, entityID, nil
 }

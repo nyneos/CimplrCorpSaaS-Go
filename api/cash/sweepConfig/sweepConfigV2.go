@@ -111,15 +111,20 @@ func CreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "CreateSweepConfigurationV2",
 			APIPath:             "/cash/sweep-config-v2/create",
 			DefaultBlockMessage: "Sweep configuration create blocked by policy",
-			Fields: map[string]interface{}{
-				"entity_name":           req.EntityName,
-				"source_bank_name":      req.SourceBankName,
-				"source_bank_account":   req.SourceBankAccount,
-				"target_bank_name":      req.TargetBankName,
-				"target_bank_account":   req.TargetBankAccount,
-				"sweep_type":            req.SweepType,
-				"frequency":             req.Frequency,
-			},
+			Fields: buildSweepConfigPolicyFields(sweepConfigRow{
+				EntityName:         req.EntityName,
+				SourceBankName:     req.SourceBankName,
+				SourceBankAccount:  req.SourceBankAccount,
+				TargetBankName:     req.TargetBankName,
+				TargetBankAccount:  req.TargetBankAccount,
+				SweepType:          sweepTypeUpper,
+				Frequency:          frequencyUpper,
+				EffectiveDate:      req.EffectiveDate,
+				ExecutionTime:      req.ExecutionTime,
+				BufferAmount:       req.BufferAmount,
+				SweepAmount:        req.SweepAmount,
+				RequiresInitiation: req.RequiresInitiation == nil || *req.RequiresInitiation,
+			}),
 		}) {
 			return
 		}
@@ -275,13 +280,20 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkCreateSweepConfigurationV2",
 				APIPath:             "/cash/sweep-config-v2/bulk-create",
 				DefaultBlockMessage: "Sweep configuration create blocked by policy",
-				Fields: map[string]interface{}{
-					"entity_name":         cfg.EntityName,
-					"source_bank_account": cfg.SourceBankAccount,
-					"target_bank_account": cfg.TargetBankAccount,
-					"sweep_type":          cfg.SweepType,
-					"frequency":           cfg.Frequency,
-				},
+				Fields: buildSweepConfigPolicyFields(sweepConfigRow{
+					EntityName:         cfg.EntityName,
+					SourceBankName:     cfg.SourceBankName,
+					SourceBankAccount:  cfg.SourceBankAccount,
+					TargetBankName:     cfg.TargetBankName,
+					TargetBankAccount:  cfg.TargetBankAccount,
+					SweepType:          sweepTypeUpper,
+					Frequency:          frequencyUpper,
+					EffectiveDate:      cfg.EffectiveDate,
+					ExecutionTime:      cfg.ExecutionTime,
+					BufferAmount:       cfg.BufferAmount,
+					SweepAmount:        cfg.SweepAmount,
+					RequiresInitiation: cfg.RequiresInitiation == nil || *cfg.RequiresInitiation,
+				}),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
@@ -391,18 +403,23 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		currentRow, err := loadSweepConfigRow(ctx, pgxPool, req.SweepID)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to fetch existing sweep config for policy check: "+err.Error())
+			return
+		}
+		updatedRow := applySweepConfigEdits(currentRow, req.Fields)
+
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "SWEEP_CONFIG",
+			EntityCode:          updatedRow.EntityName,
 			ActorUserID:         req.UserID,
 			HandlerName:         "UpdateSweepConfigurationV2",
 			APIPath:             "/cash/sweep-config-v2/update",
 			DefaultBlockMessage: "Sweep configuration update blocked by policy",
-			Fields: map[string]interface{}{
-				"sweep_id": req.SweepID,
-				"fields":   req.Fields,
-			},
+			Fields:              buildSweepConfigPolicyFields(updatedRow),
 		}) {
 			return
 		}
@@ -1024,15 +1041,21 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, sweepID := range req.SweepIDs {
+			policyRow, perr := loadSweepConfigRow(ctx, pgxPool, sweepID)
+			if perr != nil {
+				api.RespondWithResult(w, false, "failed to fetch sweep config for policy check: "+perr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreApprove,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "SWEEP_CONFIG",
+				EntityCode:          policyRow.EntityName,
 				ActorUserID:         req.UserID,
 				HandlerName:         "BulkApproveSweepConfigurationsV2",
 				APIPath:             "/cash/sweep-config-v2/bulk-approve",
 				DefaultBlockMessage: "Sweep configuration approve blocked by policy",
-				Fields:              map[string]interface{}{"sweep_id": sweepID},
+				Fields:              buildSweepConfigPolicyFields(policyRow),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
@@ -1165,15 +1188,21 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, sweepID := range req.SweepIDs {
+			policyRow, perr := loadSweepConfigRow(ctx, pgxPool, sweepID)
+			if perr != nil {
+				api.RespondWithResult(w, false, "failed to fetch sweep config for policy check: "+perr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreReject,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "SWEEP_CONFIG",
+				EntityCode:          policyRow.EntityName,
 				ActorUserID:         req.UserID,
 				HandlerName:         "BulkRejectSweepConfigurationsV2",
 				APIPath:             "/cash/sweep-config-v2/bulk-reject",
 				DefaultBlockMessage: "Sweep configuration reject blocked by policy",
-				Fields:              map[string]interface{}{"sweep_id": sweepID},
+				Fields:              buildSweepConfigPolicyFields(policyRow),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
@@ -1247,15 +1276,21 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 		}
 
 		for _, sweepID := range req.SweepIDs {
+			policyRow, perr := loadSweepConfigRow(ctx, pgxPool, sweepID)
+			if perr != nil {
+				api.RespondWithResult(w, false, "failed to fetch sweep config for policy check: "+perr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "SWEEP_CONFIG",
+				EntityCode:          policyRow.EntityName,
 				ActorUserID:         req.UserID,
 				HandlerName:         "BulkRequestDeleteSweepConfigurationsV2",
 				APIPath:             "/cash/sweep-config-v2/bulk-delete",
 				DefaultBlockMessage: "Sweep configuration delete blocked by policy",
-				Fields:              map[string]interface{}{"sweep_id": sweepID},
+				Fields:              buildSweepConfigPolicyFields(policyRow),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return

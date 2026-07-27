@@ -13,6 +13,7 @@ import (
 const (
 	mfSubInitiation   = "MF_INITIATION"
 	mfSubConfirmation = "MF_CONFIRMATION"
+	mfSubProposal     = "MF_PROPOSAL"
 )
 
 func mfEnforce(

@@ -55,18 +55,18 @@ func RejectMTMAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 func mtmAdditionalFilesConfig() additionalfiles.Config {
 	return withForwardCrossStage(additionalfiles.Config{
-		Module:                "fx-mtm",
-		AuditSource:           "FX_FORWARD_MTM",
-		AuditTableName:        fxAdditionalFileAuditTable,
-		ParentIDField:         "mtm_id",
-		List:                  listMTMAdditionalFiles,
-		CreateReturning:       createMTMAdditionalFile,
-		GetOne:                getMTMAdditionalFile,
-		GetAnyFile:            getAnyMTMAdditionalFile,
-		GetMany:               getMTMAdditionalFiles,
-		SoftDelete:            deleteMTMAdditionalFile,
-		SoftDeleteTx:          deleteMTMAdditionalFileTx,
-		RecordMainUploadAudit: recordMTMMainUploadAudit,
+		Module:                  "fx-mtm",
+		AuditSource:             "FX_FORWARD_MTM",
+		AuditTableName:          fxAdditionalFileAuditTable,
+		ParentIDField:           "mtm_id",
+		List:                    listMTMAdditionalFiles,
+		CreateReturning:         createMTMAdditionalFile,
+		GetOne:                  getMTMAdditionalFile,
+		GetAnyFile:              getAnyMTMAdditionalFile,
+		GetMany:                 getMTMAdditionalFiles,
+		SoftDelete:              deleteMTMAdditionalFile,
+		SoftDeleteTx:            deleteMTMAdditionalFileTx,
+		RecordMainUploadAudit:   recordMTMMainUploadAudit,
 		RecordMainDownloadAudit: recordMTMMainDownloadAudit,
 	})
 }

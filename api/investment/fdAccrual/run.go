@@ -192,17 +192,27 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			input.FinancialPeriod = buildAccrualPeriod(input.AccrualPeriodStart)
 		}
 
+		draftRow := fdAccrualRow{
+			EntityID:           req.EntityID,
+			EntityName:         req.EntityName,
+			RunType:            req.RunType,
+			RunMode:            req.RunMode,
+			RunStatus:          "DRAFT",
+			BankIDFilter:       req.BankIDFilter,
+			FDStatusFilter:     req.FDStatusFilter,
+			FDInclusionMethod:  req.FDInclusionMethod,
+			AccrualPeriodStart: req.AccrualPeriodStart,
+			AccrualPeriodEnd:   req.AccrualPeriodEnd,
+			FinancialPeriod:    input.FinancialPeriod,
+			AccrualGranularity: req.AcrualGranularity,
+			DayCountConvention: req.DayCountConvention,
+			RoundingRule:       req.RoundingRule,
+			PrecisionDecimals:  req.PrecisionDecimals,
+			IsActive:           true,
+			CreatedBy:          userEmail,
+		}
 		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateAccrualRun",
-			"/investment/fd/accrual/run/create", req.EntityID, userEmail, map[string]interface{}{
-				"entity_id":            req.EntityID,
-				"entity_code":          req.EntityID,
-				"run_type":             req.RunType,
-				"run_mode":             req.RunMode,
-				"accrual_period_start": req.AccrualPeriodStart,
-				"accrual_period_end":   req.AccrualPeriodEnd,
-				"financial_period":     input.FinancialPeriod,
-				"accrual_granularity":  req.AcrualGranularity,
-			}) {
+			"/investment/fd/accrual/run/create", req.EntityID, userEmail, buildFDAccrualPolicyFields(draftRow)) {
 			return
 		}
 
@@ -1101,37 +1111,25 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		var runStatus, runMode, entityID string
-		var totalNet float64
-		err := pgxPool.QueryRow(ctx, `
-			SELECT run_status, run_mode,
-			       COALESCE(entity_id,''),
-			       COALESCE(total_interest_accrued,0)
-			FROM investment.fd_accrual_run WHERE run_id = $1`, req.RunID,
-		).Scan(&runStatus, &runMode, &entityID, &totalNet)
+		submitRow, err := loadFDAccrualRunRow(ctx, pgxPool, req.RunID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Run not found: "+err.Error())
 			return
 		}
+		entityID := submitRow.EntityID
+		totalNet := submitRow.TotalInterestAccrued
 		// SIMULATION runs may be submitted for workflow visibility; they will NOT post to GL on approval.
 		// FINAL runs follow the normal approve → post-journals path.
-		if runMode == "SIMULATION" {
+		if submitRow.RunMode == "SIMULATION" {
 			api.LogInfo("[FDAccrual] SubmitForApproval: run=%s is SIMULATION — will skip GL posting on approval", req.RunID)
 		}
-		if runStatus != "COMPUTED" {
-			api.RespondWithError(w, http.StatusBadRequest, "Only COMPUTED runs can be submitted (current: "+runStatus+")")
+		if submitRow.RunStatus != "COMPUTED" {
+			api.RespondWithError(w, http.StatusBadRequest, "Only COMPUTED runs can be submitted (current: "+submitRow.RunStatus+")")
 			return
 		}
 
 		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreSubmit, "SubmitForApproval",
-			"/investment/fd/accrual/run/submit", entityID, userEmail, map[string]interface{}{
-				"run_id":                 req.RunID,
-				"entity_id":              entityID,
-				"entity_code":            entityID,
-				"run_mode":               runMode,
-				"run_status":             runStatus,
-				"total_interest_accrued": totalNet,
-			}) {
+			"/investment/fd/accrual/run/submit", entityID, userEmail, buildFDAccrualPolicyFields(submitRow)) {
 			return
 		}
 
@@ -2286,15 +2284,14 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		req.RunID = outRunID
 		req.FDID = outFDID
 
+		proposeRow, pfErr := loadFDAccrualLedgerRow(ctx, pgxPool, ledgerID)
+		if pfErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
+			return
+		}
+		proposeRow = applyFDAccrualOverrideProposal(proposeRow, req.OverrideAmount, req.OverrideReasonCode, req.OverrideReasonText)
 		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "ProposeOverride",
-			"/investment/fd/accrual/override/propose", entityID, userEmail, map[string]interface{}{
-				"run_id":          outRunID,
-				"ledger_id":       ledgerID,
-				"fd_id":           outFDID,
-				"entity_id":       entityID,
-				"entity_code":     entityID,
-				"override_amount": req.OverrideAmount,
-			}) {
+			"/investment/fd/accrual/override/propose", entityID, userEmail, buildFDAccrualPolicyFields(proposeRow)) {
 			return
 		}
 
@@ -2561,12 +2558,13 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		approveOverrideRow, pfErr := loadFDAccrualLedgerRow(ctx, pgxPool, ledgerID)
+		if pfErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
+			return
+		}
 		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreApprove, "ApproveOverride",
-			"/investment/fd/accrual/override/approve", entityID, userEmail, map[string]interface{}{
-				"ledger_id":   ledgerID,
-				"entity_id":   entityID,
-				"entity_code": entityID,
-			}) {
+			"/investment/fd/accrual/override/approve", entityID, userEmail, buildFDAccrualPolicyFields(approveOverrideRow)) {
 			return
 		}
 
@@ -2759,14 +2757,13 @@ func RejectOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		rejectOverrideRow, pfErr := loadFDAccrualLedgerRow(ctx, pgxPool, ledgerID)
+		if pfErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
+			return
+		}
 		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreReject, "RejectOverride",
-			"/investment/fd/accrual/override/reject", entityID, userEmail, map[string]interface{}{
-				"run_id":      req.RunID,
-				"ledger_id":   ledgerID,
-				"fd_id":       req.FDID,
-				"entity_id":   entityID,
-				"entity_code": entityID,
-			}) {
+			"/investment/fd/accrual/override/reject", entityID, userEmail, buildFDAccrualPolicyFields(rejectOverrideRow)) {
 			return
 		}
 
@@ -4165,14 +4162,19 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
+		bulkGateRow := fdAccrualRow{
+			EntityID:           req.EntityID,
+			EntityName:         req.EntityName,
+			RunMode:            req.RunMode,
+			BankIDFilter:       req.BankIDFilter,
+			FDStatusFilter:     req.FDStatusFilter,
+			DayCountConvention: req.DayCountConvention,
+			RoundingRule:       req.RoundingRule,
+			PrecisionDecimals:  req.PrecisionDecimals,
+			CreatedBy:          userEmail,
+		}
 		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreSubmit, "BulkGenerateMonthlyAccruals",
-			"/investment/fd/accrual/run/bulk-generate", req.EntityID, userEmail, map[string]interface{}{
-				"entity_id":    req.EntityID,
-				"entity_code":  req.EntityID,
-				"start_month":  req.StartMonth,
-				"end_month":    req.EndMonth,
-				"run_mode":     req.RunMode,
-			}) {
+			"/investment/fd/accrual/run/bulk-generate", req.EntityID, userEmail, buildFDAccrualPolicyFields(bulkGateRow)) {
 			return
 		}
 
@@ -4219,15 +4221,25 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Step 1: Create run
+			monthDraftRow := fdAccrualRow{
+				EntityID:           req.EntityID,
+				EntityName:         req.EntityName,
+				RunType:            "MONTHLY",
+				RunMode:            req.RunMode,
+				RunStatus:          "DRAFT",
+				BankIDFilter:       req.BankIDFilter,
+				FDStatusFilter:     req.FDStatusFilter,
+				AccrualPeriodStart: periodStart.Format("2006-01-02"),
+				AccrualPeriodEnd:   periodEnd.Format("2006-01-02"),
+				FinancialPeriod:    buildAccrualPeriod(periodStart),
+				DayCountConvention: req.DayCountConvention,
+				RoundingRule:       req.RoundingRule,
+				PrecisionDecimals:  req.PrecisionDecimals,
+				IsActive:           true,
+				CreatedBy:          userEmail,
+			}
 			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "BulkGenerateMonthlyAccruals",
-				"/investment/fd/accrual/run/bulk-generate", req.EntityID, userEmail, map[string]interface{}{
-					"entity_id":            req.EntityID,
-					"entity_code":          req.EntityID,
-					"month":                monthStr,
-					"accrual_period_start": periodStart.Format("2006-01-02"),
-					"accrual_period_end":   periodEnd.Format("2006-01-02"),
-					"run_mode":             req.RunMode,
-				}); !ok {
+				"/investment/fd/accrual/run/bulk-generate", req.EntityID, userEmail, buildFDAccrualPolicyFields(monthDraftRow)); !ok {
 				res.Error = pmsg
 				monthResults = append(monthResults, res)
 				continue

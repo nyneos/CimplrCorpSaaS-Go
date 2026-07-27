@@ -468,11 +468,31 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "CreateReceipt", "/investment/fd/receipt/create",
-			fdSubReceipt, entityID, userEmail, map[string]interface{}{
-				"fd_id": req.FdID, "entity_id": entityID, "entity_code": entityID,
-				"bank_id": bankID, "gross_interest_received": req.GrossInterestReceived,
-				"receipt_date": req.ReceiptDate,
-			}) {
+			fdSubReceipt, entityID, userEmail, buildFDReceiptPolicyFields(fdReceiptRow{
+				ReceiptID:             receiptID,
+				FDID:                  req.FdID,
+				FDRefNo:               fdRefNo,
+				EntityID:              entityID,
+				EntityName:            entityName,
+				BankID:                bankID,
+				BankName:              bankName,
+				ReceiptDate:           req.ReceiptDate,
+				PeriodStart:           req.PeriodStart,
+				PeriodEnd:             req.PeriodEnd,
+				GrossInterestReceived: req.GrossInterestReceived,
+				TDSAmountDeducted:     req.TdsAmountDeducted,
+				OtherCharges:          req.OtherCharges,
+				NetAmountReceived:     net,
+				Currency:              "INR",
+				BankReferenceNo:       req.BankReferenceNo,
+				Narration:             req.Narration,
+				Attachment:            req.Attachment,
+				UploadS3Key:           uploadS3Key,
+				IngestionMode:         "MANUAL",
+				ReceiptStatus:         "CAPTURED",
+				ReconcileStatus:       "PENDING",
+				IsActive:              true,
+			})) {
 			return
 		}
 
@@ -800,11 +820,15 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		existingReceiptRow, rowErr := loadFDReceiptRow(ctx, pool, req.ReceiptID)
+		if rowErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Receipt load for policy failed: "+rowErr.Error())
+			return
+		}
+		mergedReceiptRow := applyFDReceiptEdits(existingReceiptRow, req.Fields)
+
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "UpdateReceipt", "/investment/fd/receipt/update",
-			fdSubReceipt, entityID, userEmail, map[string]interface{}{
-				"receipt_id": req.ReceiptID, "fd_id": fdIDForReceipt,
-				"entity_id": entityID, "entity_code": entityID,
-			}) {
+			fdSubReceipt, entityID, userEmail, buildFDReceiptPolicyFields(mergedReceiptRow)) {
 			return
 		}
 
@@ -990,18 +1014,14 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "Cannot delete receipt in status " + status})
 				continue
 			}
-			var delEntityID, delFDID string
-			if loadErr := pool.QueryRow(ctx,
-				`SELECT COALESCE(entity_id,''), COALESCE(fd_id,'') FROM investment.fd_interest_receipt WHERE receipt_id=$1`,
-				rid,
-			).Scan(&delEntityID, &delFDID); loadErr != nil {
+			delRow, delRowErr := loadFDReceiptRow(ctx, pool, rid)
+			if delRowErr != nil {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "not found"})
 				continue
 			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreDelete, "DeleteReceipt",
-				"/investment/fd/receipt/delete", fdSubReceipt, delEntityID, userEmail, map[string]interface{}{
-					"receipt_id": rid, "fd_id": delFDID, "entity_id": delEntityID, "entity_code": delEntityID,
-				}); !ok {
+				"/investment/fd/receipt/delete", fdSubReceipt, delRow.EntityID, userEmail,
+				buildFDReceiptPolicyFields(delRow)); !ok {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": pmsg})
 				continue
 			}
@@ -1037,7 +1057,7 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				rid := rid
 				go func() {
 					bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer bgCancel()
+					defer bgCancel()
 					// Fetch entity_id for this receipt
 					var eID string
 					var amount float64
@@ -1145,21 +1165,14 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		engineActed := 0
 		var approvalErrors []string
 		for _, receiptID := range req.ReceiptIDs {
-			var approveEntityID, approveFDID string
-			var approveGross float64
-			if loadErr := pool.QueryRow(ctx,
-				`SELECT COALESCE(entity_id,''), COALESCE(fd_id,''), COALESCE(gross_interest_received,0)
-				 FROM investment.fd_interest_receipt WHERE receipt_id=$1 AND is_deleted=false`,
-				receiptID,
-			).Scan(&approveEntityID, &approveFDID, &approveGross); loadErr != nil {
+			approveRow, approveRowErr := loadFDReceiptRow(ctx, pool, receiptID)
+			if approveRowErr != nil {
 				approvalErrors = append(approvalErrors, receiptID+": not found")
 				continue
 			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "BulkApproveReceipt",
-				"/investment/fd/receipt/bulk-approve", fdSubReceipt, approveEntityID, userEmail, map[string]interface{}{
-					"receipt_id": receiptID, "fd_id": approveFDID, "entity_id": approveEntityID, "entity_code": approveEntityID,
-					"gross_interest_received": approveGross,
-				}); !ok {
+				"/investment/fd/receipt/bulk-approve", fdSubReceipt, approveRow.EntityID, userEmail,
+				buildFDReceiptPolicyFields(approveRow)); !ok {
 				approvalErrors = append(approvalErrors, receiptID+": "+pmsg)
 				continue
 			}
@@ -1383,18 +1396,14 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		engineActed := 0
 		var approvalErrors []string
 		for _, receiptID := range req.ReceiptIDs {
-			var rejectEntityID, rejectFDID string
-			if loadErr := pool.QueryRow(ctx,
-				`SELECT COALESCE(entity_id,''), COALESCE(fd_id,'') FROM investment.fd_interest_receipt WHERE receipt_id=$1 AND is_deleted=false`,
-				receiptID,
-			).Scan(&rejectEntityID, &rejectFDID); loadErr != nil {
+			rejectRow, rejectRowErr := loadFDReceiptRow(ctx, pool, receiptID)
+			if rejectRowErr != nil {
 				approvalErrors = append(approvalErrors, receiptID+": not found")
 				continue
 			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "BulkRejectReceipt",
-				"/investment/fd/receipt/bulk-reject", fdSubReceipt, rejectEntityID, userEmail, map[string]interface{}{
-					"receipt_id": receiptID, "fd_id": rejectFDID, "entity_id": rejectEntityID, "entity_code": rejectEntityID,
-				}); !ok {
+				"/investment/fd/receipt/bulk-reject", fdSubReceipt, rejectRow.EntityID, userEmail,
+				buildFDReceiptPolicyFields(rejectRow)); !ok {
 				approvalErrors = append(approvalErrors, receiptID+": "+pmsg)
 				continue
 			}
@@ -3762,6 +3771,20 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Policy check — this was the live, routed handler for
+		// /investment/fd/exception/resolve with zero enforcement (a separate,
+		// now-unreachable resolveVarianceHandler had an Enforce call, but
+		// routes.go never pointed here to it). Added 2026-07-27.
+		resolveRow, rowErr := loadFDExceptionRow(ctx, pool, req.ExceptionID)
+		if rowErr != nil {
+			resolveRow = fdExceptionRow{ExceptionID: req.ExceptionID, EntityID: entityID}
+		}
+		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "ResolveException",
+			"/investment/fd/exception/resolve", "FD_EXCEPTION", entityID, userEmail,
+			buildFDExceptionPolicyFields(resolveRow)) {
+			return
+		}
+
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
@@ -3893,11 +3916,15 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "already posted"})
 				continue
 			}
+			postJournalsRow, postJournalsRowErr := loadFDReceiptRow(ctx, pool, rid)
+			if postJournalsRowErr != nil {
+				skipped++
+				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "not found"})
+				continue
+			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreSubmit, "PostReceiptJournals",
-				"/investment/fd/receipt/post-journals", fdSubReceipt, rec.EntityID, userEmail, map[string]interface{}{
-					"receipt_id": rid, "fd_id": rec.FDID, "entity_id": rec.EntityID, "entity_code": rec.EntityID,
-					"gross_interest_received": rec.GrossInterestReceived,
-				}); !ok {
+				"/investment/fd/receipt/post-journals", fdSubReceipt, postJournalsRow.EntityID, userEmail,
+				buildFDReceiptPolicyFields(postJournalsRow)); !ok {
 				skipped++
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": pmsg})
 				continue

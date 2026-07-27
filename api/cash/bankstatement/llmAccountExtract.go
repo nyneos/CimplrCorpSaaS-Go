@@ -1,7 +1,6 @@
 package bankstatement
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,12 +8,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
-	"CimplrCorpSaas/internal/bindref"
 )
 
 // LLMExtractTestHandler is a debug-only endpoint that runs the LLM account and
@@ -54,8 +50,8 @@ func LLMExtractTestHandler() http.Handler {
 			return
 		}
 
-		if !bindref.BrOn() {
-			fail(http.StatusServiceUnavailable, "LLM inference is disabled")
+		if !bankStatementUseLLM() {
+			fail(http.StatusServiceUnavailable, "LLM inference is disabled (BANK_STATEMENT_USE_LLM)")
 			return
 		}
 
@@ -135,28 +131,16 @@ type llmAccountInfo struct {
 	AccountName   string `json:"account_name"`
 }
 
-// extractAccountInfoWithLLM sends the first 20 header rows to the configured
-// inference endpoint and asks the model to extract the bank account number and name.
+// extractAccountInfoWithLLM sends the first 20 header rows to SmartCatAI and asks
+// for the bank account number and name.
 //
 // Returns empty strings (not an error) when the model cannot find the values —
 // the caller should treat that as "no result" and fall through to manual strategies.
-// A non-nil error means the call itself failed (missing config, network, auth, bad JSON).
-//
-// Reads bindref static slots when BrOn() is true.
+// A non-nil error means the SmartCat call itself failed.
 func extractAccountInfoWithLLM(ctx context.Context, rows [][]string) (llmAccountInfo, error) {
-	inferURL := bindref.BrG1()
-	inferKey := bindref.BrG2()
-	if inferURL == "" || inferKey == "" {
-		return llmAccountInfo{}, fmt.Errorf("AI inference not configured")
+	if !bankStatementUseLLM() {
+		return llmAccountInfo{}, fmt.Errorf("LLM extraction disabled")
 	}
-
-	model := bindref.BrG3()
-	if model == "" {
-		model = "gpt-4o-mini"
-	}
-
-	timeoutSec := bindref.BrN1()
-
 	// Serialize the first 20 rows into a readable pipe-separated block.
 	var sb strings.Builder
 	for i, row := range rows {
@@ -177,60 +161,18 @@ Use empty string "" for any field you cannot find with confidence. Do not guess.
 Header rows:
 ` + sb.String()
 
-	reqBody := map[string]interface{}{
-		"model": model,
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": prompt},
-		},
-		"response_format": map[string]string{"type": "json_object"},
-		"max_tokens":      150,
-		"temperature":     0,
-	}
-
-	bodyBytes, err := json.Marshal(reqBody)
+	content, _, err := smartCatInfer(ctx, prompt, 150, 30)
 	if err != nil {
-		return llmAccountInfo{}, fmt.Errorf("llm-acct: marshal: %w", err)
+		return llmAccountInfo{}, fmt.Errorf("llm-acct: %w", err)
 	}
-
-	httpCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, inferURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return llmAccountInfo{}, fmt.Errorf("llm-acct: build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+inferKey)
-	req.Header.Set(constants.ContentTypeText, constants.ContentTypeJSON)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return llmAccountInfo{}, fmt.Errorf("llm-acct: http: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return llmAccountInfo{}, fmt.Errorf("llm-acct: status=%d body=%.200s", resp.StatusCode, body)
-	}
-
-	var apiResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return llmAccountInfo{}, fmt.Errorf("llm-acct: decode: %w", err)
-	}
-	if len(apiResp.Choices) == 0 || strings.TrimSpace(apiResp.Choices[0].Message.Content) == "" {
+	content = strings.TrimSpace(content)
+	if content == "" {
 		return llmAccountInfo{}, fmt.Errorf("llm-acct: empty response")
 	}
 
 	var info llmAccountInfo
-	if err := json.Unmarshal([]byte(apiResp.Choices[0].Message.Content), &info); err != nil {
-		return llmAccountInfo{}, fmt.Errorf("llm-acct: parse json: %w — raw: %.200s",
-			err, apiResp.Choices[0].Message.Content)
+	if err := json.Unmarshal([]byte(content), &info); err != nil {
+		return llmAccountInfo{}, fmt.Errorf("llm-acct: parse json: %w — raw: %.200s", err, content)
 	}
 
 	// Normalize to match the shape the rest of the pipeline expects.
@@ -238,8 +180,8 @@ Header rows:
 		strings.ReplaceAll(strings.TrimSpace(info.AccountNumber), "-", ""), " ", "")
 	info.AccountName = strings.TrimSpace(info.AccountName)
 
-	logger.LogInfo("[LLM-ACCT] model=%s extracted account_number=%q account_name=%q",
-		model, info.AccountNumber, info.AccountName)
+	logger.LogInfo("[LLM-ACCT] extracted account_number=%q account_name=%q",
+		info.AccountNumber, info.AccountName)
 	return info, nil
 }
 
@@ -288,25 +230,12 @@ func (l llmColumnLayout) toColIdx() map[string]int {
 	return out
 }
 
-// extractColumnLayoutWithLLM sends up to 40 rows to the inference endpoint and
-// asks it to identify the header row index and column positions for each
-// standard bank-statement field.
-//
-// Uses the same QA obfuscated secrets as extractAccountInfoWithLLM.
+// extractColumnLayoutWithLLM sends up to 100 rows to SmartCatAI and asks it to
+// identify the header row index and column positions for each standard field.
 func extractColumnLayoutWithLLM(ctx context.Context, rows [][]string) (llmColumnLayout, error) {
-	inferURL := bindref.BrG1()
-	inferKey := bindref.BrG2()
-	if inferURL == "" || inferKey == "" {
-		return llmColumnLayout{}, fmt.Errorf("AI inference not configured")
+	if !bankStatementUseLLM() {
+		return llmColumnLayout{}, fmt.Errorf("LLM extraction disabled")
 	}
-
-	model := bindref.BrG3()
-	if model == "" {
-		model = "gpt-4o-mini"
-	}
-
-	timeoutSec := 30
-
 	// Serialize up to 100 rows showing both row index and per-cell column index.
 	// The explicit [colIdx] prefix lets the model return an integer directly.
 	var sb strings.Builder
@@ -404,67 +333,25 @@ Return ONLY valid JSON matching this exact schema (all fields required, use -1 w
 Rows:
 ` + sb.String()
 
-	reqBody := map[string]interface{}{
-		"model": model,
-		"messages": []map[string]interface{}{
-			{"role": "user", "content": prompt},
-		},
-		"response_format": map[string]string{"type": "json_object"},
-		"max_tokens":      400,
-		"temperature":     0,
-	}
-
-	bodyBytes, err := json.Marshal(reqBody)
+	content, _, err := smartCatInfer(ctx, prompt, 400, 30)
 	if err != nil {
-		return llmColumnLayout{}, fmt.Errorf("llm-cols: marshal: %w", err)
+		return llmColumnLayout{}, fmt.Errorf("llm-cols: %w", err)
 	}
-
-	httpCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, inferURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return llmColumnLayout{}, fmt.Errorf("llm-cols: build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+inferKey)
-	req.Header.Set(constants.ContentTypeText, constants.ContentTypeJSON)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return llmColumnLayout{}, fmt.Errorf("llm-cols: http: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return llmColumnLayout{}, fmt.Errorf("llm-cols: status=%d body=%.200s", resp.StatusCode, body)
-	}
-
-	var apiResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return llmColumnLayout{}, fmt.Errorf("llm-cols: decode: %w", err)
-	}
-	if len(apiResp.Choices) == 0 || strings.TrimSpace(apiResp.Choices[0].Message.Content) == "" {
+	content = strings.TrimSpace(content)
+	if content == "" {
 		return llmColumnLayout{}, fmt.Errorf("llm-cols: empty response")
 	}
 
 	var layout llmColumnLayout
-	if err := json.Unmarshal([]byte(apiResp.Choices[0].Message.Content), &layout); err != nil {
-		return llmColumnLayout{}, fmt.Errorf("llm-cols: parse json: %w — raw: %.200s",
-			err, apiResp.Choices[0].Message.Content)
+	if err := json.Unmarshal([]byte(content), &layout); err != nil {
+		return llmColumnLayout{}, fmt.Errorf("llm-cols: parse json: %w — raw: %.200s", err, content)
 	}
 	if layout.HeaderRowIndex < 0 || layout.HeaderRowIndex >= len(rows) {
 		return llmColumnLayout{}, fmt.Errorf("llm-cols: header_row_index=%d out of range (rows=%d)",
 			layout.HeaderRowIndex, len(rows))
 	}
 
-	logger.LogInfo("[LLM-COLS] model=%s header_row=%d cols=%v", model, layout.HeaderRowIndex, layout.Columns)
+	logger.LogInfo("[LLM-COLS] header_row=%d cols=%v", layout.HeaderRowIndex, layout.Columns)
 	layout = fixMisalignedBalanceColumn(layout, rows)
 	return layout, nil
 }

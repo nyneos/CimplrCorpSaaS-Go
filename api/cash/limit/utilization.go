@@ -74,6 +74,11 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		policyEntityName, policyBankName, perr := loadLimitEntityBank(ctx, pgxPool, req.LimitID)
+		if perr != nil {
+			api.RespondWithResult(w, false, "failed to load limit for policy check: "+perr.Error())
+			return
+		}
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleCash,
@@ -82,11 +87,18 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "CreateUtilization",
 			APIPath:             "/cash/utilization/create",
 			DefaultBlockMessage: "Limit utilization create blocked by policy",
-			Fields: map[string]interface{}{
-				"limit_id":         req.LimitID,
-				"currency_code":    req.CurrencyCode,
-				"utilized_amount":  req.UtilizedAmount,
-			},
+			Fields: buildLimitUtilizationPolicyFields(limitUtilizationRow{
+				LimitID:         req.LimitID,
+				EntityName:      policyEntityName,
+				BankName:        policyBankName,
+				UtilizationDate: req.UtilizationDate,
+				CurrencyCode:    req.CurrencyCode,
+				UtilizedAmount:  req.UtilizedAmount,
+				Remarks:         req.Remarks,
+				ReferenceDoc:    req.ReferenceDoc,
+				EntryMode:       req.EntryMode,
+				Status:          "DRAFT",
+			}),
 		}) {
 			return
 		}
@@ -226,6 +238,13 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				entryMode = "MANUAL"
 			}
 
+			policyEntityName, policyBankName, perr := loadLimitEntityBank(ctx, pgxPool, util.LimitID)
+			if perr != nil {
+				result["success"] = false
+				result["error"] = "failed to load limit for policy check: " + perr.Error()
+				results = append(results, result)
+				continue
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreCreate,
 				ModuleCode:          common.ModuleCash,
@@ -234,12 +253,18 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkCreateUtilization",
 				APIPath:             "/cash/utilization/bulk-create",
 				DefaultBlockMessage: "Limit utilization create blocked by policy",
-				Fields: map[string]interface{}{
-					"limit_id":        util.LimitID,
-					"currency_code":   util.CurrencyCode,
-					"utilized_amount": util.UtilizedAmount,
-					"index":           i,
-				},
+				Fields: mergeIndexField(buildLimitUtilizationPolicyFields(limitUtilizationRow{
+					LimitID:         util.LimitID,
+					EntityName:      policyEntityName,
+					BankName:        policyBankName,
+					UtilizationDate: util.UtilizationDate,
+					CurrencyCode:    util.CurrencyCode,
+					UtilizedAmount:  util.UtilizedAmount,
+					Remarks:         util.Remarks,
+					ReferenceDoc:    util.ReferenceDoc,
+					EntryMode:       entryMode,
+					Status:          "DRAFT",
+				}), i),
 			}); !ok {
 				result["success"] = false
 				result["error"] = msg
@@ -361,6 +386,12 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		existingRow, err := loadLimitUtilizationRow(ctx, pgxPool, req.UtilizationID)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to load utilization for policy check: "+err.Error())
+			return
+		}
+		mergedRow := applyLimitUtilizationEdits(existingRow, req.Fields)
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
@@ -369,10 +400,7 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "UpdateUtilization",
 			APIPath:             "/cash/utilization/update",
 			DefaultBlockMessage: "Limit utilization update blocked by policy",
-			Fields: map[string]interface{}{
-				"utilization_id": req.UtilizationID,
-				"fields":         req.Fields,
-			},
+			Fields:              buildLimitUtilizationPolicyFields(mergedRow),
 		}) {
 			return
 		}
@@ -552,6 +580,14 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for i, utilizationID := range req.UtilizationIDs {
 			result := map[string]interface{}{"index": i, "utilization_id": utilizationID}
 
+			policyRow, perr := loadLimitUtilizationRow(ctx, pgxPool, utilizationID)
+			if perr != nil {
+				result["success"] = false
+				result["error"] = "failed to load utilization for policy check: " + perr.Error()
+				results = append(results, result)
+				continue
+			}
+
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
@@ -560,7 +596,7 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "DeleteUtilization",
 				APIPath:             "/cash/utilization/delete",
 				DefaultBlockMessage: "Limit utilization delete blocked by policy",
-				Fields:              map[string]interface{}{"utilization_id": utilizationID},
+				Fields:              buildLimitUtilizationPolicyFields(policyRow),
 			}); !ok {
 				result["success"] = false
 				result["error"] = msg
@@ -670,151 +706,151 @@ func QueryAllUtilizations(ctx context.Context, pgxPool *pgxpool.Pool, rowLimit i
 
 	results := make([]map[string]interface{}, 0)
 	for rows.Next() {
-			var utilizationID, limitID, currencyCode, entryMode, status string
-			var utilizationDate *time.Time
-			var utilizedAmount float64
-			var remarks, referenceDoc, uploadS3Key *string
+		var utilizationID, limitID, currencyCode, entryMode, status string
+		var utilizationDate *time.Time
+		var utilizedAmount float64
+		var remarks, referenceDoc, uploadS3Key *string
 
-			// Old values (utilization)
-			var oldUtilizationDate *time.Time
-			var oldCurrencyCode *string
-			var oldUtilizedAmount *float64
-			var oldRemarks, oldReferenceDoc *string
+		// Old values (utilization)
+		var oldUtilizationDate *time.Time
+		var oldCurrencyCode *string
+		var oldUtilizedAmount *float64
+		var oldRemarks, oldReferenceDoc *string
 
-			var actionType, procStatus, requestedBy, checkerBy, checkerComment, reason *string
-			var requestedAt, checkerAt *time.Time
+		var actionType, procStatus, requestedBy, checkerBy, checkerComment, reason *string
+		var requestedAt, checkerAt *time.Time
 
-			// limit fields
-			var lLimitID, lEntityName, lBankName, lCoreLimitType string
-			var lLimitType, lLimitSubType, lLimitRemarks *string
-			var lSanctionDate, lEffectiveDate *time.Time
-			var lLimitCurrencyCode *string
-			var lSanctionedAmount float64
-			var lFungibilityType *string
-			var lFungibilityPct *float64
-			var lSecurityType *string
-			var lInitialUtilization *float64
+		// limit fields
+		var lLimitID, lEntityName, lBankName, lCoreLimitType string
+		var lLimitType, lLimitSubType, lLimitRemarks *string
+		var lSanctionDate, lEffectiveDate *time.Time
+		var lLimitCurrencyCode *string
+		var lSanctionedAmount float64
+		var lFungibilityType *string
+		var lFungibilityPct *float64
+		var lSecurityType *string
+		var lInitialUtilization *float64
 
-			// old limit values
-			var lOldEntityName, lOldBankName, lOldCoreLimitType, lOldLimitType, lOldLimitSubType *string
-			var lOldSanctionDate, lOldEffectiveDate *time.Time
-			var lOldCurrencyCode *string
-			var lOldSanctionedAmount, lOldFungibilityPct, lOldInitialUtilization *float64
-			var lOldFungibilityType, lOldSecurityType, lOldRemarks *string
+		// old limit values
+		var lOldEntityName, lOldBankName, lOldCoreLimitType, lOldLimitType, lOldLimitSubType *string
+		var lOldSanctionDate, lOldEffectiveDate *time.Time
+		var lOldCurrencyCode *string
+		var lOldSanctionedAmount, lOldFungibilityPct, lOldInitialUtilization *float64
+		var lOldFungibilityType, lOldSecurityType, lOldRemarks *string
 
-			var limitActionType, limitProcStatus, limitRequestedBy, limitCheckerBy, limitCheckerComment, limitReason *string
-			var limitRequestedAt, limitCheckerAt *time.Time
+		var limitActionType, limitProcStatus, limitRequestedBy, limitCheckerBy, limitCheckerComment, limitReason *string
+		var limitRequestedAt, limitCheckerAt *time.Time
 
-			err := rows.Scan(
-				&utilizationID, &limitID, &utilizationDate, &currencyCode, &utilizedAmount,
-				&remarks, &referenceDoc, &entryMode, &status, &uploadS3Key,
-				&oldUtilizationDate, &oldCurrencyCode, &oldUtilizedAmount, &oldRemarks, &oldReferenceDoc,
-				&actionType, &procStatus, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason,
+		err := rows.Scan(
+			&utilizationID, &limitID, &utilizationDate, &currencyCode, &utilizedAmount,
+			&remarks, &referenceDoc, &entryMode, &status, &uploadS3Key,
+			&oldUtilizationDate, &oldCurrencyCode, &oldUtilizedAmount, &oldRemarks, &oldReferenceDoc,
+			&actionType, &procStatus, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason,
 
-				&lLimitID, &lEntityName, &lBankName, &lCoreLimitType, &lLimitType, &lLimitSubType,
-				&lSanctionDate, &lEffectiveDate, &lLimitCurrencyCode, &lSanctionedAmount,
-				&lFungibilityType, &lFungibilityPct, &lSecurityType, &lLimitRemarks, &lInitialUtilization,
-				&lOldEntityName, &lOldBankName, &lOldCoreLimitType, &lOldLimitType, &lOldLimitSubType,
-				&lOldSanctionDate, &lOldEffectiveDate, &lOldCurrencyCode, &lOldSanctionedAmount,
-				&lOldFungibilityType, &lOldFungibilityPct, &lOldSecurityType, &lOldRemarks, &lOldInitialUtilization,
-				&limitActionType, &limitProcStatus, &limitRequestedBy, &limitRequestedAt, &limitCheckerBy, &limitCheckerAt, &limitCheckerComment, &limitReason,
-			)
-			if err != nil {
-				continue
-			}
-			if msg := validateLimitCashScope(ctx, map[string]interface{}{
-				"entity_name":   lEntityName,
-				"bank_name":     lBankName,
-				"currency_code": currencyCode,
-			}); msg != "" {
-				continue
-			}
+			&lLimitID, &lEntityName, &lBankName, &lCoreLimitType, &lLimitType, &lLimitSubType,
+			&lSanctionDate, &lEffectiveDate, &lLimitCurrencyCode, &lSanctionedAmount,
+			&lFungibilityType, &lFungibilityPct, &lSecurityType, &lLimitRemarks, &lInitialUtilization,
+			&lOldEntityName, &lOldBankName, &lOldCoreLimitType, &lOldLimitType, &lOldLimitSubType,
+			&lOldSanctionDate, &lOldEffectiveDate, &lOldCurrencyCode, &lOldSanctionedAmount,
+			&lOldFungibilityType, &lOldFungibilityPct, &lOldSecurityType, &lOldRemarks, &lOldInitialUtilization,
+			&limitActionType, &limitProcStatus, &limitRequestedBy, &limitRequestedAt, &limitCheckerBy, &limitCheckerAt, &limitCheckerComment, &limitReason,
+		)
+		if err != nil {
+			continue
+		}
+		if msg := validateLimitCashScope(ctx, map[string]interface{}{
+			"entity_name":   lEntityName,
+			"bank_name":     lBankName,
+			"currency_code": currencyCode,
+		}); msg != "" {
+			continue
+		}
 
-			// KPI computations: available headroom and utilization percentage
-			var lInitial float64
-			if lInitialUtilization != nil {
-				lInitial = *lInitialUtilization
-			}
-			limitAvailable := lSanctionedAmount - (lInitial + utilizedAmount)
-			if limitAvailable < 0 {
-				limitAvailable = 0
-			}
-			var limitUtilPct float64
-			if lSanctionedAmount > 0 {
-				limitUtilPct = (lInitial + utilizedAmount) / lSanctionedAmount
-			}
+		// KPI computations: available headroom and utilization percentage
+		var lInitial float64
+		if lInitialUtilization != nil {
+			lInitial = *lInitialUtilization
+		}
+		limitAvailable := lSanctionedAmount - (lInitial + utilizedAmount)
+		if limitAvailable < 0 {
+			limitAvailable = 0
+		}
+		var limitUtilPct float64
+		if lSanctionedAmount > 0 {
+			limitUtilPct = (lInitial + utilizedAmount) / lSanctionedAmount
+		}
 
-			item := map[string]interface{}{
-				"utilization_id":   utilizationID,
-				"limit_id":         limitID,
-				"utilization_date": timeOrEmpty(utilizationDate),
-				"currency_code":    currencyCode,
-				"utilized_amount":  utilizedAmount,
-				"remarks":          stringOrEmpty(remarks),
-				"reference_doc":    stringOrEmpty(referenceDoc),
-				"entry_mode":       entryMode,
-				"status":           status,
-				"upload_s3_key":    stringOrEmpty(uploadS3Key),
+		item := map[string]interface{}{
+			"utilization_id":   utilizationID,
+			"limit_id":         limitID,
+			"utilization_date": timeOrEmpty(utilizationDate),
+			"currency_code":    currencyCode,
+			"utilized_amount":  utilizedAmount,
+			"remarks":          stringOrEmpty(remarks),
+			"reference_doc":    stringOrEmpty(referenceDoc),
+			"entry_mode":       entryMode,
+			"status":           status,
+			"upload_s3_key":    stringOrEmpty(uploadS3Key),
 
-				"old_utilization_date": timeOrEmpty(oldUtilizationDate),
-				"old_currency_code":    stringOrEmpty(oldCurrencyCode),
-				"old_utilized_amount":  floatOrZero(oldUtilizedAmount),
-				"old_remarks":          stringOrEmpty(oldRemarks),
-				"old_reference_doc":    stringOrEmpty(oldReferenceDoc),
+			"old_utilization_date": timeOrEmpty(oldUtilizationDate),
+			"old_currency_code":    stringOrEmpty(oldCurrencyCode),
+			"old_utilized_amount":  floatOrZero(oldUtilizedAmount),
+			"old_remarks":          stringOrEmpty(oldRemarks),
+			"old_reference_doc":    stringOrEmpty(oldReferenceDoc),
 
-				"action_type":       stringOrEmpty(actionType),
-				"processing_status": stringOrEmpty(procStatus),
-				"requested_by":      stringOrEmpty(requestedBy),
-				"requested_at":      auditTimeOrEmpty(requestedAt),
-				"checker_by":        stringOrEmpty(checkerBy),
-				"checker_at":        auditTimeOrEmpty(checkerAt),
-				"checker_comment":   stringOrEmpty(checkerComment),
-				"reason":            stringOrEmpty(reason),
+			"action_type":       stringOrEmpty(actionType),
+			"processing_status": stringOrEmpty(procStatus),
+			"requested_by":      stringOrEmpty(requestedBy),
+			"requested_at":      auditTimeOrEmpty(requestedAt),
+			"checker_by":        stringOrEmpty(checkerBy),
+			"checker_at":        auditTimeOrEmpty(checkerAt),
+			"checker_comment":   stringOrEmpty(checkerComment),
+			"reason":            stringOrEmpty(reason),
 
-				// flattened limit fields (prefixed with limit_)
-				"limit_limit_id":            lLimitID,
-				"limit_entity_name":         lEntityName,
-				"limit_bank_name":           lBankName,
-				"limit_core_limit_type":     lCoreLimitType,
-				"limit_limit_type":          stringOrEmpty(lLimitType),
-				"limit_limit_sub_type":      stringOrEmpty(lLimitSubType),
-				"limit_sanction_date":       timeOrEmpty(lSanctionDate),
-				"limit_effective_date":      timeOrEmpty(lEffectiveDate),
-				"limit_currency_code":       stringOrEmpty(lLimitCurrencyCode),
-				"limit_sanctioned_amount":   lSanctionedAmount,
-				"limit_fungibility_type":    stringOrEmpty(lFungibilityType),
-				"limit_fungibility_pct":     floatOrZero(lFungibilityPct),
-				"limit_security_type":       stringOrEmpty(lSecurityType),
-				"limit_remarks":             stringOrEmpty(lLimitRemarks),
-				"limit_initial_utilization": floatOrZero(lInitialUtilization),
+			// flattened limit fields (prefixed with limit_)
+			"limit_limit_id":            lLimitID,
+			"limit_entity_name":         lEntityName,
+			"limit_bank_name":           lBankName,
+			"limit_core_limit_type":     lCoreLimitType,
+			"limit_limit_type":          stringOrEmpty(lLimitType),
+			"limit_limit_sub_type":      stringOrEmpty(lLimitSubType),
+			"limit_sanction_date":       timeOrEmpty(lSanctionDate),
+			"limit_effective_date":      timeOrEmpty(lEffectiveDate),
+			"limit_currency_code":       stringOrEmpty(lLimitCurrencyCode),
+			"limit_sanctioned_amount":   lSanctionedAmount,
+			"limit_fungibility_type":    stringOrEmpty(lFungibilityType),
+			"limit_fungibility_pct":     floatOrZero(lFungibilityPct),
+			"limit_security_type":       stringOrEmpty(lSecurityType),
+			"limit_remarks":             stringOrEmpty(lLimitRemarks),
+			"limit_initial_utilization": floatOrZero(lInitialUtilization),
 
-				"limit_old_entity_name":         stringOrEmpty(lOldEntityName),
-				"limit_old_bank_name":           stringOrEmpty(lOldBankName),
-				"limit_old_core_limit_type":     stringOrEmpty(lOldCoreLimitType),
-				"limit_old_limit_type":          stringOrEmpty(lOldLimitType),
-				"limit_old_limit_sub_type":      stringOrEmpty(lOldLimitSubType),
-				"limit_old_sanction_date":       timeOrEmpty(lOldSanctionDate),
-				"limit_old_effective_date":      timeOrEmpty(lOldEffectiveDate),
-				"limit_old_currency_code":       stringOrEmpty(lOldCurrencyCode),
-				"limit_old_sanctioned_amount":   floatOrZero(lOldSanctionedAmount),
-				"limit_old_fungibility_type":    stringOrEmpty(lOldFungibilityType),
-				"limit_old_fungibility_pct":     floatOrZero(lOldFungibilityPct),
-				"limit_old_security_type":       stringOrEmpty(lOldSecurityType),
-				"limit_old_remarks":             stringOrEmpty(lOldRemarks),
-				"limit_old_initial_utilization": floatOrZero(lOldInitialUtilization),
+			"limit_old_entity_name":         stringOrEmpty(lOldEntityName),
+			"limit_old_bank_name":           stringOrEmpty(lOldBankName),
+			"limit_old_core_limit_type":     stringOrEmpty(lOldCoreLimitType),
+			"limit_old_limit_type":          stringOrEmpty(lOldLimitType),
+			"limit_old_limit_sub_type":      stringOrEmpty(lOldLimitSubType),
+			"limit_old_sanction_date":       timeOrEmpty(lOldSanctionDate),
+			"limit_old_effective_date":      timeOrEmpty(lOldEffectiveDate),
+			"limit_old_currency_code":       stringOrEmpty(lOldCurrencyCode),
+			"limit_old_sanctioned_amount":   floatOrZero(lOldSanctionedAmount),
+			"limit_old_fungibility_type":    stringOrEmpty(lOldFungibilityType),
+			"limit_old_fungibility_pct":     floatOrZero(lOldFungibilityPct),
+			"limit_old_security_type":       stringOrEmpty(lOldSecurityType),
+			"limit_old_remarks":             stringOrEmpty(lOldRemarks),
+			"limit_old_initial_utilization": floatOrZero(lOldInitialUtilization),
 
-				"limit_action_type":       stringOrEmpty(limitActionType),
-				"limit_processing_status": stringOrEmpty(limitProcStatus),
-				"limit_requested_by":      stringOrEmpty(limitRequestedBy),
-				"limit_requested_at":      auditTimeOrEmpty(limitRequestedAt),
-				"limit_checker_by":        stringOrEmpty(limitCheckerBy),
-				"limit_checker_at":        auditTimeOrEmpty(limitCheckerAt),
-				"limit_checker_comment":   stringOrEmpty(limitCheckerComment),
-				"limit_reason":            stringOrEmpty(limitReason),
-				// KPIs
-				"limit_available":       limitAvailable,
-				"limit_utilization_pct": limitUtilPct,
-			}
+			"limit_action_type":       stringOrEmpty(limitActionType),
+			"limit_processing_status": stringOrEmpty(limitProcStatus),
+			"limit_requested_by":      stringOrEmpty(limitRequestedBy),
+			"limit_requested_at":      auditTimeOrEmpty(limitRequestedAt),
+			"limit_checker_by":        stringOrEmpty(limitCheckerBy),
+			"limit_checker_at":        auditTimeOrEmpty(limitCheckerAt),
+			"limit_checker_comment":   stringOrEmpty(limitCheckerComment),
+			"limit_reason":            stringOrEmpty(limitReason),
+			// KPIs
+			"limit_available":       limitAvailable,
+			"limit_utilization_pct": limitUtilPct,
+		}
 
 		results = append(results, item)
 		if rowLimit > 0 && len(results) >= rowLimit {
@@ -1207,6 +1243,11 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, utilizationID := range req.UtilizationIDs {
+			policyRow, perr := loadLimitUtilizationRow(ctx, pgxPool, utilizationID)
+			if perr != nil {
+				api.RespondWithResult(w, false, "failed to load utilization for policy check: "+perr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreApprove,
 				ModuleCode:          common.ModuleCash,
@@ -1215,7 +1256,7 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkApproveUtilizations",
 				APIPath:             "/cash/utilization/approve",
 				DefaultBlockMessage: "Limit utilization approve blocked by policy",
-				Fields:              map[string]interface{}{"utilization_id": utilizationID},
+				Fields:              buildLimitUtilizationPolicyFields(policyRow),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
@@ -1331,6 +1372,11 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, utilizationID := range req.UtilizationIDs {
+			policyRow, perr := loadLimitUtilizationRow(ctx, pgxPool, utilizationID)
+			if perr != nil {
+				api.RespondWithResult(w, false, "failed to load utilization for policy check: "+perr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreReject,
 				ModuleCode:          common.ModuleCash,
@@ -1339,7 +1385,7 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkRejectUtilizations",
 				APIPath:             "/cash/utilization/reject",
 				DefaultBlockMessage: "Limit utilization reject blocked by policy",
-				Fields:              map[string]interface{}{"utilization_id": utilizationID},
+				Fields:              buildLimitUtilizationPolicyFields(policyRow),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return

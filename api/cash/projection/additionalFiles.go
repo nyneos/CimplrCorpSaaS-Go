@@ -57,17 +57,19 @@ func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 func projectionAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.Config{
-		Module:                "projection",
-		AuditSource:           "PROJECTION",
-		ParentIDField:         "proposal_id",
-		List:                  listProjectionAdditionalFiles,
-		CreateReturning:       createProjectionAdditionalFile,
-		GetOne:                getProjectionAdditionalFile,
-		GetAnyFile:            getAnyProjectionAdditionalFile,
-		GetMany:               getProjectionAdditionalFiles,
-		SoftDelete:            deleteProjectionAdditionalFile,
-		SoftDeleteTx:          deleteProjectionAdditionalFileTx,
-		RecordMainUploadAudit: recordProjectionMainUploadAudit,
+		Module:                  "projection",
+		AuditSource:             "PROJECTION",
+		ParentIDField:           "proposal_id",
+		PolicyModuleCode:        "CASH",
+		PolicySubModule:         "CASHFLOW_PROJECTION",
+		List:                    listProjectionAdditionalFiles,
+		CreateReturning:         createProjectionAdditionalFile,
+		GetOne:                  getProjectionAdditionalFile,
+		GetAnyFile:              getAnyProjectionAdditionalFile,
+		GetMany:                 getProjectionAdditionalFiles,
+		SoftDelete:              deleteProjectionAdditionalFile,
+		SoftDeleteTx:            deleteProjectionAdditionalFileTx,
+		RecordMainUploadAudit:   recordProjectionMainUploadAudit,
 		RecordMainDownloadAudit: recordProjectionMainDownloadAudit,
 	}
 }

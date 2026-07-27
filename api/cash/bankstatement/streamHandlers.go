@@ -537,8 +537,8 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 		}
 		// When USE_PDFCO=true, route single-PDF through pdfco-svc → CSV/XLSX → staged preview
 		// instead of the AI parser. The staging batch is created with a single-file batch.
-		usePDFCo := usePDFCoFromEnv() || r.FormValue("co_pdf") == "true"
-		logger.LogInfo("[BANK-PREVIEW] step=route ext=%s use_pdfco=%v upload_to_storage=%v", ext, usePDFCo, uploadEnabled)
+		usePDFCo := usePDFCoFromEnv() || r.FormValue("co_pdf") == "true" || bankStatementUseLLM()
+		logger.LogInfo("[BANK-PREVIEW] step=route ext=%s use_pdfco=%v llm=%v upload_to_storage=%v", ext, usePDFCo, bankStatementUseLLM(), uploadEnabled)
 		if ext == ".pdf" && usePDFCo {
 			if tx != nil {
 				_ = tx.Rollback(ctx)
@@ -1054,21 +1054,38 @@ func CommitHandler(pool *pgxpool.Pool) http.Handler {
 		if actorUserID == "" {
 			actorUserID = strings.TrimSpace(payload.ID)
 		}
+		// bank_statement_id/entity_id/file_hash/etc. don't exist yet at this point —
+		// the master row hasn't been inserted (entity_id is only resolved further
+		// below via resolveMasterBankAccountForPreview, and file_hash/closing_balance
+		// are only computed after this check). Build the canonical row from the
+		// pre-insert data actually available here, same as CreateBankBalance does
+		// for BANK_BALANCE. staging_id has no domain_catalog field_code for this
+		// sub-module (never cataloged), so it isn't part of the canonical Fields set.
+		commitPeriodStart := ""
+		if payload.Clean.Metadata.PeriodStart != nil {
+			commitPeriodStart = strings.TrimSpace(*payload.Clean.Metadata.PeriodStart)
+		}
+		commitPeriodEnd := ""
+		if payload.Clean.Metadata.PeriodEnd != nil {
+			commitPeriodEnd = strings.TrimSpace(*payload.Clean.Metadata.PeriodEnd)
+		}
 		if !runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
-			EventCode:            common.TriggerPreCreate,
-			ModuleCode:           common.ModuleCash,
-			SubModule:            "BANK_STATEMENT",
-			EntityCode:           accountNumber,
-			ActorUserID:          actorUserID,
-			HandlerName:          "CommitHandler",
-			APIPath:              "/cash/commit",
-			DefaultBlockMessage:  "Bank statement commit blocked by policy",
-			Fields: map[string]interface{}{
-				"account_number":     accountNumber,
-				"staging_id":         stagingID,
-				"transaction_count":  len(payload.Clean.Transactions),
-				"opening_balance":    payload.Clean.OpeningBalance,
-			},
+			EventCode:           common.TriggerPreCreate,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "BANK_STATEMENT",
+			EntityCode:          accountNumber,
+			ActorUserID:         actorUserID,
+			HandlerName:         "CommitHandler",
+			APIPath:             "/cash/commit",
+			DefaultBlockMessage: "Bank statement commit blocked by policy",
+			Fields: buildBankStatementPolicyFields(bankStatementRow{
+				AccountNumber:        accountNumber,
+				StatementPeriodStart: commitPeriodStart,
+				StatementPeriodEnd:   commitPeriodEnd,
+				OpeningBalance:       payload.Clean.OpeningBalance,
+				ClosingBalance:       payload.Clean.Metadata.ClosingBalance,
+				TotalTransactions:    len(payload.Clean.Transactions),
+			}, "CREATE"),
 		}) {
 			return
 		}

@@ -73,6 +73,9 @@ func EnforceInline(ctx context.Context, r *http.Request, pool *pgxpool.Pool, in 
 
 // EnforceDetailed runs the check and returns the full CheckResult for UIs.
 func EnforceDetailed(ctx context.Context, r *http.Request, pool *pgxpool.Pool, in EnforceInput) EnforceOutcome {
+	if !PolicyChecksEnabled() {
+		return EnforceOutcome{OK: true}
+	}
 	vars := in.Variables
 	if len(vars) == 0 && len(in.Fields) > 0 && strings.TrimSpace(in.SubModule) != "" {
 		mapped, err := BuildVariablesFromCatalog(ctx, pool, in.SubModule, in.Fields, nil)

@@ -19,9 +19,9 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"CimplrCorpSaas/api/constants"
 )
 
 const (
@@ -352,6 +352,20 @@ func CancellationStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		if strings.EqualFold(requestedStatus, "Rejected") {
 			cancelEventCode = common.TriggerPreReject
 		}
+		// One Enforce call for the whole batch, not per booking: BookingAmounts
+		// is a map of booking_id -> amount sharing one common cancellation
+		// date/rate/reason across the request, so there is no single canonical
+		// row here — build Fields from those batch-common scalars via the same
+		// row builder Create/Approve/Reject all share, plus booking_count since
+		// that's the one thing that genuinely varies per call.
+		statusReqFields := buildForwardCancellationPolicyFields(fwdCancellationRow{
+			CancellationDate:   req.CancellationDate,
+			CancellationRate:   &req.CancellationRate,
+			RealizedGainLoss:   &req.RealizedGainLoss,
+			CancellationReason: req.CancellationReason,
+			Status:             requestedStatus,
+		})
+		statusReqFields["booking_count"] = len(req.BookingAmounts)
 		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
 			EventCode:           cancelEventCode,
 			ModuleCode:          common.ModuleFX,
@@ -360,11 +374,7 @@ func CancellationStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "CancellationStatusRequest",
 			APIPath:             "/fx/forwards/cancellation-status-request",
 			DefaultBlockMessage: "Forward cancellation status change blocked by policy",
-			Fields: map[string]interface{}{
-				"status":              requestedStatus,
-				"cancellation_reason": req.CancellationReason,
-				"booking_count":       len(req.BookingAmounts),
-			},
+			Fields:              statusReqFields,
 		}) {
 			return
 		}
@@ -717,21 +727,12 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 		case constants.AuditActionDelete:
 			actionEventCode = common.TriggerPreDelete
 		}
-		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
-			EventCode:           actionEventCode,
-			ModuleCode:          common.ModuleFX,
-			SubModule:           "FORWARD_CANCEL_ROLL",
-			ActorUserID:         req.UserID,
-			HandlerName:         "CancellationRolloverAction",
-			APIPath:             "/fx/forwards/cancel-roll/action",
-			DefaultBlockMessage: "Forward cancellation/rollover action blocked by policy",
-			Fields: map[string]interface{}{
-				"action":     action,
-				"item_count": len(req.Items),
-			},
-		}) {
-			return
-		}
+		// Enforce is called per item (not once for the whole request) below,
+		// once each item's real row is loaded — items are heterogeneous
+		// (independently cancellation-or-rollover, by booking_id+request_date),
+		// so a single upfront check had no per-item data to evaluate against.
+		// Same per-item pattern BulkUpdateForwardBookingProcessingStatus already
+		// uses for FORWARD_BOOKING in this package.
 
 		processed := 0
 		notifItems := make([]fxnotification.CancelRollItem, 0, len(req.Items))
@@ -760,6 +761,20 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 			`, tableName, dateColumn)
 			if err := pool.QueryRow(r.Context(), statusQuery, bookingID, requestDate, buNames).Scan(&currentStatus); err != nil {
 				respondWithError(w, http.StatusBadRequest, fmt.Sprintf("%s request not found or not accessible", cancelRollRequestLabel(requestType)))
+				return
+			}
+
+			if ok, msg := runtime.EnforceInline(r.Context(), r, pool, runtime.EnforceInput{
+				EventCode:           actionEventCode,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "FORWARD_CANCEL_ROLL",
+				ActorUserID:         req.UserID,
+				HandlerName:         "CancellationRolloverAction",
+				APIPath:             "/fx/forwards/cancel-roll/action",
+				DefaultBlockMessage: "Forward cancellation/rollover action blocked by policy",
+				Fields:              forwardCancelRollItemPolicyFields(r.Context(), pool, requestType, bookingID, requestDate, action, len(req.Items)),
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
 			}
 
@@ -885,6 +900,28 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
+		// Pre-insert batch create, same map-of-bookings shape as
+		// CreateForwardCancellations. NOTE: this previously passed
+		// "realized_gain_loss"/"cancellation_reason" keys copy-pasted from the
+		// cancellation handler — req.RealizedGainLoss is actually inserted into
+		// forward_rollovers as rollover_cost below (see the INSERT a few lines
+		// down), and forward_rollovers has no cancellation_reason column at
+		// all. Canonicalized to the real column/field_code names.
+		rolloverCreateFields := buildForwardRolloverPolicyFields(fwdRolloverRow{
+			RolloverDate:              req.CancellationDate,
+			OriginalMaturityDate:      req.CancellationDate,
+			NewMaturityDate:           req.NewForward.MaturityDate,
+			RolloverCost:              &req.RealizedGainLoss,
+			Status:                    "Pending",
+			FXPair:                    req.NewForward.FXPair,
+			OrderType:                 req.NewForward.OrderType,
+			NewForwardAmount:          parseFloatPtr(req.NewForward.Amount),
+			NewForwardSpotRate:        parseFloatPtr(req.NewForward.SpotRate),
+			NewForwardPremiumDiscount: parseFloatPtr(req.NewForward.PremiumDiscount),
+			NewForwardMarginRate:      parseFloatPtr(req.NewForward.MarginRate),
+			NewForwardNetRate:         parseFloatPtr(req.NewForward.NetRate),
+		})
+		rolloverCreateFields["booking_count"] = len(req.BookingAmounts)
 		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleFX,
@@ -893,13 +930,7 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "RolloverForwardBooking",
 			APIPath:             "/fx/forwards/create-forward-rollover",
 			DefaultBlockMessage: "Forward rollover request blocked by policy",
-			Fields: map[string]interface{}{
-				"rollover_date":       req.CancellationDate,
-				"realized_gain_loss":  req.RealizedGainLoss,
-				"cancellation_reason": req.CancellationReason,
-				"new_forward_amount":  req.NewForward.Amount,
-				"booking_count":       len(req.BookingAmounts),
-			},
+			Fields:              rolloverCreateFields,
 		}) {
 			return
 		}
@@ -1208,6 +1239,18 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		buNames, _ := r.Context().Value(api.BusinessUnitsKey).([]string)
+		// Pre-insert batch create: same rationale as CancellationStatusRequest —
+		// one common cancellation_date/rate/reason applies to every booking in
+		// the map, so build Fields from those via the shared row builder rather
+		// than per-booking data.
+		createFields := buildForwardCancellationPolicyFields(fwdCancellationRow{
+			CancellationDate:   req.CancellationDate,
+			CancellationRate:   &req.CancellationRate,
+			RealizedGainLoss:   &req.RealizedGainLoss,
+			CancellationReason: req.CancellationReason,
+			Status:             "Pending",
+		})
+		createFields["booking_count"] = len(req.BookingAmounts)
 		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleFX,
@@ -1216,13 +1259,7 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "CreateForwardCancellations",
 			APIPath:             "/fx/forwards/create-forward-cancellations",
 			DefaultBlockMessage: "Forward cancellation request blocked by policy",
-			Fields: map[string]interface{}{
-				"cancellation_date":   req.CancellationDate,
-				"cancellation_rate":   req.CancellationRate,
-				"realized_gain_loss":  req.RealizedGainLoss,
-				"cancellation_reason": req.CancellationReason,
-				"booking_count":       len(req.BookingAmounts),
-			},
+			Fields:              createFields,
 		}) {
 			return
 		}
@@ -1279,6 +1316,11 @@ func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		if strings.EqualFold(requestedStatus, "Rejected") {
 			rolloverEventCode = common.TriggerPreReject
 		}
+		rolloverStatusFields := buildForwardRolloverPolicyFields(fwdRolloverRow{
+			RolloverDate: req.RolloverDate,
+			Status:       requestedStatus,
+		})
+		rolloverStatusFields["booking_count"] = len(req.BookingAmounts)
 		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
 			EventCode:           rolloverEventCode,
 			ModuleCode:          common.ModuleFX,
@@ -1287,10 +1329,7 @@ func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "RolloverStatusRequest",
 			APIPath:             "/fx/forwards/rollover-status-request",
 			DefaultBlockMessage: "Forward rollover status change blocked by policy",
-			Fields: map[string]interface{}{
-				"status":        requestedStatus,
-				"booking_count": len(req.BookingAmounts),
-			},
+			Fields:              rolloverStatusFields,
 		}) {
 			return
 		}

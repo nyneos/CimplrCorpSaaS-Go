@@ -173,6 +173,11 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		for _, proposalID := range req.ProposalIDs {
+			row, rowErr := loadCashflowProjectionRow(ctx, pgxPool, proposalID)
+			if rowErr != nil {
+				api.RespondWithError(w, http.StatusNotFound, "Proposal not found: "+rowErr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
@@ -181,7 +186,7 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "DeleteCashFlowProposalV2",
 				APIPath:             "/cash/projection/v2/delete",
 				DefaultBlockMessage: "Cash flow projection delete blocked by policy",
-				Fields:              map[string]interface{}{"proposal_id": proposalID},
+				Fields:              buildCashflowProjectionPolicyFields(row),
 			}); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
@@ -285,6 +290,11 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 
 		ctx := r.Context()
 		for _, proposalID := range req.ProposalIDs {
+			row, rowErr := loadCashflowProjectionRow(ctx, pgxPool, proposalID)
+			if rowErr != nil {
+				api.RespondWithError(w, http.StatusNotFound, "Proposal not found: "+rowErr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreReject,
 				ModuleCode:          common.ModuleCash,
@@ -293,7 +303,7 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 				HandlerName:         "BulkRejectCashFlowProposalActionsV2",
 				APIPath:             "/cash/projection/v2/reject",
 				DefaultBlockMessage: "Cash flow projection reject blocked by policy",
-				Fields:              map[string]interface{}{"proposal_id": proposalID},
+				Fields:              buildCashflowProjectionPolicyFields(row),
 			}); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
@@ -447,6 +457,11 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 
 		ctx := r.Context()
 		for _, proposalID := range req.ProposalIDs {
+			row, rowErr := loadCashflowProjectionRow(ctx, pgxPool, proposalID)
+			if rowErr != nil {
+				api.RespondWithError(w, http.StatusNotFound, "Proposal not found: "+rowErr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreApprove,
 				ModuleCode:          common.ModuleCash,
@@ -455,7 +470,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 				HandlerName:         "BulkApproveCashFlowProposalActionsV2",
 				APIPath:             "/cash/projection/v2/approve",
 				DefaultBlockMessage: "Cash flow projection approve blocked by policy",
-				Fields:              map[string]interface{}{"proposal_id": proposalID},
+				Fields:              buildCashflowProjectionPolicyFields(row),
 			}); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
@@ -671,6 +686,23 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(req.Items) > 0 {
 			entityCode = req.Items[0].EntityName
 		}
+		policyItems := make([]cashflowProjectionItemInput, 0, len(req.Items))
+		for _, item := range req.Items {
+			policyItems = append(policyItems, cashflowProjectionItemInput{
+				Description:         item.Description,
+				CashflowType:        item.CashflowType,
+				CategoryID:          item.CategoryID,
+				CurrencyCode:        item.CurrencyCode,
+				ExpectedAmount:      item.ExpectedAmount,
+				IsRecurring:         item.IsRecurring,
+				RecurrenceFrequency: item.RecurrenceFrequency,
+				MaturityDate:        item.MaturityDate,
+				BankName:            item.BankName,
+				BankAccountNumber:   item.BankAccountNumber,
+				EntityName:          item.EntityName,
+			})
+		}
+		policyRow := buildCashflowProjectionRowFromRequest("", req.Proposal.ProposalName, req.Proposal.BaseCurrencyCode, req.Proposal.EffectiveDate, policyItems)
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleCash,
@@ -680,11 +712,7 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "CreateCashFlowProposalV2",
 			APIPath:             "/cash/projection/v2/create",
 			DefaultBlockMessage: "Cash flow projection create blocked by policy",
-			Fields: map[string]interface{}{
-				"proposal_name":      req.Proposal.ProposalName,
-				"base_currency_code": req.Proposal.BaseCurrencyCode,
-				"item_count":         len(req.Items),
-			},
+			Fields:              buildCashflowProjectionPolicyFields(policyRow),
 		}) {
 			return
 		}
@@ -1408,6 +1436,23 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(req.Items) > 0 {
 			entityCode = req.Items[0].EntityName
 		}
+		policyItems := make([]cashflowProjectionItemInput, 0, len(req.Items))
+		for _, item := range req.Items {
+			policyItems = append(policyItems, cashflowProjectionItemInput{
+				Description:         item.Description,
+				CashflowType:        item.CashflowType,
+				CategoryID:          item.CategoryID,
+				CurrencyCode:        item.CurrencyCode,
+				ExpectedAmount:      item.ExpectedAmount,
+				IsRecurring:         item.IsRecurring,
+				RecurrenceFrequency: item.RecurrenceFrequency,
+				MaturityDate:        item.MaturityDate,
+				BankName:            item.BankName,
+				BankAccountNumber:   item.BankAccountNumber,
+				EntityName:          item.EntityName,
+			})
+		}
+		policyRow := buildCashflowProjectionRowFromRequest(req.ProposalID, req.Proposal.ProposalName, req.Proposal.BaseCurrencyCode, req.Proposal.EffectiveDate, policyItems)
 		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
@@ -1417,11 +1462,7 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "UpdateCashFlowProposalV2",
 			APIPath:             "/cash/projection/v2/update",
 			DefaultBlockMessage: "Cash flow projection update blocked by policy",
-			Fields: map[string]interface{}{
-				"proposal_id":        req.ProposalID,
-				"proposal_name":      req.Proposal.ProposalName,
-				"base_currency_code": req.Proposal.BaseCurrencyCode,
-			},
+			Fields:              buildCashflowProjectionPolicyFields(policyRow),
 		}) {
 			return
 		}

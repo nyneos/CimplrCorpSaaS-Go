@@ -51,13 +51,21 @@ func HandleTransformResultProcessingLog(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT log_id::text, step, status, detail, created_at
 			FROM email_svc.processing_log
 			WHERE message_id = $1::uuid
+			  AND step LIKE 'TRANSFORM%'
 			  AND (
-			    step LIKE 'TRANSFORM%'
-			    OR detail->>'attachment_id' = $2
-			    OR detail->>'rule_id' = $3
+			    -- Prefer exact result when present (multi-destination TRANSFORM rows).
+			    detail->>'result_id' = $4
+			    OR (
+			      -- Same rule + attachment that produced this transform result.
+			      detail->>'rule_id' = $3
+			      AND (
+			        COALESCE(detail->>'attachment_id', '') = ''
+			        OR detail->>'attachment_id' = $2
+			      )
+			    )
 			  )
 			ORDER BY created_at ASC
-		`, messageID, attachmentID, ruleID)
+		`, messageID, attachmentID, ruleID, resultID)
 		if err != nil {
 			emailcommon.RespondInternal(w, err.Error())
 			return

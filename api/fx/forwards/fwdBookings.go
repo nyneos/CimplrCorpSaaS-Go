@@ -309,6 +309,42 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusForbidden, "You do not have access to this business unit")
 			return
 		}
+		createRow := forwardBookingRow{
+			InternalReferenceID:         req.InternalReferenceID,
+			EntityLevel0:                req.EntityLevel0,
+			EntityLevel1:                req.EntityLevel1,
+			EntityLevel2:                req.EntityLevel2,
+			EntityLevel3:                req.EntityLevel3,
+			LocalCurrency:               req.LocalCurrency,
+			OrderType:                   req.OrderType,
+			TransactionType:             req.TransactionType,
+			Counterparty:                req.Counterparty,
+			ModeOfDelivery:              req.ModeOfDelivery,
+			DeliveryPeriod:              req.DeliveryPeriod,
+			AddDate:                     req.AddDate,
+			SettlementDate:              req.SettlementDate,
+			MaturityDate:                req.MaturityDate,
+			DeliveryDate:                req.DeliveryDate,
+			CurrencyPair:                req.CurrencyPair,
+			BaseCurrency:                req.BaseCurrency,
+			QuoteCurrency:               req.QuoteCurrency,
+			BookingAmount:               jsonNumberToFloatPtr(req.BookingAmount),
+			ValueType:                   req.ValueType,
+			ActualValueBaseCurrency:     jsonNumberToFloatPtr(req.ActualValueBaseCurrency),
+			SpotRate:                    jsonNumberToFloatPtr(req.SpotRate),
+			ForwardPoints:               jsonNumberToFloatPtr(req.ForwardPoints),
+			BankMargin:                  jsonNumberToFloatPtr(req.BankMargin),
+			TotalRate:                   jsonNumberToFloatPtr(req.TotalRate),
+			ValueQuoteCurrency:          jsonNumberToFloatPtr(req.ValueQuoteCurrency),
+			InterveningRateQuoteToLocal: jsonNumberToFloatPtr(req.InterveningRateQuoteToLocal),
+			ValueLocalCurrency:          jsonNumberToFloatPtr(req.ValueLocalCurrency),
+			InternalDealer:              req.InternalDealer,
+			CounterpartyDealer:          req.CounterpartyDealer,
+			Remarks:                     req.Remarks,
+			Narration:                   req.Narration,
+			TransactionTimestamp:        req.TransactionTimestamp,
+			ProcessingStatus:            "pending",
+		}
 		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleFX,
@@ -318,13 +354,7 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "AddForwardBookingManualEntry",
 			APIPath:             "/fx/forwards/manual-entry",
 			DefaultBlockMessage: "Forward booking create blocked by policy",
-			Fields: map[string]interface{}{
-				"entity_level_0":    req.EntityLevel0,
-				"currency_pair":     req.CurrencyPair,
-				"counterparty":      req.Counterparty,
-				"transaction_type":  req.TransactionType,
-				"internal_reference_id": req.InternalReferenceID,
-			},
+			Fields:              buildForwardBookingPolicyFields(createRow),
 		}) {
 			return
 		}

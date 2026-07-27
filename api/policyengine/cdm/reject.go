@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// HandleReject bulk-rejects pending CREATE/EDIT/DELETE requests. A rejected
-// EDIT reverts the master row to the audit row's old_* values.
+// HandleReject bulk-rejects pending CREATE/EDIT/DELETE requests.
+// EDIT reject does NOT revert master columns — only processing_status.
 func HandleReject(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !common.RequirePOST(w, r) {
@@ -44,22 +44,15 @@ func HandleReject(pool *pgxpool.Pool) http.HandlerFunc {
 			if id == "" {
 				continue
 			}
-			var auditID, actionType string
-			var oldName, oldDataType, oldUnit, oldLabel, oldDescription, oldDomain, oldSourceSystem, oldStatus *string
-			var oldCanonicalRef, oldUserAlias *string
-			var oldNullable *bool
+			var auditID string
 			err := tx.QueryRow(r.Context(), `
-				SELECT audit_id::text, action_type, old_name, old_data_type, old_unit, old_label,
-				       old_description, old_domain, old_source_system, old_canonical_ref, old_user_alias,
-				       old_nullable, old_status
+				SELECT audit_id::text
 				FROM policyengine_svc.cdm_variable_audit
 				WHERE variable_id = $1::uuid AND processing_status = ANY($2::text[])
 				ORDER BY requested_at DESC
 				LIMIT 1
 				FOR UPDATE`, id, common.PendingProcessingStatuses,
-			).Scan(&auditID, &actionType, &oldName, &oldDataType, &oldUnit, &oldLabel,
-				&oldDescription, &oldDomain, &oldSourceSystem, &oldCanonicalRef, &oldUserAlias,
-				&oldNullable, &oldStatus)
+			).Scan(&auditID)
 			if err != nil {
 				errs = append(errs, id+": no pending request")
 				continue
@@ -74,30 +67,14 @@ func HandleReject(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			if actionType == "EDIT" && oldName != nil {
-				if _, err := tx.Exec(r.Context(), `
-					UPDATE policyengine_svc.cdm_variable
-					SET name = $1, data_type = $2, unit = COALESCE($3,''), label = $4, description = $5, domain = $6,
-					    source_system = $7, canonical_ref = COALESCE($8,''), user_alias = $9,
-					    nullable = COALESCE($10,false), status = COALESCE($11,status),
-					    processing_status = 'REJECTED', last_modified_by = $12, last_modified_at = now()
-					WHERE variable_id = $13::uuid`,
-					oldName, oldDataType, oldUnit, oldLabel, oldDescription, oldDomain,
-					oldSourceSystem, oldCanonicalRef, oldUserAlias, oldNullable, oldStatus, actor, id,
-				); err != nil {
-					errs = append(errs, id+": "+err.Error())
-					continue
-				}
-			} else {
-				if _, err := tx.Exec(r.Context(), `
+			if _, err := tx.Exec(r.Context(), `
 					UPDATE policyengine_svc.cdm_variable
 					SET processing_status = 'REJECTED', last_modified_by = $1, last_modified_at = now()
 					WHERE variable_id = $2::uuid`,
-					actor, id,
-				); err != nil {
-					errs = append(errs, id+": "+err.Error())
-					continue
-				}
+				actor, id,
+			); err != nil {
+				errs = append(errs, id+": "+err.Error())
+				continue
 			}
 			rejected = append(rejected, id)
 		}

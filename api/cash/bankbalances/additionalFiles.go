@@ -59,17 +59,19 @@ func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 func bankBalanceAdditionalFilesConfig() additionalfiles.Config {
 	return additionalfiles.WithCashCrossStageVisibility(additionalfiles.Config{
-		Module:                "bankbalance",
-		AuditSource:           "BANK_BALANCE",
-		ParentIDField:         "balance_id",
-		List:                  listBankBalanceAdditionalFiles,
-		CreateReturning:       createBankBalanceAdditionalFile,
-		GetOne:                getBankBalanceAdditionalFile,
-		GetAnyFile:            getAnyBankBalanceAdditionalFile,
-		GetMany:               getBankBalanceAdditionalFiles,
-		SoftDelete:            deleteBankBalanceAdditionalFile,
-		SoftDeleteTx:          deleteBankBalanceAdditionalFileTx,
-		RecordMainUploadAudit: recordBankBalanceMainUploadAudit,
+		Module:                  "bankbalance",
+		AuditSource:             "BANK_BALANCE",
+		ParentIDField:           "balance_id",
+		PolicyModuleCode:        "CASH",
+		PolicySubModule:         "BANK_BALANCE",
+		List:                    listBankBalanceAdditionalFiles,
+		CreateReturning:         createBankBalanceAdditionalFile,
+		GetOne:                  getBankBalanceAdditionalFile,
+		GetAnyFile:              getAnyBankBalanceAdditionalFile,
+		GetMany:                 getBankBalanceAdditionalFiles,
+		SoftDelete:              deleteBankBalanceAdditionalFile,
+		SoftDeleteTx:            deleteBankBalanceAdditionalFileTx,
+		RecordMainUploadAudit:   recordBankBalanceMainUploadAudit,
 		RecordMainDownloadAudit: recordBankBalanceMainDownloadAudit,
 	})
 }

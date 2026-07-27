@@ -150,7 +150,7 @@ func previewLogString(s string, limit int) string {
 // BuildPreviewResponseFromFileBytes parses xls/xlsx/csv bytes and returns a
 // staging-shaped preview map (clean + status). No data is written to the database.
 func BuildPreviewResponseFromFileBytes(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings, accountOverride string) (map[string]interface{}, error) {
-	txns, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, filename, useMapping, mappings, accountOverride)
+	txns, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, filename, useMapping, mappings, accountOverride, false)
 	if err != nil {
 		return nil, fmt.Errorf(constants.ErrParseFmt, err)
 	}
@@ -177,7 +177,7 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, pool *pgxpool.Pool, c
 		csvFilename = noExt + ".csv"
 	}
 
-	txns, err := processSingleFilePreviewFlat(ctx, pool, csvBytes, csvFilename, false, nil, accountOverride)
+	txns, err := processSingleFilePreviewFlat(ctx, pool, csvBytes, csvFilename, false, nil, accountOverride, true)
 	if err != nil {
 		return nil, fmt.Errorf(constants.ErrParseFmt, err)
 	}
@@ -194,10 +194,19 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, pool *pgxpool.Pool, c
 
 // BuildPreviewResponsesFromCSVBytes returns one preview payload per account.
 // For single-account converted CSVs this returns exactly one entry.
-// When accountOverride is set (forced single account from the upload form), the multi-account
-// split path is skipped so preview and staging resolve the same master row as CSV/XLS uploads.
+// When LLM is on (or accountOverride is set), uses the LLM-first single-file path so
+// PDF-converted sheets are not routed through the multi-account positional splitter.
 func BuildPreviewResponsesFromCSVBytes(ctx context.Context, pool *pgxpool.Pool, csvBytes []byte, filename string, accountOverride string) ([]map[string]interface{}, error) {
 	logger.LogInfo("[CSV-RAW] filename=%s size=%d content=\n%s", filename, len(csvBytes), string(csvBytes))
+
+	if bankStatementUseLLM() || strings.TrimSpace(accountOverride) != "" {
+		single, err := BuildPreviewResponseFromCSVBytes(ctx, pool, csvBytes, filename, accountOverride)
+		if err != nil {
+			return nil, err
+		}
+		return []map[string]interface{}{single}, nil
+	}
+
 	csvFilename := filename
 	if !strings.HasSuffix(strings.ToLower(csvFilename), ".csv") {
 		noExt := strings.TrimSuffix(csvFilename, ".pdf")
@@ -206,28 +215,26 @@ func BuildPreviewResponsesFromCSVBytes(ctx context.Context, pool *pgxpool.Pool, 
 	}
 
 	// Prefer multi-account parser first so one converted CSV can stage N statements.
-	if strings.TrimSpace(accountOverride) == "" {
-		if txns, err := processMultiAccountCSVPreviewFlat(ctx, pool, csvBytes); err == nil && len(txns) > 0 {
-			grouped := map[string][]map[string]interface{}{}
-			order := make([]string, 0)
-			for _, t := range txns {
-				acc, _ := t["account_number"].(string)
-				acc = strings.TrimSpace(acc)
-				if acc == "" {
-					acc = "__unknown__"
-				}
-				if _, ok := grouped[acc]; !ok {
-					order = append(order, acc)
-				}
-				grouped[acc] = append(grouped[acc], t)
+	if txns, err := processMultiAccountCSVPreviewFlat(ctx, pool, csvBytes); err == nil && len(txns) > 0 {
+		grouped := map[string][]map[string]interface{}{}
+		order := make([]string, 0)
+		for _, t := range txns {
+			acc, _ := t["account_number"].(string)
+			acc = strings.TrimSpace(acc)
+			if acc == "" {
+				acc = "__unknown__"
 			}
-			if len(grouped) > 0 {
-				out := make([]map[string]interface{}, 0, len(grouped))
-				for _, acc := range order {
-					out = append(out, buildPreviewResponseFromTxnMaps(grouped[acc], csvBytes, acc))
-				}
-				return out, nil
+			if _, ok := grouped[acc]; !ok {
+				order = append(order, acc)
 			}
+			grouped[acc] = append(grouped[acc], t)
+		}
+		if len(grouped) > 0 {
+			out := make([]map[string]interface{}, 0, len(grouped))
+			for _, acc := range order {
+				out = append(out, buildPreviewResponseFromTxnMaps(grouped[acc], csvBytes, acc))
+			}
+			return out, nil
 		}
 	}
 

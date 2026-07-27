@@ -1052,9 +1052,16 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName:         "ManualTriggerSweepV2",
 			APIPath:             "/cash/sweep-execution-v2/manual-trigger",
 			DefaultBlockMessage: "Sweep execution blocked by policy",
-			Fields: map[string]interface{}{
-				"sweep_id": req.SweepID,
-			},
+			// execution_id/amount_swept/status/error_message/balance_before/
+			// balance_after are not known yet at this point — the check runs
+			// before the sweep actually executes. See
+			// sweepExecutionPolicyFields.go for the field-set rationale.
+			Fields: buildSweepExecutionPolicyFields(sweepExecutionRow{
+				SweepID:     req.SweepID,
+				EntityName:  entityName,
+				FromAccount: sourceAccount,
+				ToAccount:   targetAccount,
+			}),
 		}) {
 			return
 		}
@@ -1500,12 +1507,15 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 
 			// Determine if we need to create new sweep or use existing
 			sweepID := strings.TrimSpace(sweep.SweepID)
+			entityName := strings.TrimSpace(sweep.EntityName)
+			fromAccount := strings.TrimSpace(sweep.SourceBankAccount)
+			toAccount := strings.TrimSpace(sweep.TargetBankAccount)
 
 			if sweepID == "" {
 				// CREATE NEW SWEEP CONFIG + AUTO-APPROVE
 
 				// Validate required fields for new sweep
-				if strings.TrimSpace(sweep.EntityName) == "" {
+				if entityName == "" {
 					tx.Rollback(ctx)
 					result.Status = "failed"
 					result.Error = fmt.Sprintf("sweep[%d]: entity_name required when sweep_id is empty", i)
@@ -1514,10 +1524,10 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 				}
 
 				// Validate entity authorization
-				if !ctxutil.FromContext(ctx).HasEntityAccess(sweep.EntityName) {
+				if !ctxutil.FromContext(ctx).HasEntityAccess(entityName) {
 					tx.Rollback(ctx)
 					result.Status = "failed"
-					result.Error = fmt.Sprintf("sweep[%d]: unauthorized entity %s", i, sweep.EntityName)
+					result.Error = fmt.Sprintf("sweep[%d]: unauthorized entity %s", i, entityName)
 					results = append(results, result)
 					continue
 				}
@@ -1604,13 +1614,15 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 			} else {
 				// USE EXISTING SWEEP - Validate it exists and is approved
 
-				var entityName, sourceBank, sourceAccount, targetBank, targetAccount string
+				var sourceBank, targetBank string
 				err := tx.QueryRow(ctx, `
 					SELECT entity_name, source_bank_name, source_bank_account, 
 						   target_bank_name, target_bank_account
 					FROM cimplrcorpsaas.sweepconfiguration
 					WHERE sweep_id = $1 AND is_deleted = false
-				`, sweepID).Scan(&entityName, &sourceBank, &sourceAccount, &targetBank, &targetAccount)
+				`, sweepID).Scan(&entityName, &sourceBank, &fromAccount, &targetBank, &toAccount)
+				_ = sourceBank
+				_ = targetBank
 
 				if err != nil {
 					tx.Rollback(ctx)
@@ -1653,6 +1665,29 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 			}
 
 			result.SweepID = sweepID
+
+			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreSubmit,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "SWEEP_EXECUTION",
+				EntityCode:          entityName,
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkManualTriggerSweepV2WithAutoApproval",
+				APIPath:             "/cash/sweep-execution-v2/bulk-manual",
+				DefaultBlockMessage: "Sweep execution blocked by policy",
+				Fields: buildSweepExecutionPolicyFields(sweepExecutionRow{
+					SweepID:     sweepID,
+					EntityName:  entityName,
+					FromAccount: fromAccount,
+					ToAccount:   toAccount,
+				}),
+			}); !ok {
+				tx.Rollback(ctx)
+				result.Status = "failed"
+				result.Error = msg
+				results = append(results, result)
+				continue
+			}
 
 			// CREATE INITIATION + AUTO-APPROVE
 			insInitiation := `INSERT INTO cimplrcorpsaas.sweep_initiation (

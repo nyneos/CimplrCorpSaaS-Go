@@ -78,6 +78,7 @@ type DetailItem struct {
 
 	TriggerEvents           []string                  `json:"trigger_events"`
 	Modules                 []string                  `json:"modules"`
+	SubModules              []string                  `json:"sub_modules"`
 	EntitiesInclude         []string                  `json:"entities_include"`
 	EntitiesExclude         []string                  `json:"entities_exclude"`
 	SlabRows                []slabRowConfig           `json:"slab_rows"`
@@ -219,6 +220,20 @@ func loadPolicyDetail(r *http.Request, pool *pgxpool.Pool, policyID string) (*De
 			}
 		}
 		modRows.Close()
+	}
+
+	it.SubModules = make([]string, 0)
+	subRows, err := pool.Query(r.Context(), `
+		SELECT sub_module_code FROM policyengine_svc.policy_sub_module
+		WHERE policy_id = $1::uuid AND is_deleted = false ORDER BY sub_module_code`, policyID)
+	if err == nil {
+		for subRows.Next() {
+			var code string
+			if subRows.Scan(&code) == nil {
+				it.SubModules = append(it.SubModules, code)
+			}
+		}
+		subRows.Close()
 	}
 
 	it.EntitiesInclude = make([]string, 0)

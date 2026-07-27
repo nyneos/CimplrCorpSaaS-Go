@@ -59,6 +59,43 @@ func EnsureTransformationSchema(ctx context.Context, pool *pgxpool.Pool) {
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_transformation_results_attachment_rule ON email_svc.transformation_results (attachment_id, rule_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transformation_results_rule_id ON email_svc.transformation_results (rule_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_transformation_results_created_at ON email_svc.transformation_results (created_at DESC)`,
+		`
+		CREATE TABLE IF NOT EXISTS email_svc.transformation_rule_destinations (
+			destination_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			rule_id UUID NOT NULL,
+			sort_order INT NOT NULL DEFAULT 0,
+			destination_type TEXT NOT NULL DEFAULT 'S3',
+			output_name_prefix TEXT NOT NULL DEFAULT '',
+			append_datetime BOOLEAN NOT NULL DEFAULT true,
+			s3_prefix TEXT NOT NULL DEFAULT '',
+			local_folder TEXT NOT NULL DEFAULT '',
+			sftp_host TEXT NOT NULL DEFAULT '',
+			sftp_port INT NOT NULL DEFAULT 22,
+			sftp_user TEXT NOT NULL DEFAULT '',
+			sftp_password TEXT NOT NULL DEFAULT '',
+			sftp_folder TEXT NOT NULL DEFAULT '',
+			api_url TEXT NOT NULL DEFAULT '',
+			api_auth_token TEXT NOT NULL DEFAULT '',
+			is_active BOOLEAN NOT NULL DEFAULT true,
+			is_deleted BOOLEAN NOT NULL DEFAULT false,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_tr_dest_rule_id ON email_svc.transformation_rule_destinations (rule_id) WHERE is_deleted = false`,
+		`
+		CREATE TABLE IF NOT EXISTS email_svc.transformation_result_deliveries (
+			delivery_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			result_id UUID NOT NULL,
+			destination_id UUID,
+			destination_type TEXT NOT NULL DEFAULT 'S3',
+			output_location TEXT NOT NULL DEFAULT '',
+			output_filename TEXT NOT NULL DEFAULT '',
+			transformed_s3_key TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'SUCCESS',
+			error_message TEXT,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_tr_result_deliveries_result_id ON email_svc.transformation_result_deliveries (result_id)`,
 	}
 	for _, q := range stmts {
 		if _, err := pool.Exec(ctx, q); err != nil {
@@ -380,43 +417,104 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 		contentType = "application/json"
 	}
 
-	dest, destErr := loadRuleDestination(ctx, pool, ruleID)
-	if destErr != nil {
-		log.Printf("[TransformWorker] Failed to load destination for rule %s: %v", ruleID, destErr)
-		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, ruleDestination{}, "load_destination: "+destErr.Error())
+	dests, destErr := loadRuleDestinations(ctx, pool, ruleID)
+	if destErr != nil || len(dests) == 0 {
+		log.Printf("[TransformWorker] Failed to load destinations for rule %s: %v", ruleID, destErr)
+		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, ruleDestination{}, "load_destination: "+errString(destErr))
 		return
 	}
 
 	logTransformStep(ctx, pool, messageID, "TRANSFORM_CONVERT", "OK", map[string]interface{}{
-		"attachment_id": attachmentID,
-		"rule_id":       ruleID,
-		"mapping_id":    mappingID,
-		"output_format": transformedExt,
-		"byte_size":     len(bodyBytes),
+		"attachment_id":       attachmentID,
+		"rule_id":             ruleID,
+		"mapping_id":          mappingID,
+		"output_format":       transformedExt,
+		"byte_size":           len(bodyBytes),
+		"destination_count":   len(dests),
 	})
 
-	location, s3KeyOut, outName, delErr := deliverTransformed(ctx, dest, transformedExt, bodyBytes, contentType)
-
-	if delErr != nil {
-		log.Printf("[TransformWorker] Failed to deliver transformed file (%s): %v", dest.DestinationType, delErr)
-		saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, dest, "deliver_"+strings.ToLower(dest.DestinationType)+": "+delErr.Error())
-		return
+	type deliveryOutcome struct {
+		dest     ruleDestination
+		location string
+		s3Key    string
+		outName  string
+		err      error
+	}
+	outcomes := make([]deliveryOutcome, 0, len(dests))
+	successCount := 0
+	for _, dest := range dests {
+		location, s3KeyOut, outName, delErr := deliverTransformed(ctx, dest, transformedExt, bodyBytes, contentType)
+		outcomes = append(outcomes, deliveryOutcome{dest: dest, location: location, s3Key: s3KeyOut, outName: outName, err: delErr})
+		if delErr != nil {
+			log.Printf("[TransformWorker] Failed to deliver transformed file (%s) dest=%s: %v", dest.DestinationType, dest.DestinationID, delErr)
+			continue
+		}
+		successCount++
 	}
 
-	query := `
+	primary := outcomes[0]
+	for _, o := range outcomes {
+		if o.err == nil {
+			primary = o
+			break
+		}
+	}
+
+	overallStatus := "SUCCESS"
+	var overallErr *string
+	if successCount == 0 {
+		overallStatus = "FAILED"
+		msg := "all destinations failed"
+		if primary.err != nil {
+			msg = "deliver_" + strings.ToLower(primary.dest.DestinationType) + ": " + primary.err.Error()
+		}
+		overallErr = &msg
+	} else if successCount < len(outcomes) {
+		overallStatus = "PARTIAL"
+		msg := fmt.Sprintf("%d of %d destinations succeeded", successCount, len(outcomes))
+		overallErr = &msg
+	}
+
+	primaryLoc := primary.location
+	primaryS3 := primary.s3Key
+	primaryName := primary.outName
+	primaryType := primary.dest.DestinationType
+	if primary.err != nil {
+		primaryLoc, primaryS3, primaryName = "", "", ""
+	}
+	// Always keep an S3 key on the result when any destination landed in S3,
+	// so preview/download work for mixes like S3+API even if primary display is API.
+	for _, o := range outcomes {
+		if o.err != nil {
+			continue
+		}
+		if strings.EqualFold(o.dest.DestinationType, "S3") && strings.TrimSpace(o.s3Key) != "" {
+			primaryS3 = o.s3Key
+			if strings.TrimSpace(primaryName) == "" {
+				primaryName = o.outName
+			}
+			break
+		}
+		if strings.TrimSpace(o.s3Key) != "" && strings.TrimSpace(primaryS3) == "" {
+			primaryS3 = o.s3Key
+		}
+	}
+
+	var resultID string
+	err = pool.QueryRow(ctx, `
 		INSERT INTO email_svc.transformation_results
 			(attachment_id, rule_id, transformed_s3_key, status, error_message, destination_type, output_location, output_filename)
-		VALUES ($1::uuid, $2::uuid, $3, 'SUCCESS', NULL, $4, $5, $6)
+		VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (attachment_id, rule_id) DO UPDATE SET
 			transformed_s3_key = EXCLUDED.transformed_s3_key,
-			status = 'SUCCESS',
-			error_message = NULL,
+			status = EXCLUDED.status,
+			error_message = EXCLUDED.error_message,
 			destination_type = EXCLUDED.destination_type,
 			output_location = EXCLUDED.output_location,
 			output_filename = EXCLUDED.output_filename,
 			created_at = now()
-	`
-	_, err = pool.Exec(ctx, query, attachmentID, ruleID, s3KeyOut, dest.DestinationType, location, outName)
+		RETURNING result_id::text
+	`, attachmentID, ruleID, primaryS3, overallStatus, overallErr, primaryType, primaryLoc, primaryName).Scan(&resultID)
 	if err != nil {
 		log.Printf("[TransformWorker] Failed to save result to DB: %v", err)
 		logTransformStep(ctx, pool, messageID, "TRANSFORM", "FAIL", map[string]interface{}{
@@ -426,26 +524,155 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 		})
 		return
 	}
-	log.Printf("[TransformWorker] Saved converted file %s (%s) for attachment %s rule %s", location, dest.DestinationType, attachmentID, ruleID)
+
+	// Replace prior delivery rows for this result (retry-safe).
+	_, _ = pool.Exec(ctx, `DELETE FROM email_svc.transformation_result_deliveries WHERE result_id = $1::uuid`, resultID)
+
+	deliverySummaries := make([]map[string]interface{}, 0, len(outcomes))
+	for _, o := range outcomes {
+		st := "SUCCESS"
+		var errMsg *string
+		loc, s3k, name := o.location, o.s3Key, o.outName
+		if o.err != nil {
+			st = "FAILED"
+			m := o.err.Error()
+			errMsg = &m
+			loc, s3k, name = "", "", ""
+		}
+		var destIDArg interface{}
+		if strings.TrimSpace(o.dest.DestinationID) != "" {
+			destIDArg = o.dest.DestinationID
+		}
+		_, derr := pool.Exec(ctx, `
+			INSERT INTO email_svc.transformation_result_deliveries
+				(result_id, destination_id, destination_type, output_location, output_filename, transformed_s3_key, status, error_message)
+			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8)
+		`, resultID, destIDArg, o.dest.DestinationType, loc, name, s3k, st, errMsg)
+		if derr != nil {
+			log.Printf("[TransformWorker] Failed to save delivery row: %v", derr)
+		}
+		sum := map[string]interface{}{
+			"destination_id":     o.dest.DestinationID,
+			"destination_type":   o.dest.DestinationType,
+			"output_location":    loc,
+			"output_filename":    name,
+			"transformed_s3_key": s3k,
+			"status":             st,
+		}
+		if errMsg != nil {
+			sum["error_message"] = *errMsg
+		}
+		for k, v := range deliveryAuditFromOutcome(o.dest.DestinationType, loc, ptrString(errMsg)) {
+			sum[k] = v
+		}
+		deliverySummaries = append(deliverySummaries, sum)
+	}
+
+	logStatus := "OK"
+	if overallStatus == "FAILED" {
+		logStatus = "FAIL"
+	} else if overallStatus == "PARTIAL" {
+		logStatus = "PARTIAL"
+	}
 	okDetail := map[string]interface{}{
 		"attachment_id":      attachmentID,
 		"rule_id":            ruleID,
 		"mapping_id":         mappingID,
-		"destination_type":   dest.DestinationType,
-		"output_location":    location,
-		"output_filename":    outName,
-		"transformed_s3_key": s3KeyOut,
+		"result_id":          resultID,
+		"status":             overallStatus,
+		"destination_type":   primaryType,
+		"output_location":    primaryLoc,
+		"output_filename":    primaryName,
+		"transformed_s3_key": primaryS3,
+		"deliveries":         deliverySummaries,
+		"delivery_success":   successCount,
+		"delivery_total":     len(outcomes),
 	}
-	if strings.EqualFold(dest.DestinationType, "API") && strings.TrimSpace(dest.APIURL) != "" {
-		okDetail["api_url"] = dest.APIURL
+	if overallErr != nil {
+		okDetail["error"] = *overallErr
 	}
-	for k, v := range deliveryAuditFromOutcome(dest.DestinationType, location, "") {
-		okDetail[k] = v
-	}
-	logTransformStep(ctx, pool, messageID, "TRANSFORM", "OK", okDetail)
+	logTransformStep(ctx, pool, messageID, "TRANSFORM", logStatus, okDetail)
+	log.Printf("[TransformWorker] Saved convert for attachment %s rule %s status=%s deliveries=%d/%d primary=%s",
+		attachmentID, ruleID, overallStatus, successCount, len(outcomes), primaryLoc)
 }
 
-func loadRuleDestination(ctx context.Context, pool *pgxpool.Pool, ruleID string) (ruleDestination, error) {
+func errString(err error) string {
+	if err == nil {
+		return "no destinations configured"
+	}
+	return err.Error()
+}
+
+func ptrString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+func loadRuleDestinations(ctx context.Context, pool *pgxpool.Pool, ruleID string) ([]ruleDestination, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT destination_id::text,
+		       COALESCE(NULLIF(destination_type, ''), 'S3'),
+		       COALESCE(output_name_prefix, ''),
+		       COALESCE(append_datetime, true),
+		       COALESCE(s3_prefix, ''),
+		       COALESCE(local_folder, ''),
+		       COALESCE(sftp_host, ''),
+		       COALESCE(sftp_port, 22),
+		       COALESCE(sftp_user, ''),
+		       COALESCE(sftp_password, ''),
+		       COALESCE(sftp_folder, ''),
+		       COALESCE(api_url, ''),
+		       COALESCE(api_auth_token, '')
+		FROM email_svc.transformation_rule_destinations
+		WHERE rule_id = $1::uuid
+		  AND is_deleted = false
+		  AND COALESCE(is_active, true) = true
+		ORDER BY sort_order ASC, created_at ASC
+	`, ruleID)
+	if err == nil {
+		defer rows.Close()
+		var out []ruleDestination
+		for rows.Next() {
+			var d ruleDestination
+			if scanErr := rows.Scan(
+				&d.DestinationID, &d.DestinationType, &d.OutputNamePrefix, &d.AppendDatetime,
+				&d.S3Prefix, &d.LocalFolder,
+				&d.SftpHost, &d.SftpPort, &d.SftpUser, &d.SftpPassword, &d.SftpFolder,
+				&d.APIURL, &d.APIAuthToken,
+			); scanErr != nil {
+				continue
+			}
+			out = append(out, d)
+		}
+		if len(out) > 0 {
+			// Attach rule owner for LOCAL path layout.
+			var createdBy, approvedBy string
+			_ = pool.QueryRow(ctx, `
+				SELECT COALESCE(created_by, ''), COALESCE(approved_by, '')
+				FROM email_svc.transformation_rules WHERE rule_id = $1::uuid
+			`, ruleID).Scan(&createdBy, &approvedBy)
+			for i := range out {
+				out[i].CreatedBy = createdBy
+				out[i].ApprovedBy = approvedBy
+			}
+			return out, nil
+		}
+	}
+
+	// Fallback: legacy fat columns on the rule (pre-migration / empty child table).
+	d, ferr := loadRuleDestinationLegacy(ctx, pool, ruleID)
+	if ferr != nil {
+		if err != nil {
+			return nil, err
+		}
+		return nil, ferr
+	}
+	return []ruleDestination{d}, nil
+}
+
+func loadRuleDestinationLegacy(ctx context.Context, pool *pgxpool.Pool, ruleID string) (ruleDestination, error) {
 	var d ruleDestination
 	err := pool.QueryRow(ctx, `
 		SELECT COALESCE(NULLIF(destination_type, ''), 'S3'),
@@ -477,6 +704,17 @@ func loadRuleDestination(ctx context.Context, pool *pgxpool.Pool, ruleID string)
 	return d, nil
 }
 
+func loadRuleDestination(ctx context.Context, pool *pgxpool.Pool, ruleID string) (ruleDestination, error) {
+	dests, err := loadRuleDestinations(ctx, pool, ruleID)
+	if err != nil {
+		return ruleDestination{}, err
+	}
+	if len(dests) == 0 {
+		return ruleDestination{}, fmt.Errorf("no destinations for rule %s", ruleID)
+	}
+	return dests[0], nil
+}
+
 func saveTransformFailureByRuleID(ctx context.Context, pool *pgxpool.Pool, messageID, attachmentID, ruleID, errMsg string) {
 	dest, _ := loadRuleDestination(ctx, pool, ruleID)
 	saveTransformFailure(ctx, pool, messageID, attachmentID, ruleID, dest, errMsg)
@@ -505,9 +743,9 @@ func saveTransformFailure(ctx context.Context, pool *pgxpool.Pool, messageID, at
 		log.Printf("[TransformWorker] Failed to persist failure row: %v", err)
 	}
 	failDetail := map[string]interface{}{
-		"attachment_id": attachmentID,
-		"rule_id":       ruleID,
-		"error":         errMsg,
+		"attachment_id":    attachmentID,
+		"rule_id":          ruleID,
+		"error":            errMsg,
 		"destination_type": destType,
 	}
 	for k, v := range deliveryAuditFromOutcome(destType, "", errMsg) {

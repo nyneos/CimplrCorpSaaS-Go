@@ -431,10 +431,38 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		rolloverNewBankID, rolloverNewBankName := cimplrResolveInitiateRolloverBank(ctx, pool, req, src)
 
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "CimplrInitiateCreate",
-			"/investment/fd/closure/initiate/create", src.EntityID, userEmail, map[string]interface{}{
-				"fd_id": src.FDID, "entity_id": src.EntityID, "entity_code": src.EntityID,
-				"closure_type": req.ClosureType, "principal_amount": principal,
-			}) {
+			"/investment/fd/closure/initiate/create", src.EntityID, userEmail, buildFDClosureInitiatePolicyFields(fdClosureInitiateRow{
+				FDID:                    src.FDID,
+				BookingID:               src.BookingID,
+				ConfirmationID:          src.ConfirmationID,
+				EntityID:                src.EntityID,
+				EntityName:              src.EntityName,
+				BankID:                  src.BankID,
+				BankName:                src.BankName,
+				FDRefNo:                 src.FDRefNo,
+				BankFDRefNo:             src.BankFDRefNo,
+				ClosureType:             req.ClosureType,
+				ClosureStatus:           "INITIATE",
+				ActionAtMaturity:        req.ActionAtMaturity,
+				MaturityDate:            src.MaturityDate.Format(constants.DateFormat),
+				RequestedClosureDate:    req.RequestedClosureDate,
+				PrincipalAmount:         principal,
+				InterestTypeCode:        src.InterestTypeCode,
+				InterestRate:            src.InterestRate,
+				ExpectedMaturityValue:   expectedMaturity,
+				AccruedInterestTillDate: accrued,
+				TDSExpected:             tds,
+				NetExpectedAmount:       netExpected,
+				AutoRenewalFlag:         autoRenewal,
+				MaturityStatus:          maturityStatus,
+				ActionRequired:          actionRequired,
+				RolloverType:            req.RolloverType,
+				RolloverBankType:        req.RolloverBankType,
+				TentativeNewTenorDays:   req.TentativeNewTenorDays,
+				Remarks:                 req.Remarks,
+				RolloverNewBankID:       rolloverNewBankID,
+				RolloverNewBankName:     rolloverNewBankName,
+			})) {
 			return
 		}
 
@@ -638,11 +666,39 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		netExpected := chooseFloat(req.NetExpectedAmount, calc.NetPayout)
 		rolloverNewBankID, rolloverNewBankName := cimplrResolveInitiateRolloverBank(ctx, pool, req, src)
 
+		editedMaturityStatus := firstNonEmpty(strings.ToUpper(strings.TrimSpace(req.MaturityStatus)), deriveCimplrMaturityStatus(src.MaturityDate))
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "CimplrInitiateEdit",
-			"/investment/fd/closure/initiate/edit", src.EntityID, userEmail, map[string]interface{}{
-				"closure_initiate_id": req.ClosureInitiateID, "fd_id": src.FDID,
-				"entity_id": src.EntityID, "entity_code": src.EntityID, "closure_type": req.ClosureType,
-			}) {
+			"/investment/fd/closure/initiate/edit", src.EntityID, userEmail, buildFDClosureInitiatePolicyFields(fdClosureInitiateRow{
+				ClosureInitiateID:       req.ClosureInitiateID,
+				FDID:                    src.FDID,
+				BookingID:               src.BookingID,
+				ConfirmationID:          src.ConfirmationID,
+				EntityID:                src.EntityID,
+				EntityName:              src.EntityName,
+				BankID:                  src.BankID,
+				BankName:                src.BankName,
+				FDRefNo:                 src.FDRefNo,
+				BankFDRefNo:             src.BankFDRefNo,
+				ClosureType:             req.ClosureType,
+				ClosureStatus:           cimplrMapString(oldRow, "closure_status"),
+				ActionAtMaturity:        strings.ToUpper(strings.TrimSpace(req.ActionAtMaturity)),
+				MaturityDate:            src.MaturityDate.Format(constants.DateFormat),
+				RequestedClosureDate:    req.RequestedClosureDate,
+				PrincipalAmount:         principal,
+				InterestTypeCode:        src.InterestTypeCode,
+				InterestRate:            src.InterestRate,
+				ExpectedMaturityValue:   expectedMaturity,
+				AccruedInterestTillDate: accrued,
+				TDSExpected:             tds,
+				NetExpectedAmount:       netExpected,
+				MaturityStatus:          editedMaturityStatus,
+				RolloverType:            strings.ToUpper(strings.TrimSpace(req.RolloverType)),
+				RolloverBankType:        strings.ToUpper(strings.TrimSpace(req.RolloverBankType)),
+				TentativeNewTenorDays:   req.TentativeNewTenorDays,
+				Remarks:                 req.Remarks,
+				RolloverNewBankID:       rolloverNewBankID,
+				RolloverNewBankName:     rolloverNewBankName,
+			})) {
 			return
 		}
 
@@ -747,11 +803,15 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
+			policyRow, policyErr := loadFDClosureInitiateRow(r.Context(), pool, id)
+			if policyErr != nil {
+				res["success"] = false
+				res["error"] = policyErr.Error()
+				results = append(results, res)
+				continue
+			}
 			if ok, pmsg := fdEnforceInline(r.Context(), r, pool, common.TriggerPreDelete, "CimplrInitiateDelete",
-				"/investment/fd/closure/initiate/delete", fmt.Sprint(oldRow["entity_id"]), userEmail, map[string]interface{}{
-					"closure_initiate_id": id, "fd_id": oldRow["fd_id"],
-					"entity_id": oldRow["entity_id"], "entity_code": oldRow["entity_id"],
-				}); !ok {
+				"/investment/fd/closure/initiate/delete", policyRow.EntityID, userEmail, buildFDClosureInitiatePolicyFields(policyRow)); !ok {
 				res["success"] = false
 				res["error"] = pmsg
 				results = append(results, res)
@@ -801,16 +861,13 @@ func CimplrInitiateApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		policyResults := make([]map[string]interface{}, 0)
 		filtered := make([]string, 0, len(ids))
 		for _, id := range ids {
-			oldRow, err := loadCimplrInitiateOld(ctx, pool, id)
-			if err != nil {
+			policyRow, policyErr := loadFDClosureInitiateRow(ctx, pool, id)
+			if policyErr != nil {
 				policyResults = append(policyResults, map[string]interface{}{"closure_initiate_id": id, "success": false, "error": "record not found"})
 				continue
 			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "CimplrInitiateApprove",
-				"/investment/fd/closure/initiate/approve", fmt.Sprint(oldRow["entity_id"]), userEmail, map[string]interface{}{
-					"closure_initiate_id": id, "fd_id": oldRow["fd_id"],
-					"entity_id": oldRow["entity_id"], "entity_code": oldRow["entity_id"],
-				}); !ok {
+				"/investment/fd/closure/initiate/approve", policyRow.EntityID, userEmail, buildFDClosureInitiatePolicyFields(policyRow)); !ok {
 				policyResults = append(policyResults, map[string]interface{}{"closure_initiate_id": id, "success": false, "error": pmsg})
 				continue
 			}
@@ -848,16 +905,13 @@ func CimplrInitiateReject(pool *pgxpool.Pool) http.HandlerFunc {
 		policyResults := make([]map[string]interface{}, 0)
 		filtered := make([]string, 0, len(ids))
 		for _, id := range ids {
-			oldRow, err := loadCimplrInitiateOld(ctx, pool, id)
-			if err != nil {
+			policyRow, policyErr := loadFDClosureInitiateRow(ctx, pool, id)
+			if policyErr != nil {
 				policyResults = append(policyResults, map[string]interface{}{"closure_initiate_id": id, "success": false, "error": "record not found"})
 				continue
 			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "CimplrInitiateReject",
-				"/investment/fd/closure/initiate/reject", fmt.Sprint(oldRow["entity_id"]), userEmail, map[string]interface{}{
-					"closure_initiate_id": id, "fd_id": oldRow["fd_id"],
-					"entity_id": oldRow["entity_id"], "entity_code": oldRow["entity_id"],
-				}); !ok {
+				"/investment/fd/closure/initiate/reject", policyRow.EntityID, userEmail, buildFDClosureInitiatePolicyFields(policyRow)); !ok {
 				policyResults = append(policyResults, map[string]interface{}{"closure_initiate_id": id, "success": false, "error": pmsg})
 				continue
 			}
@@ -975,11 +1029,36 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "CimplrConfirmCreate",
-			"/investment/fd/closure/confirm/create", src.EntityID, userEmail, map[string]interface{}{
-				"closure_initiate_id": req.ClosureInitiateID, "fd_id": src.FDID,
-				"entity_id": src.EntityID, "entity_code": src.EntityID, "closure_type": closureType,
-				"principal_expected": principalExpected,
-			}) {
+			"/investment/fd/closure/confirm/create", src.EntityID, userEmail, buildFDClosureConfirmPolicyFields(fdClosureConfirmRow{
+				ClosureInitiateID:    req.ClosureInitiateID,
+				FDID:                 src.FDID,
+				BookingID:            src.BookingID,
+				ConfirmationID:       src.ConfirmationID,
+				EntityID:             src.EntityID,
+				EntityName:           src.EntityName,
+				BankID:               src.BankID,
+				BankName:             src.BankName,
+				FDRefNo:              src.FDRefNo,
+				BankFDRefNo:          src.BankFDRefNo,
+				ClosureType:          closureType,
+				ClosureStatus:        "CONFIRM",
+				ConfirmationMode:     req.ConfirmationMode,
+				BankReferenceNo:      req.BankReferenceNo,
+				ActualPayoutDate:     req.ActualPayoutDate,
+				RequestedClosureDate: firstNonEmpty(req.RequestedClosureDate, cimplrMapString(initiate, "requested_closure_date")),
+				PrematureReason:      req.PrematureReason,
+				PrincipalExpected:    principalExpected,
+				InterestExpected:     interestExpected,
+				TDSExpected:          tdsExpected,
+				NetExpected:          netExpected,
+				PrincipalReceived:    principalReceived,
+				InterestReceived:     interestReceived,
+				TDSDeducted:          tdsDeducted,
+				NetAmountReceived:    netReceived,
+				VarianceType:         req.VarianceType,
+				ResolutionAction:     req.ResolutionAction,
+				Remarks:              req.Remarks,
+			})) {
 			return
 		}
 
@@ -1179,10 +1258,32 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "CimplrPrematureCreate",
-			"/investment/fd/closure/premature/create", src.EntityID, userEmail, map[string]interface{}{
-				"fd_id": src.FDID, "entity_id": src.EntityID, "entity_code": src.EntityID,
-				"closure_type": "PREMATURE", "principal_expected": principalExpected,
-			}) {
+			"/investment/fd/closure/premature/create", src.EntityID, userEmail, buildFDClosureConfirmPolicyFields(fdClosureConfirmRow{
+				FDID:                 src.FDID,
+				BookingID:            src.BookingID,
+				ConfirmationID:       src.ConfirmationID,
+				EntityID:             src.EntityID,
+				EntityName:           src.EntityName,
+				BankID:               src.BankID,
+				BankName:             src.BankName,
+				FDRefNo:              src.FDRefNo,
+				BankFDRefNo:          src.BankFDRefNo,
+				ClosureType:          "PREMATURE",
+				ClosureStatus:        "CONFIRM",
+				RequestedClosureDate: req.RequestedClosureDate,
+				PrematureReason:      req.PrematureReason,
+				PrincipalExpected:    principalExpected,
+				InterestExpected:     interestExpected,
+				TDSExpected:          tdsExpected,
+				NetExpected:          netExpected,
+				PrincipalReceived:    principalReceived,
+				InterestReceived:     interestReceived,
+				TDSDeducted:          tdsDeducted,
+				NetAmountReceived:    netReceived,
+				VarianceType:         req.VarianceType,
+				ResolutionAction:     req.ResolutionAction,
+				Remarks:              req.Remarks,
+			})) {
 			return
 		}
 
@@ -1397,10 +1498,38 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "CimplrConfirmEdit",
-			"/investment/fd/closure/confirm/edit", src.EntityID, userEmail, map[string]interface{}{
-				"closure_confirm_id": req.ClosureConfirmID, "fd_id": src.FDID,
-				"entity_id": src.EntityID, "entity_code": src.EntityID, "closure_type": closureType,
-			}) {
+			"/investment/fd/closure/confirm/edit", src.EntityID, userEmail, buildFDClosureConfirmPolicyFields(fdClosureConfirmRow{
+				ClosureConfirmID:     req.ClosureConfirmID,
+				ClosureInitiateID:    cimplrMapString(oldRow, "closure_initiate_id"),
+				FDID:                 src.FDID,
+				BookingID:            src.BookingID,
+				ConfirmationID:       src.ConfirmationID,
+				EntityID:             src.EntityID,
+				EntityName:           src.EntityName,
+				BankID:               src.BankID,
+				BankName:             src.BankName,
+				FDRefNo:              src.FDRefNo,
+				BankFDRefNo:          src.BankFDRefNo,
+				ClosureType:          closureType,
+				ClosureStatus:        cimplrMapString(oldRow, "closure_status"),
+				PostingStatus:        cimplrMapString(oldRow, "posting_status"),
+				ConfirmationMode:     req.ConfirmationMode,
+				BankReferenceNo:      req.BankReferenceNo,
+				ActualPayoutDate:     req.ActualPayoutDate,
+				RequestedClosureDate: firstNonEmpty(req.RequestedClosureDate, cimplrMapString(oldRow, "requested_closure_date")),
+				PrematureReason:      req.PrematureReason,
+				PrincipalExpected:    principalExpected,
+				InterestExpected:     interestExpected,
+				TDSExpected:          tdsExpected,
+				NetExpected:          netExpected,
+				PrincipalReceived:    principalReceived,
+				InterestReceived:     interestReceived,
+				TDSDeducted:          tdsDeducted,
+				NetAmountReceived:    netReceived,
+				VarianceType:         req.VarianceType,
+				ResolutionAction:     req.ResolutionAction,
+				Remarks:              req.Remarks,
+			})) {
 			return
 		}
 
@@ -1528,11 +1657,15 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
+			policyRow, policyErr := loadFDClosureConfirmRow(r.Context(), pool, id)
+			if policyErr != nil {
+				res["success"] = false
+				res["error"] = policyErr.Error()
+				results = append(results, res)
+				continue
+			}
 			if ok, pmsg := fdEnforceInline(r.Context(), r, pool, common.TriggerPreDelete, "CimplrConfirmDelete",
-				"/investment/fd/closure/confirm/delete", fmt.Sprint(oldRow["entity_id"]), userEmail, map[string]interface{}{
-					"closure_confirm_id": id, "fd_id": oldRow["fd_id"],
-					"entity_id": oldRow["entity_id"], "entity_code": oldRow["entity_id"],
-				}); !ok {
+				"/investment/fd/closure/confirm/delete", policyRow.EntityID, userEmail, buildFDClosureConfirmPolicyFields(policyRow)); !ok {
 				res["success"] = false
 				res["error"] = pmsg
 				results = append(results, res)
@@ -1631,16 +1764,13 @@ func CimplrConfirmApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		policyResults := make([]map[string]interface{}, 0)
 		filtered := make([]string, 0, len(ids))
 		for _, id := range ids {
-			oldRow, err := loadCimplrConfirmOld(ctx, pool, id)
-			if err != nil {
+			policyRow, policyErr := loadFDClosureConfirmRow(ctx, pool, id)
+			if policyErr != nil {
 				policyResults = append(policyResults, map[string]interface{}{"closure_confirm_id": id, "success": false, "error": "record not found"})
 				continue
 			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "CimplrConfirmApprove",
-				"/investment/fd/closure/confirm/approve", fmt.Sprint(oldRow["entity_id"]), userEmail, map[string]interface{}{
-					"closure_confirm_id": id, "fd_id": oldRow["fd_id"],
-					"entity_id": oldRow["entity_id"], "entity_code": oldRow["entity_id"],
-				}); !ok {
+				"/investment/fd/closure/confirm/approve", policyRow.EntityID, userEmail, buildFDClosureConfirmPolicyFields(policyRow)); !ok {
 				policyResults = append(policyResults, map[string]interface{}{"closure_confirm_id": id, "success": false, "error": pmsg})
 				continue
 			}
@@ -1678,16 +1808,13 @@ func CimplrConfirmReject(pool *pgxpool.Pool) http.HandlerFunc {
 		policyResults := make([]map[string]interface{}, 0)
 		filtered := make([]string, 0, len(ids))
 		for _, id := range ids {
-			oldRow, err := loadCimplrConfirmOld(ctx, pool, id)
-			if err != nil {
+			policyRow, policyErr := loadFDClosureConfirmRow(ctx, pool, id)
+			if policyErr != nil {
 				policyResults = append(policyResults, map[string]interface{}{"closure_confirm_id": id, "success": false, "error": "record not found"})
 				continue
 			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "CimplrConfirmReject",
-				"/investment/fd/closure/confirm/reject", fmt.Sprint(oldRow["entity_id"]), userEmail, map[string]interface{}{
-					"closure_confirm_id": id, "fd_id": oldRow["fd_id"],
-					"entity_id": oldRow["entity_id"], "entity_code": oldRow["entity_id"],
-				}); !ok {
+				"/investment/fd/closure/confirm/reject", policyRow.EntityID, userEmail, buildFDClosureConfirmPolicyFields(policyRow)); !ok {
 				policyResults = append(policyResults, map[string]interface{}{"closure_confirm_id": id, "success": false, "error": pmsg})
 				continue
 			}
@@ -2078,11 +2205,9 @@ func CimplrClosureUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		uploadEntityID := cimplrClosureUploadEntityID(r.Context(), pool, req.ClosureInitiateID, req.ClosureConfirmID)
+		uploadFields := cimplrClosureUploadPolicyFields(r.Context(), pool, req.ClosureInitiateID, req.ClosureConfirmID, req.FileType)
 		if !fdEnforce(r.Context(), w, r, pool, common.TriggerPreUpload, "CimplrClosureUpload",
-			r.URL.Path, uploadEntityID, userEmail, map[string]interface{}{
-				"closure_initiate_id": req.ClosureInitiateID, "closure_confirm_id": req.ClosureConfirmID,
-				"entity_id": uploadEntityID, "entity_code": uploadEntityID, "file_type": req.FileType,
-			}) {
+			r.URL.Path, uploadEntityID, userEmail, uploadFields) {
 			return
 		}
 		if isCimplrPrematureClosureRoute(r.URL.Path) {
@@ -2159,11 +2284,9 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 		return
 	}
 	uploadEntityID := cimplrClosureUploadEntityID(r.Context(), pool, closureInitiateID, closureConfirmID)
+	uploadFields := cimplrClosureUploadPolicyFields(r.Context(), pool, closureInitiateID, closureConfirmID, fileType)
 	if !fdEnforce(r.Context(), w, r, pool, common.TriggerPreUpload, "CimplrClosureUploadMultipart",
-		r.URL.Path, uploadEntityID, userEmail, map[string]interface{}{
-			"closure_initiate_id": closureInitiateID, "closure_confirm_id": closureConfirmID,
-			"entity_id": uploadEntityID, "entity_code": uploadEntityID, "file_type": fileType,
-		}) {
+		r.URL.Path, uploadEntityID, userEmail, uploadFields) {
 		return
 	}
 	file, header, err := r.FormFile("file")
@@ -4224,7 +4347,7 @@ func fetchCimplrAudit(ctx context.Context, pool *pgxpool.Pool, stage, id string)
 			SELECT * FROM cimplr.fd_closure_confirm_audit
 			WHERE closure_confirm_id=$1
 			ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, audit_id DESC`, id)
-			
+
 		fileAudit = fetchCimplrSubRows(ctx, pool, `
 			SELECT
 				audit_id,
@@ -4247,7 +4370,7 @@ func fetchCimplrAudit(ctx context.Context, pool *pgxpool.Pool, stage, id string)
 			SELECT * FROM cimplr.fd_closure_initiate_audit
 			WHERE closure_initiate_id=$1
 			ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, audit_id DESC`, id)
-			
+
 		fileAudit = fetchCimplrSubRows(ctx, pool, `
 			SELECT
 				audit_id,
