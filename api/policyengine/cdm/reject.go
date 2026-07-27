@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// HandleReject bulk-rejects pending CREATE/EDIT/DELETE requests.
-// EDIT reject does NOT revert master columns — only processing_status.
+// HandleReject rejects the latest pending CREATE/EDIT/DELETE request only.
+// Older audit rows are not rewritten. Checker_* is set only on that latest row.
 func HandleReject(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !common.RequirePOST(w, r) {

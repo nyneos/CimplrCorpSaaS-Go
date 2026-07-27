@@ -16,9 +16,8 @@ type decisionReq struct {
 	ActorID        string   `json:"actor_id"`
 }
 
-// HandleApprove bulk-approves pending CREATE/EDIT/DELETE requests: the latest
-// pending audit row per variable_id is closed out, and the master row's
-// processing_status becomes APPROVED (is_deleted also flips true for a delete request).
+// HandleApprove bulk-approves the latest pending CREATE/EDIT/DELETE request only.
+// Older audit rows are not rewritten. Master → APPROVED (is_deleted=true for DELETE).
 func HandleApprove(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !common.RequirePOST(w, r) {

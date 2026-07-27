@@ -29,8 +29,8 @@ type updateReq struct {
 	Reason       string `json:"reason"`
 }
 
-// HandleUpdate always stages a fresh EDIT request:
-// master → PENDING_EDIT_APPROVAL + new EDIT audit row (never revises CREATE in place).
+// HandleUpdate stages a new EDIT request only.
+// Older audit rows are never rewritten — checker_* is filled only by approve/reject.
 func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !common.RequirePOST(w, r) {
@@ -80,14 +80,6 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "CDM variable not found", "NOT_FOUND")
 			return
-		}
-
-		// Close any open CREATE/EDIT/DELETE pending so approve picks this new EDIT row.
-		if common.IsPendingStatus(old.ProcessingStatus) {
-			if err := supersedePendingCDMAudit(r.Context(), tx, req.VariableID, actor, ip, "superseded by edit"); err != nil {
-				respondCDMUpdateError(w, "audit", err)
-				return
-			}
 		}
 
 		if err := applyCDMMasterWrite(r.Context(), tx, req, actor, "PENDING_EDIT_APPROVAL"); err != nil {
@@ -145,26 +137,6 @@ func insertCDMEditAudit(ctx context.Context, tx pgx.Tx, req updateReq, old Item,
 		old.CanonicalRef, req.CanonicalRef,
 		common.NullIfEmpty(old.UserAlias), common.NullIfEmpty(req.UserAlias),
 		old.Nullable, req.Nullable, old.Status, req.Status,
-	)
-	return err
-}
-
-func supersedePendingCDMAudit(ctx context.Context, tx pgx.Tx, variableID, actor, ip, comment string) error {
-	// Close ONLY the latest open pending audit — never bulk-reject the trail.
-	// SUPERSEDED ≠ REJECTED (checker decision).
-	_, err := tx.Exec(ctx, `
-		UPDATE policyengine_svc.cdm_variable_audit
-		SET processing_status = 'SUPERSEDED',
-		    checker_by = $1, checker_at = now(), checker_ip = $2, checker_comment = $3
-		WHERE audit_id = (
-			SELECT audit_id
-			FROM policyengine_svc.cdm_variable_audit
-			WHERE variable_id = $4::uuid
-			  AND processing_status = ANY($5::text[])
-			ORDER BY requested_at DESC
-			LIMIT 1
-		)`,
-		actor, common.NullIfEmpty(ip), comment, variableID, common.PendingProcessingStatuses,
 	)
 	return err
 }
