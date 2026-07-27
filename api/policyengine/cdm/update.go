@@ -222,14 +222,26 @@ func revisePendingCDMAudit(ctx context.Context, tx pgx.Tx, req updateReq, old It
 		    requested_by = $2,
 		    requested_at = now(),
 		    requested_ip = $3,
-		    new_name = $4, new_data_type = $5, new_unit = $6, new_label = $7, new_description = $8, new_domain = $9,
-		    new_source_system = $10, new_canonical_ref = $11, new_user_alias = $12,
-		    new_nullable = $13, new_status = $14, new_is_deleted = false
-		WHERE audit_id = $15::uuid`,
+		    old_name = $4, new_name = $5,
+		    old_data_type = $6, new_data_type = $7,
+		    old_unit = $8, new_unit = $9,
+		    old_label = $10, new_label = $11,
+		    old_description = $12, new_description = $13,
+		    old_domain = $14, new_domain = $15,
+		    old_source_system = $16, new_source_system = $17,
+		    old_canonical_ref = $18, new_canonical_ref = $19,
+		    old_user_alias = $20, new_user_alias = $21,
+		    old_nullable = $22, new_nullable = $23,
+		    old_status = $24, new_status = $25,
+		    old_is_deleted = false, new_is_deleted = false
+		WHERE audit_id = $26::uuid`,
 		common.NullIfEmpty(req.Reason), actor, common.NullIfEmpty(ip),
-		req.Name, req.DataType, req.Unit, req.Label, req.Description, req.Domain,
-		req.SourceSystem, req.CanonicalRef, common.NullIfEmpty(req.UserAlias),
-		req.Nullable, req.Status, auditID,
+		old.Name, req.Name, old.DataType, req.DataType, old.Unit, req.Unit,
+		old.Label, req.Label, old.Description, req.Description, old.Domain, req.Domain,
+		old.SourceSystem, req.SourceSystem,
+		old.CanonicalRef, req.CanonicalRef,
+		common.NullIfEmpty(old.UserAlias), common.NullIfEmpty(req.UserAlias),
+		old.Nullable, req.Nullable, old.Status, req.Status, auditID,
 	)
 	return err
 }
