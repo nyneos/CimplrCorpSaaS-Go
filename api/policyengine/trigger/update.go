@@ -22,8 +22,9 @@ type updateReq struct {
 	Reason                string `json:"reason"`
 }
 
-// HandleUpdate applies the edit to the master row immediately but flags it
-// PENDING_EDIT_APPROVAL; old_/new_ values are recorded so a reject can revert.
+// HandleUpdate stages a new EDIT for breach-action flags (and description/timing if sent).
+// Create is disabled for triggers — edit exists so checkers can change allowed breach actions.
+// Pending is allowed: always inserts a fresh EDIT audit; older audits are not rewritten.
 func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !common.RequirePOST(w, r) {
@@ -63,10 +64,6 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			&old.AllowsTriggerApproval, &old.AllowsNotifyOnly, &old.ProcessingStatus)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "trigger event not found", "NOT_FOUND")
-			return
-		}
-		if common.IsPendingStatus(old.ProcessingStatus) {
-			api.RespondEnvelopeError(w, http.StatusConflict, "trigger event already has a pending request", "TRIGGER_PENDING_EXISTS")
 			return
 		}
 

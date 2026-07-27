@@ -72,10 +72,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "policy not found", "NOT_FOUND")
 			return
 		}
-		if common.IsPendingStatus(old.ProcessingStatus) {
-			api.RespondEnvelopeError(w, http.StatusConflict, "policy already has a pending request", "POLICY_PENDING_EXISTS")
-			return
-		}
+		// Pending is allowed — always insert a fresh EDIT audit (approve/reject use latest only).
 		if req.EffectiveStart == "" {
 			req.EffectiveStart = old.EffectiveStart
 		}
