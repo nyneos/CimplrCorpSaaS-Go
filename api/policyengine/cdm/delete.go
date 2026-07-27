@@ -71,14 +71,21 @@ func HandleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// Close any open CREATE/EDIT pending so approve picks the new DELETE row.
+			// Close ONLY the latest open pending audit (SUPERSEDED, not REJECTED).
 			if common.IsPendingStatus(processingStatus) {
 				if _, err := tx.Exec(r.Context(), `
 					UPDATE policyengine_svc.cdm_variable_audit
-					SET processing_status = 'REJECTED',
+					SET processing_status = 'SUPERSEDED',
 					    checker_by = $1, checker_at = now(), checker_ip = $2,
 					    checker_comment = COALESCE(NULLIF($3,''), 'superseded by delete request')
-					WHERE variable_id = $4::uuid AND processing_status = ANY($5::text[])`,
+					WHERE audit_id = (
+						SELECT audit_id
+						FROM policyengine_svc.cdm_variable_audit
+						WHERE variable_id = $4::uuid
+						  AND processing_status = ANY($5::text[])
+						ORDER BY requested_at DESC
+						LIMIT 1
+					)`,
 					actor, common.NullIfEmpty(ip), req.Reason, id, common.PendingProcessingStatuses,
 				); err != nil {
 					errs = append(errs, id+": "+err.Error())

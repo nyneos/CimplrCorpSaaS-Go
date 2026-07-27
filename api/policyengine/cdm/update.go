@@ -29,6 +29,8 @@ type updateReq struct {
 	Reason       string `json:"reason"`
 }
 
+// HandleUpdate always stages a fresh EDIT request:
+// master → PENDING_EDIT_APPROVAL + new EDIT audit row (never revises CREATE in place).
 func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !common.RequirePOST(w, r) {
@@ -80,60 +82,21 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		pending := old.ProcessingStatus
-		msg := "CDM variable edit submitted for approval"
-
-		switch pending {
-		case "PENDING_APPROVAL":
-			// Revise open CREATE request — keep PENDING_APPROVAL, refresh CREATE audit new_*.
-			if err := applyCDMMasterWrite(r.Context(), tx, req, actor, "PENDING_APPROVAL"); err != nil {
-				respondCDMUpdateError(w, "exec", err)
-				return
-			}
-			if err := revisePendingCDMAudit(r.Context(), tx, req, old, actor, ip, "CREATE", "PENDING_APPROVAL"); err != nil {
-				respondCDMUpdateError(w, "audit", err)
-				return
-			}
-			msg = "CDM variable create request updated"
-
-		case "PENDING_EDIT_APPROVAL":
-			// Revise open EDIT request — refresh EDIT audit new_* (do not stack another pending).
-			if err := applyCDMMasterWrite(r.Context(), tx, req, actor, "PENDING_EDIT_APPROVAL"); err != nil {
-				respondCDMUpdateError(w, "exec", err)
-				return
-			}
-			if err := revisePendingCDMAudit(r.Context(), tx, req, old, actor, ip, "EDIT", "PENDING_EDIT_APPROVAL"); err != nil {
-				respondCDMUpdateError(w, "audit", err)
-				return
-			}
-			msg = "CDM variable edit request updated"
-
-		case "PENDING_DELETE_APPROVAL":
-			// Cancel pending delete, then raise a fresh EDIT (approve/reject still work on the new row).
+		// Close any open CREATE/EDIT/DELETE pending so approve picks this new EDIT row.
+		if common.IsPendingStatus(old.ProcessingStatus) {
 			if err := supersedePendingCDMAudit(r.Context(), tx, req.VariableID, actor, ip, "superseded by edit"); err != nil {
 				respondCDMUpdateError(w, "audit", err)
 				return
 			}
-			if err := applyCDMMasterWrite(r.Context(), tx, req, actor, "PENDING_EDIT_APPROVAL"); err != nil {
-				respondCDMUpdateError(w, "exec", err)
-				return
-			}
-			if err := insertCDMEditAudit(r.Context(), tx, req, old, actor, ip); err != nil {
-				respondCDMUpdateError(w, "audit", err)
-				return
-			}
-			msg = "CDM delete request cancelled; edit submitted for approval"
+		}
 
-		default:
-			// APPROVED / REJECTED / etc. — normal maker-checker EDIT.
-			if err := applyCDMMasterWrite(r.Context(), tx, req, actor, "PENDING_EDIT_APPROVAL"); err != nil {
-				respondCDMUpdateError(w, "exec", err)
-				return
-			}
-			if err := insertCDMEditAudit(r.Context(), tx, req, old, actor, ip); err != nil {
-				respondCDMUpdateError(w, "audit", err)
-				return
-			}
+		if err := applyCDMMasterWrite(r.Context(), tx, req, actor, "PENDING_EDIT_APPROVAL"); err != nil {
+			respondCDMUpdateError(w, "exec", err)
+			return
+		}
+		if err := insertCDMEditAudit(r.Context(), tx, req, old, actor, ip); err != nil {
+			respondCDMUpdateError(w, "audit", err)
+			return
 		}
 
 		if err := tx.Commit(r.Context()); err != nil {
@@ -141,7 +104,9 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update CDM variable", "CDM_UPDATE_FAILED")
 			return
 		}
-		api.RespondEnvelopeSuccess(w, msg, map[string]string{"variable_id": req.VariableID})
+		api.RespondEnvelopeSuccess(w, "CDM variable edit submitted for approval", map[string]string{
+			"variable_id": req.VariableID,
+		})
 	}
 }
 
@@ -184,75 +149,21 @@ func insertCDMEditAudit(ctx context.Context, tx pgx.Tx, req updateReq, old Item,
 	return err
 }
 
-// revisePendingCDMAudit updates the latest matching pending audit in place (no second pending row).
-func revisePendingCDMAudit(ctx context.Context, tx pgx.Tx, req updateReq, old Item, actor, ip, actionType, pendingStatus string) error {
-	var auditID string
-	err := tx.QueryRow(ctx, `
-		SELECT audit_id::text
-		FROM policyengine_svc.cdm_variable_audit
-		WHERE variable_id = $1::uuid
-		  AND action_type = $2
-		  AND processing_status = $3
-		ORDER BY requested_at DESC
-		LIMIT 1
-		FOR UPDATE`, req.VariableID, actionType, pendingStatus,
-	).Scan(&auditID)
-	if err != nil {
-		// No matching audit — insert a fresh pending row so the trail stays usable.
-		if actionType == "CREATE" {
-			_, err = tx.Exec(ctx, `
-				INSERT INTO policyengine_svc.cdm_variable_audit (
-					variable_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip,
-					new_name, new_data_type, new_unit, new_label, new_description, new_domain,
-					new_source_system, new_canonical_ref, new_user_alias, new_nullable, new_status, new_is_deleted
-				) VALUES ($1::uuid, 'CREATE', 'PENDING_APPROVAL', $2, $3, now(), $4,
-					$5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, false)`,
-				req.VariableID, common.NullIfEmpty(req.Reason), actor, common.NullIfEmpty(ip),
-				req.Name, req.DataType, req.Unit, req.Label, req.Description, req.Domain,
-				req.SourceSystem, req.CanonicalRef, common.NullIfEmpty(req.UserAlias), req.Nullable, req.Status,
-			)
-			return err
-		}
-		return insertCDMEditAudit(ctx, tx, req, old, actor, ip)
-	}
-
-	_, err = tx.Exec(ctx, `
-		UPDATE policyengine_svc.cdm_variable_audit
-		SET reason = COALESCE($1, reason),
-		    requested_by = $2,
-		    requested_at = now(),
-		    requested_ip = $3,
-		    old_name = $4, new_name = $5,
-		    old_data_type = $6, new_data_type = $7,
-		    old_unit = $8, new_unit = $9,
-		    old_label = $10, new_label = $11,
-		    old_description = $12, new_description = $13,
-		    old_domain = $14, new_domain = $15,
-		    old_source_system = $16, new_source_system = $17,
-		    old_canonical_ref = $18, new_canonical_ref = $19,
-		    old_user_alias = $20, new_user_alias = $21,
-		    old_nullable = $22, new_nullable = $23,
-		    old_status = $24, new_status = $25,
-		    old_is_deleted = false, new_is_deleted = false
-		WHERE audit_id = $26::uuid`,
-		common.NullIfEmpty(req.Reason), actor, common.NullIfEmpty(ip),
-		old.Name, req.Name, old.DataType, req.DataType, old.Unit, req.Unit,
-		old.Label, req.Label, old.Description, req.Description, old.Domain, req.Domain,
-		old.SourceSystem, req.SourceSystem,
-		old.CanonicalRef, req.CanonicalRef,
-		common.NullIfEmpty(old.UserAlias), common.NullIfEmpty(req.UserAlias),
-		old.Nullable, req.Nullable, old.Status, req.Status, auditID,
-	)
-	return err
-}
-
 func supersedePendingCDMAudit(ctx context.Context, tx pgx.Tx, variableID, actor, ip, comment string) error {
+	// Close ONLY the latest open pending audit — never bulk-reject the trail.
+	// SUPERSEDED ≠ REJECTED (checker decision).
 	_, err := tx.Exec(ctx, `
 		UPDATE policyengine_svc.cdm_variable_audit
-		SET processing_status = 'REJECTED',
+		SET processing_status = 'SUPERSEDED',
 		    checker_by = $1, checker_at = now(), checker_ip = $2, checker_comment = $3
-		WHERE variable_id = $4::uuid
-		  AND processing_status = ANY($5::text[])`,
+		WHERE audit_id = (
+			SELECT audit_id
+			FROM policyengine_svc.cdm_variable_audit
+			WHERE variable_id = $4::uuid
+			  AND processing_status = ANY($5::text[])
+			ORDER BY requested_at DESC
+			LIMIT 1
+		)`,
 		actor, common.NullIfEmpty(ip), comment, variableID, common.PendingProcessingStatuses,
 	)
 	return err
