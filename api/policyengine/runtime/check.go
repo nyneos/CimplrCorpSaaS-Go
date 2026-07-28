@@ -32,7 +32,10 @@ type CheckRequest struct {
 	SourceFileID       string
 	BatchID            string
 	Variables          map[string]string
-	Policies           []map[string]interface{}
+	// NotifyFields are domain_catalog field_code → value (pre-CDM). Used by
+	// dispatchNotifyBreaches to build template keys via NOTIFICATION aliases.
+	NotifyFields map[string]interface{}
+	Policies     []map[string]interface{}
 }
 
 // CheckResult holds evaluation output for module handlers.

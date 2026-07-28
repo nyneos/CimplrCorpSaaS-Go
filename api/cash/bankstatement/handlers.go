@@ -117,36 +117,57 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 											  AND (cardinality($4::text[]) = 0 OR mba.currency = ANY($4::text[]))
 											  AND COALESCE(s.is_deleted, false) = false
 										),
-										prioritized_audit AS (
+										ordered_audit AS (
 											SELECT a.*,
-												ROW_NUMBER() OVER(PARTITION BY a.bankstatementid ORDER BY
-													CASE WHEN a.actiontype = 'DELETE' AND a.processing_status = 'PENDING_DELETE_APPROVAL' THEN 1
-													WHEN a.processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL') AND a.actiontype IN ('CREATE', 'EDIT', 'RECAT') THEN 2
-													WHEN a.actiontype IN ('CREATE', 'EDIT', 'RECAT', 'DELETE') THEN 3
-													ELSE 4 END,
-													a.requested_at DESC,
-													a.action_id DESC
-												) as rn
+												GREATEST(a.requested_at, COALESCE(a.checker_at, a.requested_at)) AS event_at,
+												ROW_NUMBER() OVER (
+													PARTITION BY a.bankstatementid
+													ORDER BY GREATEST(a.requested_at, COALESCE(a.checker_at, a.requested_at)) DESC,
+													         a.action_id DESC
+												) AS head_rn
 											FROM cimplrcorpsaas.auditactionbankstatement a
 											JOIN scoped_statements ss ON a.bankstatementid = ss.bank_statement_id
 											WHERE COALESCE(a.actiontype, '') NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 										),
-										latest_audit AS (
-											SELECT * FROM prioritized_audit WHERE rn = 1
+										head_audit AS (
+											SELECT * FROM ordered_audit WHERE head_rn = 1
+										),
+										-- Display status: skip RECAT (any) and EDIT+PENDING_EDIT_APPROVAL;
+										-- DELETE/CREATE pending still win via CASE priority.
+										display_ranked AS (
+											SELECT a.*,
+												ROW_NUMBER() OVER (
+													PARTITION BY a.bankstatementid
+													ORDER BY
+														CASE
+															WHEN a.actiontype = 'DELETE' AND a.processing_status = 'PENDING_DELETE_APPROVAL' THEN 0
+															WHEN a.actiontype = 'CREATE' AND a.processing_status = 'PENDING_APPROVAL' THEN 1
+															ELSE 2
+														END,
+														a.event_at DESC,
+														a.action_id DESC
+												) AS disp_rn
+											FROM ordered_audit a
+											WHERE NOT (
+												a.actiontype = 'RECAT'
+												OR (a.actiontype = 'EDIT' AND a.processing_status = 'PENDING_EDIT_APPROVAL')
+											)
+										),
+										display_audit AS (
+											SELECT * FROM display_ranked WHERE disp_rn = 1
 										)
 										SELECT ss.bank_statement_id, ss.entity_id, ss.entity_name, ss.account_number, ss.statement_period_start, ss.statement_period_end, ss.opening_balance, ss.closing_balance, ss.uploaded_at,
-													 la.actiontype,
-													 CASE
-													     WHEN la.actiontype = 'RECAT' AND la.processing_status = 'PENDING_EDIT_APPROVAL' THEN 'APPROVED'
-													     ELSE la.processing_status
-													 END AS processing_status,
-													 la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason,
+													 ha.actiontype,
+													 da.processing_status,
+													 da.action_id, da.requested_by, da.requested_at, da.checker_by, da.checker_at, da.checker_comment, da.reason,
 														ss.bank_name,
 														ss.account_nickname,
-														ss.upload_s3_key
+														ss.upload_s3_key,
+														(ha.actiontype = 'RECAT' AND ha.processing_status = 'PENDING_EDIT_APPROVAL') AS has_pending_recat
 										FROM scoped_statements ss
-										LEFT JOIN latest_audit la ON la.bankstatementid = ss.bank_statement_id
-										ORDER BY GREATEST(COALESCE(la.requested_at, ss.uploaded_at), COALESCE(la.checker_at, ss.uploaded_at)) DESC
+										LEFT JOIN head_audit ha ON ha.bankstatementid = ss.bank_statement_id
+										LEFT JOIN display_audit da ON da.bankstatementid = ss.bank_statement_id
+										ORDER BY GREATEST(COALESCE(ha.requested_at, ss.uploaded_at), COALESCE(ha.checker_at, ss.uploaded_at)) DESC
 						`, entityIDs, accountNumbers, bankIDs, currencyCodes)
 		if err != nil {
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
@@ -163,14 +184,13 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 			var accountNickname sql.NullString
 			var uploadS3Key sql.NullString
 			var requestedAt, checkerAt sql.NullTime
+			var hasPendingRecat bool
 			if err := rows.Scan(&id, &entityID, &entityName, &acc, &start, &end, &open, &close, &uploaded,
-				&actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &bankName, &accountNickname, &uploadS3Key); err != nil {
+				&actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &bankName, &accountNickname, &uploadS3Key, &hasPendingRecat); err != nil {
 				continue
 			}
-			isDeletePending := false
-			if actionType.String == constants.AuditActionDelete && processingStatus.String == constants.StatusPendingDeleteApproval {
-				isDeletePending = true
-			}
+			// Display status drives delete-pending flag (head action may still be RECAT).
+			isDeletePending := processingStatus.String == constants.StatusPendingDeleteApproval
 			resp = append(resp, map[string]interface{}{
 				"statement_id":               id,
 				"bank_statement_id":          id,
@@ -195,6 +215,7 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 				"account_nickname":           accountNickname.String,
 				"upload_s3_key":              uploadS3Key.String,
 				"is_delete_pending_approval": isDeletePending,
+				"has_pending_recat":          hasPendingRecat,
 			})
 		}
 		apictx.RespondEnvelopeSuccess(w, "Success", resp)

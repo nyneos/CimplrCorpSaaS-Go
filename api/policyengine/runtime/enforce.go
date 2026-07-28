@@ -27,12 +27,15 @@ type EnforceInput struct {
 	// Variables are CDM evaluation keys (already mapped). Prefer BuildVariablesFromCatalog.
 	Variables map[string]string
 	// Fields + SubModule: if Variables empty, map via domain_catalog.field.cdm_path.
+	// Also used to build notification template keys (field_code / NOTIFICATION alias_key).
 	Fields map[string]interface{}
 	// RequireVariables: if true, empty CDM map aborts (FD booking pilot).
 	// Default false — modules without CDM seed yet still call RunCheck (no matching policies → pass).
 	RequireVariables bool
 	// DefaultBlockMessage used when HardBlock has no policy message.
 	DefaultBlockMessage string
+	BusinessRecordID   string
+	BusinessRecordType string
 }
 
 // EnforceOutcome is returned by EnforceDetailed / EnforceInlineDetailed so
@@ -102,16 +105,19 @@ func EnforceDetailed(ctx context.Context, r *http.Request, pool *pgxpool.Pool, i
 	traceID := observability.TraceIDFromContext(ctx)
 
 	result, err := RunCheck(ctx, pool, CheckRequest{
-		EventCode:     in.EventCode,
-		ModuleCode:    in.ModuleCode,
-		SubModule:     in.SubModule,
-		EntityCode:    in.EntityCode,
-		ActorUserID:   in.ActorUserID,
-		HandlerName:   in.HandlerName,
-		APIPath:       in.APIPath,
-		CorrelationID: corr,
-		TraceID:       traceID,
-		Variables:     vars,
+		EventCode:          in.EventCode,
+		ModuleCode:         in.ModuleCode,
+		SubModule:          in.SubModule,
+		EntityCode:         in.EntityCode,
+		ActorUserID:        in.ActorUserID,
+		HandlerName:        in.HandlerName,
+		APIPath:            in.APIPath,
+		CorrelationID:      corr,
+		TraceID:            traceID,
+		BusinessRecordID:   in.BusinessRecordID,
+		BusinessRecordType: in.BusinessRecordType,
+		Variables:          vars,
+		NotifyFields:       in.Fields,
 	})
 	if err != nil {
 		api.LogError("policy check %s %s: %v", in.HandlerName, in.EventCode, err)

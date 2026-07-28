@@ -1380,6 +1380,13 @@ func fireScheduledRun(
 		CreatedBy:          "SCHEDULER",
 	}
 
+	if ok, msg := EnforceScheduledAccrualFire(ctx, pool, p,
+		periodStart.Format(constants.DateFormat), periodEnd.Format(constants.DateFormat)); !ok {
+		api.LogError("[FDAccrual] Scheduler policy blocked config=%s entity=%s: %s", configID, entityID, msg)
+		updateLastRunStatus(ctx, pool, configID, "", truncateStatus("POLICY_BLOCKED: "+msg))
+		return
+	}
+
 	runID, err := createAccrualRunInternal(ctx, pool, input)
 	if err != nil {
 		api.LogError("[FDAccrual] Scheduler createRun failed entity=%s: %v", entityID, err)

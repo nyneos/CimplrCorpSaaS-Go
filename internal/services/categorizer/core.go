@@ -383,6 +383,12 @@ func PersistClassification(ctx context.Context, pool *pgxpool.Pool, txnID int64,
 // PostgreSQL round-trip using pgx.Batch (pipeline). Dramatically faster than N individual
 // calls in a batch job.
 func PersistBatch(ctx context.Context, pool *pgxpool.Pool, items []BatchClassification) {
+	PersistBatchWithOptions(ctx, pool, items, nil)
+}
+
+// PersistBatchWithOptions skips category_id writes for txn IDs listed in skipCategoryTxnIDs
+// so async RECAT can run policy before mutating categories.
+func PersistBatchWithOptions(ctx context.Context, pool *pgxpool.Pool, items []BatchClassification, skipCategoryTxnIDs map[int64]struct{}) {
 	if len(items) == 0 {
 		return
 	}
@@ -399,8 +405,10 @@ func PersistBatch(ctx context.Context, pool *pgxpool.Pool, items []BatchClassifi
 			string(item.Narration.Channel), item.Result.Step, item.Result.Confidence, item.TxnID,
 		)
 
-		// 2. Category update / clear
-		if item.Result.CategoryID != "" && item.Result.Confidence >= MinConfidenceForActuals {
+		// 2. Category update / clear (deferred when RECAT policy will gate the write)
+		if _, skip := skipCategoryTxnIDs[item.TxnID]; skip {
+			// narration + audit log only; category applied after EnforceSmartCatJob
+		} else if item.Result.CategoryID != "" && item.Result.Confidence >= MinConfidenceForActuals {
 			batch.Queue(
 				`UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id=$1 WHERE transaction_id=$2`,
 				item.Result.CategoryID, item.TxnID,

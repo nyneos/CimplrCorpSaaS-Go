@@ -2,6 +2,7 @@ package bankstatement
 
 import (
 	apictx "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/cash/bsasync"
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
@@ -2912,6 +2913,10 @@ RETURNING bank_statement_id
 		pool := opts.PgxPool
 		bsID := bankStatementID // capture for goroutine
 		go func() {
+			if ok, msg := bsasync.EnforcePostUploadJob(context.Background(), pool, bsID); !ok {
+				logger.LogInfo("[SMART-CAT] post-upload policy blocked bs=%s: %s", bsID, msg)
+				return
+			}
 			if err := cashjobs.ProcessUncategorizedTransactions(pool, 500, bsID); err != nil {
 				logger.LogInfo("[SMART-CAT] post-upload trigger failed: %v", err)
 			}

@@ -217,8 +217,15 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 				return
 			}
 
-			// ALL sweeps now require initiation -> approval -> execution workflow
+	// ALL sweeps now require initiation -> approval -> execution workflow
 			// Create initiation with auto-approval for scheduled sweeps
+			if ok, msg := enforceScheduledSweepFire(ctx, db, sweep.sweepID, "", "createScheduledInitiation"); !ok {
+				logger.LogError("[SWEEP V2] %s - Policy blocked scheduled initiation: %s", sweep.sweepID, msg)
+				mu.Lock()
+				failCount++
+				mu.Unlock()
+				return
+			}
 			err = createScheduledInitiation(ctx, db, sweep.sweepID)
 			if err != nil {
 				logger.LogError("[SWEEP V2] %s - Failed to create scheduled initiation: %v", sweep.sweepID, err)
@@ -438,6 +445,12 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 		}
 
 		logger.LogInfo("[SWEEP V2] 📝 Processing initiation [%d]: %s (sweep: %s)", initiationCount, initiationID, sweepID)
+
+		if ok, msg := enforceScheduledSweepFire(ctx, db, sweepID, initiationID, "ProcessPendingInitiations"); !ok {
+			logger.LogError("[SWEEP V2] %s (initiation: %s) - Policy blocked execution: %s", sweepID, initiationID, msg)
+			failCount++
+			continue
+		}
 
 		// Determine final source and target accounts
 		finalSourceAccount := configSourceAccount

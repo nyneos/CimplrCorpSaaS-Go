@@ -2,6 +2,7 @@ package jobs
 
 import (
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	fdReceipt "CimplrCorpSaas/api/investment/fdReceipt"
 	"context"
 	"fmt"
 	"time"
@@ -63,6 +64,16 @@ func runAutoReconcile(db *pgxpool.Pool) {
 
 	for _, e := range entities {
 		runID := fmt.Sprintf("RRUN-AUTO-%d", time.Now().UnixMilli())
+		pendingCount := 0
+		_ = db.QueryRow(ctx, `
+			SELECT COUNT(*) FROM investment.fd_interest_receipt
+			WHERE entity_id=$1 AND is_deleted=false
+			  AND reconcile_status IN ('PENDING','UNMATCHED')`, e.EntityID,
+		).Scan(&pendingCount)
+		if ok, msg := fdReceipt.EnforceReceiptReconcileRun(ctx, db, runID, e.EntityID, e.EntityName, e.PeriodStart, e.PeriodEnd, pendingCount); !ok {
+			logger.LogError("[fd_receipt_scheduler] policy blocked entity=%s: %s", e.EntityID, msg)
+			continue
+		}
 		_, err := db.Exec(ctx, `
 			INSERT INTO investment.fd_receipt_reconcile_run
 			  (reconcile_run_id, entity_id, entity_name, period_start, period_end,

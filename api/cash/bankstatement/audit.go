@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -315,9 +316,12 @@ func GetBankStatementTransactionAuditHandler(pool *pgxpool.Pool) http.Handler {
 				return
 			}
 
+			actionType := "RECAT"
+			if fieldName.String != "" && fieldName.String != "category_id" {
+				actionType = "EDIT"
+			}
 			payload = append(payload, map[string]interface{}{
-				"entity_id":         transactionID.String,
-				"action_type":       "EDIT",
+				"action_type":       actionType,
 				"processing_status": "COMPLETED",
 				"requested_by":      performedBy.String,
 				"requested_at":      nullableTime(performedAt),
@@ -326,7 +330,7 @@ func GetBankStatementTransactionAuditHandler(pool *pgxpool.Pool) http.Handler {
 				"checker_at":        nil,
 				"checker_ip":        checkerIP.String,
 				"checker_comment":   "",
-				"reason":            "",
+				"reason":            fmt.Sprintf("Transaction %s category change", transactionID.String),
 				"transaction_id":    transactionID.String,
 				"change_summary": []map[string]interface{}{{
 					"field":     fieldName.String,

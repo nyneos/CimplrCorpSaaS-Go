@@ -55,22 +55,42 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 			LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 			WHERE COALESCE(s.is_deleted, false) = false %s
 		),
-		prioritized_audit AS (
+		ordered_audit AS (
 			SELECT a.*,
-				ROW_NUMBER() OVER(PARTITION BY a.bankstatementid ORDER BY
-					CASE WHEN a.actiontype = '%s' AND a.processing_status = '%s' THEN 1
-					WHEN a.processing_status IN ('PENDING_APPROVAL', '%s') AND a.actiontype IN ('CREATE', 'EDIT', 'RECAT') THEN 2
-					WHEN a.actiontype IN ('CREATE', 'EDIT', 'RECAT', '%s') THEN 3
-					ELSE 4 END,
-					a.requested_at DESC,
-					a.action_id DESC
-				) AS rn
+				GREATEST(a.requested_at, COALESCE(a.checker_at, a.requested_at)) AS event_at,
+				ROW_NUMBER() OVER (
+					PARTITION BY a.bankstatementid
+					ORDER BY GREATEST(a.requested_at, COALESCE(a.checker_at, a.requested_at)) DESC,
+					         a.action_id DESC
+				) AS head_rn
 			FROM cimplrcorpsaas.auditactionbankstatement a
 			JOIN scoped_statements ss ON a.bankstatementid = ss.bank_statement_id
 			WHERE COALESCE(a.actiontype, '') NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
 		),
-		latest_audit AS (
-			SELECT * FROM prioritized_audit WHERE rn = 1
+		head_audit AS (
+			SELECT * FROM ordered_audit WHERE head_rn = 1
+		),
+		display_ranked AS (
+			SELECT a.*,
+				ROW_NUMBER() OVER (
+					PARTITION BY a.bankstatementid
+					ORDER BY
+						CASE
+							WHEN a.actiontype = '%s' AND a.processing_status = '%s' THEN 0
+							WHEN a.actiontype = 'CREATE' AND a.processing_status = 'PENDING_APPROVAL' THEN 1
+							ELSE 2
+						END,
+						a.event_at DESC,
+						a.action_id DESC
+				) AS disp_rn
+			FROM ordered_audit a
+			WHERE NOT (
+				a.actiontype = 'RECAT'
+				OR (a.actiontype = 'EDIT' AND a.processing_status = '%s')
+			)
+		),
+		display_audit AS (
+			SELECT * FROM display_ranked WHERE disp_rn = 1
 		)
 		SELECT
 			COALESCE(ss.bank_statement_id::text, '') AS statement_id,
@@ -85,19 +105,16 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 			ss.uploaded_at,
 			COALESCE(ss.opening_balance, 0)          AS opening_balance,
 			COALESCE(ss.closing_balance, 0)          AS closing_balance,
-			CASE
-				WHEN la.actiontype = 'RECAT' AND la.processing_status = '%s' THEN 'APPROVED'
-				ELSE COALESCE(la.processing_status, '')
-			END AS processing_status
+			COALESCE(da.processing_status, '')       AS processing_status,
+			COALESCE(ha.actiontype, '')              AS action_type
 		FROM scoped_statements ss
-		LEFT JOIN latest_audit la ON la.bankstatementid = ss.bank_statement_id
-		ORDER BY GREATEST(COALESCE(la.requested_at, ss.uploaded_at), COALESCE(la.checker_at, ss.uploaded_at)) DESC NULLS LAST
+		LEFT JOIN head_audit ha ON ha.bankstatementid = ss.bank_statement_id
+		LEFT JOIN display_audit da ON da.bankstatementid = ss.bank_statement_id
+		ORDER BY GREATEST(COALESCE(ha.requested_at, ss.uploaded_at), COALESCE(ha.checker_at, ss.uploaded_at)) DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, extraFilters,
 		constants.AuditActionDelete,
 		constants.StatusPendingDeleteApproval,
-		constants.StatusPendingEditApproval,
-		constants.AuditActionDelete,
 		constants.StatusPendingEditApproval,
 	)
 

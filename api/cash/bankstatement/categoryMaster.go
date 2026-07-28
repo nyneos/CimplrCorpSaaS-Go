@@ -2,6 +2,7 @@ package bankstatement
 
 import (
 	apictx "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/cash/bsasync"
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -352,32 +353,41 @@ func MapTransactionsToCategoryHandler(pool *pgxpool.Pool) http.Handler {
 			return
 		}
 
-		// Update category for given transactions
-		if _, err := tx.Exec(r.Context(), `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = ANY($2)`, body.CategoryID, body.TransactionIDs); err != nil {
+		// Load current categories, stage RECAT audit + per-txn old/new, then apply.
+		oldRows, err := tx.Query(ctx, `
+			SELECT transaction_id, bank_statement_id::text, COALESCE(category_id::text, '')
+			FROM cimplrcorpsaas.bank_statement_transactions
+			WHERE transaction_id = ANY($1) AND bank_statement_id IS NOT NULL`, body.TransactionIDs)
+		if err != nil {
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
-
-		// Collect affected bank_statement_ids
-		bsRows, err := tx.Query(r.Context(), `SELECT DISTINCT bank_statement_id FROM cimplrcorpsaas.bank_statement_transactions WHERE transaction_id = ANY($1) AND bank_statement_id IS NOT NULL`, body.TransactionIDs)
-		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		var bsIDs []string
-		for bsRows.Next() {
-			var id string
-			if err := bsRows.Scan(&id); err == nil {
-				bsIDs = append(bsIDs, id)
+		recatByBS := map[string][]bsasync.TxnCategoryChange{}
+		for oldRows.Next() {
+			var txnID int64
+			var bsID, oldCat string
+			if err := oldRows.Scan(&txnID, &bsID, &oldCat); err != nil {
+				continue
 			}
+			if oldCat == body.CategoryID {
+				continue
+			}
+			recatByBS[bsID] = append(recatByBS[bsID], bsasync.TxnCategoryChange{
+				TransactionID: txnID,
+				FieldName:     "category_id",
+				OldValue:      oldCat,
+				NewValue:      body.CategoryID,
+			})
 		}
-		bsRows.Close()
+		oldRows.Close()
 
-		// Insert pending edit approval for each affected statement
-		for _, bsID := range bsIDs {
-			_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, $4)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now(), nullIfBlank(apictx.ClientIPFromRequest(r)))
-			if err != nil {
-
+		requestedBy := requestedByFromCtx(ctx, body.UserID)
+		requestedIP := strings.TrimSpace(apictx.ClientIPFromRequest(r))
+		if requestedIP == "" {
+			requestedIP = "system"
+		}
+		for bsID, changes := range recatByBS {
+			if err := bsasync.ApplyManualRecatInTx(ctx, tx, bsID, changes, requestedBy, requestedIP); err != nil {
 				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
@@ -484,9 +494,7 @@ WHERE t.category_id IS NULL
 		}
 
 		ruleCache := make(map[string][]categoryRuleComponent)
-		bsSet := make(map[string]struct{})
-		matchedByCategory := make(map[string][]int64)
-
+		recatByBS := map[string][]bsasync.TxnCategoryChange{}
 		for _, tr := range txns {
 			if !ctxutil.FromContext(ctx).HasApprovedBankAccount(tr.acct) {
 				continue
@@ -514,30 +522,27 @@ WHERE t.category_id IS NULL
 
 			matched := matchCategoryForTransaction(rules, tr.desc, tr.wd, tr.dep, tr.valueDate)
 			if matched.Valid && matched.String == body.CategoryID {
-				matchedByCategory[matched.String] = append(matchedByCategory[matched.String], tr.id)
-				bsSet[tr.bsID] = struct{}{}
+				recatByBS[tr.bsID] = append(recatByBS[tr.bsID], bsasync.TxnCategoryChange{
+					TransactionID: tr.id,
+					FieldName:     "category_id",
+					OldValue:      "",
+					NewValue:      matched.String,
+				})
 			}
 		}
 
 		updated := 0
-		for catID, txnIDs := range matchedByCategory {
-			if len(txnIDs) == 0 {
-				continue
-			}
-			if _, err := tx.Exec(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = ANY($2)`, catID, txnIDs); err != nil {
-				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
-				return
-			}
-			updated += len(txnIDs)
+		requestedBy := requestedByFromCtx(ctx, body.UserID)
+		requestedIP := strings.TrimSpace(apictx.ClientIPFromRequest(r))
+		if requestedIP == "" {
+			requestedIP = "system"
 		}
-
-		for bsID := range bsSet {
-			_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, $4)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now(), nullIfBlank(apictx.ClientIPFromRequest(r)))
-			if err != nil {
-
+		for bsID, changes := range recatByBS {
+			if err := bsasync.ApplyManualRecatInTx(ctx, tx, bsID, changes, requestedBy, requestedIP); err != nil {
 				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
+			updated += len(changes)
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -547,7 +552,7 @@ WHERE t.category_id IS NULL
 
 		apictx.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"updated_transactions":     updated,
-			"affected_bank_statements": len(bsSet),
+			"affected_bank_statements": len(recatByBS),
 		})
 	})
 }
@@ -632,8 +637,7 @@ WHERE t.category_id IS NULL
 		}
 
 		ruleCache := make(map[string][]categoryRuleComponent)
-		bsSet := make(map[string]struct{})
-		updated := 0
+		recatByBS := map[string][]bsasync.TxnCategoryChange{}
 
 		for _, tr := range txns {
 			if !ctxutil.FromContext(ctx).HasApprovedBankAccount(tr.acct) {
@@ -662,19 +666,27 @@ WHERE t.category_id IS NULL
 
 			matched := matchCategoryForTransaction(rules, tr.desc, tr.wd, tr.dep, tr.valueDate)
 			if matched.Valid {
-				if _, err := tx.Exec(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = $2`, matched.String, tr.id); err == nil {
-					updated++
-					bsSet[tr.bsID] = struct{}{}
-				}
+				recatByBS[tr.bsID] = append(recatByBS[tr.bsID], bsasync.TxnCategoryChange{
+					TransactionID: tr.id,
+					FieldName:     "category_id",
+					OldValue:      "",
+					NewValue:      matched.String,
+				})
 			}
 		}
 
-		for bsID := range bsSet {
-			_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, $4)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now(), nullIfBlank(apictx.ClientIPFromRequest(r)))
-			if err != nil {
+		updated := 0
+		requestedBy := requestedByFromCtx(ctx, body.UserID)
+		requestedIP := strings.TrimSpace(apictx.ClientIPFromRequest(r))
+		if requestedIP == "" {
+			requestedIP = "system"
+		}
+		for bsID, changes := range recatByBS {
+			if err := bsasync.ApplyManualRecatInTx(ctx, tx, bsID, changes, requestedBy, requestedIP); err != nil {
 				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
+			updated += len(changes)
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -684,7 +696,7 @@ WHERE t.category_id IS NULL
 
 		apictx.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"updated_transactions":     updated,
-			"affected_bank_statements": len(bsSet),
+			"affected_bank_statements": len(recatByBS),
 		})
 	})
 }

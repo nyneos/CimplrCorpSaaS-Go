@@ -9,11 +9,12 @@ import (
 	"sync"
 	"time"
 
+	bsasync "CimplrCorpSaas/api/cash/bsasync"
+	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/config"
 	"CimplrCorpSaas/internal/logger"
 	cat "CimplrCorpSaas/internal/services/categorizer"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/robfig/cron/v3"
 )
@@ -217,7 +218,11 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 	totalProcessed := 0
 	totalUpdated := 0
 	progressAt := time.Now()
-	affectedBS := make(map[string]struct{})
+	recatByBS := map[string][]bsasync.TxnCategoryChange{}
+	eventCode := common.TriggerScheduledDaily
+	if filterBSID != "" {
+		eventCode = common.TriggerOnDataImport
+	}
 
 	for {
 		rows, err := db.Query(ctx, `
@@ -299,6 +304,12 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 			break
 		}
 
+		txnIDs := make([]int64, len(batch))
+		for i, rd := range batch {
+			txnIDs[i] = rd.input.TransactionID
+		}
+		oldCats := loadTxnCategoryIDs(ctx, db, txnIDs)
+
 		// Advance keyset cursor.
 		lastID = batch[len(batch)-1].input.TransactionID
 
@@ -327,15 +338,29 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 		}
 		wg.Wait()
 
-		// Collect affected bank-statement IDs (serial, safe).
-		for _, rd := range batch {
-			if rd.bsID != "" {
-				affectedBS[rd.bsID] = struct{}{}
+		// Collect category changes for RECAT audit (only confident assignments).
+		skipCategory := map[int64]struct{}{}
+		for i, rd := range batch {
+			item := persistItems[i]
+			newCat := ""
+			if item.Result.CategoryID != "" && item.Result.Confidence >= cat.MinConfidenceForActuals {
+				newCat = item.Result.CategoryID
 			}
+			oldCat := oldCats[rd.input.TransactionID]
+			if oldCat == newCat || rd.bsID == "" {
+				continue
+			}
+			skipCategory[rd.input.TransactionID] = struct{}{}
+			recatByBS[rd.bsID] = append(recatByBS[rd.bsID], bsasync.TxnCategoryChange{
+				TransactionID: rd.input.TransactionID,
+				FieldName:     "category_id",
+				OldValue:      oldCat,
+				NewValue:      newCat,
+			})
 		}
 
-		// ── 5. Persist batch ──────────────────────────────────────────────────
-		cat.PersistBatch(ctx, db, persistItems)
+		// ── 5. Persist batch (category writes deferred for RECAT txns) ─────────
+		cat.PersistBatchWithOptions(ctx, db, persistItems, skipCategory)
 		totalUpdated += len(persistItems)
 		totalProcessed += len(batch)
 
@@ -346,26 +371,39 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 		}
 	}
 
-	// ── 6. Insert audit approval rows for affected bank statements ────────────
-	if len(affectedBS) > 0 {
-		pgxBatch := &pgx.Batch{}
-		for bsID := range affectedBS {
-			pgxBatch.Queue(`
-				INSERT INTO cimplrcorpsaas.auditactionbankstatement
-				    (bankstatementid, actiontype, processing_status, requested_by, requested_at, requested_ip)
-				VALUES ($1, 'RECAT', 'PENDING_EDIT_APPROVAL', 'system', now(), 'system')
-				ON CONFLICT DO NOTHING
-			`, bsID)
+	// ── 6. Policy gate + RECAT audit for statements with category changes ────
+	for bsID, changes := range recatByBS {
+		if err := bsasync.ApplySmartCatRecat(ctx, db, bsID, changes, eventCode); err != nil {
+			auditLog(fmt.Sprintf("SmartCat RECAT skipped bs=%s: %v", bsID, err))
+			logger.LogError("[SMART-CAT] RECAT policy/audit failed bs=%s: %v", bsID, err)
 		}
-		br := db.SendBatch(ctx, pgxBatch)
-		for range affectedBS {
-			br.Exec() //nolint:errcheck
-		}
-		br.Close()
 	}
 
-	auditLog(fmt.Sprintf("Smart-categorization completed: processed=%d updated=%d", totalProcessed, totalUpdated))
+	auditLog(fmt.Sprintf("Smart-categorization completed: processed=%d updated=%d recat_statements=%d", totalProcessed, totalUpdated, len(recatByBS)))
 	return nil
+}
+
+func loadTxnCategoryIDs(ctx context.Context, db *pgxpool.Pool, txnIDs []int64) map[int64]string {
+	out := make(map[int64]string, len(txnIDs))
+	if len(txnIDs) == 0 {
+		return out
+	}
+	rows, err := db.Query(ctx, `
+		SELECT transaction_id, COALESCE(category_id::text, '')
+		FROM cimplrcorpsaas.bank_statement_transactions
+		WHERE transaction_id = ANY($1::bigint[])`, txnIDs)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var catID string
+		if err := rows.Scan(&id, &catID); err == nil {
+			out[id] = catID
+		}
+	}
+	return out
 }
 
 // parseInt is a helper to parse int from string.
