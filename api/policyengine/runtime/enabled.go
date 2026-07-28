@@ -8,17 +8,13 @@ import (
 // PolicyChecksEnabled reports whether business handlers should run policy
 // evaluation. Controlled by POLICY_ENGINE_ENABLED:
 //
-//	unset / empty / true / 1 / yes / on  → checks run (default)
-//	false / 0 / no / off                 → Enforce / RunCheck no-op pass
+//	true / 1 / yes / on                  → checks run
+//	unset / empty / false / 0 / no / off → Enforce / RunCheck no-op pass (default off)
 func PolicyChecksEnabled() bool {
-	v := strings.TrimSpace(strings.ToLower(os.Getenv("POLICY_ENGINE_ENABLED")))
-	if v == "" {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("POLICY_ENGINE_ENABLED"))) {
+	case "1", "true", "yes", "on":
 		return true
-	}
-	switch v {
-	case "0", "false", "no", "off":
-		return false
 	default:
-		return true
+		return false
 	}
 }
