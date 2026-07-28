@@ -13,8 +13,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// dispatchNotifyBreaches fires notification catalog for NotifyOnly / SoftWarning
-// breaches. notification_group on the policy is treated as the notification
+// dispatchNotifyBreaches fires notification catalog for NotifyOnly, SoftWarning,
+// and TriggerApproval breaches (BRD §6.3 async/scheduled: NotifyOnly |
+// TriggerApproval; SoftWarning kept for POST_* monitor triggers).
 // source_route (same string used by TriggerNotification) — in practice this
 // is always the single, module-agnostic "policy-engine/breach" event
 // (module_code=POLICYENGINE, sub_module_code=POLICY_BREACH, seeded by
@@ -53,7 +54,8 @@ func dispatchNotifyBreaches(
 		if pr.Result != "BREACH" {
 			continue
 		}
-		if pr.Action != common.BreachNotifyOnly && pr.Action != common.BreachSoftWarning {
+		if pr.Action != common.BreachNotifyOnly && pr.Action != common.BreachSoftWarning &&
+			pr.Action != common.BreachTriggerApproval {
 			continue
 		}
 		route := strings.TrimSpace(groupByPolicy[pr.PolicyID])
@@ -64,7 +66,7 @@ func dispatchNotifyBreaches(
 		if corr == "" {
 			corr = "POL-" + pr.PolicyID
 		}
-		payload := map[string]interface{}{
+		extras := map[string]interface{}{
 			"Action":       pr.Action,
 			"PolicyCode":   pr.Code,
 			"PolicyID":     pr.PolicyID,
@@ -82,13 +84,20 @@ func dispatchNotifyBreaches(
 			"BusinessType": req.BusinessRecordType,
 		}
 		if codeByPolicy[pr.PolicyID] != "" && pr.Code == "" {
-			payload["PolicyCode"] = codeByPolicy[pr.PolicyID]
+			extras["PolicyCode"] = codeByPolicy[pr.PolicyID]
 		}
-		for k, v := range req.Variables {
-			if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
-				continue
+		// Prefer field_code / NOTIFICATION alias_key keys (template UI).
+		// Fall back to CDM paths only when NotifyFields empty (legacy callers).
+		payload := BuildDispatchPayload(ctx, pool, req.SubModule, req.NotifyFields, extras)
+		if len(req.NotifyFields) == 0 {
+			for k, v := range req.Variables {
+				if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+					continue
+				}
+				if _, exists := payload[k]; !exists {
+					payload[k] = v
+				}
 			}
-			payload[k] = v
 		}
 
 		bg := context.WithoutCancel(ctx)

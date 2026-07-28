@@ -245,6 +245,14 @@ func processCimplrAutoMaturityInitiate(ctx context.Context, pool *pgxpool.Pool, 
 		return autoMaturityOutcomeFailed, "", fmt.Errorf("calculate closure fd_id=%s type=%s: %w", fdID, closureType, err)
 	}
 
+	entityID := strings.TrimSpace(fmt.Sprint(initiate["entity_id"]))
+	if entityID == "" {
+		entityID = strings.TrimSpace(src.EntityID)
+	}
+	if ok, msg := EnforceAutoMaturityConfirm(ctx, pool, initiateID, fdID, closureType, entityID); !ok {
+		return autoMaturityOutcomeFailed, "", fmt.Errorf("policy blocked: %s", msg)
+	}
+
 	expectedNewFD := cimplrExpectedRolloverNewFD(src, calc, rolloverBasis)
 	req := cimplrClosureConfirmRequest{
 		UserID:               actorUserID,

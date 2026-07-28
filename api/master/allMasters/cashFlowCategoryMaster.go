@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/cash/bsasync"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/dependency"
@@ -1747,30 +1748,11 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				return
 			}
 
-			// 5. Collect affected bank_statement_ids (before we null categories)
-			bsRows, err := tx.Query(ctx, `SELECT DISTINCT bank_statement_id FROM cimplrcorpsaas.bank_statement_transactions WHERE category_id = ANY($1)`, pq.Array(deleteCategoryIDs))
-			if err != nil {
+			// 5–6. RECAT audit with per-transaction old/new before unassigning categories
+			if err := bsasync.InsertCategoryDeleteRecatInTx(ctx, tx, deleteCategoryIDs, checkerBy, req.Comment, ""); err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 				return
-			}
-			var bsIDs []string
-			for bsRows.Next() {
-				var bsid string
-				if err := bsRows.Scan(&bsid); err == nil {
-					bsIDs = append(bsIDs, bsid)
-				}
-			}
-			bsRows.Close()
-
-			// 6. Insert auditactionbankstatement rows for affected bank statements in bulk
-			if len(bsIDs) > 0 {
-				insertBSQuery := `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) SELECT unnest($1::text[]), 'RECAT', 'PENDING_EDIT_APPROVAL', $2, now(), $3`
-				if _, err := tx.Exec(ctx, insertBSQuery, pq.Array(bsIDs), checkerBy, req.Comment); err != nil {
-					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
-					return
-				}
 			}
 
 			// 7. Unassign transactions referencing these categories
