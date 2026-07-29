@@ -41,12 +41,24 @@ type TransformationRule struct {
 	UpdatedAt        *time.Time      `json:"updated_at,omitempty"`
 	UserID           string          `json:"user_id,omitempty"`
 
+	// Audit metadata resolved per audit_action from transformation_rules_audit
+	// (CREATE_PENDING → requested_*, UPDATE_PENDING → edited_*, DELETE_PENDING →
+	// deleted_*), so a rule that was never edited reports an empty edited_at.
+	RequestedAt *time.Time `json:"requested_at,omitempty"`
+	RequestedBy string     `json:"requested_by,omitempty"`
+	EditedAt    *time.Time `json:"edited_at,omitempty"`
+	EditedBy    string     `json:"edited_by,omitempty"`
+	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
+	DeletedBy   string     `json:"deleted_by,omitempty"`
+	CheckerAt   *time.Time `json:"checker_at,omitempty"`
+	CheckerBy   string     `json:"checker_by,omitempty"`
+
 	// Legacy primary destination fields (mirrored from destinations[0] for old clients).
-	DestinationType  string `json:"destination_type"`            // S3 | LOCAL | SFTP | API
-	OutputNamePrefix string `json:"output_name_prefix"`          // user base name
-	AppendDatetime   *bool  `json:"append_datetime"`             // nil → true; append _YYYYMMDD_HHMMSS
-	S3Prefix         string `json:"s3_prefix,omitempty"`         // optional key prefix
-	LocalFolder      string `json:"local_folder,omitempty"`      // subfolder under local base
+	DestinationType  string `json:"destination_type"`       // S3 | LOCAL | SFTP | API
+	OutputNamePrefix string `json:"output_name_prefix"`     // user base name
+	AppendDatetime   *bool  `json:"append_datetime"`        // nil → true; append _YYYYMMDD_HHMMSS
+	S3Prefix         string `json:"s3_prefix,omitempty"`    // optional key prefix
+	LocalFolder      string `json:"local_folder,omitempty"` // subfolder under local base
 	SftpHost         string `json:"sftp_host,omitempty"`
 	SftpPort         int    `json:"sftp_port,omitempty"`
 	SftpUser         string `json:"sftp_user,omitempty"`
@@ -85,7 +97,36 @@ const ruleSelectCols = `
 		COALESCE(r.sftp_password, ''),
 		COALESCE(r.sftp_folder, ''),
 		COALESCE(r.api_url, ''),
-		COALESCE(r.api_auth_token, '')
+		COALESCE(r.api_auth_token, ''),
+		COALESCE(ra.requested_at, r.created_at), COALESCE(ra.requested_by, ''),
+		ra.edited_at, COALESCE(ra.edited_by, ''),
+		ra.deleted_at, COALESCE(ra.deleted_by, ''),
+		ra.checker_at, COALESCE(ra.checker_by, '')
+`
+
+// Latest audit row per action, so Requested / Edited / Deleted stay distinct
+// instead of all collapsing onto the rule's updated_at.
+const ruleAuditLateral = `
+		LEFT JOIN LATERAL (
+			SELECT
+				MAX(a.created_at) FILTER (
+					WHERE a.audit_action IN ('CREATE_PENDING', 'UPDATE_PENDING', 'DELETE_PENDING')
+				) AS requested_at,
+				(array_agg(COALESCE(a.actor_email, a.actor_id) ORDER BY a.created_at DESC)
+					FILTER (WHERE a.audit_action IN ('CREATE_PENDING', 'UPDATE_PENDING', 'DELETE_PENDING')))[1] AS requested_by,
+				MAX(a.created_at) FILTER (WHERE a.audit_action = 'UPDATE_PENDING') AS edited_at,
+				(array_agg(COALESCE(a.actor_email, a.actor_id) ORDER BY a.created_at DESC)
+					FILTER (WHERE a.audit_action = 'UPDATE_PENDING'))[1] AS edited_by,
+				MAX(a.created_at) FILTER (WHERE a.audit_action = 'DELETE_PENDING') AS deleted_at,
+				(array_agg(COALESCE(a.actor_email, a.actor_id) ORDER BY a.created_at DESC)
+					FILTER (WHERE a.audit_action = 'DELETE_PENDING'))[1] AS deleted_by,
+				MAX(a.created_at) FILTER (WHERE a.audit_action IN ('APPROVED', 'REJECTED')) AS checker_at,
+				(array_agg(COALESCE(a.actor_email, a.actor_id) ORDER BY a.created_at DESC)
+					FILTER (WHERE a.audit_action IN ('APPROVED', 'REJECTED')))[1] AS checker_by,
+				MAX(a.created_at) AS last_activity_at
+			FROM email_svc.transformation_rules_audit a
+			WHERE a.rule_id = r.rule_id
+		) ra ON true
 `
 
 func scanRule(rows interface {
@@ -104,6 +145,10 @@ func scanRule(rows interface {
 		&rule.S3Prefix, &rule.LocalFolder,
 		&rule.SftpHost, &rule.SftpPort, &rule.SftpUser, &rule.SftpPassword, &rule.SftpFolder,
 		&rule.APIURL, &rule.APIAuthToken,
+		&rule.RequestedAt, &rule.RequestedBy,
+		&rule.EditedAt, &rule.EditedBy,
+		&rule.DeletedAt, &rule.DeletedBy,
+		&rule.CheckerAt, &rule.CheckerBy,
 	)
 	if err != nil {
 		return err
@@ -213,22 +258,11 @@ func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	query := `
 		SELECT ` + ruleSelectCols + `
 		FROM email_svc.transformation_rules r
-		LEFT JOIN LATERAL (
-			SELECT
-				MAX(a.created_at) FILTER (
-					WHERE a.audit_action IN ('CREATE_PENDING', 'UPDATE_PENDING', 'DELETE_PENDING')
-				) AS requested_at,
-				MAX(a.created_at) FILTER (
-					WHERE a.audit_action IN ('APPROVED', 'REJECTED')
-				) AS checker_at
-			FROM email_svc.transformation_rules_audit a
-			WHERE a.rule_id = r.rule_id
-		) ra ON true
+` + ruleAuditLateral + `
 		WHERE ($1 = '' OR r.inbox_id::text = $1)
 		  AND (r.is_deleted = false OR r.is_deleted IS NULL)
 		ORDER BY GREATEST(
-			COALESCE(ra.requested_at, '-infinity'::timestamptz),
-			COALESCE(ra.checker_at, '-infinity'::timestamptz),
+			COALESCE(ra.last_activity_at, '-infinity'::timestamptz),
 			COALESCE(r.updated_at, r.created_at, '-infinity'::timestamptz)
 		) DESC
 	`
@@ -546,11 +580,11 @@ func handleApprove(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		SELECT COALESCE(submitted_by, '') FROM email_svc.transformation_rules WHERE rule_id = $1
 	`, req.RuleID).Scan(&submittedBy)
 	logAudit(r, pool, req.RuleID, "APPROVED", req.UserID, map[string]interface{}{
-		"rule_id":            req.RuleID,
-		"submitted_by":       submittedBy,
-		"approved_by":        req.UserID,
-		"checker_comment":    req.CheckerComment,
-		"processing_status":  "APPROVED",
+		"rule_id":           req.RuleID,
+		"submitted_by":      submittedBy,
+		"approved_by":       req.UserID,
+		"checker_comment":   req.CheckerComment,
+		"processing_status": "APPROVED",
 	})
 	emailcommon.RespondPayload(w, "transform-rules-approve", map[string]bool{"success": true})
 }

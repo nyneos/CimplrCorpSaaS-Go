@@ -57,8 +57,17 @@ type workflowInbox struct {
 	PendingEditJSON     json.RawMessage `json:"pending_edit_json,omitempty"`
 	CreatedAt           time.Time       `json:"created_at"`
 	UpdatedAt           time.Time       `json:"updated_at"`
-	RequestedAt         *time.Time      `json:"requested_at,omitempty"`
-	CheckerAt           *time.Time      `json:"checker_at,omitempty"`
+	// Audit metadata resolved per action type from inbox_audit (CREATE →
+	// requested_*, EDIT → edited_*, DELETE → deleted_*), so a mailbox that was
+	// never edited reports an empty edited_at instead of its creation time.
+	RequestedAt *time.Time `json:"requested_at,omitempty"`
+	RequestedBy string     `json:"requested_by,omitempty"`
+	EditedAt    *time.Time `json:"edited_at,omitempty"`
+	EditedBy    string     `json:"edited_by,omitempty"`
+	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
+	DeletedBy   string     `json:"deleted_by,omitempty"`
+	CheckerAt   *time.Time `json:"checker_at,omitempty"`
+	CheckerBy   string     `json:"checker_by,omitempty"`
 }
 
 func init() {
@@ -452,16 +461,31 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 			       COALESCE(i.checker_comment,''), i.is_active, i.is_deleted,
 			       COALESCE(i.pending_edit_json::text, 'null'),
 			       i.created_at, i.updated_at,
-			       ia.requested_at, ia.checker_at
+			       COALESCE(ia.requested_at, i.created_at), COALESCE(ia.requested_by, ''),
+			       ia.edited_at, COALESCE(ia.edited_by, ''),
+			       ia.deleted_at, COALESCE(ia.deleted_by, ''),
+			       ia.checker_at, COALESCE(ia.checker_by, '')
 			FROM email_svc.inbox_config i
 			LEFT JOIN LATERAL (
 				SELECT
 					MAX(a.created_at) FILTER (
-						WHERE a.action_type IN ('CREATE','EDIT','DELETE')
+						WHERE a.action_type IN ('CREATE', 'EDIT', 'DELETE')
 					) AS requested_at,
-					MAX(a.created_at) FILTER (
-						WHERE a.action_type LIKE 'APPROVE%%'
-					) AS checker_at
+					(array_agg(a.performed_by ORDER BY a.created_at DESC)
+						FILTER (WHERE a.action_type IN ('CREATE', 'EDIT', 'DELETE')))[1] AS requested_by,
+					MAX(a.created_at) FILTER (WHERE a.action_type = 'EDIT') AS edited_at,
+					(array_agg(a.performed_by ORDER BY a.created_at DESC)
+						FILTER (WHERE a.action_type = 'EDIT'))[1] AS edited_by,
+					MAX(a.created_at) FILTER (WHERE a.action_type = 'DELETE') AS deleted_at,
+					(array_agg(a.performed_by ORDER BY a.created_at DESC)
+						FILTER (WHERE a.action_type = 'DELETE'))[1] AS deleted_by,
+					MAX(COALESCE(a.checker_at, a.created_at)) FILTER (
+						WHERE a.action_type LIKE 'APPROVE%%' OR a.action_type = 'REJECT'
+					) AS checker_at,
+					(array_agg(COALESCE(a.checker_by, a.performed_by)
+						ORDER BY COALESCE(a.checker_at, a.created_at) DESC)
+						FILTER (WHERE a.action_type LIKE 'APPROVE%%' OR a.action_type = 'REJECT'))[1] AS checker_by,
+					MAX(a.created_at) AS last_activity_at
 				FROM email_svc.inbox_audit a
 				WHERE a.inbox_id = i.inbox_id
 			) ia ON true
@@ -498,8 +522,7 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, s)
 		}
 		query += ` ORDER BY GREATEST(
-			COALESCE(ia.requested_at, '-infinity'::timestamptz),
-			COALESCE(ia.checker_at, '-infinity'::timestamptz),
+			COALESCE(ia.last_activity_at, '-infinity'::timestamptz),
 			COALESCE(i.updated_at, i.created_at, '-infinity'::timestamptz)
 		) DESC`
 
@@ -536,7 +559,10 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 				&item.CheckerComment,
 				&item.IsActive, &item.IsDeleted, &pendingText,
 				&item.CreatedAt, &item.UpdatedAt,
-				&item.RequestedAt, &item.CheckerAt,
+				&item.RequestedAt, &item.RequestedBy,
+				&item.EditedAt, &item.EditedBy,
+				&item.DeletedAt, &item.DeletedBy,
+				&item.CheckerAt, &item.CheckerBy,
 			); err != nil {
 				emailcommon.RespondInternal(w, err.Error())
 				return

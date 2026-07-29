@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -12,7 +13,8 @@ import (
 )
 
 // ListItem is the full policy list view: policy_master header columns +
-// array_agg'd trigger event codes / module codes + processing_status.
+// array_agg'd trigger event codes / module codes + processing_status +
+// audit metadata (Requested / Edited / Approved) for expand panels.
 type ListItem struct {
 	PolicyID         string   `json:"policy_id"`
 	Code             string   `json:"code"`
@@ -30,6 +32,22 @@ type ListItem struct {
 	TriggerEvents    []string `json:"trigger_events"`
 	Modules          []string `json:"modules"`
 	SubModules       []string `json:"sub_modules"`
+	// Audit metadata resolved per action type from policy_master_audit
+	// (CREATE → created_*, EDIT → edited_*, DELETE → deleted_*), so a policy
+	// that was never edited reports an empty edited_at instead of created_at.
+	CreatedBy      string `json:"created_by"`
+	CreatedAt      string `json:"created_at"`
+	EditedBy       string `json:"edited_by"`
+	EditedAt       string `json:"edited_at"`
+	DeletedBy      string `json:"deleted_by"`
+	DeletedAt      string `json:"deleted_at"`
+	ApprovedBy     string `json:"approved_by"`
+	ApprovedAt     string `json:"approved_at"`
+	RequestedBy    string `json:"requested_by"`
+	RequestedAt    string `json:"requested_at"`
+	CheckerBy      string `json:"checker_by"`
+	CheckerAt      string `json:"checker_at"`
+	CheckerComment string `json:"checker_comment"`
 }
 
 const listFrom = `
@@ -49,6 +67,41 @@ const listFrom = `
 		FROM policyengine_svc.policy_sub_module psm
 		WHERE psm.policy_id = p.policy_id AND psm.is_deleted = false
 	) sm ON true
+`
+
+// Latest audit row per action type, so Requested / Edited / Deleted stay
+// distinct instead of all collapsing onto the master's last_modified_at.
+const listAuditFrom = `
+	LEFT JOIN LATERAL (
+		SELECT a.requested_by, a.requested_at
+		FROM policyengine_svc.policy_master_audit a
+		WHERE a.policy_id = p.policy_id AND a.action_type = 'CREATE'
+		ORDER BY a.requested_at DESC LIMIT 1
+	) ac ON true
+	LEFT JOIN LATERAL (
+		SELECT a.requested_by, a.requested_at
+		FROM policyengine_svc.policy_master_audit a
+		WHERE a.policy_id = p.policy_id AND a.action_type = 'EDIT'
+		ORDER BY a.requested_at DESC LIMIT 1
+	) ae ON true
+	LEFT JOIN LATERAL (
+		SELECT a.requested_by, a.requested_at
+		FROM policyengine_svc.policy_master_audit a
+		WHERE a.policy_id = p.policy_id AND a.action_type = 'DELETE'
+		ORDER BY a.requested_at DESC LIMIT 1
+	) ad ON true
+	LEFT JOIN LATERAL (
+		SELECT a.requested_by, a.requested_at, a.checker_by, a.checker_at,
+		       COALESCE(a.checker_comment, '') AS checker_comment
+		FROM policyengine_svc.policy_master_audit a
+		WHERE a.policy_id = p.policy_id
+		  AND a.action_type IN ('CREATE', 'EDIT', 'DELETE')
+		ORDER BY a.requested_at DESC
+		LIMIT 1
+	) ar ON true
+`
+
+const listWhere = `
 	WHERE p.is_deleted = false`
 
 func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
@@ -65,7 +118,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 		search := common.SearchPattern(req.Search)
 
 		ctx := r.Context()
-		countQ := `SELECT COUNT(*) ` + listFrom
+		countQ := `SELECT COUNT(*) ` + listFrom + listWhere
 		countArgs := []interface{}{}
 		if search != "" {
 			countQ += ` AND (p.code ILIKE $1 OR p.name ILIKE $1 OR p.category ILIKE $1)`
@@ -84,7 +137,15 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 			       p.effective_start::text, p.source,
 			       COALESCE(t.trigger_events, ARRAY[]::varchar[]) AS trigger_events,
 			       COALESCE(m.modules, ARRAY[]::varchar[]) AS modules,
-			       COALESCE(sm.sub_modules, ARRAY[]::varchar[]) AS sub_modules` + listFrom
+			       COALESCE(sm.sub_modules, ARRAY[]::varchar[]) AS sub_modules,
+			       COALESCE(ac.requested_by, COALESCE(p.created_by, '')), COALESCE(ac.requested_at, p.created_at),
+			       COALESCE(ae.requested_by, ''), ae.requested_at,
+			       COALESCE(ad.requested_by, ''), ad.requested_at,
+			       COALESCE(p.approved_by, ''), p.approved_at,
+			       COALESCE(ar.requested_by, COALESCE(p.created_by, '')),
+			       COALESCE(ar.requested_at, p.created_at),
+			       COALESCE(ar.checker_by, ''), ar.checker_at,
+			       COALESCE(ar.checker_comment, '')` + listFrom + listAuditFrom + listWhere
 		listArgs := []interface{}{}
 		argN := 1
 		if search != "" {
@@ -106,13 +167,24 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 		out := make([]ListItem, 0)
 		for rows.Next() {
 			var it ListItem
+			var createdAt, editedAt, deletedAt, approvedAt, requestedAt, checkerAt *time.Time
 			if err := rows.Scan(&it.PolicyID, &it.Code, &it.Name, &it.Category, &it.ValidationLevel, &it.Criticality,
 				&it.ActionOnBreach, &it.RuleType, &it.Status, &it.ProcessingStatus, &it.Version,
-				&it.EffectiveStart, &it.Source, &it.TriggerEvents, &it.Modules, &it.SubModules); err != nil {
+				&it.EffectiveStart, &it.Source, &it.TriggerEvents, &it.Modules, &it.SubModules,
+				&it.CreatedBy, &createdAt, &it.EditedBy, &editedAt,
+				&it.DeletedBy, &deletedAt, &it.ApprovedBy, &approvedAt,
+				&it.RequestedBy, &requestedAt, &it.CheckerBy, &checkerAt,
+				&it.CheckerComment); err != nil {
 				api.LogErrorForResponse(w, "policy list scan: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to list policies", "POLICY_LIST_FAILED")
 				return
 			}
+			it.CreatedAt = common.FormatAuditTime(createdAt)
+			it.EditedAt = common.FormatAuditTime(editedAt)
+			it.DeletedAt = common.FormatAuditTime(deletedAt)
+			it.ApprovedAt = common.FormatAuditTime(approvedAt)
+			it.RequestedAt = common.FormatAuditTime(requestedAt)
+			it.CheckerAt = common.FormatAuditTime(checkerAt)
 			out = append(out, it)
 		}
 		api.RespondEnvelopeSuccess(w, "Policies fetched", map[string]interface{}{

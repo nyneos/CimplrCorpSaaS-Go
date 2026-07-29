@@ -3,7 +3,6 @@ package cdm
 import (
 	"net/http"
 	"strings"
-	"time"
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -32,16 +31,15 @@ func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var it Item
-		var createdAt, lastModifiedAt time.Time
+		var ts itemTimes
 		err := pool.QueryRow(r.Context(), itemSelectSQL+`
 			WHERE c.variable_id = $1::uuid AND c.is_deleted = false`, req.VariableID,
-		).Scan(scanItem(&it, &createdAt, &lastModifiedAt)...)
+		).Scan(scanItem(&it, &ts)...)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "CDM variable not found", "NOT_FOUND")
 			return
 		}
-		it.CreatedAt = createdAt.UTC().Format(time.RFC3339)
-		it.LastModifiedAt = lastModifiedAt.UTC().Format(time.RFC3339)
+		applyItemTimes(&it, ts)
 		api.RespondEnvelopeSuccess(w, "CDM variable fetched", it)
 	}
 }
