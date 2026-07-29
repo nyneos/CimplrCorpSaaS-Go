@@ -46,6 +46,8 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		req.Label = strings.TrimSpace(req.Label)
 		req.Domain = strings.TrimSpace(req.Domain)
 		req.DataType = strings.TrimSpace(req.DataType)
+		req.Unit = strings.TrimSpace(req.Unit)
+		req.SourceSystem = strings.TrimSpace(req.SourceSystem)
 		req.Description = strings.TrimSpace(req.Description)
 		req.CanonicalRef = strings.TrimSpace(req.CanonicalRef)
 		req.UserAlias = strings.TrimSpace(req.UserAlias)
@@ -56,6 +58,10 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.Status == "" {
 			req.Status = "Active"
+		}
+		if err := validateCatalogBinding(r.Context(), pool, req.SourceSystem, req.Name, req.DataType, req.Unit); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "CDM_CATALOG_BINDING_INVALID")
+			return
 		}
 		actor := common.RequestActor(r, req.ActorID)
 		ip := common.RequestIP(r)

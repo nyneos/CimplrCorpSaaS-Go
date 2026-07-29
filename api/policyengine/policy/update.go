@@ -41,6 +41,14 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
 			return
 		}
+		if err := validatePolicyScope(
+			r.Context(), pool,
+			req.Modules, req.SubModules, req.TriggerEvents,
+			req.ActionOnBreach, rf, req.AddlExpression,
+		); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "POLICY_SCOPE_INVALID")
+			return
+		}
 		if err := validatePELOnWrite(r.Context(), req.RuleType, rf.FormulaExpression, rf.FormulaReturnType, req.AddlExpression); err != nil {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
 			return

@@ -38,11 +38,17 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		req.Label = strings.TrimSpace(req.Label)
 		req.Domain = strings.TrimSpace(req.Domain)
 		req.DataType = strings.TrimSpace(req.DataType)
+		req.Unit = strings.TrimSpace(req.Unit)
+		req.SourceSystem = strings.TrimSpace(req.SourceSystem)
 		req.Description = strings.TrimSpace(req.Description)
 		req.CanonicalRef = strings.TrimSpace(req.CanonicalRef)
 		req.UserAlias = strings.TrimSpace(req.UserAlias)
 		if req.Name == "" || req.Label == "" || req.Domain == "" || req.DataType == "" || req.Description == "" {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "name, label, domain, data_type, description are required", "VALIDATION_ERROR")
+			return
+		}
+		if err := validateCatalogBinding(r.Context(), pool, req.SourceSystem, req.Name, req.DataType, req.Unit); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "CDM_CATALOG_BINDING_INVALID")
 			return
 		}
 		actor := common.RequestActor(r, req.ActorID)

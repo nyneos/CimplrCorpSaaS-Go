@@ -25,29 +25,29 @@ type createReq struct {
 	// NotificationTemplateIDs — curated notification_svc.template picks from
 	// the policy form's template multi-select. Empty = every enabled channel
 	// for NotificationGroup's event fires (unchanged default behavior).
-	NotificationTemplateIDs []string        `json:"notification_template_ids"`
-	BreachMessage           string          `json:"breach_message"`
-	RequiresApproval        bool            `json:"requires_approval"`
-	Applicability           string          `json:"applicability"`
-	CanOverride             bool            `json:"can_override"`
-	Modules                 []string        `json:"modules"`
+	NotificationTemplateIDs []string `json:"notification_template_ids"`
+	BreachMessage           string   `json:"breach_message"`
+	RequiresApproval        bool     `json:"requires_approval"`
+	Applicability           string   `json:"applicability"`
+	CanOverride             bool     `json:"can_override"`
+	Modules                 []string `json:"modules"`
 	// SubModules — domain_catalog sub_module codes (UI "forms"), e.g. FD_BOOKING.
 	// Empty = match any sub-module under the selected modules (legacy behaviour).
-	SubModules              []string        `json:"sub_modules"`
-	TriggerEvents           []string        `json:"trigger_events"`
-	EntitiesInclude         []string        `json:"entities_include"`
-	EntitiesExclude         []string        `json:"entities_exclude"`
-	RuleType                string          `json:"rule_type"`
-	Config                  json.RawMessage `json:"config"`
-	AddlExpression          string          `json:"addl_expression"`
-	NullHandling            string          `json:"null_handling"`
-	InstrumentFilter        string          `json:"instrument_filter"`
-	CurrencyFilter          string          `json:"currency_filter"`
-	TenorFilter             string          `json:"tenor_filter"`
-	RatingFilter            string          `json:"rating_filter"`
-	EffectiveStart          string          `json:"effective_start"`
-	EffectiveEnd            string          `json:"effective_end"`
-	ActorID                 string          `json:"actor_id"`
+	SubModules       []string        `json:"sub_modules"`
+	TriggerEvents    []string        `json:"trigger_events"`
+	EntitiesInclude  []string        `json:"entities_include"`
+	EntitiesExclude  []string        `json:"entities_exclude"`
+	RuleType         string          `json:"rule_type"`
+	Config           json.RawMessage `json:"config"`
+	AddlExpression   string          `json:"addl_expression"`
+	NullHandling     string          `json:"null_handling"`
+	InstrumentFilter string          `json:"instrument_filter"`
+	CurrencyFilter   string          `json:"currency_filter"`
+	TenorFilter      string          `json:"tenor_filter"`
+	RatingFilter     string          `json:"rating_filter"`
+	EffectiveStart   string          `json:"effective_start"`
+	EffectiveEnd     string          `json:"effective_end"`
+	ActorID          string          `json:"actor_id"`
 }
 
 func (req *createReq) trim() {
@@ -135,6 +135,14 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		rf, err := parseRuleConfig(req.RuleType, req.Config)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
+			return
+		}
+		if err := validatePolicyScope(
+			r.Context(), pool,
+			req.Modules, req.SubModules, req.TriggerEvents,
+			req.ActionOnBreach, rf, req.AddlExpression,
+		); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "POLICY_SCOPE_INVALID")
 			return
 		}
 		if err := validatePELOnWrite(r.Context(), req.RuleType, rf.FormulaExpression, rf.FormulaReturnType, req.AddlExpression); err != nil {
