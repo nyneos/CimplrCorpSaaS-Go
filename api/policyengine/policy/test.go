@@ -73,11 +73,18 @@ func HandleTest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if moduleCode != "" && eventCode != "TEST_HARNESS" {
-			loaded, loadErr := runtime.LoadActivePolicySnapshots(r.Context(), pool, eventCode, moduleCode, subModule, entityCode, req.Variables)
-			if loadErr != nil {
-				api.LogErrorForResponse(w, "policy test load related: %v", loadErr)
+			if subModule == "" {
+				// Without sub_module, loadActivePolicies skips the sub-module filter and
+				// returns every Active policy for module+trigger (e.g. all FD_* on
+				// INVESTMENT_FD/PRE_CREATE). That FailSafe-HardBlocks unrelated CDMs.
+				api.LogErrorForResponse(w, "policy test: sub_module empty — skipping related-policy pool")
 			} else {
-				policies = append(policies, loaded...)
+				loaded, loadErr := runtime.LoadActivePolicySnapshots(r.Context(), pool, eventCode, moduleCode, subModule, entityCode, req.Variables)
+				if loadErr != nil {
+					api.LogErrorForResponse(w, "policy test load related: %v", loadErr)
+				} else {
+					policies = append(policies, loaded...)
+				}
 			}
 		}
 
@@ -86,6 +93,8 @@ func HandleTest(pool *pgxpool.Pool) http.HandlerFunc {
 			ModuleCode:  moduleCode,
 			SubModule:   subModule,
 			EntityCode:  entityCode,
+			ActorUserID: common.RequestActor(r, ""),
+			RequestedIP: common.RequestIP(r),
 			HandlerName: "PolicyWorkbenchTest",
 			APIPath:     "/policy-engine/policies/test",
 			Variables:   req.Variables,

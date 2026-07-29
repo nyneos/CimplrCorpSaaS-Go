@@ -2791,8 +2791,11 @@ RETURNING bank_statement_id
 		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, uploadS3Key).Scan(&bankStatementID)
 	if err != nil {
 		tx.Rollback(ctx)
-		// Detect uniq_stmt (entity+account+period composite) constraint violation → clear user error
-		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" && pgErr.ConstraintName == "uniq_stmt" {
+		// Detect period uniqueness (entity+account+period) — constraint may be uniq_stmt or
+		// the soft-delete-aware uniq_stmt_active depending on which migration is live.
+		if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.Code == "23505" &&
+			(pgErr.ConstraintName == "uniq_stmt" || pgErr.ConstraintName == "uniq_stmt_active" ||
+				strings.HasPrefix(pgErr.ConstraintName, "uniq_stmt")) {
 			return nil, fmt.Errorf("%w: account %s already has a statement for this period", ErrStatementPeriodExists, accountNumber)
 		}
 		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)

@@ -49,7 +49,8 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 			       COALESCE(correlation_id, ''), COALESCE(trace_id, ''),
 			       COALESCE(event_code, ''), COALESCE(module_code, ''), COALESCE(sub_module, ''),
 			       COALESCE(form_id, ''), COALESCE(handler_name, ''), COALESCE(api_path, ''),
-			       COALESCE(actor_user_id, ''), COALESCE(entity_code, ''),
+			       COALESCE(actor_user_id, ''), COALESCE(actor_role, ''), COALESCE(entity_code, ''),
+			       COALESCE(requested_ip, ''),
 			       COALESCE(business_record_type, ''), COALESCE(business_record_id, ''),
 			       COALESCE(source_file_name, ''), COALESCE(source_file_id, ''), COALESCE(batch_id, ''),
 			       COALESCE(policy_id::text, ''), COALESCE(policy_code, ''),
@@ -82,7 +83,9 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 			HandlerName        string `json:"handler_name"`
 			APIPath            string `json:"api_path"`
 			ActorUserID        string `json:"actor_user_id"`
+			ActorRole          string `json:"actor_role"`
 			EntityCode         string `json:"entity_code"`
+			RequestedIP        string `json:"requested_ip"`
 			BusinessRecordType string `json:"business_record_type"`
 			BusinessRecordID   string `json:"business_record_id"`
 			SourceFileName     string `json:"source_file_name"`
@@ -105,7 +108,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 				&it.ExecutionID, &it.CorrelationID, &it.TraceID,
 				&it.EventCode, &it.ModuleCode, &it.SubModule,
 				&it.FormID, &it.HandlerName, &it.APIPath,
-				&it.ActorUserID, &it.EntityCode,
+				&it.ActorUserID, &it.ActorRole, &it.EntityCode, &it.RequestedIP,
 				&it.BusinessRecordType, &it.BusinessRecordID,
 				&it.SourceFileName, &it.SourceFileID, &it.BatchID,
 				&it.PolicyID, &it.PolicyCode,

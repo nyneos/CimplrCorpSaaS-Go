@@ -18,6 +18,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/lib/pq"
 
 	"CimplrCorpSaas/internal/logger"
@@ -60,9 +61,12 @@ func pqUserFriendlyMessage(err error) string {
 		switch pqErr.Constraint {
 		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
 			return constants.ErrBankStatementFileAlreadyUploaded
-		case "uniq_stmt":
+		case "uniq_stmt", "uniq_stmt_active":
 			return "A statement for this period is already uploaded for this account."
 		default:
+			if strings.HasPrefix(string(pqErr.Constraint), "uniq_stmt") {
+				return "A statement for this period is already uploaded for this account."
+			}
 			return "A record with the same unique value already exists."
 		}
 	case "23503":
@@ -922,18 +926,36 @@ func userFriendlyUploadError(err error) string {
 	if strings.Contains(msg, "could not parse date") {
 		return "One or more transaction dates in the statement could not be understood. Please verify the dates in the statement and try again."
 	}
-	// Also catch pq uniq_stmt wrapped inside fmt.Errorf chains
+	// Catch unique violations wrapped inside fmt.Errorf chains (lib/pq and pgx).
 	var pqErr *pq.Error
 	if errors.As(err, &pqErr) && pqErr.Code == "23505" {
 		switch pqErr.Constraint {
-		case "uniq_stmt":
-			return "A statement for this account and period is already uploaded. Use force_override=true to re-upload."
+		case "uniq_stmt", "uniq_stmt_active":
+			return "A statement for this account and period is already uploaded."
 		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
 			return constants.ErrBankStatementFileAlreadyUploaded
+		default:
+			if strings.HasPrefix(string(pqErr.Constraint), "uniq_stmt") {
+				return "A statement for this account and period is already uploaded."
+			}
+		}
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		switch pgErr.ConstraintName {
+		case "uniq_stmt", "uniq_stmt_active":
+			return "A statement for this account and period is already uploaded."
+		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
+			return constants.ErrBankStatementFileAlreadyUploaded
+		default:
+			if strings.HasPrefix(pgErr.ConstraintName, "uniq_stmt") {
+				return "A statement for this account and period is already uploaded."
+			}
 		}
 	}
 	// 22003: numeric_value_out_of_range (e.g. "numeric field overflow")
-	if errors.As(err, &pqErr) && pqErr.Code == "22003" {
+	if (errors.As(err, &pqErr) && pqErr.Code == "22003") ||
+		(errors.As(err, &pgErr) && pgErr.Code == "22003") {
 		return "Some transaction amounts/balances in this statement are too large to be saved. Please try uploading the Excel version, or contact support with this file."
 	}
 	logger.LogInfo("Debug raw mesage: %s", msg)

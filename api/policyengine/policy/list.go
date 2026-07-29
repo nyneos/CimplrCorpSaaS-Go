@@ -29,6 +29,7 @@ type ListItem struct {
 	Source           string   `json:"source"`
 	TriggerEvents    []string `json:"trigger_events"`
 	Modules          []string `json:"modules"`
+	SubModules       []string `json:"sub_modules"`
 }
 
 const listFrom = `
@@ -43,6 +44,11 @@ const listFrom = `
 		FROM policyengine_svc.policy_module pmod
 		WHERE pmod.policy_id = p.policy_id AND pmod.is_deleted = false
 	) m ON true
+	LEFT JOIN LATERAL (
+		SELECT array_agg(psm.sub_module_code ORDER BY psm.sub_module_code) AS sub_modules
+		FROM policyengine_svc.policy_sub_module psm
+		WHERE psm.policy_id = p.policy_id AND psm.is_deleted = false
+	) sm ON true
 	WHERE p.is_deleted = false`
 
 func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
@@ -77,7 +83,8 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 			       p.action_on_breach, p.rule_type, p.status, p.processing_status, p.version,
 			       p.effective_start::text, p.source,
 			       COALESCE(t.trigger_events, ARRAY[]::varchar[]) AS trigger_events,
-			       COALESCE(m.modules, ARRAY[]::varchar[]) AS modules` + listFrom
+			       COALESCE(m.modules, ARRAY[]::varchar[]) AS modules,
+			       COALESCE(sm.sub_modules, ARRAY[]::varchar[]) AS sub_modules` + listFrom
 		listArgs := []interface{}{}
 		argN := 1
 		if search != "" {
@@ -101,7 +108,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 			var it ListItem
 			if err := rows.Scan(&it.PolicyID, &it.Code, &it.Name, &it.Category, &it.ValidationLevel, &it.Criticality,
 				&it.ActionOnBreach, &it.RuleType, &it.Status, &it.ProcessingStatus, &it.Version,
-				&it.EffectiveStart, &it.Source, &it.TriggerEvents, &it.Modules); err != nil {
+				&it.EffectiveStart, &it.Source, &it.TriggerEvents, &it.Modules, &it.SubModules); err != nil {
 				api.LogErrorForResponse(w, "policy list scan: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to list policies", "POLICY_LIST_FAILED")
 				return

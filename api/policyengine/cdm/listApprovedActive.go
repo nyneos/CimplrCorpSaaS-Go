@@ -40,7 +40,13 @@ func HandleListApprovedActive(pool *pgxpool.Pool) http.HandlerFunc {
 			       COALESCE(c.source_system, ''), COALESCE(c.canonical_ref, ''), COALESCE(c.user_alias, ''), c.nullable,
 			       COALESCE(sm.module_code, ''), COALESCE(f.sub_module_code, '')
 			FROM policyengine_svc.cdm_variable c
-			LEFT JOIN domain_catalog.field f ON f.cdm_path = c.name AND f.is_deleted = false
+			LEFT JOIN LATERAL (
+				SELECT f0.sub_module_code
+				FROM domain_catalog.field f0
+				WHERE f0.cdm_path = c.name AND f0.is_deleted = false
+				ORDER BY f0.sub_module_code
+				LIMIT 1
+			) f ON true
 			LEFT JOIN domain_catalog.sub_module sm ON sm.sub_module_code = f.sub_module_code AND sm.is_deleted = false
 			WHERE c.is_deleted = false AND c.status = 'Active' AND c.processing_status = 'APPROVED'
 			` + common.CdmListOrderByAliased)

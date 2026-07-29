@@ -81,6 +81,63 @@ func syncCDMVariableFromCatalog(ctx context.Context, tx pgx.Tx, subModuleCode, f
 		who = "domain_catalog_api"
 	}
 
+	// name (path) is not unique — multiple labels may share one path. Prefer updating
+	// a catalog/sub-module-owned row for this path; otherwise insert a new CDM row
+	// so a hand-authored alternate label for the same path is left alone.
+	var existingID string
+	err = tx.QueryRow(ctx, `
+		SELECT variable_id::text
+		FROM policyengine_svc.cdm_variable
+		WHERE name = $1 AND is_deleted = false
+		  AND (
+			source_system = $2
+			OR source_system IN ('domain_catalog_api', 'domain_catalog_seed', '')
+		  )
+		ORDER BY
+			CASE WHEN source_system = $2 THEN 0 ELSE 1 END,
+			created_at ASC NULLS LAST
+		LIMIT 1`,
+		cdmPath, subModuleCode,
+	).Scan(&existingID)
+	if err != nil && err != pgx.ErrNoRows {
+		return err
+	}
+	if existingID != "" {
+		_, err = tx.Exec(ctx, `
+			UPDATE policyengine_svc.cdm_variable SET
+				data_type = $2,
+				unit = COALESCE($3,''),
+				label = $4,
+				description = CASE
+					WHEN btrim(COALESCE(description, '')) = '' THEN $5
+					ELSE description
+				END,
+				domain = $6,
+				source_system = CASE
+					WHEN source_system IN ('domain_catalog_api', '') THEN $7
+					ELSE source_system
+				END,
+				canonical_ref = CASE
+					WHEN btrim(COALESCE(canonical_ref, '')) = '' THEN $8
+					ELSE canonical_ref
+				END,
+				user_alias = CASE
+					WHEN user_alias IS NULL OR btrim(user_alias) = '' THEN NULLIF($9,'')
+					ELSE user_alias
+				END,
+				nullable = $10,
+				status = 'Active',
+				is_deleted = false,
+				processing_status = COALESCE(processing_status, 'APPROVED'),
+				last_modified_by = $11,
+				last_modified_at = now()
+			WHERE variable_id = $1::uuid`,
+			existingID, dataType, unit, label, desc, cdmDomain, subModuleCode,
+			canonicalRef, userAlias, nullable, who,
+		)
+		return err
+	}
+
 	_, err = tx.Exec(ctx, `
 		INSERT INTO policyengine_svc.cdm_variable (
 			name, data_type, unit, label, description, domain, source_system,
@@ -89,35 +146,7 @@ func syncCDMVariableFromCatalog(ctx context.Context, tx pgx.Tx, subModuleCode, f
 		)
 		VALUES ($1, $2, COALESCE($3,''), $4, $5, $6, $7,
 			$8, NULLIF($9,''), $10, 'Active', false, 'APPROVED',
-			$11, $11)
-		ON CONFLICT (name) DO UPDATE SET
-			data_type = EXCLUDED.data_type,
-			unit = EXCLUDED.unit,
-			label = EXCLUDED.label,
-			description = CASE
-				WHEN btrim(COALESCE(policyengine_svc.cdm_variable.description, '')) = '' THEN EXCLUDED.description
-				ELSE policyengine_svc.cdm_variable.description
-			END,
-			domain = EXCLUDED.domain,
-			source_system = CASE
-				WHEN policyengine_svc.cdm_variable.source_system IN ('domain_catalog_api', '') THEN EXCLUDED.source_system
-				ELSE policyengine_svc.cdm_variable.source_system
-			END,
-			canonical_ref = CASE
-				WHEN btrim(COALESCE(policyengine_svc.cdm_variable.canonical_ref, '')) = '' THEN EXCLUDED.canonical_ref
-				ELSE policyengine_svc.cdm_variable.canonical_ref
-			END,
-			user_alias = CASE
-				WHEN policyengine_svc.cdm_variable.user_alias IS NULL
-				  OR btrim(policyengine_svc.cdm_variable.user_alias) = '' THEN EXCLUDED.user_alias
-				ELSE policyengine_svc.cdm_variable.user_alias
-			END,
-			nullable = EXCLUDED.nullable,
-			status = 'Active',
-			is_deleted = false,
-			processing_status = COALESCE(policyengine_svc.cdm_variable.processing_status, 'APPROVED'),
-			last_modified_by = EXCLUDED.last_modified_by,
-			last_modified_at = now()`,
+			$11, $11)`,
 		cdmPath, dataType, unit, label, desc, cdmDomain, subModuleCode,
 		canonicalRef, userAlias, nullable, who,
 	)
@@ -571,9 +600,6 @@ func HandleFieldUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			api.LogErrorForResponse(w, "domain-catalog field upsert: %v", err)
 			msg := "failed to upsert field — check sub_module_code exists"
-			if trimmedPath != "" {
-				msg += " and cdm_path isn't already used by another field"
-			}
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, msg, "")
 			return
 		}
@@ -787,7 +813,7 @@ func HandleBulkFieldsUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 			).Scan(&fieldID)
 			if err != nil {
 				api.LogErrorForResponse(w, "domain-catalog bulk field upsert (field_code=%s): %v", fieldCode, err)
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upsert field_code="+fieldCode+" — check sub_module_code exists and cdm_path isn't already used", "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upsert field_code="+fieldCode+" — check sub_module_code exists", "")
 				return
 			}
 			fieldsUpserted++

@@ -2028,7 +2028,14 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 				}
 			}
 			logger.LogError("[BANK-UPLOAD-DEBUG] Multi fallback also failed; returning error: %s", surfaceMsg)
-			apictx.RespondEnvelopeError(w, http.StatusInternalServerError, surfaceMsg, "")
+			status := http.StatusInternalServerError
+			if errors.Is(err, ErrStatementPeriodExists) || errors.Is(err, ErrFileAlreadyUploaded) ||
+				errors.Is(err, ErrAllTransactionsDuplicate) ||
+				strings.Contains(strings.ToLower(surfaceMsg), "already uploaded") ||
+				strings.Contains(strings.ToLower(surfaceMsg), "already exist") {
+				status = http.StatusConflict
+			}
+			apictx.RespondEnvelopeError(w, status, surfaceMsg, "")
 			return
 		}
 

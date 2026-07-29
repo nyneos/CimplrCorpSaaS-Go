@@ -35,7 +35,13 @@ func HandleResolve(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT name, label, COALESCE(canonical_ref,''), COALESCE(user_alias,'')
 			FROM policyengine_svc.cdm_variable
 			WHERE is_deleted = false AND status = 'Active'
-			  AND (name = $1 OR user_alias = $1)
+			  AND (name = $1 OR user_alias = $1 OR label = $1)
+			ORDER BY
+				CASE
+					WHEN label = $1 THEN 0
+					WHEN user_alias = $1 THEN 1
+					ELSE 2
+				END
 			LIMIT 1`, key).Scan(&name, &label, &canonicalRef, &userAlias)
 		if err != nil {
 			err = pool.QueryRow(r.Context(), `

@@ -45,8 +45,18 @@ func HandleCheck(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		req.EventCode = strings.TrimSpace(req.EventCode)
+		req.ModuleCode = strings.TrimSpace(req.ModuleCode)
+		req.SubModule = strings.TrimSpace(req.SubModule)
 		if req.EventCode == "" {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "event_code is required", "VALIDATION_ERROR")
+			return
+		}
+		// Without sub_module, loadActivePolicies skips the sub-module filter and evaluates
+		// every Active policy for the module+trigger (e.g. FD_CONFIRMATION on booking).
+		if req.ModuleCode != "" && req.SubModule == "" && len(req.Policies) == 0 {
+			api.RespondEnvelopeError(w, http.StatusBadRequest,
+				"sub_module is required when module_code is set (e.g. FD_BOOKING, FD_CONFIRMATION)",
+				"VALIDATION_ERROR")
 			return
 		}
 		if req.Variables == nil {

@@ -79,6 +79,11 @@ func EnforceDetailed(ctx context.Context, r *http.Request, pool *pgxpool.Pool, i
 	if !PolicyChecksEnabled() {
 		return EnforceOutcome{OK: true}
 	}
+	if strings.TrimSpace(in.ModuleCode) != "" && strings.TrimSpace(in.SubModule) == "" {
+		api.LogError("policy Enforce missing SubModule handler=%s module=%s event=%s — refusing cross-sub-module load",
+			in.HandlerName, in.ModuleCode, in.EventCode)
+		return EnforceOutcome{OK: false, Message: "policy check failed — sub_module is required"}
+	}
 	vars := in.Variables
 	if len(vars) == 0 && len(in.Fields) > 0 && strings.TrimSpace(in.SubModule) != "" {
 		mapped, err := BuildVariablesFromCatalog(ctx, pool, in.SubModule, in.Fields, nil)
@@ -104,12 +109,22 @@ func EnforceDetailed(ctx context.Context, r *http.Request, pool *pgxpool.Pool, i
 	}
 	traceID := observability.TraceIDFromContext(ctx)
 
+	actor := strings.TrimSpace(in.ActorUserID)
+	if actor == "" && r != nil {
+		actor = common.RequestActor(r, "")
+	}
+	requestedIP := ""
+	if r != nil {
+		requestedIP = common.RequestIP(r)
+	}
+
 	result, err := RunCheck(ctx, pool, CheckRequest{
 		EventCode:          in.EventCode,
 		ModuleCode:         in.ModuleCode,
 		SubModule:          in.SubModule,
 		EntityCode:         in.EntityCode,
-		ActorUserID:        in.ActorUserID,
+		ActorUserID:        actor,
+		RequestedIP:        requestedIP,
 		HandlerName:        in.HandlerName,
 		APIPath:            in.APIPath,
 		CorrelationID:      corr,

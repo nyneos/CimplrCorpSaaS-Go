@@ -134,6 +134,17 @@ func insertEditAudit(r *http.Request, tx pgx.Tx, policyID, actor, ip string, old
 	a.set("old_is_deleted", false)
 	a.set("new_is_deleted", false)
 
+	// 1:many children — header columns alone miss slab/list/trigger edits.
+	pair("trigger_events", joinSortedCSV(old.TriggerEvents), joinSortedCSV(req.TriggerEvents))
+	pair("modules", joinSortedCSV(old.Modules), joinSortedCSV(req.Modules))
+	pair("sub_modules", joinSortedCSV(old.SubModules), joinSortedCSV(req.SubModules))
+	pair("entities_include", joinSortedCSV(old.EntitiesInclude), joinSortedCSV(req.EntitiesInclude))
+	pair("entities_exclude", joinSortedCSV(old.EntitiesExclude), joinSortedCSV(req.EntitiesExclude))
+	pair("list_values", joinSortedCSV(old.ListValues), joinSortedCSV(rf.ListValues))
+	pair("slab_rows", serializeSlabRows(old.SlabRows), serializeSlabRows(rf.SlabRows))
+	pair("comp_buckets", serializeCompBuckets(old.CompBuckets), serializeCompBuckets(rf.CompBuckets))
+	pair("notification_template_ids", joinSortedCSV(old.NotificationTemplateIDs), joinSortedCSV(req.NotificationTemplateIDs))
+
 	return a.exec(r, tx, "policyengine_svc.policy_master_audit")
 }
 

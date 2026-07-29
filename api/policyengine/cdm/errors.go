@@ -26,15 +26,17 @@ func cdmConflictDetail(err error) string {
 	if errors.As(err, &pgErr) && pgErr.ConstraintName != "" {
 		switch pgErr.ConstraintName {
 		case "cdm_variable_name_uq":
+			// Legacy — constraint dropped 2026-07-29; keep for old DBs mid-migrate.
 			return "CDM name already exists (including soft-deleted rows — pick a different evaluation key or restore the existing variable)"
 		case "idx_cdm_variable_user_alias_uq":
+			// Legacy — unique index dropped 2026-07-29 (same multi-label rule as name).
 			return "user_alias already in use by another active CDM variable"
 		case "idx_cdm_variable_alias_name_uq":
 			return "alias_name already in use by another CDM variable"
 		}
 		return "duplicate value: " + pgErr.ConstraintName
 	}
-	return "duplicate name, user_alias, or alias"
+	return "duplicate user_alias or alias"
 }
 
 func respondCDMCreateError(w http.ResponseWriter, step string, err error) {

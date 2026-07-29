@@ -22,6 +22,8 @@ type CheckRequest struct {
 	FormID             string
 	EntityCode         string
 	ActorUserID        string
+	ActorRole          string
+	RequestedIP        string
 	HandlerName        string
 	APIPath            string
 	CorrelationID      string
@@ -202,6 +204,9 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 
 	policies := req.Policies
 	if len(policies) == 0 {
+		if strings.TrimSpace(req.ModuleCode) != "" && strings.TrimSpace(req.SubModule) == "" {
+			return CheckResult{}, fmt.Errorf("sub_module is required when module_code is set (refusing to load all sub-modules for %s)", req.ModuleCode)
+		}
 		loaded, err := loadActivePolicies(ctx, pool, req.EventCode, req.ModuleCode, req.SubModule, req.EntityCode, req.Variables)
 		if err != nil {
 			return CheckResult{}, err
@@ -224,14 +229,14 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 		_, _ = pool.Exec(ctx, `
 			INSERT INTO policyengine_svc.execution_log (
 				correlation_id, trace_id, event_code, module_code, sub_module, form_id,
-				handler_name, api_path, actor_user_id, entity_code,
+				handler_name, api_path, actor_user_id, actor_role, entity_code, requested_ip,
 				business_record_type, business_record_id, source_file_name, source_file_id, batch_id,
 				policy_code, result, action_fired, detail_message, fail_code, fail_reason, duration_ms
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-				$16,'ERROR','HardBlock',$17,'POLICY_CONFLICT_IMPOSSIBLE',$17,$18)`,
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+				$18,'ERROR','HardBlock',$19,'POLICY_CONFLICT_IMPOSSIBLE',$19,$20)`,
 			common.NullIfEmpty(req.CorrelationID), common.NullIfEmpty(req.TraceID), req.EventCode, common.NullIfEmpty(req.ModuleCode),
 			common.NullIfEmpty(req.SubModule), common.NullIfEmpty(req.FormID), common.NullIfEmpty(req.HandlerName), common.NullIfEmpty(req.APIPath),
-			common.NullIfEmpty(req.ActorUserID), common.NullIfEmpty(req.EntityCode),
+			common.NullIfEmpty(req.ActorUserID), common.NullIfEmpty(req.ActorRole), common.NullIfEmpty(req.EntityCode), common.NullIfEmpty(req.RequestedIP),
 			common.NullIfEmpty(req.BusinessRecordType), common.NullIfEmpty(req.BusinessRecordID),
 			common.NullIfEmpty(req.SourceFileName), common.NullIfEmpty(req.SourceFileID), common.NullIfEmpty(req.BatchID),
 			"POLICY_CONFLICT_IMPOSSIBLE", msg, duration,
@@ -260,13 +265,13 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 		_, _ = pool.Exec(ctx, `
 			INSERT INTO policyengine_svc.execution_log (
 				correlation_id, trace_id, event_code, module_code, sub_module, form_id,
-				handler_name, api_path, actor_user_id, entity_code,
+				handler_name, api_path, actor_user_id, actor_role, entity_code, requested_ip,
 				business_record_type, business_record_id, source_file_name, source_file_id, batch_id,
 				result, fail_code, fail_reason, detail_message, duration_ms
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'ERROR','POLICY_SERVICE_ERROR',$16,$16,$17)`,
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'ERROR','POLICY_SERVICE_ERROR',$18,$18,$19)`,
 			common.NullIfEmpty(req.CorrelationID), common.NullIfEmpty(req.TraceID), req.EventCode, common.NullIfEmpty(req.ModuleCode),
 			common.NullIfEmpty(req.SubModule), common.NullIfEmpty(req.FormID), common.NullIfEmpty(req.HandlerName), common.NullIfEmpty(req.APIPath),
-			common.NullIfEmpty(req.ActorUserID), common.NullIfEmpty(req.EntityCode),
+			common.NullIfEmpty(req.ActorUserID), common.NullIfEmpty(req.ActorRole), common.NullIfEmpty(req.EntityCode), common.NullIfEmpty(req.RequestedIP),
 			common.NullIfEmpty(req.BusinessRecordType), common.NullIfEmpty(req.BusinessRecordID),
 			common.NullIfEmpty(req.SourceFileName), common.NullIfEmpty(req.SourceFileID), common.NullIfEmpty(req.BatchID),
 			err.Error(), duration,
@@ -283,14 +288,14 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 		_, _ = pool.Exec(ctx, `
 			INSERT INTO policyengine_svc.execution_log (
 				correlation_id, trace_id, event_code, module_code, sub_module, form_id,
-				handler_name, api_path, actor_user_id, entity_code,
+				handler_name, api_path, actor_user_id, actor_role, entity_code, requested_ip,
 				business_record_type, business_record_id, source_file_name, source_file_id, batch_id,
 				policy_id, policy_code, result, action_fired, detail_message, fail_code, fail_reason, duration_ms
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-				NULLIF($16,'')::uuid, $17, $18, $19, $20, $21, $22, $23)`,
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+				NULLIF($18,'')::uuid, $19, $20, $21, $22, $23, $24, $25)`,
 			common.NullIfEmpty(req.CorrelationID), common.NullIfEmpty(req.TraceID), req.EventCode, common.NullIfEmpty(req.ModuleCode),
 			common.NullIfEmpty(req.SubModule), common.NullIfEmpty(req.FormID), common.NullIfEmpty(req.HandlerName), common.NullIfEmpty(req.APIPath),
-			common.NullIfEmpty(req.ActorUserID), common.NullIfEmpty(req.EntityCode),
+			common.NullIfEmpty(req.ActorUserID), common.NullIfEmpty(req.ActorRole), common.NullIfEmpty(req.EntityCode), common.NullIfEmpty(req.RequestedIP),
 			common.NullIfEmpty(req.BusinessRecordType), common.NullIfEmpty(req.BusinessRecordID),
 			common.NullIfEmpty(req.SourceFileName), common.NullIfEmpty(req.SourceFileID), common.NullIfEmpty(req.BatchID),
 			pr.PolicyID, pr.Code, pr.Result, common.NullIfEmpty(pr.Action), common.NullIfEmpty(pr.Message),
