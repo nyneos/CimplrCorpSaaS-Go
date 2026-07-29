@@ -9,9 +9,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -117,8 +115,8 @@ func newResource() (*resource.Resource, error) {
 }
 
 func newTracerProvider(ctx context.Context, res *resource.Resource, endpoint string, headers map[string]string) (*sdktrace.TracerProvider, error) {
-	// Initialize OTLP HTTP trace exporter
-	traceExporter, err := otlptracehttp.New(ctx,
+	// Initialize OTLP gRPC trace exporter
+	traceExporter, err := otlptracegrpc.New(ctx,
 		otlptracegrpc.WithEndpoint(endpoint),
 		otlptracegrpc.WithTLSCredentials(credentials.NewClientTLSFromCert(nil, "")),
 		otlptracegrpc.WithHeaders(headers),
@@ -148,7 +146,7 @@ func newTracerProvider(ctx context.Context, res *resource.Resource, endpoint str
 }
 
 func newMeterProvider(ctx context.Context, res *resource.Resource, endpoint string, headers map[string]string) (*sdkmetric.MeterProvider, error) {
-	metricExporter, err := otlpmetrichttp.New(ctx,
+	metricExporter, err := otlpmetricgrpc.New(ctx,
 		otlpmetricgrpc.WithEndpoint(endpoint),
 		otlpmetricgrpc.WithTLSCredentials(credentials.NewClientTLSFromCert(nil, "")),
 		otlpmetricgrpc.WithHeaders(headers),

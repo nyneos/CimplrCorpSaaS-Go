@@ -42,4 +42,7 @@ api/investment/fdMaster/renumber_test.go
 *_test.go
 **/*_test.go
 test.txt
-*Test*
+# Root-only scratch/debug programs. Do NOT use a bare *Test* glob here:
+# core.ignorecase=true on macOS makes it case-insensitive, so it silently
+# swallowed real sources like api/policyengine/policy/testInputs.go.
+/test_*.go
