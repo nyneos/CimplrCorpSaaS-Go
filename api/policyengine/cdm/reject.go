@@ -44,15 +44,15 @@ func HandleReject(pool *pgxpool.Pool) http.HandlerFunc {
 			if id == "" {
 				continue
 			}
-			var auditID, actionType string
+			var auditID string
 			err := tx.QueryRow(r.Context(), `
-				SELECT audit_id::text, action_type
+				SELECT audit_id::text
 				FROM policyengine_svc.cdm_variable_audit
 				WHERE variable_id = $1::uuid AND processing_status = ANY($2::text[])
 				ORDER BY requested_at DESC
 				LIMIT 1
 				FOR UPDATE`, id, common.PendingProcessingStatuses,
-			).Scan(&auditID, &actionType)
+			).Scan(&auditID)
 			if err != nil {
 				errs = append(errs, id+": no pending request")
 				continue
@@ -67,29 +67,15 @@ func HandleReject(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// CREATE reject → soft-delete so the draft leaves the live catalog.
-			// EDIT/DELETE reject → status only (master columns stay as written).
-			if actionType == "CREATE" {
-				if _, err := tx.Exec(r.Context(), `
-					UPDATE policyengine_svc.cdm_variable
-					SET processing_status = 'REJECTED', is_deleted = true,
-					    last_modified_by = $1, last_modified_at = now()
-					WHERE variable_id = $2::uuid`,
-					actor, id,
-				); err != nil {
-					errs = append(errs, id+": "+err.Error())
-					continue
-				}
-			} else {
-				if _, err := tx.Exec(r.Context(), `
-					UPDATE policyengine_svc.cdm_variable
-					SET processing_status = 'REJECTED', last_modified_by = $1, last_modified_at = now()
-					WHERE variable_id = $2::uuid`,
-					actor, id,
-				); err != nil {
-					errs = append(errs, id+": "+err.Error())
-					continue
-				}
+			
+			if _, err := tx.Exec(r.Context(), `
+				UPDATE policyengine_svc.cdm_variable
+				SET processing_status = 'REJECTED', last_modified_by = $1, last_modified_at = now()
+				WHERE variable_id = $2::uuid`,
+				actor, id,
+			); err != nil {
+				errs = append(errs, id+": "+err.Error())
+				continue
 			}
 			rejected = append(rejected, id)
 		}
