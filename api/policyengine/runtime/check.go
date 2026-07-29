@@ -186,8 +186,8 @@ func (r CheckResult) WriteSummaryHeader(w http.ResponseWriter) {
 
 // LoadActivePolicySnapshots returns Active+APPROVED policy snapshots for the
 // given trigger/module/sub-module/entity (same set RunCheck loads).
-func LoadActivePolicySnapshots(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, subModule, entityCode string) ([]map[string]interface{}, error) {
-	return loadActivePolicies(ctx, pool, eventCode, moduleCode, subModule, entityCode)
+func LoadActivePolicySnapshots(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, subModule, entityCode string, vars map[string]string) ([]map[string]interface{}, error) {
+	return loadActivePolicies(ctx, pool, eventCode, moduleCode, subModule, entityCode, vars)
 }
 
 // RunCheck loads applicable policies, evaluates via CIMPLR-Policy-Service, writes execution_log.
@@ -202,7 +202,7 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 
 	policies := req.Policies
 	if len(policies) == 0 {
-		loaded, err := loadActivePolicies(ctx, pool, req.EventCode, req.ModuleCode, req.SubModule, req.EntityCode)
+		loaded, err := loadActivePolicies(ctx, pool, req.EventCode, req.ModuleCode, req.SubModule, req.EntityCode, req.Variables)
 		if err != nil {
 			return CheckResult{}, err
 		}
@@ -308,7 +308,7 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 	}, nil
 }
 
-func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, subModule, entityCode string) ([]map[string]interface{}, error) {
+func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, subModule, entityCode string, vars map[string]string) ([]map[string]interface{}, error) {
 	codes := ExpandTriggerAliases(eventCode)
 	q := `
 		SELECT p.policy_id::text, p.code, p.name, p.rule_type, p.action_on_breach, p.null_handling,
@@ -324,7 +324,9 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 		       COALESCE(p.slab_variable, ''),
 		       COALESCE(p.comp_base, ''), COALESCE(p.comp_total_check_variable, ''),
 		       p.comp_total_check_min, p.comp_total_check_max,
-		       COALESCE(p.applicability, 'Global')
+		       COALESCE(p.applicability, 'Global'),
+		       COALESCE(p.instrument_filter, ''), COALESCE(p.currency_filter, ''),
+		       COALESCE(p.tenor_filter, ''), COALESCE(p.rating_filter, '')
 		FROM policyengine_svc.policy_master p
 		INNER JOIN policyengine_svc.policy_trigger t
 			ON t.policy_id = p.policy_id AND t.is_deleted = false AND t.event_code = ANY($1::text[])
@@ -374,6 +376,7 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 			listField, listMode, listSource, listDynRef            string
 			notifGroup, formulaExpr, formulaRet, formulaOp         string
 			slabVar, compBase, compTotalVar, applicability         string
+			fltInstrument, fltCurrency, fltTenor, fltRating        string
 			thrVal, formulaVal                                     float64
 			compTotalMin, compTotalMax                             *float64
 			listCase                                               bool
@@ -381,8 +384,12 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 		if err := rows.Scan(&id, &code, &name, &ruleType, &action, &nullH, &nullDef, &addl,
 			&thrVar, &thrOp, &thrVal, &thrValueDate, &thrMode, &thrBase, &listField, &listMode, &listSource, &listDynRef, &listCase,
 			&notifGroup, &formulaExpr, &formulaRet, &formulaOp, &formulaVal, &slabVar,
-			&compBase, &compTotalVar, &compTotalMin, &compTotalMax, &applicability); err != nil {
+			&compBase, &compTotalVar, &compTotalMin, &compTotalMax, &applicability,
+			&fltInstrument, &fltCurrency, &fltTenor, &fltRating); err != nil {
 			return nil, err
+		}
+		if !policyMatchesDataFilters(fltInstrument, fltCurrency, fltTenor, fltRating, vars) {
+			continue
 		}
 		snap := map[string]interface{}{
 			"policy_id":             id,

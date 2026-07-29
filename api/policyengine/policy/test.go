@@ -73,7 +73,7 @@ func HandleTest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if moduleCode != "" && eventCode != "TEST_HARNESS" {
-			loaded, loadErr := runtime.LoadActivePolicySnapshots(r.Context(), pool, eventCode, moduleCode, subModule, entityCode)
+			loaded, loadErr := runtime.LoadActivePolicySnapshots(r.Context(), pool, eventCode, moduleCode, subModule, entityCode, req.Variables)
 			if loadErr != nil {
 				api.LogErrorForResponse(w, "policy test load related: %v", loadErr)
 			} else {
