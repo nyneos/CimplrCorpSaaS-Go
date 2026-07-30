@@ -66,11 +66,16 @@ func dispatchNotifyBreaches(
 		if corr == "" {
 			corr = "POL-" + pr.PolicyID
 		}
+		msg := strings.TrimSpace(pr.UserMessage)
+		if msg == "" {
+			msg = strings.TrimSpace(pr.Message)
+		}
 		extras := map[string]interface{}{
 			"Action":       pr.Action,
 			"PolicyCode":   pr.Code,
 			"PolicyID":     pr.PolicyID,
-			"Message":      pr.Message,
+			// Prefer author breach_message (substituted) over the raw evaluator string.
+			"Message":      msg,
 			"EventCode":    req.EventCode,
 			"ModuleCode":   req.ModuleCode,
 			"SubModule":    req.SubModule,

@@ -19,6 +19,9 @@ func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, chain func(http.Hand
 	mux.Handle("/policy-engine/policies/test", chain(http.HandlerFunc(HandleTest(pool))))
 	mux.Handle("/policy-engine/policies/test-inputs", chain(http.HandlerFunc(HandleTestInputs(pool))))
 	mux.Handle("/policy-engine/policies/audit-log", chain(http.HandlerFunc(HandleAuditLog(pool))))
+	mux.Handle("/policy-engine/policies/export", chain(http.HandlerFunc(HandleExport(pool))))
+	mux.Handle("/policy-engine/policies/import", chain(http.HandlerFunc(HandleImport(pool))))
+	mux.Handle("/policy-engine/dynamic-list-refs/list", chain(http.HandlerFunc(HandleDynamicListRegistryList(pool))))
 	mux.Handle("/policy-engine/pel/validate", chain(http.HandlerFunc(HandlePelValidate(pool))))
 	mux.Handle("/policy-engine/service/health", chain(http.HandlerFunc(HandleServiceHealth(pool))))
 }

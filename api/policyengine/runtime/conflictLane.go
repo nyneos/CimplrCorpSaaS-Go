@@ -33,7 +33,9 @@ func LoadHardBlockThresholdConstraints(ctx context.Context, pool *pgxpool.Pool, 
 		       COALESCE(p.thr_value_mode, ''), COALESCE(p.thr_value_date::text, '')
 		FROM policyengine_svc.policy_master p
 		WHERE p.is_deleted = false
-		  AND p.status = 'Active'
+		  -- Match loadActivePolicies: include Scheduled so conflict analysis sees
+		  -- the same set enforcement would (date window below is the real gate).
+		  AND p.status IN ('Active', 'Scheduled')
 		  AND p.processing_status = 'APPROVED'
 		  AND p.rule_type = 'threshold'
 		  AND p.action_on_breach = 'HardBlock'

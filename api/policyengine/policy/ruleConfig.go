@@ -31,9 +31,10 @@ type slabRowConfig struct {
 }
 
 type slabsConfig struct {
-	Variable string          `json:"variable"`
-	Rows     []slabRowConfig `json:"rows"`
-	Unit     string          `json:"unit"`
+	Variable    string          `json:"variable"`
+	Rows        []slabRowConfig `json:"rows"`
+	Unit        string          `json:"unit"`
+	PercentBase string          `json:"percentBase"`
 }
 
 type compositionBucketConfig struct {
@@ -83,9 +84,10 @@ type ruleFields struct {
 	ThrPercentBase string
 	ThrUnit        string
 
-	SlabVariable string
-	SlabUnit     string
-	SlabRows     []slabRowConfig
+	SlabVariable    string
+	SlabUnit        string
+	SlabPercentBase string
+	SlabRows        []slabRowConfig
 
 	CompBase               string
 	CompTotalCheckVariable string
@@ -137,6 +139,7 @@ func parseRuleConfig(ruleType string, raw json.RawMessage) (ruleFields, error) {
 		}
 		out.SlabVariable = c.Variable
 		out.SlabUnit = c.Unit
+		out.SlabPercentBase = c.PercentBase
 		out.SlabRows = c.Rows
 	case "composition":
 		var c compositionConfig
@@ -213,6 +216,7 @@ func validateRuleFields(ruleType string, rf ruleFields) error {
 		if len(rf.SlabRows) == 0 {
 			return fmt.Errorf("slabs: at least one slab row is required")
 		}
+		hasPercentOf := false
 		for i, row := range rf.SlabRows {
 			if strings.TrimSpace(row.Action) == "" {
 				return fmt.Errorf("slabs: row %d action is required", i+1)
@@ -224,8 +228,11 @@ func validateRuleFields(ruleType string, rf ruleFields) error {
 				return fmt.Errorf("slabs: row %d to (%v) is less than from (%v)", i+1, *row.To, row.From)
 			}
 			if strings.EqualFold(strings.TrimSpace(row.Mode), "PercentOf") {
-				return fmt.Errorf("slabs: row %d PercentOf mode is not supported — use Absolute bounds", i+1)
+				hasPercentOf = true
 			}
+		}
+		if hasPercentOf && strings.TrimSpace(rf.SlabPercentBase) == "" {
+			return fmt.Errorf("slabs: percentBase is required when any row mode is PercentOf")
 		}
 	case "composition":
 		if len(rf.CompBuckets) < 2 {

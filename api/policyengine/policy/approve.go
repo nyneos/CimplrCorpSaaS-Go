@@ -58,11 +58,14 @@ func HandleApprove(pool *pgxpool.Pool) http.HandlerFunc {
 				errs = append(errs, id+": no pending request")
 				continue
 			}
+			// Settle every outstanding request for this policy, not just the newest.
+			// A policy edited before its CREATE was approved has two pending audit
+			// rows; closing only the newest leaves the CREATE pending forever.
 			if _, err := tx.Exec(r.Context(), `
 				UPDATE policyengine_svc.policy_master_audit
 				SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_ip = $2, checker_comment = $3
-				WHERE audit_id = $4::uuid`,
-				actor, common.NullIfEmpty(ip), common.NullIfEmpty(req.CheckerComment), pa.AuditID,
+				WHERE policy_id = $4::uuid AND processing_status = ANY($5::text[])`,
+				actor, common.NullIfEmpty(ip), common.NullIfEmpty(req.CheckerComment), id, common.PendingProcessingStatuses,
 			); err != nil {
 				errs = append(errs, id+": "+err.Error())
 				continue
@@ -90,11 +93,19 @@ func HandleApprove(pool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 			default: // EDIT
+				// If the CREATE was never approved, approving the edit settles it too —
+				// the checker has signed off the current definition. Leaving status at
+				// PendingApproval would strand the row: never enforced (not Active or
+				// Scheduled) and never queued again (nothing left pending).
 				if _, err := tx.Exec(r.Context(), `
 					UPDATE policyengine_svc.policy_master
 					SET processing_status = 'APPROVED', approved_by = $1, approved_at = now(),
-					    last_modified_by = $1, last_modified_at = now()
-					WHERE policy_id = $2::uuid`, actor, id,
+					    last_modified_by = $1, last_modified_at = now(),
+					    status = CASE
+					        WHEN status = 'PendingApproval'
+					        THEN CASE WHEN effective_start::text > $2 THEN 'Scheduled' ELSE 'Active' END
+					        ELSE status END
+					WHERE policy_id = $3::uuid`, actor, today, id,
 				); err != nil {
 					errs = append(errs, id+": "+err.Error())
 					continue

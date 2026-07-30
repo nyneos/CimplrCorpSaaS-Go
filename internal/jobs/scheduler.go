@@ -127,6 +127,12 @@ func (s *CronService) Start() error {
 	}
 	logger.GlobalLogger.LogAudit("Portfolio refresh worker started")
 
+	// ---------------- Policy Lifecycle Sweeper ----------------
+	if err := RunPolicyLifecycleSweeper(s.db); err != nil {
+		return fmt.Errorf("failed to start policy lifecycle sweeper: %v", err)
+	}
+	logger.GlobalLogger.LogAudit("Policy lifecycle sweeper started")
+
 	logger.GlobalLogger.LogAudit("All background workers started")
 
 	// ---------------- DB Cleanup Worker ----------------

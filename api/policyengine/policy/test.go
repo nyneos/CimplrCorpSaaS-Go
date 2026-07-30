@@ -17,12 +17,16 @@ type testReq struct {
 	Config         json.RawMessage   `json:"config"`
 	Variables      map[string]string `json:"variables"`
 	ActionOnBreach string            `json:"action_on_breach"`
-	NullHandling   string            `json:"null_handling"`
-	AddlExpression string            `json:"addl_expression"`
-	ModuleCode     string            `json:"module_code"`
-	SubModule      string            `json:"sub_module"`
-	EventCode      string            `json:"event_code"`
-	EntityCode     string            `json:"entity_code"`
+	// NullHandlingDefault mirrors the draft's UseDefault substitute so the
+	// workbench exercises exactly what Enforce will run after approval.
+	NullHandling        string `json:"null_handling"`
+	NullHandlingDefault string `json:"null_handling_default"`
+	AddlExpression      string `json:"addl_expression"`
+	BreachMessage       string `json:"breach_message"`
+	ModuleCode          string `json:"module_code"`
+	SubModule           string `json:"sub_module"`
+	EventCode           string `json:"event_code"`
+	EntityCode          string `json:"entity_code"`
 	// PolicyName echoes the draft's own name back in results[] so the
 	// workbench doesn't have to show the raw "TEST_HARNESS" placeholder code.
 	PolicyName string `json:"policy_name"`
@@ -59,6 +63,11 @@ func HandleTest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.NullHandling == "" {
 			req.NullHandling = "FailSafe"
+		}
+		req.NullHandlingDefault = strings.TrimSpace(req.NullHandlingDefault)
+		if err := validateNullDefault(req.RuleType, req.NullHandling, req.NullHandlingDefault, rf); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
+			return
 		}
 
 		snapshot := buildTestSnapshot(req, rf)
@@ -117,6 +126,9 @@ func HandleTest(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			result = picked.Result
 			message = picked.Message
+			if um := strings.TrimSpace(picked.UserMessage); um != "" {
+				message = um
+			}
 			detail = picked.Action
 			if checkRes.AggregatedAction != "" {
 				detail = checkRes.AggregatedAction
@@ -165,6 +177,9 @@ func enrichedResultsPayload(checkRes runtime.CheckResult, policies []map[string]
 			"action":    pr.Action,
 			"message":   pr.Message,
 		}
+		if um := strings.TrimSpace(pr.UserMessage); um != "" {
+			row["user_message"] = um
+		}
 		if m.testVar != "" {
 			row["tested_variable"] = m.testVar
 			row["tested_value"] = variables[m.testVar]
@@ -196,25 +211,28 @@ func testedVariableForSnapshot(snap map[string]interface{}) string {
 
 func buildTestSnapshot(req testReq, rf ruleFields) map[string]interface{} {
 	snap := map[string]interface{}{
-		"policy_id":           "test-harness",
-		"code":                "TEST_HARNESS",
-		"name":                req.PolicyName,
-		"rule_type":           req.RuleType,
-		"action_on_breach":    req.ActionOnBreach,
-		"null_handling":       req.NullHandling,
-		"addl_expression":     req.AddlExpression,
-		"thr_variable":        rf.ThrVariable,
-		"thr_operator":        rf.ThrOperator,
-		"thr_value_mode":      rf.ThrValueMode,
-		"thr_percent_base":    rf.ThrPercentBase,
-		"slab_variable":       rf.SlabVariable,
-		"list_target_field":   rf.ListTargetField,
-		"list_mode":           rf.ListMode,
-		"list_case_sensitive": rf.ListCaseSensitive,
-		"list_values":         rf.ListValues,
-		"formula_expression":  rf.FormulaExpression,
-		"formula_return_type": rf.FormulaReturnType,
-		"formula_operator":    rf.FormulaOperator,
+		"policy_id":             "test-harness",
+		"code":                  "TEST_HARNESS",
+		"name":                  req.PolicyName,
+		"rule_type":             req.RuleType,
+		"action_on_breach":      req.ActionOnBreach,
+		"null_handling":         req.NullHandling,
+		"null_handling_default": req.NullHandlingDefault,
+		"addl_expression":       req.AddlExpression,
+		"thr_variable":          rf.ThrVariable,
+		"thr_operator":          rf.ThrOperator,
+		"thr_value_mode":        rf.ThrValueMode,
+		"thr_percent_base":      rf.ThrPercentBase,
+		"slab_variable":         rf.SlabVariable,
+		"slab_percent_base":     rf.SlabPercentBase,
+		"list_target_field":     rf.ListTargetField,
+		"list_mode":             rf.ListMode,
+		"list_case_sensitive":   rf.ListCaseSensitive,
+		"list_values":           rf.ListValues,
+		"formula_expression":    rf.FormulaExpression,
+		"formula_return_type":   rf.FormulaReturnType,
+		"formula_operator":      rf.FormulaOperator,
+		"breach_message":        strings.TrimSpace(req.BreachMessage),
 	}
 	if rf.ThrValue != nil {
 		snap["thr_value"] = *rf.ThrValue

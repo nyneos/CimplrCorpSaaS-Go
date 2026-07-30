@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/services/policysvc"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -42,6 +42,7 @@ type CheckRequest struct {
 
 // CheckResult holds evaluation output for module handlers.
 type CheckResult struct {
+	RunID            string
 	AggregatedAction string
 	Results          []policysvc.PolicyResult
 	DurationMS       int
@@ -124,6 +125,7 @@ func (r CheckResult) ClientMessage(fallback string) string {
 }
 
 // FirstBreachMessage returns the first BREACH/ERROR message, if any.
+// Prefers author user_message (substituted breach_message) over evaluator Message.
 func (r CheckResult) FirstBreachMessage() string {
 	for _, pr := range r.Results {
 		if pr.Result == "BREACH" || pr.Result == "ERROR" {
@@ -131,7 +133,10 @@ func (r CheckResult) FirstBreachMessage() string {
 			if label == "" {
 				label = strings.TrimSpace(pr.Code)
 			}
-			msg := strings.TrimSpace(pr.Message)
+			msg := strings.TrimSpace(pr.UserMessage)
+			if msg == "" {
+				msg = strings.TrimSpace(pr.Message)
+			}
 			if label != "" && msg != "" {
 				return label + ": " + msg
 			}
@@ -150,14 +155,18 @@ func (r CheckResult) FirstBreachMessage() string {
 func (r CheckResult) ResultsPayload() []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(r.Results))
 	for _, pr := range r.Results {
-		out = append(out, map[string]interface{}{
+		row := map[string]interface{}{
 			"policy_id": pr.PolicyID,
 			"code":      pr.Code,
 			"name":      pr.Name,
 			"result":    pr.Result,
 			"action":    pr.Action,
 			"message":   pr.Message,
-		})
+		}
+		if um := strings.TrimSpace(pr.UserMessage); um != "" {
+			row["user_message"] = um
+		}
+		out = append(out, row)
 	}
 	return out
 }
@@ -189,7 +198,8 @@ func (r CheckResult) WriteSummaryHeader(w http.ResponseWriter) {
 // LoadActivePolicySnapshots returns Active+APPROVED policy snapshots for the
 // given trigger/module/sub-module/entity (same set RunCheck loads).
 func LoadActivePolicySnapshots(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, subModule, entityCode string, vars map[string]string) ([]map[string]interface{}, error) {
-	return loadActivePolicies(ctx, pool, eventCode, moduleCode, subModule, entityCode, vars)
+	trace, err := loadActivePoliciesWithTrace(ctx, pool, eventCode, moduleCode, subModule, entityCode, vars)
+	return trace.Applicable, err
 }
 
 // RunCheck loads applicable policies, evaluates via CIMPLR-Policy-Service, writes execution_log.
@@ -197,21 +207,44 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 	if !PolicyChecksEnabled() {
 		return CheckResult{AggregatedAction: ""}, nil
 	}
+	runID := uuid.NewString()
+	runStarted := time.Now()
 	client := policysvc.NewFromEnv()
 	if req.Variables == nil {
 		req.Variables = map[string]string{}
 	}
 
 	policies := req.Policies
+	loadTrace := policyLoadTrace{}
+	loadStarted := time.Now()
 	if len(policies) == 0 {
 		if strings.TrimSpace(req.ModuleCode) != "" && strings.TrimSpace(req.SubModule) == "" {
-			return CheckResult{}, fmt.Errorf("sub_module is required when module_code is set (refusing to load all sub-modules for %s)", req.ModuleCode)
+			err := fmt.Errorf("sub_module is required when module_code is set (refusing to load all sub-modules for %s)", req.ModuleCode)
+			run := completedExecutionRun(runID, req, runStarted, time.Since(loadStarted), 0, loadTrace, nil, "", "ERROR")
+			_ = persistExecutionRun(ctx, pool, run, technicalExecution("INVALID_SCOPE_REQUEST", "Policy check request scope is invalid"), nil)
+			return CheckResult{RunID: runID}, err
 		}
-		loaded, err := loadActivePolicies(ctx, pool, req.EventCode, req.ModuleCode, req.SubModule, req.EntityCode, req.Variables)
+		loaded, err := loadActivePoliciesWithTrace(ctx, pool, req.EventCode, req.ModuleCode, req.SubModule, req.EntityCode, req.Variables)
 		if err != nil {
-			return CheckResult{}, err
+			logExecutionError(ctx, req.TraceID, "policy execution scope load failed: %v", err)
+			run := completedExecutionRun(runID, req, runStarted, time.Since(loadStarted), 0, loadTrace, nil, "", "ERROR")
+			_ = persistExecutionRun(ctx, pool, run, technicalExecution("POLICY_LOAD_ERROR", "Policy scope could not be loaded"), nil)
+			return CheckResult{RunID: runID}, err
 		}
-		policies = loaded
+		loadTrace = loaded
+		policies = loaded.Applicable
+	} else {
+		loadTrace.Candidates = policies
+		loadTrace.Applicable = policies
+	}
+	loadDuration := time.Since(loadStarted)
+
+	if len(policies) == 0 {
+		run := completedExecutionRun(runID, req, runStarted, loadDuration, 0, loadTrace, nil, "", "NO_APPLICABLE")
+		if err := persistExecutionRun(ctx, pool, run, nil, nil); err != nil {
+			return CheckResult{RunID: runID}, err
+		}
+		return CheckResult{RunID: runID}, nil
 	}
 
 	conflictReport := AnalyzeHardBlockThresholdConflicts(ConstraintsFromPolicySnapshots(policies))
@@ -226,22 +259,10 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 			Message:  msg,
 		}
 		duration := 0
-		_, _ = pool.Exec(ctx, `
-			INSERT INTO policyengine_svc.execution_log (
-				correlation_id, trace_id, event_code, module_code, sub_module, form_id,
-				handler_name, api_path, actor_user_id, actor_role, entity_code, requested_ip,
-				business_record_type, business_record_id, source_file_name, source_file_id, batch_id,
-				policy_code, result, action_fired, detail_message, fail_code, fail_reason, duration_ms
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-				$18,'ERROR','HardBlock',$19,'POLICY_CONFLICT_IMPOSSIBLE',$19,$20)`,
-			common.NullIfEmpty(req.CorrelationID), common.NullIfEmpty(req.TraceID), req.EventCode, common.NullIfEmpty(req.ModuleCode),
-			common.NullIfEmpty(req.SubModule), common.NullIfEmpty(req.FormID), common.NullIfEmpty(req.HandlerName), common.NullIfEmpty(req.APIPath),
-			common.NullIfEmpty(req.ActorUserID), common.NullIfEmpty(req.ActorRole), common.NullIfEmpty(req.EntityCode), common.NullIfEmpty(req.RequestedIP),
-			common.NullIfEmpty(req.BusinessRecordType), common.NullIfEmpty(req.BusinessRecordID),
-			common.NullIfEmpty(req.SourceFileName), common.NullIfEmpty(req.SourceFileID), common.NullIfEmpty(req.BatchID),
-			"POLICY_CONFLICT_IMPOSSIBLE", msg, duration,
-		)
+		run := completedExecutionRun(runID, req, runStarted, loadDuration, 0, loadTrace, []policysvc.PolicyResult{synthetic}, "HardBlock", "ERROR")
+		_ = persistExecutionRun(ctx, pool, run, technicalExecution("POLICY_CONFLICT_IMPOSSIBLE", msg), nil)
 		return CheckResult{
+			RunID:            runID,
 			AggregatedAction: "HardBlock",
 			Results:          []policysvc.PolicyResult{synthetic},
 			DurationMS:       duration,
@@ -260,52 +281,32 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 		Policies:   policies,
 	}
 	resp, err := client.Evaluate(ctx, evalReq)
-	duration := int(time.Since(started).Milliseconds())
+	evalDuration := time.Since(started)
+	duration := int(evalDuration.Milliseconds())
+	if err == nil && (resp == nil || !resp.Success) {
+		detail := "empty policy service response"
+		if resp != nil && strings.TrimSpace(resp.Error) != "" {
+			detail = resp.Error
+		}
+		err = fmt.Errorf("policy service rejected evaluation: %s", detail)
+	}
 	if err != nil {
-		_, _ = pool.Exec(ctx, `
-			INSERT INTO policyengine_svc.execution_log (
-				correlation_id, trace_id, event_code, module_code, sub_module, form_id,
-				handler_name, api_path, actor_user_id, actor_role, entity_code, requested_ip,
-				business_record_type, business_record_id, source_file_name, source_file_id, batch_id,
-				result, fail_code, fail_reason, detail_message, duration_ms
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'ERROR','POLICY_SERVICE_ERROR',$18,$18,$19)`,
-			common.NullIfEmpty(req.CorrelationID), common.NullIfEmpty(req.TraceID), req.EventCode, common.NullIfEmpty(req.ModuleCode),
-			common.NullIfEmpty(req.SubModule), common.NullIfEmpty(req.FormID), common.NullIfEmpty(req.HandlerName), common.NullIfEmpty(req.APIPath),
-			common.NullIfEmpty(req.ActorUserID), common.NullIfEmpty(req.ActorRole), common.NullIfEmpty(req.EntityCode), common.NullIfEmpty(req.RequestedIP),
-			common.NullIfEmpty(req.BusinessRecordType), common.NullIfEmpty(req.BusinessRecordID),
-			common.NullIfEmpty(req.SourceFileName), common.NullIfEmpty(req.SourceFileID), common.NullIfEmpty(req.BatchID),
-			err.Error(), duration,
-		)
-		return CheckResult{}, err
+		logExecutionError(ctx, req.TraceID, "policy evaluation service failed: %v", err)
+		run := completedExecutionRun(runID, req, runStarted, loadDuration, evalDuration, loadTrace, nil, "", "ERROR")
+		_ = persistExecutionRun(ctx, pool, run, technicalExecution("POLICY_SERVICE_ERROR", "Policy evaluation service failed"), nil)
+		return CheckResult{RunID: runID}, err
 	}
 
-	for _, pr := range resp.Results {
-		failCode, failReason := "", ""
-		if pr.Result == "BREACH" || pr.Result == "ERROR" {
-			failCode = pr.Result
-			failReason = pr.Message
-		}
-		_, _ = pool.Exec(ctx, `
-			INSERT INTO policyengine_svc.execution_log (
-				correlation_id, trace_id, event_code, module_code, sub_module, form_id,
-				handler_name, api_path, actor_user_id, actor_role, entity_code, requested_ip,
-				business_record_type, business_record_id, source_file_name, source_file_id, batch_id,
-				policy_id, policy_code, result, action_fired, detail_message, fail_code, fail_reason, duration_ms
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-				NULLIF($18,'')::uuid, $19, $20, $21, $22, $23, $24, $25)`,
-			common.NullIfEmpty(req.CorrelationID), common.NullIfEmpty(req.TraceID), req.EventCode, common.NullIfEmpty(req.ModuleCode),
-			common.NullIfEmpty(req.SubModule), common.NullIfEmpty(req.FormID), common.NullIfEmpty(req.HandlerName), common.NullIfEmpty(req.APIPath),
-			common.NullIfEmpty(req.ActorUserID), common.NullIfEmpty(req.ActorRole), common.NullIfEmpty(req.EntityCode), common.NullIfEmpty(req.RequestedIP),
-			common.NullIfEmpty(req.BusinessRecordType), common.NullIfEmpty(req.BusinessRecordID),
-			common.NullIfEmpty(req.SourceFileName), common.NullIfEmpty(req.SourceFileID), common.NullIfEmpty(req.BatchID),
-			pr.PolicyID, pr.Code, pr.Result, common.NullIfEmpty(pr.Action), common.NullIfEmpty(pr.Message),
-			common.NullIfEmpty(failCode), common.NullIfEmpty(failReason), duration,
-		)
+	outcome := resultOutcome(resp.Results)
+	run := completedExecutionRun(runID, req, runStarted, loadDuration, evalDuration, loadTrace, resp.Results, resp.AggregatedAction, outcome)
+	if err := persistExecutionRun(ctx, pool, run, nil, resp.Results); err != nil {
+		return CheckResult{RunID: runID}, err
 	}
 
 	dispatchNotifyBreaches(ctx, pool, req, policies, resp.Results)
 
 	return CheckResult{
+		RunID:            runID,
 		AggregatedAction: resp.AggregatedAction,
 		Results:          resp.Results,
 		DurationMS:       duration,
@@ -314,6 +315,11 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 }
 
 func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, subModule, entityCode string, vars map[string]string) ([]map[string]interface{}, error) {
+	trace, err := loadActivePoliciesWithTrace(ctx, pool, eventCode, moduleCode, subModule, entityCode, vars)
+	return trace.Applicable, err
+}
+
+func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, subModule, entityCode string, vars map[string]string) (policyLoadTrace, error) {
 	codes := ExpandTriggerAliases(eventCode)
 	q := `
 		SELECT p.policy_id::text, p.code, p.name, p.rule_type, p.action_on_breach, p.null_handling,
@@ -323,10 +329,10 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 		       COALESCE(p.thr_value_mode, ''), COALESCE(p.thr_percent_base, ''),
 		       COALESCE(p.list_target_field, ''), COALESCE(p.list_mode, ''), COALESCE(p.list_source, ''),
 		       COALESCE(p.list_dynamic_ref, ''), COALESCE(p.list_case_sensitive, false),
-		       COALESCE(p.notification_group, ''),
+		       COALESCE(p.notification_group, ''), COALESCE(p.breach_message, ''),
 		       COALESCE(p.formula_expression, ''), COALESCE(p.formula_return_type, ''),
 		       COALESCE(p.formula_operator, ''), COALESCE(p.formula_value, 0),
-		       COALESCE(p.slab_variable, ''),
+		       COALESCE(p.slab_variable, ''), COALESCE(p.slab_percent_base, ''),
 		       COALESCE(p.comp_base, ''), COALESCE(p.comp_total_check_variable, ''),
 		       p.comp_total_check_min, p.comp_total_check_max,
 		       COALESCE(p.applicability, 'Global'),
@@ -335,7 +341,9 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 		FROM policyengine_svc.policy_master p
 		INNER JOIN policyengine_svc.policy_trigger t
 			ON t.policy_id = p.policy_id AND t.is_deleted = false AND t.event_code = ANY($1::text[])
-		WHERE p.is_deleted = false AND p.status = 'Active' AND p.processing_status = 'APPROVED'
+		-- Include Scheduled: a missed lifecycle cron must never silently skip enforcement;
+		-- the date window below is the real gate (stale UI label is acceptable).
+		WHERE p.is_deleted = false AND p.status IN ('Active', 'Scheduled') AND p.processing_status = 'APPROVED'
 		  AND p.effective_start <= CURRENT_DATE
 		  AND (p.effective_end IS NULL OR p.effective_end >= CURRENT_DATE)`
 	args := []interface{}{codes}
@@ -368,7 +376,7 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 
 	rows, err := pool.Query(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return policyLoadTrace{}, err
 	}
 	defer rows.Close()
 
@@ -376,55 +384,58 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 	policyIDs := make([]string, 0)
 	for rows.Next() {
 		var (
-			id, code, name, ruleType, action, nullH, nullDef, addl string
-			thrVar, thrOp, thrValueDate, thrMode, thrBase          string
-			listField, listMode, listSource, listDynRef            string
-			notifGroup, formulaExpr, formulaRet, formulaOp         string
-			slabVar, compBase, compTotalVar, applicability         string
-			fltInstrument, fltCurrency, fltTenor, fltRating        string
-			thrVal, formulaVal                                     float64
-			compTotalMin, compTotalMax                             *float64
-			listCase                                               bool
+			id, code, name, ruleType, action, nullH, nullDef, addl          string
+			thrVar, thrOp, thrValueDate, thrMode, thrBase                   string
+			listField, listMode, listSource, listDynRef                     string
+			notifGroup, breachMsg, formulaExpr, formulaRet, formulaOp       string
+			slabVar, slabPercentBase, compBase, compTotalVar, applicability string
+			fltInstrument, fltCurrency, fltTenor, fltRating                 string
+			thrVal, formulaVal                                              float64
+			compTotalMin, compTotalMax                                      *float64
+			listCase                                                        bool
 		)
 		if err := rows.Scan(&id, &code, &name, &ruleType, &action, &nullH, &nullDef, &addl,
 			&thrVar, &thrOp, &thrVal, &thrValueDate, &thrMode, &thrBase, &listField, &listMode, &listSource, &listDynRef, &listCase,
-			&notifGroup, &formulaExpr, &formulaRet, &formulaOp, &formulaVal, &slabVar,
+			&notifGroup, &breachMsg, &formulaExpr, &formulaRet, &formulaOp, &formulaVal, &slabVar, &slabPercentBase,
 			&compBase, &compTotalVar, &compTotalMin, &compTotalMax, &applicability,
 			&fltInstrument, &fltCurrency, &fltTenor, &fltRating); err != nil {
-			return nil, err
-		}
-		if !policyMatchesDataFilters(fltInstrument, fltCurrency, fltTenor, fltRating, vars) {
-			continue
+			return policyLoadTrace{}, err
 		}
 		snap := map[string]interface{}{
-			"policy_id":             id,
-			"code":                  code,
-			"name":                  name,
-			"rule_type":             ruleType,
-			"action_on_breach":      action,
-			"null_handling":         nullH,
-			"null_handling_default": nullDef,
-			"addl_expression":       addl,
-			"thr_variable":          thrVar,
-			"thr_operator":          thrOp,
-			"thr_value":             thrVal,
-			"thr_value_date":        thrValueDate,
-			"thr_value_mode":        thrMode,
-			"thr_percent_base":      thrBase,
-			"list_target_field":     listField,
-			"list_mode":             listMode,
-			"list_source":           listSource,
-			"list_dynamic_ref":      listDynRef,
-			"list_case_sensitive":   listCase,
-			"notification_group":    notifGroup,
-			"formula_expression":    formulaExpr,
-			"formula_return_type":   formulaRet,
-			"formula_operator":      formulaOp,
-			"formula_value":         formulaVal,
-			"slab_variable":         slabVar,
-			"comp_base":             compBase,
+			"policy_id":                 id,
+			"code":                      code,
+			"name":                      name,
+			"rule_type":                 ruleType,
+			"action_on_breach":          action,
+			"null_handling":             nullH,
+			"null_handling_default":     nullDef,
+			"addl_expression":           addl,
+			"thr_variable":              thrVar,
+			"thr_operator":              thrOp,
+			"thr_value":                 thrVal,
+			"thr_value_date":            thrValueDate,
+			"thr_value_mode":            thrMode,
+			"thr_percent_base":          thrBase,
+			"list_target_field":         listField,
+			"list_mode":                 listMode,
+			"list_source":               listSource,
+			"list_dynamic_ref":          listDynRef,
+			"list_case_sensitive":       listCase,
+			"notification_group":        notifGroup,
+			"breach_message":            breachMsg,
+			"formula_expression":        formulaExpr,
+			"formula_return_type":       formulaRet,
+			"formula_operator":          formulaOp,
+			"formula_value":             formulaVal,
+			"slab_variable":             slabVar,
+			"slab_percent_base":         slabPercentBase,
+			"comp_base":                 compBase,
 			"comp_total_check_variable": compTotalVar,
-			"applicability":         applicability,
+			"applicability":             applicability,
+			"_filter_instrument":        fltInstrument,
+			"_filter_currency":          fltCurrency,
+			"_filter_tenor":             fltTenor,
+			"_filter_rating":            fltRating,
 		}
 		if compTotalMin != nil {
 			snap["comp_total_check_min"] = *compTotalMin
@@ -433,7 +444,7 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 			snap["comp_total_check_max"] = *compTotalMax
 		}
 		if ruleType == "list" {
-			vals, _ := loadListValues(ctx, pool, id)
+			vals, _ := loadListValues(ctx, pool, id, listSource, listDynRef)
 			snap["list_values"] = vals
 		}
 		if ruleType == "slabs" {
@@ -450,19 +461,37 @@ func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, modu
 
 	entityMap, err := loadPolicyEntityScopes(ctx, pool, policyIDs)
 	if err != nil {
-		return nil, err
+		return policyLoadTrace{}, err
 	}
 	entityCode = strings.TrimSpace(entityCode)
 	filtered := make([]map[string]interface{}, 0, len(out))
+	skips := make([]policyScopeSkip, 0)
 	for _, snap := range out {
 		id, _ := snap["policy_id"].(string)
 		applicability, _ := snap["applicability"].(string)
+		if code, reason, skipped := dataFilterSkip(
+			snapshotString(snap, "_filter_instrument"),
+			snapshotString(snap, "_filter_currency"),
+			snapshotString(snap, "_filter_tenor"),
+			snapshotString(snap, "_filter_rating"),
+			vars,
+		); skipped {
+			skips = appendScopeSkip(skips, snap, "DATA_FILTER", code, reason)
+			continue
+		}
 		scope := entityMap[id]
 		if policyAppliesToEntity(applicability, entityCode, scope.include, scope.exclude) {
+			delete(snap, "_filter_instrument")
+			delete(snap, "_filter_currency")
+			delete(snap, "_filter_tenor")
+			delete(snap, "_filter_rating")
 			filtered = append(filtered, snap)
+		} else {
+			code, reason := entityScopeSkip(applicability, entityCode, scope.include, scope.exclude)
+			skips = appendScopeSkip(skips, snap, "ENTITY_SCOPE", code, reason)
 		}
 	}
-	return filtered, nil
+	return policyLoadTrace{Candidates: out, Applicable: filtered, Skips: skips}, nil
 }
 
 type entityScopeLists struct {
@@ -556,7 +585,17 @@ func policyAppliesToEntity(applicability, entityCode string, include, exclude []
 	}
 }
 
-func loadListValues(ctx context.Context, pool *pgxpool.Pool, policyID string) ([]string, error) {
+func loadListValues(ctx context.Context, pool *pgxpool.Pool, policyID, listSource, listDynRef string) ([]string, error) {
+	if strings.EqualFold(strings.TrimSpace(listSource), "Dynamic") {
+		// Materialise masters into the snapshot before the wire call — Policy
+		// Service has no DB. Empty/error leaves list_values empty so the
+		// evaluator's Dynamic+empty guard stays fail-safe (ERROR → HardBlock).
+		vals, err := resolveDynamicList(ctx, pool, listDynRef)
+		if err != nil {
+			return []string{}, err
+		}
+		return vals, nil
+	}
 	rows, err := pool.Query(ctx, `
 		SELECT value FROM policyengine_svc.policy_list_value
 		WHERE policy_id = $1::uuid AND is_deleted = false`, policyID)

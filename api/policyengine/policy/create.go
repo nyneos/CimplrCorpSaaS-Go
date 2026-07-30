@@ -33,21 +33,24 @@ type createReq struct {
 	Modules                 []string `json:"modules"`
 	// SubModules — domain_catalog sub_module codes (UI "forms"), e.g. FD_BOOKING.
 	// Empty = match any sub-module under the selected modules (legacy behaviour).
-	SubModules       []string        `json:"sub_modules"`
-	TriggerEvents    []string        `json:"trigger_events"`
-	EntitiesInclude  []string        `json:"entities_include"`
-	EntitiesExclude  []string        `json:"entities_exclude"`
-	RuleType         string          `json:"rule_type"`
-	Config           json.RawMessage `json:"config"`
-	AddlExpression   string          `json:"addl_expression"`
-	NullHandling     string          `json:"null_handling"`
-	InstrumentFilter string          `json:"instrument_filter"`
-	CurrencyFilter   string          `json:"currency_filter"`
-	TenorFilter      string          `json:"tenor_filter"`
-	RatingFilter     string          `json:"rating_filter"`
-	EffectiveStart   string          `json:"effective_start"`
-	EffectiveEnd     string          `json:"effective_end"`
-	ActorID          string          `json:"actor_id"`
+	SubModules      []string        `json:"sub_modules"`
+	TriggerEvents   []string        `json:"trigger_events"`
+	EntitiesInclude []string        `json:"entities_include"`
+	EntitiesExclude []string        `json:"entities_exclude"`
+	RuleType        string          `json:"rule_type"`
+	Config          json.RawMessage `json:"config"`
+	AddlExpression  string          `json:"addl_expression"`
+	NullHandling    string          `json:"null_handling"`
+	// NullHandlingDefault — the substitute value used when null_handling is
+	// UseDefault and a referenced CDM variable is null at evaluation time.
+	NullHandlingDefault string `json:"null_handling_default"`
+	InstrumentFilter    string `json:"instrument_filter"`
+	CurrencyFilter      string `json:"currency_filter"`
+	TenorFilter         string `json:"tenor_filter"`
+	RatingFilter        string `json:"rating_filter"`
+	EffectiveStart      string `json:"effective_start"`
+	EffectiveEnd        string `json:"effective_end"`
+	ActorID             string `json:"actor_id"`
 }
 
 func (req *createReq) trim() {
@@ -65,6 +68,7 @@ func (req *createReq) trim() {
 	req.RuleType = strings.TrimSpace(req.RuleType)
 	req.AddlExpression = strings.TrimSpace(req.AddlExpression)
 	req.NullHandling = strings.TrimSpace(req.NullHandling)
+	req.NullHandlingDefault = strings.TrimSpace(req.NullHandlingDefault)
 	req.InstrumentFilter = strings.TrimSpace(req.InstrumentFilter)
 	req.CurrencyFilter = strings.TrimSpace(req.CurrencyFilter)
 	req.TenorFilter = strings.TrimSpace(req.TenorFilter)
@@ -110,7 +114,37 @@ func (req *createReq) validate() string {
 		return "null_handling must be FailSafe, PassThrough, or UseDefault"
 	}
 	if req.NullHandling == "UseDefault" {
-		return "null_handling UseDefault is not supported yet — use FailSafe or PassThrough (missing vars ERROR→HardBlock otherwise)"
+		if req.NullHandlingDefault == "" {
+			return "null_handling_default is required when null_handling is UseDefault"
+		}
+	} else {
+		// A stale default left behind after switching away from UseDefault would
+		// silently reactivate if the strategy were ever flipped back.
+		req.NullHandlingDefault = ""
+	}
+	if msg := validateEffectiveWindow(req.EffectiveStart, req.EffectiveEnd); msg != "" {
+		return msg
+	}
+	return ""
+}
+
+// validateEffectiveWindow rejects an end-before-start window. Such a policy can
+// never evaluate (runtime filters on effective_start <= today <= effective_end)
+// yet still shows as Active, so it silently enforces nothing.
+func validateEffectiveWindow(start, end string) string {
+	if start == "" || end == "" {
+		return ""
+	}
+	s, err := time.Parse("2006-01-02", start)
+	if err != nil {
+		return "effective_start must be a yyyy-mm-dd date"
+	}
+	e, err := time.Parse("2006-01-02", end)
+	if err != nil {
+		return "effective_end must be a yyyy-mm-dd date"
+	}
+	if e.Before(s) {
+		return "effective_end must be on or after effective_start"
 	}
 	return ""
 }
@@ -134,6 +168,10 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rf, err := parseRuleConfig(req.RuleType, req.Config)
 		if err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
+			return
+		}
+		if err := validateNullDefault(req.RuleType, req.NullHandling, req.NullHandlingDefault, rf); err != nil {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
 			return
 		}
@@ -181,9 +219,9 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				validation_level, criticality, action_on_breach, notification_group, breach_message,
 				requires_approval, applicability, can_override,
 				instrument_filter, currency_filter, tenor_filter, rating_filter,
-				rule_type, null_handling,
+				rule_type, null_handling, null_handling_default,
 				thr_variable, thr_operator, thr_value, thr_value_date, thr_value_mode, thr_percent_base, thr_unit,
-				slab_variable, slab_unit,
+				slab_variable, slab_unit, slab_percent_base,
 				comp_base, comp_total_check_variable, comp_total_check_min, comp_total_check_max,
 				list_target_field, list_mode, list_source, list_dynamic_ref, list_case_sensitive,
 				formula_expression, formula_return_type, formula_operator, formula_value,
@@ -194,9 +232,9 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				$6,$7,$8,NULLIF($9,''),$10,
 				$11,$12,$13,
 				NULLIF($14,''),NULLIF($15,''),NULLIF($16,''),NULLIF($17,''),
-				$18,$19,
+				$18,$19,NULLIF($46,''),
 				NULLIF($20,''),NULLIF($21,''),$22,$45::date,NULLIF($23,''),NULLIF($24,''),NULLIF($25,''),
-				NULLIF($26,''),NULLIF($27,''),
+				NULLIF($26,''),NULLIF($27,''),NULLIF($47,''),
 				NULLIF($28,''),NULLIF($29,''),$30,$31,
 				NULLIF($32,''),NULLIF($33,''),NULLIF($34,''),NULLIF($35,''),$36,
 				NULLIF($37,''),NULLIF($38,''),NULLIF($39,''),$40,
@@ -214,7 +252,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			rf.ListTargetField, rf.ListMode, rf.ListSource, rf.ListDynamicRef, rf.ListCaseSensitive,
 			rf.FormulaExpression, rf.FormulaReturnType, rf.FormulaOperator, rf.FormulaValue,
 			req.AddlExpression, req.EffectiveStart, req.EffectiveEnd,
-			actor, rf.ThrValueDate,
+			actor, rf.ThrValueDate, req.NullHandlingDefault, rf.SlabPercentBase,
 		).Scan(&policyID)
 		if err != nil {
 			api.LogErrorForResponse(w, "policy create insert: %v", err)

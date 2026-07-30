@@ -143,6 +143,7 @@ func cdmVarsFromSnapshot(snap map[string]interface{}) []string {
 	add("thr_variable")
 	add("thr_percent_base")
 	add("slab_variable")
+	add("slab_percent_base")
 	add("list_target_field")
 	add("comp_base")
 	add("comp_total_check_variable")

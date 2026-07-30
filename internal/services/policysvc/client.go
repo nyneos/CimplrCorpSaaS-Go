@@ -39,13 +39,31 @@ type EvaluateRequest struct {
 	Policies   []map[string]interface{} `json:"policies"`
 }
 
+// Comparison mirrors the Policy Service explainability wire contract. Values
+// are strings so callers can persist or display evaluated numbers, dates, and
+// booleans without lossy JSON number conversions.
+type Comparison struct {
+	Sequence      int    `json:"sequence"`
+	Variable      string `json:"variable,omitempty"`
+	ActualValue   string `json:"actual_value,omitempty"`
+	Operator      string `json:"operator,omitempty"`
+	ExpectedValue string `json:"expected_value,omitempty"`
+	LowerBound    string `json:"lower_bound,omitempty"`
+	UpperBound    string `json:"upper_bound,omitempty"`
+	Unit          string `json:"unit,omitempty"`
+	Label         string `json:"label,omitempty"`
+	Outcome       string `json:"outcome"`
+}
+
 type PolicyResult struct {
-	PolicyID string `json:"policy_id"`
-	Code     string `json:"code"`
-	Name     string `json:"name,omitempty"`
-	Result   string `json:"result"`
-	Action   string `json:"action,omitempty"`
-	Message  string `json:"message,omitempty"`
+	PolicyID    string       `json:"policy_id"`
+	Code        string       `json:"code"`
+	Name        string       `json:"name,omitempty"`
+	Result      string       `json:"result"`
+	Action      string       `json:"action,omitempty"`
+	Comparisons []Comparison `json:"comparisons,omitempty"`
+	Message     string       `json:"message,omitempty"`
+	UserMessage string       `json:"user_message,omitempty"`
 }
 
 type EvaluateResponse struct {

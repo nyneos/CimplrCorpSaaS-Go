@@ -41,6 +41,10 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
 			return
 		}
+		if err := validateNullDefault(req.RuleType, req.NullHandling, req.NullHandlingDefault, rf); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
+			return
+		}
 		if err := validatePolicyScope(
 			r.Context(), pool,
 			req.Modules, req.SubModules, req.TriggerEvents,
@@ -83,6 +87,12 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		// Pending is allowed — always insert a fresh EDIT audit (approve/reject use latest only).
 		if req.EffectiveStart == "" {
 			req.EffectiveStart = old.EffectiveStart
+			// Re-check: validate() ran before this backfill, so an omitted start
+			// paired with an earlier end would otherwise slip through.
+			if msg := validateEffectiveWindow(req.EffectiveStart, req.EffectiveEnd); msg != "" {
+				api.RespondEnvelopeError(w, http.StatusBadRequest, msg, "VALIDATION_ERROR")
+				return
+			}
 		}
 
 		if _, err := tx.Exec(r.Context(), `
@@ -92,9 +102,10 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 				breach_message = $10, requires_approval = $11, applicability = $12, can_override = $13,
 				instrument_filter = NULLIF($14,''), currency_filter = NULLIF($15,''), tenor_filter = NULLIF($16,''),
 				rating_filter = NULLIF($17,''), rule_type = $18, null_handling = $19,
+				null_handling_default = NULLIF($47,''),
 				thr_variable = NULLIF($20,''), thr_operator = NULLIF($21,''), thr_value = $22, thr_value_date = $46::date,
 				thr_value_mode = NULLIF($23,''), thr_percent_base = NULLIF($24,''), thr_unit = NULLIF($25,''),
-				slab_variable = NULLIF($26,''), slab_unit = NULLIF($27,''),
+				slab_variable = NULLIF($26,''), slab_unit = NULLIF($27,''), slab_percent_base = NULLIF($48,''),
 				comp_base = NULLIF($28,''), comp_total_check_variable = NULLIF($29,''),
 				comp_total_check_min = $30, comp_total_check_max = $31,
 				list_target_field = NULLIF($32,''), list_mode = NULLIF($33,''), list_source = NULLIF($34,''),
@@ -115,7 +126,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			rf.ListTargetField, rf.ListMode, rf.ListSource, rf.ListDynamicRef, rf.ListCaseSensitive,
 			rf.FormulaExpression, rf.FormulaReturnType, rf.FormulaOperator, rf.FormulaValue,
 			req.AddlExpression, req.EffectiveStart, req.EffectiveEnd,
-			actor, req.PolicyID, rf.ThrValueDate,
+			actor, req.PolicyID, rf.ThrValueDate, req.NullHandlingDefault, rf.SlabPercentBase,
 		); err != nil {
 			api.LogErrorForResponse(w, "policy update exec: %v", err)
 			api.RespondEnvelopeError(w, http.StatusConflict, "failed to update policy (duplicate code?)", "POLICY_UPDATE_FAILED")

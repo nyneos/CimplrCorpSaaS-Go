@@ -52,6 +52,7 @@ type DetailItem struct {
 	ThrUnit                string   `json:"thr_unit"`
 	SlabVariable           string   `json:"slab_variable"`
 	SlabUnit               string   `json:"slab_unit"`
+	SlabPercentBase        string   `json:"slab_percent_base"`
 	CompBase               string   `json:"comp_base"`
 	CompTotalCheckVariable string   `json:"comp_total_check_variable"`
 	CompTotalCheckMin      *float64 `json:"comp_total_check_min"`
@@ -118,7 +119,7 @@ func loadPolicyDetail(r *http.Request, pool *pgxpool.Pool, policyID string) (*De
 	var effectiveEnd, libraryRef, subCategory, approvalMatrixID, notificationGroup, approvalWorkflow,
 		instrumentFilter, currencyFilter, tenorFilter, ratingFilter, nullHandlingDefault,
 		thrVariable, thrOperator, thrValueMode, thrPercentBase, thrUnit,
-		slabVariable, slabUnit, compBase, compTotalCheckVariable,
+		slabVariable, slabUnit, slabPercentBase, compBase, compTotalCheckVariable,
 		listTargetField, listMode, listSource, listDynamicRef,
 		formulaExpression, formulaReturnType, formulaOperator, addlExpression,
 		createdBy, lastModifiedBy *string
@@ -133,7 +134,7 @@ func loadPolicyDetail(r *http.Request, pool *pgxpool.Pool, policyID string) (*De
 		       instrument_filter, currency_filter, tenor_filter, rating_filter, rule_type,
 		       null_handling, null_handling_default,
 		       thr_variable, thr_operator, thr_value, thr_value_date::text, thr_value_mode, thr_percent_base, thr_unit,
-		       slab_variable, slab_unit, comp_base, comp_total_check_variable, comp_total_check_min, comp_total_check_max,
+		       slab_variable, slab_unit, slab_percent_base, comp_base, comp_total_check_variable, comp_total_check_min, comp_total_check_max,
 		       list_target_field, list_mode, list_source, list_dynamic_ref, list_case_sensitive,
 		       formula_expression, formula_return_type, formula_operator, formula_value, addl_expression,
 		       status, processing_status, version, effective_start::text, effective_end::text,
@@ -146,7 +147,7 @@ func loadPolicyDetail(r *http.Request, pool *pgxpool.Pool, policyID string) (*De
 		&instrumentFilter, &currencyFilter, &tenorFilter, &ratingFilter, &it.RuleType,
 		&it.NullHandling, &nullHandlingDefault,
 		&thrVariable, &thrOperator, &thrValue, &thrValueDate, &thrValueMode, &thrPercentBase, &thrUnit,
-		&slabVariable, &slabUnit, &compBase, &compTotalCheckVariable, &compTotalCheckMin, &compTotalCheckMax,
+		&slabVariable, &slabUnit, &slabPercentBase, &compBase, &compTotalCheckVariable, &compTotalCheckMin, &compTotalCheckMax,
 		&listTargetField, &listMode, &listSource, &listDynamicRef, &it.ListCaseSensitive,
 		&formulaExpression, &formulaReturnType, &formulaOperator, &formulaValue, &addlExpression,
 		&it.Status, &it.ProcessingStatus, &it.Version, &it.EffectiveStart, &effectiveEnd,
@@ -175,6 +176,7 @@ func loadPolicyDetail(r *http.Request, pool *pgxpool.Pool, policyID string) (*De
 	it.ThrUnit = strOrEmpty(thrUnit)
 	it.SlabVariable = strOrEmpty(slabVariable)
 	it.SlabUnit = strOrEmpty(slabUnit)
+	it.SlabPercentBase = strOrEmpty(slabPercentBase)
 	it.CompBase = strOrEmpty(compBase)
 	it.CompTotalCheckVariable = strOrEmpty(compTotalCheckVariable)
 	it.CompTotalCheckMin = compTotalCheckMin

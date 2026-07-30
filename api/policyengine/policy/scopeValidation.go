@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 
+	"CimplrCorpSaas/api/policyengine/runtime"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -77,6 +79,13 @@ func validatePolicyScope(
 		}
 	}
 
+	// Dynamic list refs must exist and be active in the discovery registry
+	// (and have a Go-side vetted resolver). Create, update, and import all
+	// call validatePolicyScope — so export/import inherits this for free.
+	if err := validateDynamicListRef(ctx, pool, rf); err != nil {
+		return err
+	}
+
 	// Every policy variable must be an active CDM path exposed by a selected
 	// catalog sub-module. This couples Policy authoring to the same catalog used
 	// by CDM authoring and runtime field mapping.
@@ -97,6 +106,40 @@ func validatePolicyScope(
 		if !exists {
 			return fmt.Errorf("CDM path %q is not active in the selected sub-module(s)", cdmPath)
 		}
+	}
+	return nil
+}
+
+// validateDynamicListRef rejects unknown/inactive Dynamic list refs at save
+// time so a mistyped dynamicRef never reaches breach-time evaluation.
+func validateDynamicListRef(ctx context.Context, pool *pgxpool.Pool, rf ruleFields) error {
+	src := strings.TrimSpace(rf.ListSource)
+	if src == "" {
+		src = "Static"
+	}
+	if !strings.EqualFold(src, "Dynamic") {
+		return nil
+	}
+	ref := strings.TrimSpace(rf.ListDynamicRef)
+	if ref == "" {
+		return fmt.Errorf("list: dynamicRef is required when listSource is Dynamic")
+	}
+	if !runtime.IsKnownDynamicListRef(ref) {
+		return fmt.Errorf("list: unknown dynamicRef %q", ref)
+	}
+	var active bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM policyengine_svc.dynamic_list_registry
+			 WHERE ref_code = $1
+			   AND is_active = true
+			   AND is_deleted = false
+		)`, ref).Scan(&active); err != nil {
+		return fmt.Errorf("validate dynamicRef %s: %w", ref, err)
+	}
+	if !active {
+		return fmt.Errorf("list: dynamicRef %q is unknown or inactive", ref)
 	}
 	return nil
 }
