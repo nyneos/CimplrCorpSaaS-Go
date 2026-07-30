@@ -216,6 +216,16 @@ func parseDBValue(col string, val interface{}) interface{} {
 			return f.Float64
 		}
 		return nil
+	case [16]byte:
+		// pgx scans UUID columns as [16]byte; stringify so JSON is a UUID, not a byte array.
+		return uuid.UUID(t).String()
+	case pgtype.UUID:
+		if !t.Valid {
+			return ""
+		}
+		return uuid.UUID(t.Bytes).String()
+	case uuid.UUID:
+		return t.String()
 	}
 
 	if b, ok := val.([]byte); ok {
@@ -225,6 +235,12 @@ func parseDBValue(col string, val interface{}) interface{} {
 			if err := json.Unmarshal(b, &obj); err == nil {
 				return obj
 			}
+		}
+		// UUID columns may arrive as []byte of length 16
+		if len(b) == 16 && (strings.HasSuffix(col, "_id") || col == "batch_id" || col == "file_hash") {
+			var u uuid.UUID
+			copy(u[:], b)
+			return u.String()
 		}
 		// Numeric fields
 		numericFields := map[string]bool{

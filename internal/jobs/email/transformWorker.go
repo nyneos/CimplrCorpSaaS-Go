@@ -115,6 +115,27 @@ func normalizeExt(v string) string {
 	return v
 }
 
+// splitConditionValues supports multi-select rules stored as comma-separated
+// condition_value (e.g. "pdf,xlsx"). Empty segments are dropped.
+func splitConditionValues(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, p := range parts {
+		v := strings.TrimSpace(p)
+		if v == "" {
+			continue
+		}
+		key := strings.ToLower(v)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
 // matchByMode applies PREFIX / SUFFIX / EXACT / CONTAINS / GLOB against value.
 // Case-insensitive. Empty pattern never matches.
 func matchByMode(value, pattern, mode string) bool {
@@ -141,6 +162,16 @@ func matchByMode(value, pattern, mode string) bool {
 	default:
 		return strings.Contains(v, p)
 	}
+}
+
+// matchByModeAny is true if value matches any comma-separated pattern.
+func matchByModeAny(value, patterns, mode string) bool {
+	for _, p := range splitConditionValues(patterns) {
+		if matchByMode(value, p, mode) {
+			return true
+		}
+	}
+	return false
 }
 
 // directionMatches maps UI values (INBOUND/OUTBOUND) to DB mail_direction (RECEIVED/SENT).
@@ -277,9 +308,14 @@ func ProcessAttachmentRules(ctx context.Context, pool *pgxpool.Pool, inboxID, me
 		matched := false
 		switch strings.ToUpper(strings.TrimSpace(condType)) {
 		case "FILE_EXTENSION":
-			matched = normalizeExt(condVal) == ext && ext != ""
+			for _, want := range splitConditionValues(condVal) {
+				if normalizeExt(want) == ext && ext != "" {
+					matched = true
+					break
+				}
+			}
 		case "ATTACHMENT_NAME":
-			matched = matchByMode(baseName, condVal, matchMode)
+			matched = matchByModeAny(baseName, condVal, matchMode)
 		default:
 			var sender, subject, direction string
 			var receivers []string
@@ -290,16 +326,25 @@ func ProcessAttachmentRules(ctx context.Context, pool *pgxpool.Pool, inboxID, me
 			}
 			switch strings.ToUpper(strings.TrimSpace(condType)) {
 			case "SENDER_EMAIL":
-				matched = strings.EqualFold(sender, condVal)
-			case "RECEIVER_EMAIL":
-				for _, r := range receivers {
-					if strings.EqualFold(r, condVal) {
+				for _, want := range splitConditionValues(condVal) {
+					if strings.EqualFold(sender, want) {
 						matched = true
 						break
 					}
 				}
+			case "RECEIVER_EMAIL":
+				wants := splitConditionValues(condVal)
+			outerRecv:
+				for _, r := range receivers {
+					for _, want := range wants {
+						if strings.EqualFold(r, want) {
+							matched = true
+							break outerRecv
+						}
+					}
+				}
 			case "SUBJECT_CONTAINS", "SUBJECT":
-				matched = matchByMode(subject, condVal, matchMode)
+				matched = matchByModeAny(subject, condVal, matchMode)
 			case "EMAIL_DIRECTION":
 				matched = directionMatches(direction, condVal)
 			}
