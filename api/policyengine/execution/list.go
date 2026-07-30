@@ -66,8 +66,23 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM policyengine_svc.execution_log
 				WHERE run_id IS NULL
 			)`
-		var total int
-		if err := pool.QueryRow(ctx, baseQ+` SELECT COUNT(*) FROM run_rows `+where, countArgs...).Scan(&total); err != nil {
+		var total, compliantCount, breachCount, errorCount, noApplicableCount, averageDurationMS int
+		summaryQ := baseQ + `
+			SELECT COUNT(*),
+			       COUNT(*) FILTER (WHERE outcome = 'PASS'),
+			       COUNT(*) FILTER (WHERE outcome = 'BREACH'),
+			       COUNT(*) FILTER (WHERE outcome = 'ERROR'),
+			       COUNT(*) FILTER (WHERE outcome = 'NO_APPLICABLE'),
+			       COALESCE(ROUND(AVG(total_duration_ms))::int, 0)
+			FROM run_rows ` + where
+		if err := pool.QueryRow(ctx, summaryQ, countArgs...).Scan(
+			&total,
+			&compliantCount,
+			&breachCount,
+			&errorCount,
+			&noApplicableCount,
+			&averageDurationMS,
+		); err != nil {
 			api.LogErrorForResponse(w, "execution list count: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to list execution runs", "EXECUTION_LIST_FAILED")
 			return
@@ -166,6 +181,14 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 			"total":           total,
 			"page":            page,
 			"page_size":       pageSize,
+			"summary": map[string]int{
+				"total_runs":          total,
+				"compliant_count":     compliantCount,
+				"breach_count":        breachCount,
+				"error_count":         errorCount,
+				"no_applicable_count": noApplicableCount,
+				"average_duration_ms": averageDurationMS,
+			},
 			"legacy_behavior": "execution_log rows without run_id are returned as synthetic one-policy runs",
 		})
 	}

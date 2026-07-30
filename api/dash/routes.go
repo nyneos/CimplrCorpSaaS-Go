@@ -17,6 +17,7 @@ import (
 	liqsnap "CimplrCorpSaas/api/dash/liqsnap"
 	notifDash "CimplrCorpSaas/api/dash/notification"
 	payablereceivabledash "CimplrCorpSaas/api/dash/payableReceivableDash"
+	policyenginedash "CimplrCorpSaas/api/dash/policyEngine"
 	plannedinflowoutflowdash "CimplrCorpSaas/api/dash/plannedInflowOutflowDash"
 	projectiondash "CimplrCorpSaas/api/dash/projectionDash"
 	realtimebalances "CimplrCorpSaas/api/dash/realTimeBalances"
@@ -241,4 +242,18 @@ func RegisterDashRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool
 	mux.Handle("/dash/notification/event-config", midDashFull(notifDash.GetEventConfig(pgxPool)))
 	mux.Handle("/dash/notification/failure-reasons", midDashFull(notifDash.GetFailureReasons(pgxPool)))
 	mux.Handle("/dash/notification/overview", midDashFull(notifDash.GetOverview(pgxPool)))
+
+	// ── Policy Engine Dashboard ───────────────────────────────────────────────
+	// Light chain only (Session+Global) — this dashboard only reads
+	// policyengine_svc, no Cash/FD/MF middleware preloads needed (see
+	// midDashCash's comment above on why those preloads can hang minutes).
+	mux.Handle("/dash/policy-engine/overview", midDashCash(policyenginedash.GetOverview(pgxPool)))
+	mux.Handle("/dash/policy-engine/kpi", midDashCash(policyenginedash.GetKPI(pgxPool)))
+	mux.Handle("/dash/policy-engine/result-trend", midDashCash(policyenginedash.GetResultTrend(pgxPool)))
+	mux.Handle("/dash/policy-engine/module-breakdown", midDashCash(policyenginedash.GetModuleBreakdown(pgxPool)))
+	mux.Handle("/dash/policy-engine/top-breaching", midDashCash(policyenginedash.GetTopBreaching(pgxPool)))
+	mux.Handle("/dash/policy-engine/criticality-breakdown", midDashCash(policyenginedash.GetCriticalityBreakdown(pgxPool)))
+	mux.Handle("/dash/policy-engine/module-heatmap", midDashCash(policyenginedash.GetModuleHeatmap(pgxPool)))
+	mux.Handle("/dash/policy-engine/latency-distribution", midDashCash(policyenginedash.GetLatencyDistribution(pgxPool)))
+	mux.Handle("/dash/policy-engine/logs", midDashCash(policyenginedash.GetLogs(pgxPool)))
 }
