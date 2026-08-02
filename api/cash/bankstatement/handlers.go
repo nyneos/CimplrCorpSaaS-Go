@@ -32,6 +32,10 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
+// bankStatementApproveRoute is the policy-engine API path recorded for bank
+// statement approval enforcement checks.
+const bankStatementApproveRoute = "/cash/bank-statements/v2/approve"
+
 func auditActorDisplayName(ctx context.Context, userID string) string {
 	if session := middlewares.GetSessionFromContext(ctx); session != nil {
 		if name := strings.TrimSpace(session.Name); name != "" {
@@ -1017,7 +1021,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					EntityCode:          entityID,
 					ActorUserID:         body.UserID,
 					HandlerName:         "ApproveBankStatementHandler",
-					APIPath:             "/cash/bank-statements/v2/approve",
+					APIPath:             bankStatementApproveRoute,
 					DefaultBlockMessage: "Bank statement approval blocked by policy",
 					Fields:              loadBankStatementPolicyFields(ctx, pool, bsid, entityID, actionType),
 				}); !ok {
@@ -1131,7 +1135,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					EntityCode:          entityID,
 					ActorUserID:         body.UserID,
 					HandlerName:         "ApproveBankStatementHandler",
-					APIPath:             "/cash/bank-statements/v2/approve",
+					APIPath:             bankStatementApproveRoute,
 					DefaultBlockMessage: "Bank statement approval blocked by policy",
 					Fields:              loadBankStatementPolicyFields(ctx, pool, bsid, entityID, actionType),
 				}); !ok {
@@ -1399,7 +1403,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				payload := BuildBankStatementNotifPayload(context.Background(), pool, []string{capturedID}, "APPROVE", capturedUser)
 				go catalog.TriggerNotification(
 					context.Background(), pool,
-					"/cash/bank-statements/v2/approve",
+					bankStatementApproveRoute,
 					fmt.Sprintf("BSAPPROVE/%s/%d", bsid, time.Now().UnixMilli()),
 					payload,
 				)

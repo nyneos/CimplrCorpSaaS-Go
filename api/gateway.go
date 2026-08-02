@@ -39,16 +39,17 @@ func SetGatewayPool(pool *pgxpool.Pool) {
 
 // CORS and common header constants
 const (
-	headerAccessControlAllowOrigin  = "Access-Control-Allow-Origin"
-	headerAccessControlAllowMethods = "Access-Control-Allow-Methods"
-	headerAccessControlAllowHeaders = "Access-Control-Allow-Headers"
-	headerContentType               = constants.ContentTypeText
-	contentTypeJSON                 = constants.ContentTypeJSON
-	allowOriginAll                  = "*"
-	allowMethodsAll                 = "GET, POST, PUT, DELETE, OPTIONS"
-	allowHeadersAll                 = "*"
-	errAuthServiceUnavailable       = "Auth service unavailable"
-	errMethodNotAllowed             = constants.ErrMethodNotAllowed
+	headerAccessControlAllowOrigin   = "Access-Control-Allow-Origin"
+	headerAccessControlAllowMethods  = "Access-Control-Allow-Methods"
+	headerAccessControlAllowHeaders  = "Access-Control-Allow-Headers"
+	headerContentType                = constants.ContentTypeText
+	contentTypeJSON                  = constants.ContentTypeJSON
+	allowOriginAll                   = "*"
+	allowMethodsAll                  = "GET, POST, PUT, DELETE, OPTIONS"
+	allowHeadersAll                  = "*"
+	errAuthServiceUnavailable        = "Auth service unavailable"
+	errMethodNotAllowed              = constants.ErrMethodNotAllowed
+	headerAccessControlExposeHeaders = "Access-Control-Expose-Headers"
 )
 
 // stripPathPrefix removes the configured path prefix from the request path before routing.
@@ -282,11 +283,11 @@ func createReverseProxy(target string) http.HandlerFunc {
 			resp.Header.Set(headerAccessControlAllowMethods, allowMethodsAll)
 			resp.Header.Set(headerAccessControlAllowHeaders, allowHeadersAll)
 			// Let browsers read policy pass summary set by runtime.Enforce.
-			existing := resp.Header.Get("Access-Control-Expose-Headers")
+			existing := resp.Header.Get(headerAccessControlExposeHeaders)
 			if existing == "" {
-				resp.Header.Set("Access-Control-Expose-Headers", "X-Policy-Summary, X-Trace-Id")
+				resp.Header.Set(headerAccessControlExposeHeaders, "X-Policy-Summary, X-Trace-Id")
 			} else if !strings.Contains(strings.ToLower(existing), "x-policy-summary") {
-				resp.Header.Set("Access-Control-Expose-Headers", existing+", X-Policy-Summary")
+				resp.Header.Set(headerAccessControlExposeHeaders, existing+", X-Policy-Summary")
 			}
 			return nil
 		}

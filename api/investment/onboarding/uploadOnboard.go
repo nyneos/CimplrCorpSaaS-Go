@@ -22,8 +22,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/portfolio"
 	"CimplrCorpSaas/api/investment/schemejoin"
-	"CimplrCorpSaas/api/policyengine/common"
 	_ "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/validation"
 
@@ -374,7 +374,7 @@ func parseTransactionsCSV(r io.Reader) ([]TxCSVRow, error) {
 	cr := csv.NewReader(r)
 	cr.TrimLeadingSpace = true
 	rows := []TxCSVRow{}
-	
+
 	hdr, err := cr.Read()
 	if err != nil {
 		return nil, err
@@ -480,8 +480,8 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		logger.LogInfo("[bulk] user %s (%s)", userID, userEmail)
 
-		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreUpload, "UploadInvestmentBulkk",
-			"/investment/onboard/upload", userID, userEmail,
+		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreUpload, HandlerName: "UploadInvestmentBulkk",
+			APIPath: "/investment/onboard/upload", EntityCode: userID, Actor: userEmail},
 			map[string]interface{}{"user_id": userID, "batch_id": r.FormValue("batch_id")}) {
 			return
 		}

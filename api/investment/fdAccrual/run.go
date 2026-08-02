@@ -21,6 +21,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const fdAccrualBulkGeneratePath = "/investment/fd/accrual/run/bulk-generate"
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 func getUserEmail(ctx context.Context) string {
@@ -211,8 +213,13 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			IsActive:           true,
 			CreatedBy:          userEmail,
 		}
-		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateAccrualRun",
-			"/investment/fd/accrual/run/create", req.EntityID, userEmail, buildFDAccrualPolicyFields(draftRow)) {
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreCreate,
+			HandlerName: "CreateAccrualRun",
+			APIPath:     "/investment/fd/accrual/run/create",
+			EntityCode:  req.EntityID,
+			Actor:       userEmail,
+		}, buildFDAccrualPolicyFields(draftRow)) {
 			return
 		}
 
@@ -465,8 +472,13 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
 			return
 		}
-		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreSubmit, "RunAccrual",
-			"/investment/fd/accrual/run/execute", runEntityID, userEmail, runFields) {
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreSubmit,
+			HandlerName: "RunAccrual",
+			APIPath:     "/investment/fd/accrual/run/execute",
+			EntityCode:  runEntityID,
+			Actor:       userEmail,
+		}, runFields) {
 			return
 		}
 
@@ -1128,8 +1140,13 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreSubmit, "SubmitForApproval",
-			"/investment/fd/accrual/run/submit", entityID, userEmail, buildFDAccrualPolicyFields(submitRow)) {
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreSubmit,
+			HandlerName: "SubmitForApproval",
+			APIPath:     "/investment/fd/accrual/run/submit",
+			EntityCode:  entityID,
+			Actor:       userEmail,
+		}, buildFDAccrualPolicyFields(submitRow)) {
 			return
 		}
 
@@ -1237,8 +1254,13 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveAccrualRun",
-				"/investment/fd/accrual/run/approve", approveEntityID, userEmail, runFields); !ok {
+			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreApprove,
+				HandlerName: "BulkApproveAccrualRun",
+				APIPath:     "/investment/fd/accrual/run/approve",
+				EntityCode:  approveEntityID,
+				Actor:       userEmail,
+			}, runFields); !ok {
 				res[constants.ValueSuccess] = false
 				res[constants.ValueError] = pmsg
 				results = append(results, res)
@@ -1444,8 +1466,13 @@ func BulkRejectAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectAccrualRun",
-				"/investment/fd/accrual/run/reject", rejectEntityID, userEmail, runFields); !ok {
+			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreReject,
+				HandlerName: "BulkRejectAccrualRun",
+				APIPath:     "/investment/fd/accrual/run/reject",
+				EntityCode:  rejectEntityID,
+				Actor:       userEmail,
+			}, runFields); !ok {
 				res[constants.ValueSuccess] = false
 				res[constants.ValueError] = pmsg
 				results = append(results, res)
@@ -2290,8 +2317,13 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		proposeRow = applyFDAccrualOverrideProposal(proposeRow, req.OverrideAmount, req.OverrideReasonCode, req.OverrideReasonText)
-		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "ProposeOverride",
-			"/investment/fd/accrual/override/propose", entityID, userEmail, buildFDAccrualPolicyFields(proposeRow)) {
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "ProposeOverride",
+			APIPath:     "/investment/fd/accrual/override/propose",
+			EntityCode:  entityID,
+			Actor:       userEmail,
+		}, buildFDAccrualPolicyFields(proposeRow)) {
 			return
 		}
 
@@ -2563,8 +2595,13 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
 			return
 		}
-		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreApprove, "ApproveOverride",
-			"/investment/fd/accrual/override/approve", entityID, userEmail, buildFDAccrualPolicyFields(approveOverrideRow)) {
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreApprove,
+			HandlerName: "ApproveOverride",
+			APIPath:     "/investment/fd/accrual/override/approve",
+			EntityCode:  entityID,
+			Actor:       userEmail,
+		}, buildFDAccrualPolicyFields(approveOverrideRow)) {
 			return
 		}
 
@@ -2762,8 +2799,13 @@ func RejectOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
 			return
 		}
-		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreReject, "RejectOverride",
-			"/investment/fd/accrual/override/reject", entityID, userEmail, buildFDAccrualPolicyFields(rejectOverrideRow)) {
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreReject,
+			HandlerName: "RejectOverride",
+			APIPath:     "/investment/fd/accrual/override/reject",
+			EntityCode:  entityID,
+			Actor:       userEmail,
+		}, buildFDAccrualPolicyFields(rejectOverrideRow)) {
 			return
 		}
 
@@ -3997,8 +4039,13 @@ func RecomputeAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, runResult{RunID: runID, Error: pfErr.Error()})
 				continue
 			}
-			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, common.TriggerPreSubmit, "RecomputeAccrualRun",
-				"/investment/fd/accrual/run/recompute", recomputeEntityID, userEmail, runFields); !ok {
+			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreSubmit,
+				HandlerName: "RecomputeAccrualRun",
+				APIPath:     "/investment/fd/accrual/run/recompute",
+				EntityCode:  recomputeEntityID,
+				Actor:       userEmail,
+			}, runFields); !ok {
 				results = append(results, runResult{RunID: runID, Error: pmsg})
 				continue
 			}
@@ -4173,8 +4220,13 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			PrecisionDecimals:  req.PrecisionDecimals,
 			CreatedBy:          userEmail,
 		}
-		if !fdAccrualEnforce(ctx, w, r, pgxPool, common.TriggerPreSubmit, "BulkGenerateMonthlyAccruals",
-			"/investment/fd/accrual/run/bulk-generate", req.EntityID, userEmail, buildFDAccrualPolicyFields(bulkGateRow)) {
+		if !fdAccrualEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreSubmit,
+			HandlerName: "BulkGenerateMonthlyAccruals",
+			APIPath:     fdAccrualBulkGeneratePath,
+			EntityCode:  req.EntityID,
+			Actor:       userEmail,
+		}, buildFDAccrualPolicyFields(bulkGateRow)) {
 			return
 		}
 
@@ -4238,8 +4290,13 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				IsActive:           true,
 				CreatedBy:          userEmail,
 			}
-			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "BulkGenerateMonthlyAccruals",
-				"/investment/fd/accrual/run/bulk-generate", req.EntityID, userEmail, buildFDAccrualPolicyFields(monthDraftRow)); !ok {
+			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreCreate,
+				HandlerName: "BulkGenerateMonthlyAccruals",
+				APIPath:     fdAccrualBulkGeneratePath,
+				EntityCode:  req.EntityID,
+				Actor:       userEmail,
+			}, buildFDAccrualPolicyFields(monthDraftRow)); !ok {
 				res.Error = pmsg
 				monthResults = append(monthResults, res)
 				continue
@@ -4301,8 +4358,13 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				monthResults = append(monthResults, res)
 				continue
 			}
-			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, common.TriggerPreSubmit, "BulkGenerateMonthlyAccruals",
-				"/investment/fd/accrual/run/bulk-generate", bulkRunEntityID, userEmail, runFields); !ok {
+			if ok, pmsg := fdAccrualEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreSubmit,
+				HandlerName: "BulkGenerateMonthlyAccruals",
+				APIPath:     fdAccrualBulkGeneratePath,
+				EntityCode:  bulkRunEntityID,
+				Actor:       userEmail,
+			}, runFields); !ok {
 				res.Error = pmsg
 				monthResults = append(monthResults, res)
 				continue
@@ -4345,7 +4407,7 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool,
-					"/investment/fd/accrual/run/bulk-generate", id, map[string]interface{}{
+					fdAccrualBulkGeneratePath, id, map[string]interface{}{
 						"entity_id":   eID,
 						"record_id":   id,
 						"event":       "FD_ACCRUAL_AUTO_GENERATED",

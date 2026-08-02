@@ -18,6 +18,9 @@ import (
 // longer requires hand-writing a SQL migration file the way FD Booking's did
 // (database/2026-07-19/fd_booking_catalog_seed.sql) — call these instead.
 
+// errInvalidRequestBody is the shared decode-failure error message for this file's handlers.
+const errInvalidRequestBody = "invalid request body"
+
 func actor(r *http.Request) string {
 	if name := api.GetUserNameFromCtx(r.Context()); name != "" {
 		return name
@@ -62,9 +65,28 @@ func catalogCDMText(moduleCode, subModuleCode, fieldCode, label, description str
 	return desc, canonicalRef, userAlias
 }
 
+// cdmSyncInput groups the catalog-field attributes needed to upsert
+// policyengine_svc.cdm_variable for a single field (keeps syncCDMVariableFromCatalog's
+// parameter count within the lint limit).
+type cdmSyncInput struct {
+	subModuleCode string
+	fieldCode     string
+	cdmPath       string
+	dataType      string
+	unit          string
+	label         string
+	description   string
+	nullable      bool
+	who           string
+}
+
 // syncCDMVariableFromCatalog upserts policyengine_svc.cdm_variable for a catalog field.
 // source_system is the sub_module_code (matches CDM UI create) so View form can resolve Module/Sub-module.
-func syncCDMVariableFromCatalog(ctx context.Context, tx pgx.Tx, subModuleCode, fieldCode, cdmPath, dataType, unit, label, description string, nullable bool, who string) error {
+func syncCDMVariableFromCatalog(ctx context.Context, tx pgx.Tx, in cdmSyncInput) error {
+	subModuleCode, fieldCode, cdmPath := in.subModuleCode, in.fieldCode, in.cdmPath
+	dataType, unit, label, description := in.dataType, in.unit, in.label, in.description
+	nullable := in.nullable
+
 	cdmDomain, err := cdmDomainForSubModule(ctx, tx, subModuleCode)
 	if err != nil {
 		return err
@@ -76,7 +98,7 @@ func syncCDMVariableFromCatalog(ctx context.Context, tx pgx.Tx, subModuleCode, f
 	).Scan(&moduleCode)
 
 	desc, canonicalRef, userAlias := catalogCDMText(moduleCode, subModuleCode, fieldCode, label, description)
-	who = strings.TrimSpace(who)
+	who := strings.TrimSpace(in.who)
 	if who == "" {
 		who = "domain_catalog_api"
 	}
@@ -233,7 +255,7 @@ func HandleModuleUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req moduleUpsertReq
 		if err := decodeJSON(r, &req); err != nil {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")
 			return
 		}
 		req.ModuleCode = strings.TrimSpace(req.ModuleCode)
@@ -279,7 +301,7 @@ func HandleModuleAliasUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req moduleAliasUpsertReq
 		if err := decodeJSON(r, &req); err != nil {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")
 			return
 		}
 		req.ModuleCode = strings.TrimSpace(req.ModuleCode)
@@ -325,7 +347,7 @@ func HandleSubModuleUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req subModuleUpsertReq
 		if err := decodeJSON(r, &req); err != nil {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")
 			return
 		}
 		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
@@ -368,7 +390,7 @@ func HandleSubModuleAliasUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req subModuleAliasUpsertReq
 		if err := decodeJSON(r, &req); err != nil {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")
 			return
 		}
 		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
@@ -421,7 +443,7 @@ func HandlePartUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req partUpsertReq
 		if err := decodeJSON(r, &req); err != nil {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")
 			return
 		}
 		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
@@ -478,7 +500,7 @@ func HandlePartAliasUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req partAliasUpsertReq
 		if err := decodeJSON(r, &req); err != nil {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")
 			return
 		}
 		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
@@ -542,7 +564,7 @@ func HandleFieldUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req fieldUpsertReq
 		if err := decodeJSON(r, &req); err != nil {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")
 			return
 		}
 		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
@@ -606,8 +628,17 @@ func HandleFieldUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if trimmedPath != "" {
 			who := actor(r)
-			if err := syncCDMVariableFromCatalog(r.Context(), tx, req.SubModuleCode, req.FieldCode, trimmedPath,
-				req.DataType, req.Unit, req.Label, req.Description, nullable, who); err != nil {
+			if err := syncCDMVariableFromCatalog(r.Context(), tx, cdmSyncInput{
+				subModuleCode: req.SubModuleCode,
+				fieldCode:     req.FieldCode,
+				cdmPath:       trimmedPath,
+				dataType:      req.DataType,
+				unit:          req.Unit,
+				label:         req.Label,
+				description:   req.Description,
+				nullable:      nullable,
+				who:           who,
+			}); err != nil {
 				api.LogErrorForResponse(w, "domain-catalog field upsert: cdm_variable sync failed: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, "field saved but cdm_variable sync failed", "")
 				return
@@ -654,7 +685,7 @@ func HandleFieldAliasUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req fieldAliasUpsertReq
 		if err := decodeJSON(r, &req); err != nil {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")
 			return
 		}
 		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
@@ -740,7 +771,7 @@ func HandleBulkFieldsUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req bulkFieldsUpsertReq
 		if err := decodeJSON(r, &req); err != nil {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")
 			return
 		}
 		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
@@ -819,8 +850,17 @@ func HandleBulkFieldsUpsert(pool *pgxpool.Pool) http.HandlerFunc {
 			fieldsUpserted++
 
 			if trimmedPath != "" {
-				if err := syncCDMVariableFromCatalog(r.Context(), tx, req.SubModuleCode, fieldCode, trimmedPath,
-					dataType, f.Unit, label, f.Description, nullable, who); err != nil {
+				if err := syncCDMVariableFromCatalog(r.Context(), tx, cdmSyncInput{
+					subModuleCode: req.SubModuleCode,
+					fieldCode:     fieldCode,
+					cdmPath:       trimmedPath,
+					dataType:      dataType,
+					unit:          f.Unit,
+					label:         label,
+					description:   f.Description,
+					nullable:      nullable,
+					who:           who,
+				}); err != nil {
 					api.LogErrorForResponse(w, "domain-catalog bulk field upsert: cdm_variable sync failed for %s: %v", trimmedPath, err)
 					api.RespondEnvelopeError(w, http.StatusInternalServerError, "field_code="+fieldCode+" saved but cdm_variable sync failed", "")
 					return

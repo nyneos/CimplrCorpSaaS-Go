@@ -22,6 +22,8 @@ import (
 	"CimplrCorpSaas/internal/validation"
 )
 
+const errProposalNotFound = "Proposal not found: "
+
 // V2 API handlers for new schema with base_currency_code, maturity_date, bank info
 // PERFORMANCE OPTIMIZED for bulk operations (10K-100K records)
 
@@ -175,7 +177,7 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, proposalID := range req.ProposalIDs {
 			row, rowErr := loadCashflowProjectionRow(ctx, pgxPool, proposalID)
 			if rowErr != nil {
-				api.RespondWithError(w, http.StatusNotFound, "Proposal not found: "+rowErr.Error())
+				api.RespondWithError(w, http.StatusNotFound, errProposalNotFound+rowErr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -292,7 +294,7 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 		for _, proposalID := range req.ProposalIDs {
 			row, rowErr := loadCashflowProjectionRow(ctx, pgxPool, proposalID)
 			if rowErr != nil {
-				api.RespondWithError(w, http.StatusNotFound, "Proposal not found: "+rowErr.Error())
+				api.RespondWithError(w, http.StatusNotFound, errProposalNotFound+rowErr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -459,7 +461,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 		for _, proposalID := range req.ProposalIDs {
 			row, rowErr := loadCashflowProjectionRow(ctx, pgxPool, proposalID)
 			if rowErr != nil {
-				api.RespondWithError(w, http.StatusNotFound, "Proposal not found: "+rowErr.Error())
+				api.RespondWithError(w, http.StatusNotFound, errProposalNotFound+rowErr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -920,7 +922,7 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&oldProposalName, &oldBaseCurrency, &oldEffectiveDate, &processingStatus, &isDeleted, &deletedAt, &deletedBy,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Proposal not found: "+err.Error())
+			api.RespondWithError(w, http.StatusNotFound, errProposalNotFound+err.Error())
 			return
 		}
 		if err := validateProjectionCashScope(ctx, map[string]interface{}{
@@ -1483,7 +1485,7 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var oldDate time.Time
 		q := `SELECT proposal_name, base_currency_code, effective_date FROM cimplrcorpsaas.cashflow_proposal WHERE proposal_id=$1`
 		if err := tx.QueryRow(ctx, q, req.ProposalID).Scan(&oldName, &oldCurrency, &oldDate); err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Proposal not found: "+err.Error())
+			api.RespondWithError(w, http.StatusNotFound, errProposalNotFound+err.Error())
 			return
 		}
 

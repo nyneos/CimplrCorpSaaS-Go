@@ -35,12 +35,7 @@ func deliveryAuditFromOutcome(destType, location, errMsg string) map[string]inte
 			out["delivery_status"] = "OK"
 			out["delivery_detail"] = loc
 		}
-	case "LOCAL":
-		if loc != "" {
-			out["delivery_status"] = "OK"
-			out["delivery_detail"] = loc
-		}
-	default: // S3
+	default: // S3, LOCAL
 		if loc != "" {
 			out["delivery_status"] = "OK"
 			out["delivery_detail"] = loc

@@ -25,6 +25,9 @@ import (
 
 var tenureTypeBackfillOnce sync.Once
 
+// dateLayoutISO is the Go reference layout for ISO-8601 (YYYY-MM-DD) dates.
+const dateLayoutISO = "2006-01-02"
+
 // deriveTenureType resolves DAYS | MONTHS | YEARS when tenure_type is blank.
 func deriveTenureType(tenureType string, tenureYears, tenureMonths, tenureDays int) string {
 	if v := strings.ToUpper(strings.TrimSpace(tenureType)); v != "" {
@@ -1047,42 +1050,42 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if !fdEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "ActivateFD", "/investment/fd/master/activate",
-			fdSubMaster, rec.EntityID, userEmail, buildFDMasterPolicyFields(fdMasterRow{
-				BookingID:               rec.BookingID,
-				ConfirmationID:          rec.ConfirmationID,
-				EntityID:                rec.EntityID,
-				EntityName:              rec.EntityName,
-				BankID:                  rec.BankID,
-				BankName:                rec.BankName,
-				BankFDRefNo:             bankRef,
-				BankReferenceNumber:     rec.BankReferenceNumber,
-				PrincipalAmount:         rec.PrincipalAmount,
-				InterestTypeCode:        rec.InterestTypeCode,
-				InterestRate:            rec.InterestRate,
-				TenureDays:              rec.TenorDays,
-				TenureMonths:            rec.TenorMonths,
-				TenureYears:             rec.TenureYears,
-				TenureType:              rec.TenureType,
-				StartDate:               rec.ValueDate.Format("2006-01-02"),
-				MaturityDate:            rec.MaturityDate.Format("2006-01-02"),
-				FrequencyID:             rec.FrequencyID,
-				InterestPayoutFrequency: rec.InterestPayoutFrequency,
-				PayoutFrequencyID:       rec.InterestPayoutFrequency,
-				TDSPlanID:               rec.TDSPlanID,
-				BankConfigID:            rec.BankConfigID,
-				DayCountCode:            rec.DayCountConvention,
-				SourceAccountID:         rec.BankAccountID,
-				AutoRenewal:             rec.AutoRenewal,
-				FDStatus:                "PENDING_ACTIVATION",
-				AccrualFrequencyCode:    rec.AccrualFrequencyCode,
-				ResetType:               rec.ResetType,
-				PenaltyID:               rec.PenaltyID,
-				FirstPayoutDate:         rec.FirstPayoutDate.Format("2006-01-02"),
-				FirstCapitalizationDate: rec.FirstCapitalizationDate.Format("2006-01-02"),
-				ReceiptDate:             receiptDate.Format("2006-01-02"),
-				PrematureClosureTerms:   rec.PrematureClosureTerms,
-			})) {
+		if !fdEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "ActivateFD", APIPath: "/investment/fd/master/activate",
+			SubModule: fdSubMaster, EntityCode: rec.EntityID, Actor: userEmail}, buildFDMasterPolicyFields(fdMasterRow{
+			BookingID:               rec.BookingID,
+			ConfirmationID:          rec.ConfirmationID,
+			EntityID:                rec.EntityID,
+			EntityName:              rec.EntityName,
+			BankID:                  rec.BankID,
+			BankName:                rec.BankName,
+			BankFDRefNo:             bankRef,
+			BankReferenceNumber:     rec.BankReferenceNumber,
+			PrincipalAmount:         rec.PrincipalAmount,
+			InterestTypeCode:        rec.InterestTypeCode,
+			InterestRate:            rec.InterestRate,
+			TenureDays:              rec.TenorDays,
+			TenureMonths:            rec.TenorMonths,
+			TenureYears:             rec.TenureYears,
+			TenureType:              rec.TenureType,
+			StartDate:               rec.ValueDate.Format(dateLayoutISO),
+			MaturityDate:            rec.MaturityDate.Format(dateLayoutISO),
+			FrequencyID:             rec.FrequencyID,
+			InterestPayoutFrequency: rec.InterestPayoutFrequency,
+			PayoutFrequencyID:       rec.InterestPayoutFrequency,
+			TDSPlanID:               rec.TDSPlanID,
+			BankConfigID:            rec.BankConfigID,
+			DayCountCode:            rec.DayCountConvention,
+			SourceAccountID:         rec.BankAccountID,
+			AutoRenewal:             rec.AutoRenewal,
+			FDStatus:                "PENDING_ACTIVATION",
+			AccrualFrequencyCode:    rec.AccrualFrequencyCode,
+			ResetType:               rec.ResetType,
+			PenaltyID:               rec.PenaltyID,
+			FirstPayoutDate:         rec.FirstPayoutDate.Format(dateLayoutISO),
+			FirstCapitalizationDate: rec.FirstCapitalizationDate.Format(dateLayoutISO),
+			ReceiptDate:             receiptDate.Format(dateLayoutISO),
+			PrematureClosureTerms:   rec.PrematureClosureTerms,
+		})) {
 			return
 		}
 
@@ -1265,8 +1268,8 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, fdID+": fd master not found")
 				continue
 			}
-			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveActivation",
-				"/investment/fd/master/bulk-approve", fdSubMaster, approveRow.EntityID, userEmail,
+			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreApprove, HandlerName: "BulkApproveActivation",
+				APIPath: "/investment/fd/master/bulk-approve", SubModule: fdSubMaster, EntityCode: approveRow.EntityID, Actor: userEmail},
 				buildFDMasterPolicyFields(approveRow)); !ok {
 				errors = append(errors, fdID+": "+pmsg)
 				continue
@@ -1440,8 +1443,8 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, fdID+": fd master not found")
 				continue
 			}
-			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectActivation",
-				"/investment/fd/master/bulk-reject", fdSubMaster, rejectRow.EntityID, userEmail,
+			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreReject, HandlerName: "BulkRejectActivation",
+				APIPath: "/investment/fd/master/bulk-reject", SubModule: fdSubMaster, EntityCode: rejectRow.EntityID, Actor: userEmail},
 				buildFDMasterPolicyFields(rejectRow)); !ok {
 				errors = append(errors, fdID+": "+pmsg)
 				continue
@@ -2495,8 +2498,8 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bulkApproveCFRow, _ := loadFDCashflowRow(ctx, pgxPool, cashflowID)
 			bulkApproveCFFields := buildFDCashflowPolicyFields(bulkApproveCFRow)
 			bulkApproveCFFields["audit_id"] = auditID
-			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveCashflowEdit",
-				"/investment/fd/master/cashflow/bulk-approve", fdSubCashflow, bulkApproveCFRow.EntityID, userEmail,
+			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreApprove, HandlerName: "BulkApproveCashflowEdit",
+				APIPath: "/investment/fd/master/cashflow/bulk-approve", SubModule: fdSubCashflow, EntityCode: bulkApproveCFRow.EntityID, Actor: userEmail},
 				bulkApproveCFFields); !ok {
 				errs = append(errs, cashflowID+": "+pmsg)
 				continue
@@ -2653,8 +2656,8 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bulkRejectCFRow, _ := loadFDCashflowRow(ctx, pgxPool, cashflowID)
 			bulkRejectCFFields := buildFDCashflowPolicyFields(bulkRejectCFRow)
 			bulkRejectCFFields["audit_id"] = auditID
-			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectCashflowEdit",
-				"/investment/fd/master/cashflow/bulk-reject", fdSubCashflow, bulkRejectCFRow.EntityID, userEmail,
+			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreReject, HandlerName: "BulkRejectCashflowEdit",
+				APIPath: "/investment/fd/master/cashflow/bulk-reject", SubModule: fdSubCashflow, EntityCode: bulkRejectCFRow.EntityID, Actor: userEmail},
 				bulkRejectCFFields); !ok {
 				errs = append(errs, cashflowID+": "+pmsg)
 				continue
@@ -2850,8 +2853,8 @@ func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			bulkDeleteCFRow, _ := loadFDCashflowRow(ctx, pgxPool, cashflowID)
-			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, common.TriggerPreDelete, "BulkDeleteCashflow",
-				"/investment/fd/master/cashflow/bulk-delete", fdSubCashflow, bulkDeleteCFRow.EntityID, userEmail,
+			if ok, pmsg := fdEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "BulkDeleteCashflow",
+				APIPath: "/investment/fd/master/cashflow/bulk-delete", SubModule: fdSubCashflow, EntityCode: bulkDeleteCFRow.EntityID, Actor: userEmail},
 				buildFDCashflowPolicyFields(bulkDeleteCFRow)); !ok {
 				errs = append(errs, cashflowID+": "+pmsg)
 				continue
@@ -3097,13 +3100,13 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			editCashflowRow.EventType = *snap.eventType
 		}
 		if snap.eventDate != nil {
-			editCashflowRow.EventDate = snap.eventDate.Format("2006-01-02")
+			editCashflowRow.EventDate = snap.eventDate.Format(dateLayoutISO)
 		}
 		if snap.periodStart != nil {
-			editCashflowRow.PeriodStartDate = snap.periodStart.Format("2006-01-02")
+			editCashflowRow.PeriodStartDate = snap.periodStart.Format(dateLayoutISO)
 		}
 		if snap.periodEnd != nil {
-			editCashflowRow.PeriodEndDate = snap.periodEnd.Format("2006-01-02")
+			editCashflowRow.PeriodEndDate = snap.periodEnd.Format(dateLayoutISO)
 		}
 		if snap.periodDays != nil {
 			editCashflowRow.PeriodDays = *snap.periodDays
@@ -3160,7 +3163,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			editCashflowRow.BankConfirmed = *snap.bankConfirm
 		}
 		if snap.bankConfDate != nil {
-			editCashflowRow.BankConfirmedDate = snap.bankConfDate.Format("2006-01-02")
+			editCashflowRow.BankConfirmedDate = snap.bankConfDate.Format(dateLayoutISO)
 		}
 		if snap.bankRef != nil {
 			editCashflowRow.BankReference = *snap.bankRef
@@ -3183,8 +3186,8 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if snap.receiptClr != nil {
 			editCashflowRow.ReceiptCleared = *snap.receiptClr
 		}
-		if !fdEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "EditCashflowLineItem",
-			"/investment/fd/master/cashflow/edit", fdSubCashflow, entityID, userEmail,
+		if !fdEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "EditCashflowLineItem",
+			APIPath: "/investment/fd/master/cashflow/edit", SubModule: fdSubCashflow, EntityCode: entityID, Actor: userEmail},
 			buildFDCashflowPolicyFields(editCashflowRow)) {
 			return
 		}
@@ -3645,8 +3648,8 @@ func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		approveCFRow, _ := loadFDCashflowRow(ctx, pgxPool, cashflowID)
 		approveCFFields := buildFDCashflowPolicyFields(approveCFRow)
 		approveCFFields["audit_id"] = req.AuditID
-		if !fdEnforce(ctx, w, r, pgxPool, common.TriggerPreApprove, "ApproveCashflowEdit",
-			"/investment/fd/master/cashflow/approve", fdSubCashflow, approveCFRow.EntityID, userEmail,
+		if !fdEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreApprove, HandlerName: "ApproveCashflowEdit",
+			APIPath: "/investment/fd/master/cashflow/approve", SubModule: fdSubCashflow, EntityCode: approveCFRow.EntityID, Actor: userEmail},
 			approveCFFields) {
 			return
 		}
@@ -3751,8 +3754,8 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rejectCFRow, _ := loadFDCashflowRow(ctx, pgxPool, cashflowID)
 		rejectCFFields := buildFDCashflowPolicyFields(rejectCFRow)
 		rejectCFFields["audit_id"] = req.AuditID
-		if !fdEnforce(ctx, w, r, pgxPool, common.TriggerPreReject, "RejectCashflowEdit",
-			"/investment/fd/master/cashflow/reject", fdSubCashflow, rejectCFRow.EntityID, userEmail,
+		if !fdEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreReject, HandlerName: "RejectCashflowEdit",
+			APIPath: "/investment/fd/master/cashflow/reject", SubModule: fdSubCashflow, EntityCode: rejectCFRow.EntityID, Actor: userEmail},
 			rejectCFFields) {
 			return
 		}
@@ -3931,8 +3934,8 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		)
 
 		deleteCFRow, _ := loadFDCashflowRow(ctx, pgxPool, req.CashflowID)
-		if !fdEnforce(ctx, w, r, pgxPool, common.TriggerPreDelete, "DeleteCashflowLineItem",
-			"/investment/fd/master/cashflow/delete", fdSubCashflow, deleteCFRow.EntityID, userEmail,
+		if !fdEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "DeleteCashflowLineItem",
+			APIPath: "/investment/fd/master/cashflow/delete", SubModule: fdSubCashflow, EntityCode: deleteCFRow.EntityID, Actor: userEmail},
 			buildFDCashflowPolicyFields(deleteCFRow)) {
 			return
 		}
@@ -4104,8 +4107,8 @@ func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		approveDelCFRow, _ := loadFDCashflowRow(ctx, pgxPool, cashflowID)
 		approveDelCFFields := buildFDCashflowPolicyFields(approveDelCFRow)
 		approveDelCFFields["audit_id"] = req.AuditID
-		if !fdEnforce(ctx, w, r, pgxPool, common.TriggerPreApprove, "ApproveDeleteCashflow",
-			"/investment/fd/master/cashflow/approve-delete", fdSubCashflow, approveDelCFRow.EntityID, userEmail,
+		if !fdEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreApprove, HandlerName: "ApproveDeleteCashflow",
+			APIPath: "/investment/fd/master/cashflow/approve-delete", SubModule: fdSubCashflow, EntityCode: approveDelCFRow.EntityID, Actor: userEmail},
 			approveDelCFFields) {
 			return
 		}

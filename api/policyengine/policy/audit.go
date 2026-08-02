@@ -73,14 +73,22 @@ func insertCreateAudit(r *http.Request, tx pgx.Tx, policyID, actor, ip string, r
 	return a.exec(r, tx, "policyengine_svc.policy_master_audit")
 }
 
+// editAuditActor groups the requester identity fields for insertEditAudit so the
+// function stays within the project's max-params limit.
+type editAuditActor struct {
+	PolicyID string
+	Actor    string
+	IP       string
+}
+
 // insertEditAudit records old_/new_ pairs for an EDIT request so a reject can revert.
-func insertEditAudit(r *http.Request, tx pgx.Tx, policyID, actor, ip string, old *DetailItem, req createReq, rf ruleFields) error {
+func insertEditAudit(r *http.Request, tx pgx.Tx, who editAuditActor, old *DetailItem, req createReq, rf ruleFields) error {
 	a := &auditRow{}
-	a.set("policy_id", policyID)
+	a.set("policy_id", who.PolicyID)
 	a.set("action_type", "EDIT")
 	a.set("processing_status", "PENDING_EDIT_APPROVAL")
-	a.set("requested_by", actor)
-	a.set("requested_ip", common.NullIfEmpty(ip))
+	a.set("requested_by", who.Actor)
+	a.set("requested_ip", common.NullIfEmpty(who.IP))
 
 	pair := func(col string, oldVal, newVal interface{}) {
 		a.set("old_"+col, oldVal)

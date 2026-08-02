@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const dateLayoutISO = "2006-01-02"
+
 type createReq struct {
 	Code              string `json:"code"`
 	Name              string `json:"name"`
@@ -135,11 +137,11 @@ func validateEffectiveWindow(start, end string) string {
 	if start == "" || end == "" {
 		return ""
 	}
-	s, err := time.Parse("2006-01-02", start)
+	s, err := time.Parse(dateLayoutISO, start)
 	if err != nil {
 		return "effective_start must be a yyyy-mm-dd date"
 	}
-	e, err := time.Parse("2006-01-02", end)
+	e, err := time.Parse(dateLayoutISO, end)
 	if err != nil {
 		return "effective_end must be a yyyy-mm-dd date"
 	}
@@ -175,11 +177,10 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
 			return
 		}
-		if err := validatePolicyScope(
-			r.Context(), pool,
-			req.Modules, req.SubModules, req.TriggerEvents,
-			req.ActionOnBreach, rf, req.AddlExpression,
-		); err != nil {
+		if err := validatePolicyScope(r.Context(), pool, policyScopeInput{
+			Modules: req.Modules, SubModules: req.SubModules, TriggerEvents: req.TriggerEvents,
+			ActionOnBreach: req.ActionOnBreach, RF: rf, AddlExpression: req.AddlExpression,
+		}); err != nil {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "POLICY_SCOPE_INVALID")
 			return
 		}
@@ -199,7 +200,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.EffectiveStart == "" {
-			req.EffectiveStart = time.Now().UTC().Format("2006-01-02")
+			req.EffectiveStart = time.Now().UTC().Format(dateLayoutISO)
 		}
 		actor := common.RequestActor(r, req.ActorID)
 		ip := common.RequestIP(r)
@@ -260,7 +261,11 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := insertPolicyChildren(r, tx, policyID, req.TriggerEvents, req.Modules, req.SubModules, req.EntitiesInclude, req.EntitiesExclude, req.RuleType, rf); err != nil {
+		if err := insertPolicyChildren(r, tx, policyID, policyChildrenSpec{
+			TriggerEvents: req.TriggerEvents, Modules: req.Modules, SubModules: req.SubModules,
+			EntitiesInclude: req.EntitiesInclude, EntitiesExclude: req.EntitiesExclude,
+			RuleType: req.RuleType, RF: rf,
+		}); err != nil {
 			api.LogErrorForResponse(w, "policy create children: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach triggers/modules/rule rows (unknown code?)", "POLICY_CREATE_FAILED")
 			return

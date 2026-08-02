@@ -20,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errFailedToFetchSweepConfigForPolicyCheck = "failed to fetch sweep config for policy check: "
+
 func validateSweepConfigV2Scope(ctx context.Context, entityName, sourceBank, sourceAccount, targetBank, targetAccount string) string {
 	return validation.ValidateCashMasterReferences(ctx, map[string]interface{}{
 		"entity_name":           entityName,
@@ -1043,7 +1045,7 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, sweepID := range req.SweepIDs {
 			policyRow, perr := loadSweepConfigRow(ctx, pgxPool, sweepID)
 			if perr != nil {
-				api.RespondWithResult(w, false, "failed to fetch sweep config for policy check: "+perr.Error())
+				api.RespondWithResult(w, false, errFailedToFetchSweepConfigForPolicyCheck+perr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -1190,7 +1192,7 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, sweepID := range req.SweepIDs {
 			policyRow, perr := loadSweepConfigRow(ctx, pgxPool, sweepID)
 			if perr != nil {
-				api.RespondWithResult(w, false, "failed to fetch sweep config for policy check: "+perr.Error())
+				api.RespondWithResult(w, false, errFailedToFetchSweepConfigForPolicyCheck+perr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -1278,7 +1280,7 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 		for _, sweepID := range req.SweepIDs {
 			policyRow, perr := loadSweepConfigRow(ctx, pgxPool, sweepID)
 			if perr != nil {
-				api.RespondWithResult(w, false, "failed to fetch sweep config for policy check: "+perr.Error())
+				api.RespondWithResult(w, false, errFailedToFetchSweepConfigForPolicyCheck+perr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{

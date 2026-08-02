@@ -20,6 +20,11 @@ const (
 	DestAPI   = "API"
 )
 
+const (
+	errInvalidJSONBody = "Invalid JSON body"
+	errRuleIDRequired  = "rule_id is required"
+)
+
 type TransformationRule struct {
 	RuleID           string          `json:"rule_id,omitempty"`
 	InboxID          string          `json:"inbox_id"`
@@ -249,7 +254,7 @@ func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 
 	var req listReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		emailcommon.RespondBadRequest(w, "Invalid JSON body")
+		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
 
@@ -296,7 +301,7 @@ func handleCreate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 
 	var req TransformationRule
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		emailcommon.RespondBadRequest(w, "Invalid JSON body")
+		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
 	if req.InboxID == "" || req.RuleName == "" || req.ConditionType == "" || req.MappingID == "" {
@@ -364,11 +369,11 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 
 	var req TransformationRule
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		emailcommon.RespondBadRequest(w, "Invalid JSON body")
+		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
 	if req.RuleID == "" {
-		emailcommon.RespondBadRequest(w, "rule_id is required")
+		emailcommon.RespondBadRequest(w, errRuleIDRequired)
 		return
 	}
 
@@ -439,11 +444,11 @@ func handleDelete(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 
 	var req deleteReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		emailcommon.RespondBadRequest(w, "Invalid JSON body")
+		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
 	if req.RuleID == "" {
-		emailcommon.RespondBadRequest(w, "rule_id is required")
+		emailcommon.RespondBadRequest(w, errRuleIDRequired)
 		return
 	}
 	comment := strings.TrimSpace(req.CheckerComment)
@@ -483,11 +488,11 @@ func handleApprove(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 
 	var req approveRejectReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		emailcommon.RespondBadRequest(w, "Invalid JSON body")
+		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
 	if req.RuleID == "" {
-		emailcommon.RespondBadRequest(w, "rule_id is required")
+		emailcommon.RespondBadRequest(w, errRuleIDRequired)
 		return
 	}
 
@@ -597,11 +602,11 @@ func handleReject(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 
 	var req approveRejectReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		emailcommon.RespondBadRequest(w, "Invalid JSON body")
+		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
 	if req.RuleID == "" {
-		emailcommon.RespondBadRequest(w, "rule_id is required")
+		emailcommon.RespondBadRequest(w, errRuleIDRequired)
 		return
 	}
 
@@ -689,12 +694,12 @@ func handleAuditLog(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 		RuleID string `json:"rule_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		emailcommon.RespondBadRequest(w, "Invalid JSON body")
+		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
 	ruleID := strings.TrimSpace(req.RuleID)
 	if ruleID == "" {
-		emailcommon.RespondBadRequest(w, "rule_id is required")
+		emailcommon.RespondBadRequest(w, errRuleIDRequired)
 		return
 	}
 

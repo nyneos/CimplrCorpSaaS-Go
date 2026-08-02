@@ -70,9 +70,14 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 		auditOld := auditOldFromHeader(hdr)
 
 		excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
-		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "EditVariance", "/investment/fd/receipt/exception/edit",
-			fdSubException, excEntityID, userEmail,
-			buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID))) {
+		if !fdEnforce(ctx, w, r, pool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "EditVariance",
+			APIPath:     "/investment/fd/receipt/exception/edit",
+			SubModule:   fdSubException,
+			EntityCode:  excEntityID,
+			Actor:       userEmail,
+		}, buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID))) {
 			return
 		}
 
@@ -200,9 +205,14 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		// ResolveException handler in receipt.go instead (see routes.go).
 		// Fields kept in sync here anyway for whenever/if this handler is wired up.
 		excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
-		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "ResolveVariance", "/investment/fd/receipt/exception/resolve",
-			fdSubException, excEntityID, userEmail,
-			buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID))) {
+		if !fdEnforce(ctx, w, r, pool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "ResolveVariance",
+			APIPath:     "/investment/fd/receipt/exception/resolve",
+			SubModule:   fdSubException,
+			EntityCode:  excEntityID,
+			Actor:       userEmail,
+		}, buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID))) {
 			return
 		}
 
@@ -328,9 +338,14 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
-			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "ApproveVariance",
-				"/investment/fd/receipt/exception/approve", fdSubException, excEntityID, userEmail,
-				buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID))); !ok {
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{
+				EventCode:   common.TriggerPreApprove,
+				HandlerName: "ApproveVariance",
+				APIPath:     "/investment/fd/receipt/exception/approve",
+				SubModule:   fdSubException,
+				EntityCode:  excEntityID,
+				Actor:       userEmail,
+			}, buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID))); !ok {
 				res["error"] = pmsg
 				results = append(results, res)
 				continue
@@ -431,9 +446,14 @@ func closeOneVariance(ctx context.Context, r *http.Request, pool *pgxpool.Pool, 
 	// Policy check — CloseException was live and routed with zero
 	// enforcement anywhere in its call chain. Added 2026-07-27.
 	excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
-	if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "CloseException",
-		"/investment/fd/exception/close", "FD_EXCEPTION", excEntityID, userEmail,
-		buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID))); !ok {
+	if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{
+		EventCode:   common.TriggerPreApprove,
+		HandlerName: "CloseException",
+		APIPath:     "/investment/fd/exception/close",
+		SubModule:   fdSubException,
+		EntityCode:  excEntityID,
+		Actor:       userEmail,
+	}, buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID))); !ok {
 		res["error"] = pmsg
 		return res
 	}
@@ -631,9 +651,14 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
-			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "RejectVariance",
-				"/investment/fd/receipt/exception/reject", fdSubException, excEntityID, userEmail,
-				buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID))); !ok {
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{
+				EventCode:   common.TriggerPreReject,
+				HandlerName: "RejectVariance",
+				APIPath:     "/investment/fd/receipt/exception/reject",
+				SubModule:   fdSubException,
+				EntityCode:  excEntityID,
+				Actor:       userEmail,
+			}, buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID))); !ok {
 				res["error"] = pmsg
 				results = append(results, res)
 				continue

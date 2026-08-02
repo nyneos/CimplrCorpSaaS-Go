@@ -136,7 +136,14 @@ func PreviewBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 			}
 		} else {
 			// Single file processing (XLSX, XLS, CSV)
-			transactions, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, header.Filename, useMapping, mappings, accountOverride, false)
+			transactions, err := processSingleFilePreviewFlat(ctx, pool, processSingleFilePreviewFlatParams{
+				fileBytes:       fileBytes,
+				filename:        header.Filename,
+				useMapping:      useMapping,
+				mappings:        mappings,
+				accountOverride: accountOverride,
+				fromPDFConvert:  false,
+			})
 			if err != nil {
 				http.Error(w, "File processing failed: "+err.Error(), http.StatusInternalServerError)
 				return
@@ -186,7 +193,12 @@ func processZipPreviewFlat(ctx context.Context, pool *pgxpool.Pool, zipBytes []b
 			continue
 		}
 
-		transactions, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, f.Name, useMapping, mappings, "", false)
+		transactions, err := processSingleFilePreviewFlat(ctx, pool, processSingleFilePreviewFlatParams{
+			fileBytes:  fileBytes,
+			filename:   f.Name,
+			useMapping: useMapping,
+			mappings:   mappings,
+		})
 		if err != nil {
 			// Skip files with errors, continue processing others
 			continue
@@ -306,10 +318,26 @@ func resolveAccountForPreviewWithLLMFallback(ctx context.Context, pool *pgxpool.
 	return resolveMasterBankAccountForPreview(ctx, pool, info.AccountNumber, filename, rows)
 }
 
+// processSingleFilePreviewFlatParams groups the file/parsing options for
+// processSingleFilePreviewFlat so the function stays within the parameter-count limit.
+type processSingleFilePreviewFlatParams struct {
+	fileBytes       []byte
+	filename        string
+	useMapping      bool
+	mappings        *ColumnMappings
+	accountOverride string
+	fromPDFConvert  bool
+}
+
 // processSingleFilePreviewFlat parses file and categorizes WITHOUT any DB writes
 // Uses EXACT same parsing logic as UploadBankStatementV2WithCategorization but ONLY reads DB for account lookup and rules.
 // When accountOverride is non-empty (force_override + single account from the client), it is used for master lookup instead of relying only on the file header.
-func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings, accountOverride string, fromPDFConvert bool) ([]map[string]interface{}, error) {
+func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, p processSingleFilePreviewFlatParams) ([]map[string]interface{}, error) {
+	fileBytes := p.fileBytes
+	filename := p.filename
+	mappings := p.mappings
+	accountOverride := p.accountOverride
+	fromPDFConvert := p.fromPDFConvert
 
 	ext := strings.ToLower(filepath.Ext(filename))
 	var rows [][]string

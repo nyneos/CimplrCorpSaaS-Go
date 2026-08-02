@@ -55,6 +55,11 @@ type UpdateRedemptionConfirmationRequest struct {
 
 const redemptionConfirmationUploadModule = "investment/redemption/confirmation"
 
+const (
+	errLoadRedemptionConfirmationForPolicyCheck = ": failed to load redemption confirmation for policy check: "
+	redemptionConfirmationApprovePath           = "/investment/redemption/confirmation/approve"
+)
+
 func redemptionConfirmationRequestFromForm(r *http.Request) CreateRedemptionConfirmationRequest {
 	return CreateRedemptionConfirmationRequest{
 		UserID:                       strings.TrimSpace(r.FormValue("user_id")),
@@ -315,8 +320,8 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			status = req.Status
 		}
 
-		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateRedemptionConfirmationSingle",
-			"/investment/redemption/confirmation/create", mfSubRedemptionConf, req.RedemptionID, userEmail,
+		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateRedemptionConfirmationSingle",
+			APIPath: "/investment/redemption/confirmation/create", SubModule: mfSubRedemptionConf, EntityCode: req.RedemptionID, Actor: userEmail},
 			buildRedemptionConfirmationPolicyFields(redemptionConfirmationRow{
 				RedemptionID:                 req.RedemptionID,
 				ActualNAV:                    &req.ActualNAV,
@@ -512,8 +517,8 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					bulkStatus = row.Status
 				}
 
-				if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "CreateRedemptionConfirmationBulk",
-					"/investment/redemption/confirmation/create-bulk", mfSubRedemptionConf, row.RedemptionID, userEmail,
+				if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateRedemptionConfirmationBulk",
+					APIPath: "/investment/redemption/confirmation/create-bulk", SubModule: mfSubRedemptionConf, EntityCode: row.RedemptionID, Actor: userEmail},
 					buildRedemptionConfirmationPolicyFields(redemptionConfirmationRow{
 						RedemptionID:                 row.RedemptionID,
 						ActualNAV:                    &row.ActualNAV,
@@ -649,8 +654,8 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		mergedRow := applyRedemptionConfirmationEdits(existingRow, req.Fields)
-		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateRedemptionConfirmation",
-			"/investment/redemption/confirmation/update", mfSubRedemptionConf, req.RedemptionConfirmID, userEmail,
+		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateRedemptionConfirmation",
+			APIPath: "/investment/redemption/confirmation/update", SubModule: mfSubRedemptionConf, EntityCode: req.RedemptionConfirmID, Actor: userEmail},
 			buildRedemptionConfirmationPolicyFields(mergedRow)) {
 			return
 		}
@@ -800,8 +805,8 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 				mergedRow := applyRedemptionConfirmationEdits(existingRow, row.Fields)
-				if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreEdit, "UpdateRedemptionConfirmationBulk",
-					"/investment/redemption/confirmation/update-bulk", mfSubRedemptionConf, row.RedemptionConfirmID, userEmail,
+				if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateRedemptionConfirmationBulk",
+					APIPath: "/investment/redemption/confirmation/update-bulk", SubModule: mfSubRedemptionConf, EntityCode: row.RedemptionConfirmID, Actor: userEmail},
 					buildRedemptionConfirmationPolicyFields(mergedRow)); !ok {
 					results = append(results, map[string]interface{}{
 						constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: pmsg,
@@ -938,11 +943,11 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.RedemptionConfirmIDs {
 			row, rowErr := loadRedemptionConfirmationRow(ctx, pgxPool, id)
 			if rowErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption confirmation for policy check: "+rowErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadRedemptionConfirmationForPolicyCheck+rowErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreDelete, "DeleteRedemptionConfirmation",
-				"/investment/redemption/confirmation/delete", mfSubRedemptionConf, id, requestedBy,
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "DeleteRedemptionConfirmation",
+				APIPath: "/investment/redemption/confirmation/delete", SubModule: mfSubRedemptionConf, EntityCode: id, Actor: requestedBy},
 				buildRedemptionConfirmationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
@@ -1014,11 +1019,11 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		for _, id := range req.RedemptionConfirmIDs {
 			row, rowErr := loadRedemptionConfirmationRow(ctx, pgxPool, id)
 			if rowErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption confirmation for policy check: "+rowErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadRedemptionConfirmationForPolicyCheck+rowErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveRedemptionConfirmationActions",
-				"/investment/redemption/confirmation/approve", mfSubRedemptionConf, id, checkerBy,
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreApprove, HandlerName: "BulkApproveRedemptionConfirmationActions",
+				APIPath: redemptionConfirmationApprovePath, SubModule: mfSubRedemptionConf, EntityCode: id, Actor: checkerBy},
 				buildRedemptionConfirmationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
@@ -1270,13 +1275,13 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		if len(toApproveConfirmIDs) > 0 {
 			go func() {
 				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, toApproveConfirmIDs, constants.AuditActionApprove, checkerBy)
-				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/approve", toApproveConfirmIDs[0], payload.ToMap())
+				catalog.TriggerNotification(ctx, pgxPool, redemptionConfirmationApprovePath, toApproveConfirmIDs[0], payload.ToMap())
 			}()
 		}
 		if len(deleteMasterIDs) > 0 {
 			go func() {
 				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, deleteMasterIDs, constants.AuditActionDelete, checkerBy)
-				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/approve", deleteMasterIDs[0], payload.ToMap())
+				catalog.TriggerNotification(ctx, pgxPool, redemptionConfirmationApprovePath, deleteMasterIDs[0], payload.ToMap())
 			}()
 		}
 		api.RespondWithPayload(w, true, "", response)
@@ -1363,11 +1368,11 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 		for _, id := range req.RedemptionConfirmIDs {
 			row, rowErr := loadRedemptionConfirmationRow(ctx, pgxPool, id)
 			if rowErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption confirmation for policy check: "+rowErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadRedemptionConfirmationForPolicyCheck+rowErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectRedemptionConfirmationActions",
-				"/investment/redemption/confirmation/reject", mfSubRedemptionConf, id, checkerBy,
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreReject, HandlerName: "BulkRejectRedemptionConfirmationActions",
+				APIPath: "/investment/redemption/confirmation/reject", SubModule: mfSubRedemptionConf, EntityCode: id, Actor: checkerBy},
 				buildRedemptionConfirmationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
@@ -2099,11 +2104,11 @@ func ConfirmRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.RedemptionConfirmationIDs {
 			row, rowErr := loadRedemptionConfirmationRow(ctx, pgxPool, id)
 			if rowErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption confirmation for policy check: "+rowErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadRedemptionConfirmationForPolicyCheck+rowErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "ConfirmRedemption",
-				"/investment/redemption/confirmation/confirm", mfSubRedemptionConf, id, confirmedBy,
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "ConfirmRedemption",
+				APIPath: "/investment/redemption/confirmation/confirm", SubModule: mfSubRedemptionConf, EntityCode: id, Actor: confirmedBy},
 				buildRedemptionConfirmationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return

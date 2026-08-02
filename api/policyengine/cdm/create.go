@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errMsgCreateCDMVariable = "failed to create CDM variable"
+
 type createReq struct {
 	Name         string `json:"name"`
 	DataType     string `json:"data_type"`
@@ -57,10 +59,35 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(r.Context())
 		if err != nil {
 			api.LogErrorForResponse(w, "cdm create begin: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create CDM variable", "CDM_CREATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgCreateCDMVariable, "CDM_CREATE_FAILED")
 			return
 		}
 		defer tx.Rollback(r.Context())
+
+		// `name` carries no unique constraint on purpose (dropped 2026-07-29) so one
+		// cdm_path can hold alternate labels. That still leaves the exact-same
+		// name+label free to be inserted twice, and since a rule stores only `name`,
+		// the copies render as indistinguishable duplicate options in every variable
+		// picker. Reject that case here; genuine alternates need a distinct label.
+		var dupCount int
+		if err := tx.QueryRow(r.Context(), `
+			SELECT count(*)
+			FROM policyengine_svc.cdm_variable
+			WHERE is_deleted = false
+			  AND lower(btrim(name)) = lower(btrim($1))
+			  AND lower(btrim(label)) = lower(btrim($2))`,
+			req.Name, req.Label,
+		).Scan(&dupCount); err != nil {
+			api.LogErrorForResponse(w, "cdm create dup-check: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgCreateCDMVariable, "CDM_CREATE_FAILED")
+			return
+		}
+		if dupCount > 0 {
+			api.RespondEnvelopeError(w, http.StatusConflict,
+				"a CDM variable with this name and label already exists — edit that one, or use a different label to register an alternate for the same path",
+				"CDM_DUPLICATE_NAME_LABEL")
+			return
+		}
 
 		var id string
 		err = tx.QueryRow(r.Context(), `
@@ -99,7 +126,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := tx.Commit(r.Context()); err != nil {
 			api.LogErrorForResponse(w, "cdm create commit: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create CDM variable", "CDM_CREATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgCreateCDMVariable, "CDM_CREATE_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "CDM variable submitted for approval", map[string]string{"variable_id": id})

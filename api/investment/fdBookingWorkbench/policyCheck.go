@@ -13,6 +13,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// enforceCtx groups the per-call identifiers shared by the fdBooking
+// Enforce/EnforceInline variants (event/actor/handler routing info).
+// CorrelationID is optional — empty means the callee resolves its own.
+type enforceCtx struct {
+	EventCode, HandlerName, APIPath, EntityCode, Actor, CorrelationID string
+}
+
 // enforceFDBookingPolicy builds CDM variables from the booking field map
 // (domain_catalog → cdm_path) and runs RunCheck. Returns false when the
 // handler should abort (response already written with full policy_results).
@@ -21,12 +28,7 @@ func enforceFDBookingPolicy(
 	w http.ResponseWriter,
 	r *http.Request,
 	pool *pgxpool.Pool,
-	eventCode string,
-	handlerName string,
-	apiPath string,
-	entityCode string,
-	actorEmail string,
-	correlationID string,
+	cc enforceCtx,
 	fields map[string]interface{},
 ) bool {
 	vars, err := runtime.BuildFdBookingVariables(ctx, pool, fields)
@@ -36,24 +38,25 @@ func enforceFDBookingPolicy(
 		return false
 	}
 	if len(vars) == 0 {
-		api.LogErrorForResponse(w, "fd booking policy check: empty CDM variable map for %s", handlerName)
+		api.LogErrorForResponse(w, "fd booking policy check: empty CDM variable map for %s", cc.HandlerName)
 		api.RespondEnvelopeError(w, http.StatusBadGateway, "Policy check failed — no CDM variables mapped from booking", "POLICY_CDM_EMPTY")
 		return false
 	}
 
 	traceID := observability.TraceIDFromContext(ctx)
+	correlationID := cc.CorrelationID
 	if correlationID == "" {
 		correlationID = common.ResolveCorrelationID(r, "")
 	}
 
 	result, err := runtime.RunCheck(ctx, pool, runtime.CheckRequest{
-		EventCode:     eventCode,
+		EventCode:     cc.EventCode,
 		ModuleCode:    common.ModuleInvestmentFD,
 		SubModule:     "FD_BOOKING",
-		EntityCode:    entityCode,
-		ActorUserID:   actorEmail,
-		HandlerName:   handlerName,
-		APIPath:       apiPath,
+		EntityCode:    cc.EntityCode,
+		ActorUserID:   cc.Actor,
+		HandlerName:   cc.HandlerName,
+		APIPath:       cc.APIPath,
 		CorrelationID: correlationID,
 		TraceID:       traceID,
 		Variables:     vars,
@@ -79,11 +82,7 @@ func enforceFDBookingPolicyInline(
 	ctx context.Context,
 	r *http.Request,
 	pool *pgxpool.Pool,
-	eventCode string,
-	handlerName string,
-	apiPath string,
-	entityCode string,
-	actorEmail string,
+	cc enforceCtx,
 	fields map[string]interface{},
 ) (bool, string, runtime.CheckResult) {
 	vars, err := runtime.BuildFdBookingVariables(ctx, pool, fields)
@@ -94,13 +93,13 @@ func enforceFDBookingPolicyInline(
 		return false, "policy CDM map empty — check domain_catalog FD_BOOKING cdm_path", runtime.CheckResult{}
 	}
 	result, err := runtime.RunCheck(ctx, pool, runtime.CheckRequest{
-		EventCode:     eventCode,
+		EventCode:     cc.EventCode,
 		ModuleCode:    common.ModuleInvestmentFD,
 		SubModule:     "FD_BOOKING",
-		EntityCode:    entityCode,
-		ActorUserID:   actorEmail,
-		HandlerName:   handlerName,
-		APIPath:       apiPath,
+		EntityCode:    cc.EntityCode,
+		ActorUserID:   cc.Actor,
+		HandlerName:   cc.HandlerName,
+		APIPath:       cc.APIPath,
 		CorrelationID: common.ResolveCorrelationID(r, ""),
 		TraceID:       observability.TraceIDFromContext(ctx),
 		Variables:     vars,
@@ -121,17 +120,17 @@ func EnforceFDConfirmationPolicy(
 	w http.ResponseWriter,
 	r *http.Request,
 	pool *pgxpool.Pool,
-	eventCode, handlerName, apiPath, entityCode, actorEmail string,
+	cc enforceCtx,
 	fields map[string]interface{},
 ) bool {
 	return runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
-		EventCode:           eventCode,
+		EventCode:           cc.EventCode,
 		ModuleCode:          common.ModuleInvestmentFD,
 		SubModule:           "FD_CONFIRMATION",
-		EntityCode:          entityCode,
-		ActorUserID:         actorEmail,
-		HandlerName:         handlerName,
-		APIPath:             apiPath,
+		EntityCode:          cc.EntityCode,
+		ActorUserID:         cc.Actor,
+		HandlerName:         cc.HandlerName,
+		APIPath:             cc.APIPath,
 		Fields:              fields,
 		RequireVariables:    false,
 		DefaultBlockMessage: "FD confirmation blocked by policy",

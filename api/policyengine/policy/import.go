@@ -186,11 +186,10 @@ func planOneImport(ctx context.Context, pool *pgxpool.Pool, p *DetailItem, onCon
 	if err := validateNullDefault(req.RuleType, req.NullHandling, req.NullHandlingDefault, rf); err != nil {
 		return importPolicyResult{}, nil, err.Error()
 	}
-	if err := validatePolicyScope(
-		ctx, pool,
-		req.Modules, req.SubModules, req.TriggerEvents,
-		req.ActionOnBreach, rf, req.AddlExpression,
-	); err != nil {
+	if err := validatePolicyScope(ctx, pool, policyScopeInput{
+		Modules: req.Modules, SubModules: req.SubModules, TriggerEvents: req.TriggerEvents,
+		ActionOnBreach: req.ActionOnBreach, RF: rf, AddlExpression: req.AddlExpression,
+	}); err != nil {
 		return importPolicyResult{}, nil, err.Error()
 	}
 	if err := validatePELOnWrite(ctx, req.RuleType, rf.FormulaExpression, rf.FormulaReturnType, req.AddlExpression); err != nil {
@@ -268,7 +267,11 @@ func applyPlannedImport(r *http.Request, tx pgx.Tx, plan *plannedImport, actor, 
 	if err != nil {
 		return "", "", err
 	}
-	if err := insertPolicyChildren(r, tx, policyID, plan.Req.TriggerEvents, plan.Req.Modules, plan.Req.SubModules, plan.Req.EntitiesInclude, plan.Req.EntitiesExclude, plan.Req.RuleType, plan.RF); err != nil {
+	if err := insertPolicyChildren(r, tx, policyID, policyChildrenSpec{
+		TriggerEvents: plan.Req.TriggerEvents, Modules: plan.Req.Modules, SubModules: plan.Req.SubModules,
+		EntitiesInclude: plan.Req.EntitiesInclude, EntitiesExclude: plan.Req.EntitiesExclude,
+		RuleType: plan.Req.RuleType, RF: plan.RF,
+	}); err != nil {
 		return "", "", fmt.Errorf("children: %w", err)
 	}
 	if err := insertPolicyNotificationTemplates(r.Context(), tx, policyID, plan.Req.NotificationTemplateIDs, actor); err != nil {
@@ -371,7 +374,11 @@ func overwriteImportedPolicy(r *http.Request, tx pgx.Tx, policyID string, req cr
 	if err != nil {
 		return fmt.Errorf("overwrite: %w", err)
 	}
-	if err := replacePolicyChildren(r.Context(), tx, r, policyID, req.TriggerEvents, req.Modules, req.SubModules, req.EntitiesInclude, req.EntitiesExclude, req.RuleType, rf); err != nil {
+	if err := replacePolicyChildren(r.Context(), tx, r, policyID, policyChildrenSpec{
+		TriggerEvents: req.TriggerEvents, Modules: req.Modules, SubModules: req.SubModules,
+		EntitiesInclude: req.EntitiesInclude, EntitiesExclude: req.EntitiesExclude,
+		RuleType: req.RuleType, RF: rf,
+	}); err != nil {
 		return fmt.Errorf("children: %w", err)
 	}
 	if err := replacePolicyNotificationTemplates(r.Context(), tx, policyID, req.NotificationTemplateIDs, actor); err != nil {

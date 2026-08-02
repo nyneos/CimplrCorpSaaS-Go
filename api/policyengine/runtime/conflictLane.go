@@ -122,33 +122,48 @@ func trimNonEmpty(in []string) []string {
 	return out
 }
 
+// DraftThreshold holds the draft create/update/test threshold fields used by
+// DraftHardBlockConstraint so the function stays within the project's
+// max-params limit.
+type DraftThreshold struct {
+	Code      string
+	Action    string
+	RuleType  string
+	Variable  string
+	Operator  string
+	Value     *float64
+	ValueMode string
+	ValueDate string
+}
+
 // DraftHardBlockConstraint builds a constraint from a draft create/update/test
 // threshold when action is HardBlock.
-func DraftHardBlockConstraint(code, action, ruleType, variable, operator string, value *float64, valueMode, valueDate string) (ThrConstraint, bool) {
-	if !isHardBlockAction(action) {
+func DraftHardBlockConstraint(d DraftThreshold) (ThrConstraint, bool) {
+	if !isHardBlockAction(d.Action) {
 		return ThrConstraint{}, false
 	}
-	if !strings.EqualFold(strings.TrimSpace(ruleType), "threshold") {
+	if !strings.EqualFold(strings.TrimSpace(d.RuleType), "threshold") {
 		return ThrConstraint{}, false
 	}
-	if strings.TrimSpace(valueMode) == "PercentOf" || strings.TrimSpace(valueDate) != "" {
+	if strings.TrimSpace(d.ValueMode) == "PercentOf" || strings.TrimSpace(d.ValueDate) != "" {
 		return ThrConstraint{}, false
 	}
-	if value == nil {
+	if d.Value == nil {
 		return ThrConstraint{}, false
 	}
-	variable = strings.TrimSpace(variable)
-	operator = strings.TrimSpace(operator)
+	variable := strings.TrimSpace(d.Variable)
+	operator := strings.TrimSpace(d.Operator)
 	if variable == "" || operator == "" {
 		return ThrConstraint{}, false
 	}
-	if strings.TrimSpace(code) == "" {
+	code := strings.TrimSpace(d.Code)
+	if code == "" {
 		code = "DRAFT"
 	}
 	return ThrConstraint{
 		PolicyCode: code,
 		Variable:   variable,
 		Operator:   operator,
-		Value:      *value,
+		Value:      *d.Value,
 	}, true
 }

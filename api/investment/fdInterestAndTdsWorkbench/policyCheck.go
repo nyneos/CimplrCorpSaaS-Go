@@ -12,22 +12,26 @@ import (
 
 const fdSubTDSRegister = "FD_TDS_REGISTER"
 
+type enforceCtx struct {
+	EventCode, HandlerName, APIPath, EntityCode, Actor string
+}
+
 func fdEnforce(
 	ctx context.Context,
 	w http.ResponseWriter,
 	r *http.Request,
 	pool *pgxpool.Pool,
-	eventCode, handlerName, apiPath, entityCode, actor string,
+	cc enforceCtx,
 	fields map[string]interface{},
 ) bool {
 	return runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
-		EventCode:        eventCode,
+		EventCode:        cc.EventCode,
 		ModuleCode:       common.ModuleInvestmentFD,
 		SubModule:        fdSubTDSRegister,
-		EntityCode:       entityCode,
-		ActorUserID:      actor,
-		HandlerName:      handlerName,
-		APIPath:          apiPath,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
 		Fields:           fields,
 		RequireVariables: false,
 	})
@@ -37,17 +41,17 @@ func fdEnforceInline(
 	ctx context.Context,
 	r *http.Request,
 	pool *pgxpool.Pool,
-	eventCode, handlerName, apiPath, entityCode, actor string,
+	cc enforceCtx,
 	fields map[string]interface{},
 ) (bool, string) {
 	return runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
-		EventCode:        eventCode,
+		EventCode:        cc.EventCode,
 		ModuleCode:       common.ModuleInvestmentFD,
 		SubModule:        fdSubTDSRegister,
-		EntityCode:       entityCode,
-		ActorUserID:      actor,
-		HandlerName:      handlerName,
-		APIPath:          apiPath,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
 		Fields:           fields,
 		RequireVariables: false,
 	})

@@ -28,6 +28,14 @@ import (
 // bank-statement .zip file (multipart field "file").
 const MaxBankStatementZipBytes int64 = 5 << 20 // 5 MiB
 
+// msgStatementPeriodAlreadyUploaded is returned when a uniq_stmt(_active) constraint
+// violation is detected while building a user-friendly SQL error message.
+const msgStatementPeriodAlreadyUploaded = "A statement for this period is already uploaded for this account."
+
+// msgStatementAccountPeriodAlreadyUploaded is returned when a uniq_stmt(_active) constraint
+// violation is detected while building a user-friendly upload error message.
+const msgStatementAccountPeriodAlreadyUploaded = "A statement for this account and period is already uploaded."
+
 // readBankStatementZipBytes reads a zip upload and rejects bodies larger than MaxBankStatementZipBytes.
 func readBankStatementZipBytes(file multipart.File, header *multipart.FileHeader) ([]byte, error) {
 	const max = MaxBankStatementZipBytes
@@ -62,10 +70,10 @@ func pqUserFriendlyMessage(err error) string {
 		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
 			return constants.ErrBankStatementFileAlreadyUploaded
 		case "uniq_stmt", "uniq_stmt_active":
-			return "A statement for this period is already uploaded for this account."
+			return msgStatementPeriodAlreadyUploaded
 		default:
 			if strings.HasPrefix(string(pqErr.Constraint), "uniq_stmt") {
-				return "A statement for this period is already uploaded for this account."
+				return msgStatementPeriodAlreadyUploaded
 			}
 			return "A record with the same unique value already exists."
 		}
@@ -891,7 +899,7 @@ func userFriendlyUploadError(err error) string {
 		return "Bank account not found in the system for this statement. Please check the account number in master data."
 	}
 	if errors.Is(err, ErrStatementPeriodExists) {
-		return "A statement for this period is already uploaded for this account."
+		return msgStatementPeriodAlreadyUploaded
 	}
 	if errors.Is(err, ErrAllTransactionsDuplicate) {
 		return "This statement has already been uploaded. All transactions in this statement already exist in the system."
@@ -931,12 +939,12 @@ func userFriendlyUploadError(err error) string {
 	if errors.As(err, &pqErr) && pqErr.Code == "23505" {
 		switch pqErr.Constraint {
 		case "uniq_stmt", "uniq_stmt_active":
-			return "A statement for this account and period is already uploaded."
+			return msgStatementAccountPeriodAlreadyUploaded
 		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
 			return constants.ErrBankStatementFileAlreadyUploaded
 		default:
 			if strings.HasPrefix(string(pqErr.Constraint), "uniq_stmt") {
-				return "A statement for this account and period is already uploaded."
+				return msgStatementAccountPeriodAlreadyUploaded
 			}
 		}
 	}
@@ -944,12 +952,12 @@ func userFriendlyUploadError(err error) string {
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		switch pgErr.ConstraintName {
 		case "uniq_stmt", "uniq_stmt_active":
-			return "A statement for this account and period is already uploaded."
+			return msgStatementAccountPeriodAlreadyUploaded
 		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
 			return constants.ErrBankStatementFileAlreadyUploaded
 		default:
 			if strings.HasPrefix(pgErr.ConstraintName, "uniq_stmt") {
-				return "A statement for this account and period is already uploaded."
+				return msgStatementAccountPeriodAlreadyUploaded
 			}
 		}
 	}

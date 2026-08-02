@@ -22,6 +22,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errLoadExposureBucketingRowForPolicyCheck = "Failed to load exposure_bucketing row for policy check: "
+
 // // Helper: send JSON error response
 // func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 // 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -276,7 +278,7 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 
 			bucketingRow, err := loadExposureBucketingRow(ctx, pool, req.ExposureHeaderID)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Failed to load exposure_bucketing row for policy check: "+err.Error())
+				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+err.Error())
 				return
 			}
 			bucketingRow = applyExposureBucketingEdits(bucketingRow, req.BucketingFields)
@@ -573,7 +575,7 @@ func DeleteBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ExposureHeaderIds {
 			bucketingRow, err := loadExposureBucketingRow(ctx, pool, id)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Failed to load exposure_bucketing row for policy check: "+err.Error())
+				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+err.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
@@ -715,7 +717,7 @@ func ApproveBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ExposureHeaderIds {
 			bucketingRow, err := loadExposureBucketingRow(ctx, pool, id)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Failed to load exposure_bucketing row for policy check: "+err.Error())
+				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+err.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
@@ -868,7 +870,7 @@ func RejectBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ExposureHeaderIds {
 			bucketingRow, err := loadExposureBucketingRow(ctx, pool, id)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Failed to load exposure_bucketing row for policy check: "+err.Error())
+				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+err.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{

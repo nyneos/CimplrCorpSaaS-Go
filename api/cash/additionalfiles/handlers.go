@@ -78,16 +78,16 @@ type MainUploadAuditPayload struct {
 }
 
 type Config struct {
-	Module                  string
-	AuditSource             string
-	AuditTableName          string
-	ParentIDField           string
-	FolderName              string
+	Module         string
+	AuditSource    string
+	AuditTableName string
+	ParentIDField  string
+	FolderName     string
 	// PolicyModuleCode + PolicySubModule enable PRE_UPLOAD / PRE_DELETE RunCheck
 	// against the parent business sub-module (RequireVariables=false).
-	PolicyModuleCode string
-	PolicySubModule  string
-	PolicyAPIPath    string
+	PolicyModuleCode        string
+	PolicySubModule         string
+	PolicyAPIPath           string
 	List                    func(ctx context.Context, pool *pgxpool.Pool, parentID string) ([]FileRecord, error)
 	Create                  func(ctx context.Context, tx pgx.Tx, input CreateInput) error
 	CreateReturning         func(ctx context.Context, tx pgx.Tx, input CreateInput) (string, error)
@@ -201,6 +201,16 @@ func NewListHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 	}
 }
 
+// additionalFilesPolicyEvent groups the per-call variables for
+// enforceAdditionalFilesPolicy (event/actor/target identifiers).
+type additionalFilesPolicyEvent struct {
+	EventCode string
+	ParentID  string
+	Actor     string
+	FileID    string
+	FileCount int
+}
+
 // enforceAdditionalFilesPolicy runs PRE_UPLOAD / PRE_DELETE when PolicyModuleCode
 // + PolicySubModule are set on Config. Missing scope → no-op (pass).
 func enforceAdditionalFilesPolicy(
@@ -209,11 +219,7 @@ func enforceAdditionalFilesPolicy(
 	r *http.Request,
 	pool *pgxpool.Pool,
 	cfg Config,
-	eventCode string,
-	parentID string,
-	actor string,
-	fileID string,
-	fileCount int,
+	ev additionalFilesPolicyEvent,
 ) bool {
 	mod := strings.TrimSpace(cfg.PolicyModuleCode)
 	sub := strings.TrimSpace(cfg.PolicySubModule)
@@ -225,19 +231,19 @@ func enforceAdditionalFilesPolicy(
 		apiPath = "/additional-files/" + strings.TrimSpace(cfg.Module)
 	}
 	fields := map[string]interface{}{
-		cfg.ParentIDField: parentID,
-		"parent_id":       parentID,
+		cfg.ParentIDField: ev.ParentID,
+		"parent_id":       ev.ParentID,
 		"module_key":      cfg.Module,
-		"file_count":      fileCount,
+		"file_count":      ev.FileCount,
 	}
-	if strings.TrimSpace(fileID) != "" {
-		fields["file_id"] = fileID
+	if strings.TrimSpace(ev.FileID) != "" {
+		fields["file_id"] = ev.FileID
 	}
 	return runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
-		EventCode:           eventCode,
+		EventCode:           ev.EventCode,
 		ModuleCode:          mod,
 		SubModule:           sub,
-		ActorUserID:         actor,
+		ActorUserID:         ev.Actor,
 		HandlerName:         "AdditionalFiles/" + cfg.Module,
 		APIPath:             apiPath,
 		DefaultBlockMessage: "Additional file action blocked by policy",
@@ -276,7 +282,12 @@ func NewUploadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			return
 		}
 
-		if !enforceAdditionalFilesPolicy(r.Context(), w, r, pool, cfg, common.TriggerPreUpload, parentID, uploadedBy, "", len(fileHeaders)) {
+		if !enforceAdditionalFilesPolicy(r.Context(), w, r, pool, cfg, additionalFilesPolicyEvent{
+			EventCode: common.TriggerPreUpload,
+			ParentID:  parentID,
+			Actor:     uploadedBy,
+			FileCount: len(fileHeaders),
+		}) {
 			return
 		}
 
@@ -386,7 +397,6 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		})
 	}
 }
-
 
 func NewMainFileDownloadHandler(pool *pgxpool.Pool, cfg Config, loadMain func(ctx context.Context, pool *pgxpool.Pool, parentID string) (*MainPackageFile, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -662,7 +672,13 @@ func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		}
 
 		requestedBy := requestedByOrFallback(r.Context(), req.UserID)
-		if !enforceAdditionalFilesPolicy(r.Context(), w, r, pool, cfg, common.TriggerPreDelete, parentID, requestedBy, req.FileID, 1) {
+		if !enforceAdditionalFilesPolicy(r.Context(), w, r, pool, cfg, additionalFilesPolicyEvent{
+			EventCode: common.TriggerPreDelete,
+			ParentID:  parentID,
+			Actor:     requestedBy,
+			FileID:    req.FileID,
+			FileCount: 1,
+		}) {
 			return
 		}
 
@@ -1158,7 +1174,13 @@ func deleteImmediate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool,
 	}
 
 	deletedBy := requestedByOrFallback(r.Context(), req.UserID)
-	if !enforceAdditionalFilesPolicy(r.Context(), w, r, pool, cfg, common.TriggerPreDelete, parentID, deletedBy, req.FileID, 1) {
+	if !enforceAdditionalFilesPolicy(r.Context(), w, r, pool, cfg, additionalFilesPolicyEvent{
+		EventCode: common.TriggerPreDelete,
+		ParentID:  parentID,
+		Actor:     deletedBy,
+		FileID:    req.FileID,
+		FileCount: 1,
+	}) {
 		return
 	}
 	deleted, err := cfg.SoftDelete(r.Context(), pool, parentID, req.FileID, deletedBy, time.Now().UTC())

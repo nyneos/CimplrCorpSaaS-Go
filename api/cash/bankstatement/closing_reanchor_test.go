@@ -2,6 +2,15 @@ package bankstatement
 
 import "testing"
 
+// Shared literals for the reanchor test fixtures below: two statement dates, the
+// zero-closing-balance marker, and the repeated running/page-total balance amount.
+const (
+	testDateFeb03           = "03-02-2026"
+	testDateFeb16           = "16-02-2026"
+	testZeroClosingBalance  = "0.00 Cr"
+	testPageTotalRunningBal = "1,18,000.00"
+)
+
 // TestClosingBalanceReanchorRecoversFinalWithdrawal reproduces the ICICI screenshot case: the
 // account is swept to a 0.00 closing balance, but the LLM lost the final balance and copied the
 // previous row's 9000. Because amounts are reconstructed from balance deltas, the unchanged balance
@@ -13,22 +22,22 @@ func TestClosingBalanceReanchorRecoversFinalWithdrawal(t *testing.T) {
 	resp := &llmTxnResponse{
 		OpeningBalance: &ob,
 		Transactions: []llmExtractedTxn{
-			{Date: "03-02-2026", Description: "NEFT-CITIN26616782256", Deposit: 100000, Balance: 100000},
-			{Date: "16-02-2026", Description: "NEFT-CITIN26621312615", Deposit: 18000, Balance: 118000},
-			{Date: "16-02-2026", Description: "COMMERCIAL PAPER CHARGES", Withdrawal: 100000, Balance: 18000},
-			{Date: "16-02-2026", Description: "SGST202602166798447682", Withdrawal: 9000, Balance: 9000},
+			{Date: testDateFeb03, Description: "NEFT-CITIN26616782256", Deposit: 100000, Balance: 100000},
+			{Date: testDateFeb16, Description: "NEFT-CITIN26621312615", Deposit: 18000, Balance: 118000},
+			{Date: testDateFeb16, Description: "COMMERCIAL PAPER CHARGES", Withdrawal: 100000, Balance: 18000},
+			{Date: testDateFeb16, Description: "SGST202602166798447682", Withdrawal: 9000, Balance: 9000},
 			// WRONG as extracted: should be withdrawal 9000, balance 0.00.
-			{Date: "16-02-2026", Description: "CGST202602166798447685", Balance: 9000},
+			{Date: testDateFeb16, Description: "CGST202602166798447685", Balance: 9000},
 		},
 	}
 	sourceRows := [][]string{
 		{"Date", "Particulars", "Withdrawals", "Deposits", "Balance(INR)"},
-		{"03-02-2026", "NEFT-CITIN26616782256", "0.00", "1,00,000.00", "1,00,000.00 Cr"},
-		{"16-02-2026", "NEFT-CITIN26621312615", "0.00", "18,000.00", "1,18,000.00 Cr"},
-		{"16-02-2026", "COMMERCIAL PAPER CHARGES", "1,00,000.00", "0.00", "18,000.00 Cr"},
-		{"16-02-2026", "SGST202602166798447682", "9,000.00", "0.00", "9,000.00 Cr"},
-		{"16-02-2026", "CGST202602166798447685", "9,000.00", "0.00", "0.00 Cr"},
-		{"", "Page Total:", "1,18,000.00", "1,18,000.00", "0.00 Cr"},
+		{testDateFeb03, "NEFT-CITIN26616782256", "0.00", "1,00,000.00", "1,00,000.00 Cr"},
+		{testDateFeb16, "NEFT-CITIN26621312615", "0.00", "18,000.00", "1,18,000.00 Cr"},
+		{testDateFeb16, "COMMERCIAL PAPER CHARGES", "1,00,000.00", "0.00", "18,000.00 Cr"},
+		{testDateFeb16, "SGST202602166798447682", "9,000.00", "0.00", "9,000.00 Cr"},
+		{testDateFeb16, "CGST202602166798447685", "9,000.00", "0.00", testZeroClosingBalance},
+		{"", "Page Total:", testPageTotalRunningBal, testPageTotalRunningBal, testZeroClosingBalance},
 	}
 
 	out, ok := buildTxnMapsFromLLM(resp, llmTxnContext{batchID: "TEST00", sourceRows: sourceRows})
@@ -62,7 +71,7 @@ func TestScanDeclaredClosingBalance(t *testing.T) {
 			name: "page total row, zero closing",
 			rows: [][]string{
 				{"Date", "Particulars", "Withdrawals", "Deposits", "Balance(INR)"},
-				{"", "Page Total:", "1,18,000.00", "1,18,000.00", "0.00 Cr"},
+				{"", "Page Total:", testPageTotalRunningBal, testPageTotalRunningBal, testZeroClosingBalance},
 			},
 			want: 0, ok: true,
 		},
@@ -84,7 +93,7 @@ func TestScanDeclaredClosingBalance(t *testing.T) {
 			name: "no totals or closing row",
 			rows: [][]string{
 				{"Date", "Particulars", "Balance"},
-				{"03-02-2026", "NEFT", "100.00"},
+				{testDateFeb03, "NEFT", "100.00"},
 			},
 			want: 0, ok: false,
 		},

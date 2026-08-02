@@ -22,11 +22,11 @@ type googleWorkspaceCred struct {
 }
 
 type googleWorkspaceInboxRow struct {
-	InboxID        string
-	MailboxAddress string
-	FiltersJSON    []byte
-	Module         string
-	EntityID       string
+	InboxID         string
+	MailboxAddress  string
+	FiltersJSON     []byte
+	Module          string
+	EntityID        string
 	GoogleTenantKey string
 	Google          googleWorkspaceCred
 	LastSync        *time.Time
@@ -204,7 +204,16 @@ func pollGoogleWorkspaceMailboxFolder(ctx context.Context, pool *pgxpool.Pool, r
 
 	var totalIngested int
 	for {
-		resp, err := rt.PullGmailDWDMessages(ctx, inbox.InboxID, inbox.MailboxAddress, folder.sentFolder, sinceStr, googleWorkspacePullPageSize, conn, skipIDs, inbox.FiltersJSON)
+		resp, err := rt.PullGmailDWDMessages(ctx, mailruntime.GmailDWDPullRequest{
+			InboxID:        inbox.InboxID,
+			Mailbox:        inbox.MailboxAddress,
+			SentFolder:     folder.sentFolder,
+			Since:          sinceStr,
+			PageSize:       googleWorkspacePullPageSize,
+			Conn:           conn,
+			SkipMessageIDs: skipIDs,
+			FiltersJSON:    inbox.FiltersJSON,
+		})
 		if err != nil {
 			return totalIngested, err
 		}

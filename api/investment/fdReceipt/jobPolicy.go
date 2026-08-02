@@ -13,11 +13,18 @@ import (
 
 const JobPathReceiptReconcile = "job://investment/receipt-reconcile"
 
+// ReceiptReconcileEntity groups the entity identity fields for
+// EnforceReceiptReconcileRun so the function stays under the 7-parameter limit.
+type ReceiptReconcileEntity struct {
+	ID   string
+	Name string
+}
+
 // EnforceReceiptReconcileRun gates auto receipt reconcile run creation.
-func EnforceReceiptReconcileRun(ctx context.Context, pool *pgxpool.Pool, runID, entityID, entityName string, periodStart, periodEnd time.Time, pendingCount int) (bool, string) {
+func EnforceReceiptReconcileRun(ctx context.Context, pool *pgxpool.Pool, runID string, entity ReceiptReconcileEntity, periodStart, periodEnd time.Time, pendingCount int) (bool, string) {
 	fields := map[string]interface{}{
-		"entity_id":        entityID,
-		"entity_name":      entityName,
+		"entity_id":        entity.ID,
+		"entity_name":      entity.Name,
 		"reconcile_run_id": runID,
 		"period_start":     periodStart.Format("2006-01-02"),
 		"period_end":       periodEnd.Format("2006-01-02"),
@@ -29,7 +36,7 @@ func EnforceReceiptReconcileRun(ctx context.Context, pool *pgxpool.Pool, runID, 
 		EventCode:           common.TriggerScheduledDaily,
 		ModuleCode:          common.ModuleInvestmentFD,
 		SubModule:           fdSubReceipt,
-		EntityCode:          entityID,
+		EntityCode:          entity.ID,
 		ActorUserID:         "SYSTEM:receipt-reconcile",
 		HandlerName:         "runAutoReconcile",
 		APIPath:             JobPathReceiptReconcile,

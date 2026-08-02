@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errMsgUpdateTrigger = "failed to update trigger"
+
 type updateReq struct {
 	EventCode             string `json:"event_code"`
 	TimingCategory        string `json:"timing_category"`
@@ -48,7 +50,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(r.Context())
 		if err != nil {
 			api.LogErrorForResponse(w, "trigger update begin: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update trigger", "TRIGGER_UPDATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgUpdateTrigger, "TRIGGER_UPDATE_FAILED")
 			return
 		}
 		defer tx.Rollback(r.Context())
@@ -78,7 +80,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 		if err != nil {
 			api.LogErrorForResponse(w, "trigger update exec: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update trigger", "TRIGGER_UPDATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgUpdateTrigger, "TRIGGER_UPDATE_FAILED")
 			return
 		}
 
@@ -103,7 +105,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := tx.Commit(r.Context()); err != nil {
 			api.LogErrorForResponse(w, "trigger update commit: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update trigger", "TRIGGER_UPDATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgUpdateTrigger, "TRIGGER_UPDATE_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Trigger event edit submitted for approval", map[string]string{"event_code": req.EventCode})

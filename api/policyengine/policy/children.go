@@ -65,10 +65,26 @@ func insertPolicyEntities(ctx context.Context, tx pgx.Tx, policyID string, inclu
 	return nil
 }
 
+// policyChildrenSpec groups the trigger/module/sub-module/entity-scope and
+// rule-type child data shared by insertPolicyChildren and replacePolicyChildren
+// so neither function exceeds the project's max-params limit.
+type policyChildrenSpec struct {
+	TriggerEvents   []string
+	Modules         []string
+	SubModules      []string
+	EntitiesInclude []string
+	EntitiesExclude []string
+	RuleType        string
+	RF              ruleFields
+}
+
 // insertPolicyChildren attaches trigger events, modules, sub-modules, entity scope,
 // and rule-type child rows (slabs / composition buckets / list values) to a freshly inserted policy.
-func insertPolicyChildren(r *http.Request, tx pgx.Tx, policyID string, triggerEvents, modules, subModules, entitiesInclude, entitiesExclude []string, ruleType string, rf ruleFields) error {
+func insertPolicyChildren(r *http.Request, tx pgx.Tx, policyID string, spec policyChildrenSpec) error {
 	ctx := r.Context()
+	triggerEvents, modules, subModules := spec.TriggerEvents, spec.Modules, spec.SubModules
+	entitiesInclude, entitiesExclude := spec.EntitiesInclude, spec.EntitiesExclude
+	ruleType, rf := spec.RuleType, spec.RF
 	for _, code := range triggerEvents {
 		code = strings.TrimSpace(code)
 		if code == "" {
@@ -156,7 +172,7 @@ func insertPolicyChildren(r *http.Request, tx pgx.Tx, policyID string, triggerEv
 
 // replacePolicyChildren soft-deletes existing trigger/module/sub-module/entity/rule-type children
 // and re-inserts the new set — used by HandleUpdate.
-func replacePolicyChildren(ctx context.Context, tx pgx.Tx, r *http.Request, policyID string, triggerEvents, modules, subModules, entitiesInclude, entitiesExclude []string, ruleType string, rf ruleFields) error {
+func replacePolicyChildren(ctx context.Context, tx pgx.Tx, r *http.Request, policyID string, spec policyChildrenSpec) error {
 	if _, err := tx.Exec(ctx, `UPDATE policyengine_svc.policy_trigger SET is_deleted = true WHERE policy_id = $1::uuid`, policyID); err != nil {
 		return err
 	}
@@ -178,7 +194,7 @@ func replacePolicyChildren(ctx context.Context, tx pgx.Tx, r *http.Request, poli
 	if _, err := tx.Exec(ctx, `UPDATE policyengine_svc.policy_list_value SET is_deleted = true WHERE policy_id = $1::uuid`, policyID); err != nil {
 		return err
 	}
-	return insertPolicyChildren(r, tx, policyID, triggerEvents, modules, subModules, entitiesInclude, entitiesExclude, ruleType, rf)
+	return insertPolicyChildren(r, tx, policyID, spec)
 }
 
 // insertPolicyNotificationTemplates attaches the policy's curated

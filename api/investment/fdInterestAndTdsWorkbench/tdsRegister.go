@@ -19,6 +19,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// tdsEntryNotFoundMsg is the shared 404 message for a missing TDS register entry.
+const tdsEntryNotFoundMsg = "TDS entry not found"
+
 func nullIfEmpty(s string) interface{} {
 	if strings.TrimSpace(s) == "" {
 		return nil
@@ -202,8 +205,8 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			ReconcileStatus:   "PENDING",
 			ExceptionRaised:   exceptionRaised,
 		}
-		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "CreateTDSRegister", "/investment/fd/tds-register/create",
-			req.EntityID, userEmail, buildFDTDSRegisterPolicyFields(createRow)) {
+		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateTDSRegister", APIPath: "/investment/fd/tds-register/create",
+			EntityCode: req.EntityID, Actor: userEmail}, buildFDTDSRegisterPolicyFields(createRow)) {
 			return
 		}
 
@@ -535,13 +538,13 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		// build fields from here, so this stays entity/request-scoped rather than
 		// using buildFDTDSRegisterPolicyFields. tolerance_amount added so a policy
 		// can actually see the value driving the AUTO branch's accept/flag split.
-		if !fdEnforce(ctx, w, r, pool, common.TriggerPreSubmit, "ReconcileTDSRegister", "/investment/fd/tds-register/reconcile",
-			req.EntityID, userEmail, map[string]interface{}{
-				"entity_id":        req.EntityID,
-				"entity_code":      req.EntityID,
-				"reconcile_action": req.ReconcileAction,
-				"tolerance_amount": req.ToleranceAmount,
-			}) {
+		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreSubmit, HandlerName: "ReconcileTDSRegister", APIPath: "/investment/fd/tds-register/reconcile",
+			EntityCode: req.EntityID, Actor: userEmail}, map[string]interface{}{
+			"entity_id":        req.EntityID,
+			"entity_code":      req.EntityID,
+			"reconcile_action": req.ReconcileAction,
+			"tolerance_amount": req.ToleranceAmount,
+		}) {
 			return
 		}
 
@@ -680,7 +683,7 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			`SELECT tds_status FROM investment.fd_tds_receipt WHERE tds_id = $1 AND is_deleted = false`,
 			req.TDSID).Scan(&currentStatus)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "TDS entry not found")
+			api.RespondWithError(w, http.StatusNotFound, tdsEntryNotFoundMsg)
 			return
 		}
 		if currentStatus != "CAPTURED" {
@@ -692,11 +695,11 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		approveRow, err := loadFDTDSRegisterRow(ctx, pool, req.TDSID)
 		if err != nil {
 			api.LogError("[TDSApprove] load row for policy failed for %s: %v", req.TDSID, err)
-			api.RespondWithError(w, http.StatusNotFound, "TDS entry not found")
+			api.RespondWithError(w, http.StatusNotFound, tdsEntryNotFoundMsg)
 			return
 		}
-		if !fdEnforce(ctx, w, r, pool, common.TriggerPreApprove, "ApproveTDSRegister", "/investment/fd/tds-register/approve",
-			approveRow.EntityID, userEmail, buildFDTDSRegisterPolicyFields(approveRow)) {
+		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreApprove, HandlerName: "ApproveTDSRegister", APIPath: "/investment/fd/tds-register/approve",
+			EntityCode: approveRow.EntityID, Actor: userEmail}, buildFDTDSRegisterPolicyFields(approveRow)) {
 			return
 		}
 
@@ -814,7 +817,7 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		if err := pool.QueryRow(ctx,
 			`SELECT tds_status, fd_id FROM investment.fd_tds_receipt WHERE tds_id = $1 AND is_deleted = false`,
 			req.TDSID).Scan(&currentStatus, &fdIDForTDS); err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "TDS entry not found")
+			api.RespondWithError(w, http.StatusNotFound, tdsEntryNotFoundMsg)
 			return
 		}
 		if currentStatus == constants.StatusApproved || currentStatus == "POSTED" {
@@ -851,7 +854,7 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		editBaseRow, loadErr := loadFDTDSRegisterRow(ctx, pool, req.TDSID)
 		if loadErr != nil {
 			api.LogError("[TDSUpdate] load row for policy failed for %s: %v", req.TDSID, loadErr)
-			api.RespondWithError(w, http.StatusNotFound, "TDS entry not found")
+			api.RespondWithError(w, http.StatusNotFound, tdsEntryNotFoundMsg)
 			return
 		}
 		editedRow := applyFDTDSRegisterEdits(editBaseRow, map[string]interface{}{
@@ -866,8 +869,8 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"tds_section":         req.TDSSection,
 			"has_pan":             req.HasPAN,
 		})
-		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "UpdateTDSRegister", "/investment/fd/tds-register/update",
-			editedRow.EntityID, userEmail, buildFDTDSRegisterPolicyFields(editedRow)) {
+		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateTDSRegister", APIPath: "/investment/fd/tds-register/update",
+			EntityCode: editedRow.EntityID, Actor: userEmail}, buildFDTDSRegisterPolicyFields(editedRow)) {
 			return
 		}
 
@@ -1010,11 +1013,11 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			bulkApproveRow, rowErr := loadFDTDSRegisterRow(ctx, pool, tdsID)
 			if rowErr != nil {
-				results = append(results, result{TDSID: tdsID, OK: false, Message: "TDS entry not found"})
+				results = append(results, result{TDSID: tdsID, OK: false, Message: tdsEntryNotFoundMsg})
 				continue
 			}
-			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "BulkApproveTDSRegister",
-				"/investment/fd/tds-register/approve-bulk", bulkApproveRow.EntityID, userEmail,
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{EventCode: common.TriggerPreApprove, HandlerName: "BulkApproveTDSRegister",
+				APIPath: "/investment/fd/tds-register/approve-bulk", EntityCode: bulkApproveRow.EntityID, Actor: userEmail},
 				buildFDTDSRegisterPolicyFields(bulkApproveRow)); !ok {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: pmsg})
 				continue
@@ -1121,8 +1124,8 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			if rowErr != nil {
 				continue
 			}
-			if ok, _ := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "BulkRejectTDSRegister",
-				"/investment/fd/tds-register/reject-bulk", bulkRejectRow.EntityID, userEmail,
+			if ok, _ := fdEnforceInline(ctx, r, pool, enforceCtx{EventCode: common.TriggerPreReject, HandlerName: "BulkRejectTDSRegister",
+				APIPath: "/investment/fd/tds-register/reject-bulk", EntityCode: bulkRejectRow.EntityID, Actor: userEmail},
 				buildFDTDSRegisterPolicyFields(bulkRejectRow)); !ok {
 				continue
 			}
@@ -1219,11 +1222,11 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		rejectRow, err := loadFDTDSRegisterRow(ctx, pool, req.TDSID)
 		if err != nil {
 			api.LogError("[TDSReject] load row for policy failed for %s: %v", req.TDSID, err)
-			api.RespondWithError(w, http.StatusNotFound, "TDS entry not found")
+			api.RespondWithError(w, http.StatusNotFound, tdsEntryNotFoundMsg)
 			return
 		}
-		if !fdEnforce(ctx, w, r, pool, common.TriggerPreReject, "RejectTDSRegister", "/investment/fd/tds-register/reject",
-			rejectRow.EntityID, userEmail, buildFDTDSRegisterPolicyFields(rejectRow)) {
+		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreReject, HandlerName: "RejectTDSRegister", APIPath: "/investment/fd/tds-register/reject",
+			EntityCode: rejectRow.EntityID, Actor: userEmail}, buildFDTDSRegisterPolicyFields(rejectRow)) {
 			return
 		}
 
@@ -1439,8 +1442,8 @@ func BulkDeleteTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				failed++
 				continue
 			}
-			if ok, _ := fdEnforceInline(ctx, r, pool, common.TriggerPreDelete, "BulkDeleteTDSRegister",
-				"/investment/fd/tds-register/delete-bulk", deleteRow.EntityID, userEmail,
+			if ok, _ := fdEnforceInline(ctx, r, pool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "BulkDeleteTDSRegister",
+				APIPath: "/investment/fd/tds-register/delete-bulk", EntityCode: deleteRow.EntityID, Actor: userEmail},
 				buildFDTDSRegisterPolicyFields(deleteRow)); !ok {
 				failed++
 				continue

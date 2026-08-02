@@ -435,21 +435,33 @@ func (r *Runtime) PullIMAPMessages(ctx context.Context, req IMAPPullRequest) (*I
 	return &out, nil
 }
 
-func (r *Runtime) PullGraphMessages(ctx context.Context, inboxID, mailbox string, sentFolder bool, since string, pageSize int, cfg GraphConnection, skipMessageIDs []string, filtersJSON []byte) (*GraphPullResult, error) {
+// GraphPullRequest groups the parameters for PullGraphMessages.
+type GraphPullRequest struct {
+	InboxID        string
+	Mailbox        string
+	SentFolder     bool
+	Since          string
+	PageSize       int
+	Conn           GraphConnection
+	SkipMessageIDs []string
+	FiltersJSON    []byte
+}
+
+func (r *Runtime) PullGraphMessages(ctx context.Context, req GraphPullRequest) (*GraphPullResult, error) {
 	var out GraphPullResult
 	payload := map[string]interface{}{
-		"inbox_id":        inboxID,
-		"mailbox_address": mailbox,
-		"sent_folder":     sentFolder,
-		"since":           since,
-		"batch":           pageSize,
-		"graph":           cfg,
+		"inbox_id":        req.InboxID,
+		"mailbox_address": req.Mailbox,
+		"sent_folder":     req.SentFolder,
+		"since":           req.Since,
+		"batch":           req.PageSize,
+		"graph":           req.Conn,
 	}
-	if len(skipMessageIDs) > 0 {
-		payload["skip_message_ids"] = skipMessageIDs
+	if len(req.SkipMessageIDs) > 0 {
+		payload["skip_message_ids"] = req.SkipMessageIDs
 	}
-	if len(filtersJSON) > 0 {
-		payload["filters_json"] = json.RawMessage(filtersJSON)
+	if len(req.FiltersJSON) > 0 {
+		payload["filters_json"] = json.RawMessage(req.FiltersJSON)
 	}
 	err := r.invoke(ctx, "/v1/graph/poll-page", payload, &out, pullTimeout())
 	if err != nil {
@@ -458,21 +470,33 @@ func (r *Runtime) PullGraphMessages(ctx context.Context, inboxID, mailbox string
 	return &out, nil
 }
 
-func (r *Runtime) PullGmailDWDMessages(ctx context.Context, inboxID, mailbox string, sentFolder bool, since string, pageSize int, cfg GmailDWDConnection, skipMessageIDs []string, filtersJSON []byte) (*GraphPullResult, error) {
+// GmailDWDPullRequest groups the parameters for PullGmailDWDMessages.
+type GmailDWDPullRequest struct {
+	InboxID        string
+	Mailbox        string
+	SentFolder     bool
+	Since          string
+	PageSize       int
+	Conn           GmailDWDConnection
+	SkipMessageIDs []string
+	FiltersJSON    []byte
+}
+
+func (r *Runtime) PullGmailDWDMessages(ctx context.Context, req GmailDWDPullRequest) (*GraphPullResult, error) {
 	var out GraphPullResult
 	payload := map[string]interface{}{
-		"inbox_id":        inboxID,
-		"mailbox_address": mailbox,
-		"sent_folder":     sentFolder,
-		"since":           since,
-		"batch":           pageSize,
-		"gmail_dwd":       cfg,
+		"inbox_id":        req.InboxID,
+		"mailbox_address": req.Mailbox,
+		"sent_folder":     req.SentFolder,
+		"since":           req.Since,
+		"batch":           req.PageSize,
+		"gmail_dwd":       req.Conn,
 	}
-	if len(skipMessageIDs) > 0 {
-		payload["skip_message_ids"] = skipMessageIDs
+	if len(req.SkipMessageIDs) > 0 {
+		payload["skip_message_ids"] = req.SkipMessageIDs
 	}
-	if len(filtersJSON) > 0 {
-		payload["filters_json"] = json.RawMessage(filtersJSON)
+	if len(req.FiltersJSON) > 0 {
+		payload["filters_json"] = json.RawMessage(req.FiltersJSON)
 	}
 	err := r.invoke(ctx, "/v1/gmail-dwd/poll-page", payload, &out, pullTimeout())
 	if err != nil {

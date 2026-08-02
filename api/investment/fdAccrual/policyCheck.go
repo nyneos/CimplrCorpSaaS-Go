@@ -15,22 +15,28 @@ const (
 	fdSubAccrualSched = "FD_ACCRUAL_SCHED"
 )
 
+// enforceCtx groups the per-call identifiers shared by the fdAccrual
+// Enforce/EnforceInline variants (event/actor/handler routing info).
+type enforceCtx struct {
+	EventCode, HandlerName, APIPath, EntityCode, Actor string
+}
+
 func fdAccrualEnforce(
 	ctx context.Context,
 	w http.ResponseWriter,
 	r *http.Request,
 	pool *pgxpool.Pool,
-	eventCode, handlerName, apiPath, entityCode, actor string,
+	cc enforceCtx,
 	fields map[string]interface{},
 ) bool {
 	return runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
-		EventCode:        eventCode,
+		EventCode:        cc.EventCode,
 		ModuleCode:       common.ModuleInvestmentFD,
 		SubModule:        fdSubAccrual,
-		EntityCode:       entityCode,
-		ActorUserID:      actor,
-		HandlerName:      handlerName,
-		APIPath:          apiPath,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
 		Fields:           fields,
 		RequireVariables: false,
 	})
@@ -40,17 +46,17 @@ func fdAccrualEnforceInline(
 	ctx context.Context,
 	r *http.Request,
 	pool *pgxpool.Pool,
-	eventCode, handlerName, apiPath, entityCode, actor string,
+	cc enforceCtx,
 	fields map[string]interface{},
 ) (bool, string) {
 	return runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
-		EventCode:        eventCode,
+		EventCode:        cc.EventCode,
 		ModuleCode:       common.ModuleInvestmentFD,
 		SubModule:        fdSubAccrual,
-		EntityCode:       entityCode,
-		ActorUserID:      actor,
-		HandlerName:      handlerName,
-		APIPath:          apiPath,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
 		Fields:           fields,
 		RequireVariables: false,
 	})
@@ -61,17 +67,17 @@ func fdAccrualSchedEnforce(
 	w http.ResponseWriter,
 	r *http.Request,
 	pool *pgxpool.Pool,
-	eventCode, handlerName, apiPath, entityCode, actor string,
+	cc enforceCtx,
 	fields map[string]interface{},
 ) bool {
 	return runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
-		EventCode:        eventCode,
+		EventCode:        cc.EventCode,
 		ModuleCode:       common.ModuleInvestmentFD,
 		SubModule:        fdSubAccrualSched,
-		EntityCode:       entityCode,
-		ActorUserID:      actor,
-		HandlerName:      handlerName,
-		APIPath:          apiPath,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
 		Fields:           fields,
 		RequireVariables: false,
 	})
@@ -81,17 +87,17 @@ func fdAccrualSchedEnforceInline(
 	ctx context.Context,
 	r *http.Request,
 	pool *pgxpool.Pool,
-	eventCode, handlerName, apiPath, entityCode, actor string,
+	cc enforceCtx,
 	fields map[string]interface{},
 ) (bool, string) {
 	return runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
-		EventCode:        eventCode,
+		EventCode:        cc.EventCode,
 		ModuleCode:       common.ModuleInvestmentFD,
 		SubModule:        fdSubAccrualSched,
-		EntityCode:       entityCode,
-		ActorUserID:      actor,
-		HandlerName:      handlerName,
-		APIPath:          apiPath,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
 		Fields:           fields,
 		RequireVariables: false,
 	})

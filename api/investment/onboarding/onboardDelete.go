@@ -42,8 +42,8 @@ func DeleteOnboardBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		userEmail := api.GetUserNameFromCtx(ctx)
-		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreDelete, "DeleteOnboardBatch",
-			"/investment/onboard/batch/delete", req.BatchID, userEmail,
+		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "DeleteOnboardBatch",
+			APIPath: "/investment/onboard/batch/delete", EntityCode: req.BatchID, Actor: userEmail},
 			buildMFOnboardBatchPolicyFields(batchRow, "DELETE", "")) {
 			return
 		}
@@ -127,8 +127,8 @@ func DeleteOnboardTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, fmt.Sprintf("transaction '%s' not found", req.TransactionID))
 			return
 		}
-		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreDelete, "DeleteOnboardTransaction",
-			"/investment/onboard/batch/delete-transaction", txnRow.BatchID, userEmail,
+		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "DeleteOnboardTransaction",
+			APIPath: "/investment/onboard/batch/delete-transaction", EntityCode: txnRow.BatchID, Actor: userEmail},
 			buildMFOnboardTransactionPolicyFields(txnRow)) {
 			return
 		}

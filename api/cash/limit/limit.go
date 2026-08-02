@@ -20,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errFailedToLoadBankLimitForPolicyCheck = "failed to load bank limit for policy check: "
+
 func validateLimitCashScope(ctx context.Context, refs map[string]interface{}) string {
 	return validation.ValidateCashMasterReferences(ctx, refs)
 }
@@ -566,7 +568,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		existingRow, err := loadBankLimitRow(ctx, pgxPool, req.LimitID)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to load bank limit for policy check: "+err.Error())
+			api.RespondWithResult(w, false, errFailedToLoadBankLimitForPolicyCheck+err.Error())
 			return
 		}
 		mergedRow := applyBankLimitEdits(existingRow, req.Fields)
@@ -821,7 +823,7 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			policyRow, perr := loadBankLimitRow(ctx, pgxPool, limitID)
 			if perr != nil {
 				result["success"] = false
-				result["error"] = "failed to load bank limit for policy check: " + perr.Error()
+				result["error"] = errFailedToLoadBankLimitForPolicyCheck + perr.Error()
 				results = append(results, result)
 				continue
 			}
@@ -1172,7 +1174,7 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, limitID := range req.LimitIDs {
 			policyRow, perr := loadBankLimitRow(ctx, pgxPool, limitID)
 			if perr != nil {
-				api.RespondWithResult(w, false, "failed to load bank limit for policy check: "+perr.Error())
+				api.RespondWithResult(w, false, errFailedToLoadBankLimitForPolicyCheck+perr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -1303,7 +1305,7 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, limitID := range req.LimitIDs {
 			policyRow, perr := loadBankLimitRow(ctx, pgxPool, limitID)
 			if perr != nil {
-				api.RespondWithResult(w, false, "failed to load bank limit for policy check: "+perr.Error())
+				api.RespondWithResult(w, false, errFailedToLoadBankLimitForPolicyCheck+perr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{

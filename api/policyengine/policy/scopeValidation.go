@@ -11,17 +11,24 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// policyScopeInput groups the module/sub-module/trigger scope and rule data
+// validated by validatePolicyScope so the function stays within the
+// project's max-params limit.
+type policyScopeInput struct {
+	Modules        []string
+	SubModules     []string
+	TriggerEvents  []string
+	ActionOnBreach string
+	RF             ruleFields
+	AddlExpression string
+}
+
 // validatePolicyScope makes domain_catalog the authority for module/sub-module
 // identity. It prevents action-level UI values such as BANK_BALANCE_CREATE from
 // being stored where runtime handlers use the canonical BANK_BALANCE code.
-func validatePolicyScope(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	modules, subModules, triggerEvents []string,
-	actionOnBreach string,
-	rf ruleFields,
-	addlExpression string,
-) error {
+func validatePolicyScope(ctx context.Context, pool *pgxpool.Pool, in policyScopeInput) error {
+	modules, subModules, triggerEvents := in.Modules, in.SubModules, in.TriggerEvents
+	actionOnBreach, rf, addlExpression := in.ActionOnBreach, in.RF, in.AddlExpression
 	moduleSet := cleanSet(modules)
 	subModuleSet := cleanSet(subModules)
 	triggerSet := cleanSet(triggerEvents)

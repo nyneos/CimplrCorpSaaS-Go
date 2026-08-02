@@ -25,6 +25,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// errLoadFailedSuffix is appended to a record id when a row load fails while
+// processing a bulk action, to build the per-item error message.
+const errLoadFailedSuffix = ": load failed: "
+
 // ---------------------------
 // Request/Response Types
 // ---------------------------
@@ -256,9 +260,14 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			v := req.ActualUnits
 			createRow.ActualAllottedUnits = &v
 		}
-		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateConfirmationSingle",
-			"/investment/confirmation/create", mfSubConfirmation, req.InitiationID, userEmail,
-			buildMFConfirmationPolicyFields(createRow)) {
+		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreCreate,
+			HandlerName: "CreateConfirmationSingle",
+			APIPath:     "/investment/confirmation/create",
+			SubModule:   mfSubConfirmation,
+			EntityCode:  req.InitiationID,
+			Actor:       userEmail,
+		}, buildMFConfirmationPolicyFields(createRow)) {
 			return
 		}
 
@@ -447,9 +456,14 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				v := row.ActualUnits
 				bulkCreateRow.ActualAllottedUnits = &v
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "CreateConfirmationBulk",
-				"/investment/confirmation/create-bulk", mfSubConfirmation, initiationID, userEmail,
-				buildMFConfirmationPolicyFields(bulkCreateRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreCreate,
+				HandlerName: "CreateConfirmationBulk",
+				APIPath:     "/investment/confirmation/create-bulk",
+				SubModule:   mfSubConfirmation,
+				EntityCode:  initiationID,
+				Actor:       userEmail,
+			}, buildMFConfirmationPolicyFields(bulkCreateRow)); !ok {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, constants.ValueError: pmsg,
 				})
@@ -566,9 +580,14 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		updatedConfRow := applyMFConfirmationEdits(existingConfRow, req.Fields)
-		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateConfirmation",
-			"/investment/confirmation/update", mfSubConfirmation, req.ConfirmationID, userEmail,
-			buildMFConfirmationPolicyFields(updatedConfRow)) {
+		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "UpdateConfirmation",
+			APIPath:     "/investment/confirmation/update",
+			SubModule:   mfSubConfirmation,
+			EntityCode:  req.ConfirmationID,
+			Actor:       userEmail,
+		}, buildMFConfirmationPolicyFields(updatedConfRow)) {
 			return
 		}
 
@@ -715,9 +734,14 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			bulkUpdatedConfRow := applyMFConfirmationEdits(bulkExistingConfRow, row.Fields)
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreEdit, "UpdateConfirmationBulk",
-				"/investment/confirmation/update-bulk", mfSubConfirmation, row.ConfirmationID, userEmail,
-				buildMFConfirmationPolicyFields(bulkUpdatedConfRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreEdit,
+				HandlerName: "UpdateConfirmationBulk",
+				APIPath:     "/investment/confirmation/update-bulk",
+				SubModule:   mfSubConfirmation,
+				EntityCode:  row.ConfirmationID,
+				Actor:       userEmail,
+			}, buildMFConfirmationPolicyFields(bulkUpdatedConfRow)); !ok {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, "confirmation_id": row.ConfirmationID, constants.ValueError: pmsg,
 				})
@@ -862,12 +886,17 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ConfirmationIDs {
 			delConfRow, loadErr := loadMFConfirmationRow(ctx, pgxPool, id)
 			if loadErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadFailedSuffix+loadErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreDelete, "DeleteConfirmation",
-				"/investment/confirmation/delete", mfSubConfirmation, id, requestedBy,
-				buildMFConfirmationPolicyFields(delConfRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreDelete,
+				HandlerName: "DeleteConfirmation",
+				APIPath:     "/investment/confirmation/delete",
+				SubModule:   mfSubConfirmation,
+				EntityCode:  id,
+				Actor:       requestedBy,
+			}, buildMFConfirmationPolicyFields(delConfRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -939,12 +968,17 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ConfirmationIDs {
 			apprConfRow, loadErr := loadMFConfirmationRow(ctx, pgxPool, id)
 			if loadErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadFailedSuffix+loadErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveConfirmationActions",
-				"/investment/confirmation/approve", mfSubConfirmation, id, checkerBy,
-				buildMFConfirmationPolicyFields(apprConfRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreApprove,
+				HandlerName: "BulkApproveConfirmationActions",
+				APIPath:     "/investment/confirmation/approve",
+				SubModule:   mfSubConfirmation,
+				EntityCode:  id,
+				Actor:       checkerBy,
+			}, buildMFConfirmationPolicyFields(apprConfRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -1198,12 +1232,17 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ConfirmationIDs {
 			rejConfRow, loadErr := loadMFConfirmationRow(ctx, pgxPool, id)
 			if loadErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadFailedSuffix+loadErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectConfirmationActions",
-				"/investment/confirmation/reject", mfSubConfirmation, id, checkerBy,
-				buildMFConfirmationPolicyFields(rejConfRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreReject,
+				HandlerName: "BulkRejectConfirmationActions",
+				APIPath:     "/investment/confirmation/reject",
+				SubModule:   mfSubConfirmation,
+				EntityCode:  id,
+				Actor:       checkerBy,
+			}, buildMFConfirmationPolicyFields(rejConfRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -2023,12 +2062,17 @@ func ConfirmInvestment(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ConfirmationIDs {
 			confirmRow, loadErr := loadMFConfirmationRow(ctx, pgxPool, id)
 			if loadErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadFailedSuffix+loadErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "ConfirmInvestment",
-				"/investment/confirmation/confirm", mfSubConfirmation, id, confirmedBy,
-				buildMFConfirmationPolicyFields(confirmRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreCreate,
+				HandlerName: "ConfirmInvestment",
+				APIPath:     "/investment/confirmation/confirm",
+				SubModule:   mfSubConfirmation,
+				EntityCode:  id,
+				Actor:       confirmedBy,
+			}, buildMFConfirmationPolicyFields(confirmRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}

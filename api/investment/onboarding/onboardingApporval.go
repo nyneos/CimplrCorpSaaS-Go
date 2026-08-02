@@ -155,8 +155,8 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 404, fmt.Sprintf("Batch '%s' not found", batchID))
 				return
 			}
-			if !mfEnforce(ctx, w, r, pgxPool, approvalEventCode, "BulkApproveBatch",
-				"/investment/onboard/batch/approve", batchID, userEmail,
+			if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: approvalEventCode, HandlerName: "BulkApproveBatch",
+				APIPath: "/investment/onboard/batch/approve", EntityCode: batchID, Actor: userEmail},
 				buildMFOnboardBatchPolicyFields(batchRow, req.Action, req.Comment)) {
 				return
 			}

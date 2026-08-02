@@ -157,8 +157,13 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			PeriodCoverage:        req.PeriodCoverage,
 			CreatedBy:             userEmail,
 		}
-		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateScheduleConfig",
-			"/investment/fd/accrual/schedule/create", req.EntityID, userEmail, buildFDAccrualSchedulePolicyFields(schedDraftRow)) {
+		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreCreate,
+			HandlerName: "CreateScheduleConfig",
+			APIPath:     "/investment/fd/accrual/schedule/create",
+			EntityCode:  req.EntityID,
+			Actor:       userEmail,
+		}, buildFDAccrualSchedulePolicyFields(schedDraftRow)) {
 			return
 		}
 
@@ -322,8 +327,13 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		updatedRow := applyFDAccrualScheduleEdits(updateBaseRow, req.Fields)
-		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateScheduleConfig",
-			"/investment/fd/accrual/schedule/update", entityID, userEmail, buildFDAccrualSchedulePolicyFields(updatedRow)) {
+		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "UpdateScheduleConfig",
+			APIPath:     "/investment/fd/accrual/schedule/update",
+			EntityCode:  entityID,
+			Actor:       userEmail,
+		}, buildFDAccrualSchedulePolicyFields(updatedRow)) {
 			return
 		}
 
@@ -526,8 +536,13 @@ func DisableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
 			return
 		}
-		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "DisableSchedule",
-			"/investment/fd/accrual/schedule/disable", disableEntityID, userEmail, schedFields) {
+		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "DisableSchedule",
+			APIPath:     "/investment/fd/accrual/schedule/disable",
+			EntityCode:  disableEntityID,
+			Actor:       userEmail,
+		}, schedFields) {
 			return
 		}
 		ct, err := pgxPool.Exec(ctx, `
@@ -593,8 +608,13 @@ func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
 			return
 		}
-		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "EnableSchedule",
-			"/investment/fd/accrual/schedule/enable", enableEntityID, userEmail, schedFields) {
+		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "EnableSchedule",
+			APIPath:     "/investment/fd/accrual/schedule/enable",
+			EntityCode:  enableEntityID,
+			Actor:       userEmail,
+		}, schedFields) {
 			return
 		}
 		ct, err := pgxPool.Exec(ctx, `
@@ -666,8 +686,13 @@ func ApproveScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, configID+": "+pfErr.Error())
 				continue
 			}
-			if ok, pmsg := fdAccrualSchedEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "ApproveAccrualSchedule",
-				"/investment/fd/accrual/schedule/approve", approveEntityID, userEmail, schedFields); !ok {
+			if ok, pmsg := fdAccrualSchedEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreApprove,
+				HandlerName: "ApproveAccrualSchedule",
+				APIPath:     "/investment/fd/accrual/schedule/approve",
+				EntityCode:  approveEntityID,
+				Actor:       userEmail,
+			}, schedFields); !ok {
 				errors = append(errors, configID+": "+pmsg)
 				continue
 			}
@@ -797,8 +822,13 @@ func RejectScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, configID+": "+pfErr.Error())
 				continue
 			}
-			if ok, pmsg := fdAccrualSchedEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "RejectAccrualSchedule",
-				"/investment/fd/accrual/schedule/reject", rejectEntityID, userEmail, schedFields); !ok {
+			if ok, pmsg := fdAccrualSchedEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreReject,
+				HandlerName: "RejectAccrualSchedule",
+				APIPath:     "/investment/fd/accrual/schedule/reject",
+				EntityCode:  rejectEntityID,
+				Actor:       userEmail,
+			}, schedFields); !ok {
 				errors = append(errors, configID+": "+pmsg)
 				continue
 			}
@@ -1081,8 +1111,13 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+pfErr.Error())
 			return
 		}
-		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, common.TriggerPreDelete, "DeleteScheduleConfig",
-			"/investment/fd/accrual/schedule/delete", entityID, userEmail, buildFDAccrualSchedulePolicyFields(deleteRow)) {
+		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreDelete,
+			HandlerName: "DeleteScheduleConfig",
+			APIPath:     "/investment/fd/accrual/schedule/delete",
+			EntityCode:  entityID,
+			Actor:       userEmail,
+		}, buildFDAccrualSchedulePolicyFields(deleteRow)) {
 			return
 		}
 

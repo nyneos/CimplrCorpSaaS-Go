@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+const (
+	contentTypeHeader = "Content-Type"
+	contentTypeJSON   = "application/json"
+	bearerPrefix      = "Bearer "
+)
+
 // Client is the outbound policy check relay. Safe for concurrent use.
 type Client struct {
 	wireRoot string
@@ -108,9 +114,9 @@ func (c *Client) ValidatePEL(ctx context.Context, expression, returnType string)
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(contentTypeHeader, contentTypeJSON)
 	if c.token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+		httpReq.Header.Set("Authorization", bearerPrefix+c.token)
 	}
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -138,9 +144,9 @@ func (c *Client) post(ctx context.Context, route string, req EvaluateRequest) (*
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(contentTypeHeader, contentTypeJSON)
 	if c.token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+		httpReq.Header.Set("Authorization", bearerPrefix+c.token)
 	}
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -183,9 +189,9 @@ func (c *Client) Health(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(contentTypeHeader, contentTypeJSON)
 	if c.token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+		httpReq.Header.Set("Authorization", bearerPrefix+c.token)
 	}
 	resp, err := c.http.Do(httpReq)
 	if err != nil {

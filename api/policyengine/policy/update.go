@@ -45,11 +45,10 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
 			return
 		}
-		if err := validatePolicyScope(
-			r.Context(), pool,
-			req.Modules, req.SubModules, req.TriggerEvents,
-			req.ActionOnBreach, rf, req.AddlExpression,
-		); err != nil {
+		if err := validatePolicyScope(r.Context(), pool, policyScopeInput{
+			Modules: req.Modules, SubModules: req.SubModules, TriggerEvents: req.TriggerEvents,
+			ActionOnBreach: req.ActionOnBreach, RF: rf, AddlExpression: req.AddlExpression,
+		}); err != nil {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "POLICY_SCOPE_INVALID")
 			return
 		}
@@ -133,7 +132,11 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := replacePolicyChildren(r.Context(), tx, r, req.PolicyID, req.TriggerEvents, req.Modules, req.SubModules, req.EntitiesInclude, req.EntitiesExclude, req.RuleType, rf); err != nil {
+		if err := replacePolicyChildren(r.Context(), tx, r, req.PolicyID, policyChildrenSpec{
+			TriggerEvents: req.TriggerEvents, Modules: req.Modules, SubModules: req.SubModules,
+			EntitiesInclude: req.EntitiesInclude, EntitiesExclude: req.EntitiesExclude,
+			RuleType: req.RuleType, RF: rf,
+		}); err != nil {
 			api.LogErrorForResponse(w, "policy update children: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach triggers/modules/rule rows (unknown code?)", "POLICY_UPDATE_FAILED")
 			return
@@ -145,7 +148,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := insertEditAudit(r, tx, req.PolicyID, actor, ip, old, req.createReq, rf); err != nil {
+		if err := insertEditAudit(r, tx, editAuditActor{PolicyID: req.PolicyID, Actor: actor, IP: ip}, old, req.createReq, rf); err != nil {
 			api.LogErrorForResponse(w, "policy update audit: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit policy update", "POLICY_UPDATE_FAILED")
 			return

@@ -9,6 +9,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// errCatalogTreeFailed is the shared error message for catalog-tree load failures.
+const errCatalogTreeFailed = "failed to load catalog tree"
+
 type treeAlias struct {
 	ConsumerSystem string `json:"consumer_system"`
 	AliasCode      string `json:"alias_code"`
@@ -26,16 +29,16 @@ type treeField struct {
 }
 
 type treePart struct {
-	PartCode         string `json:"part_code"`
-	PartName         string `json:"part_name"`
-	Description      string `json:"description"`
-	APIPath          string `json:"api_path"`
-	HandlerName      string `json:"handler_name"`
-	StorageModuleKey string `json:"storage_module_key"`
-	S3Prefix         string `json:"s3_prefix"`
-	ParentField      string `json:"parent_field"`
-	FilesTable       string `json:"files_table"`
-	SortOrder        int    `json:"sort_order"`
+	PartCode         string      `json:"part_code"`
+	PartName         string      `json:"part_name"`
+	Description      string      `json:"description"`
+	APIPath          string      `json:"api_path"`
+	HandlerName      string      `json:"handler_name"`
+	StorageModuleKey string      `json:"storage_module_key"`
+	S3Prefix         string      `json:"s3_prefix"`
+	ParentField      string      `json:"parent_field"`
+	FilesTable       string      `json:"files_table"`
+	SortOrder        int         `json:"sort_order"`
 	Aliases          []treeAlias `json:"aliases"`
 }
 
@@ -98,7 +101,7 @@ func HandleTree(pool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY sort_order, part_code`, out.SubModuleCode)
 		if err != nil {
 			api.LogErrorForResponse(w, "domain-catalog tree parts: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to load catalog tree", "CATALOG_TREE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errCatalogTreeFailed, "CATALOG_TREE_FAILED")
 			return
 		}
 		defer partRows.Close()
@@ -110,7 +113,7 @@ func HandleTree(pool *pgxpool.Pool) http.HandlerFunc {
 			if err := partRows.Scan(&partID, &p.PartCode, &p.PartName, &p.Description, &p.APIPath, &p.HandlerName,
 				&p.StorageModuleKey, &p.S3Prefix, &p.ParentField, &p.FilesTable, &p.SortOrder); err != nil {
 				api.LogErrorForResponse(w, "domain-catalog tree part scan: %v", err)
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to load catalog tree", "CATALOG_TREE_FAILED")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errCatalogTreeFailed, "CATALOG_TREE_FAILED")
 				return
 			}
 			p.Aliases = loadAliases(w, r, pool, `
@@ -126,7 +129,7 @@ func HandleTree(pool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY sort_order, field_code`, out.SubModuleCode)
 		if err != nil {
 			api.LogErrorForResponse(w, "domain-catalog tree fields: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to load catalog tree", "CATALOG_TREE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errCatalogTreeFailed, "CATALOG_TREE_FAILED")
 			return
 		}
 		defer fieldRows.Close()
@@ -136,7 +139,7 @@ func HandleTree(pool *pgxpool.Pool) http.HandlerFunc {
 			var f treeField
 			if err := fieldRows.Scan(&f.FieldCode, &f.CDMPath, &f.DataType, &f.Unit, &f.Label, &f.Description, &f.Nullable, &f.SortOrder); err != nil {
 				api.LogErrorForResponse(w, "domain-catalog tree field scan: %v", err)
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to load catalog tree", "CATALOG_TREE_FAILED")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errCatalogTreeFailed, "CATALOG_TREE_FAILED")
 				return
 			}
 			out.Fields = append(out.Fields, f)

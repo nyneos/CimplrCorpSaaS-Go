@@ -119,9 +119,14 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// ── Policy check — CDM vars from domain_catalog.field.cdm_path ────────
 		correlationID := common.ResolveCorrelationID(r, req.CorrelationID)
-		if !enforceFDBookingPolicy(r.Context(), w, r, pgxPool, common.TriggerPreCreate,
-			"CreateBookingSingle", "/investment/fd/booking/create",
-			req.EntityID, userEmail, correlationID,
+		if !enforceFDBookingPolicy(r.Context(), w, r, pgxPool, enforceCtx{
+			EventCode:     common.TriggerPreCreate,
+			HandlerName:   "CreateBookingSingle",
+			APIPath:       "/investment/fd/booking/create",
+			EntityCode:    req.EntityID,
+			Actor:         userEmail,
+			CorrelationID: correlationID,
+		},
 			map[string]interface{}{
 				"entity_id":              req.EntityID,
 				"entity_code":            req.EntityID,
@@ -477,9 +482,13 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreCreate,
-				"CreateBookingBulk", "/investment/fd/booking/create-bulk",
-				row.EntityID, userEmail,
+			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreCreate,
+				HandlerName: "CreateBookingBulk",
+				APIPath:     "/investment/fd/booking/create-bulk",
+				EntityCode:  row.EntityID,
+				Actor:       userEmail,
+			},
 				map[string]interface{}{
 					"entity_id":           row.EntityID,
 					"entity_code":         row.EntityID,
@@ -866,9 +875,13 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for k, v := range req.Fields {
 			merged[k] = v
 		}
-		if !enforceFDBookingPolicy(ctx, w, r, pgxPool, common.TriggerPreEdit,
-			"UpdateBooking", "/investment/fd/booking/update",
-			entityID, userEmail, "", merged,
+		if !enforceFDBookingPolicy(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "UpdateBooking",
+			APIPath:     "/investment/fd/booking/update",
+			EntityCode:  entityID,
+			Actor:       userEmail,
+		}, merged,
 		) {
 			return
 		}
@@ -1082,9 +1095,13 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Soft-deleted / missing rows are skipped by the delete query below.
 				continue
 			}
-			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreDelete,
-				"DeleteBooking", "/investment/fd/booking/delete",
-				entityID, userEmail, fields,
+			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreDelete,
+				HandlerName: "DeleteBooking",
+				APIPath:     "/investment/fd/booking/delete",
+				EntityCode:  entityID,
+				Actor:       userEmail,
+			}, fields,
 			); !ok {
 				policyBlocked = append(policyBlocked, bID+": "+pmsg)
 			}
@@ -1521,9 +1538,13 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, bID+": "+loadErr.Error())
 				continue
 			}
-			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreApprove,
-				"BulkApproveBooking", "/investment/fd/booking/approve",
-				entityID, userEmail, fields,
+			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreApprove,
+				HandlerName: "BulkApproveBooking",
+				APIPath:     "/investment/fd/booking/approve",
+				EntityCode:  entityID,
+				Actor:       userEmail,
+			}, fields,
 			); !ok {
 				errors = append(errors, bID+": "+pmsg)
 				continue
@@ -1666,9 +1687,13 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, bID+": "+loadErr.Error())
 				continue
 			}
-			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, common.TriggerPreReject,
-				"BulkRejectBooking", "/investment/fd/booking/reject",
-				entityID, userEmail, fields,
+			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreReject,
+				HandlerName: "BulkRejectBooking",
+				APIPath:     "/investment/fd/booking/reject",
+				EntityCode:  entityID,
+				Actor:       userEmail,
+			}, fields,
 			); !ok {
 				errors = append(errors, bID+": "+pmsg)
 				continue

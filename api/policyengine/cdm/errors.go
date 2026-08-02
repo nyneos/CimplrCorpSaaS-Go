@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+const logFmtCDMUpdateStep = "cdm update %s: %v"
+
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
@@ -56,12 +58,12 @@ func respondCDMCreateError(w http.ResponseWriter, step string, err error) {
 
 func respondCDMUpdateError(w http.ResponseWriter, step string, err error) {
 	if isUniqueViolation(err) {
-		api.LogErrorForResponse(w, "cdm update %s: %v", step, err)
+		api.LogErrorForResponse(w, logFmtCDMUpdateStep, step, err)
 		api.RespondEnvelopeError(w, http.StatusConflict, "failed to update CDM variable ("+cdmConflictDetail(err)+")", "CDM_UPDATE_FAILED")
 		return
 	}
 	if isAbortedTransaction(err) {
-		api.LogErrorForResponse(w, "cdm update %s: %v", step, err)
+		api.LogErrorForResponse(w, logFmtCDMUpdateStep, step, err)
 		api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update CDM variable (transaction aborted)", "CDM_UPDATE_FAILED")
 		return
 	}
@@ -72,6 +74,6 @@ func respondCDMUpdateError(w http.ResponseWriter, step string, err error) {
 	if strings.TrimSpace(step) == "" {
 		step = "exec"
 	}
-	api.LogErrorForResponse(w, "cdm update %s: %v", step, err)
+	api.LogErrorForResponse(w, logFmtCDMUpdateStep, step, err)
 	api.RespondEnvelopeError(w, http.StatusInternalServerError, msg, "CDM_UPDATE_FAILED")
 }

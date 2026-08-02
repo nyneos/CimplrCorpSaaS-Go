@@ -42,16 +42,16 @@ func draftConstraintFromReq(req createReq, rf ruleFields) *runtime.ThrConstraint
 	if rf.ThrValueDate != nil {
 		valueDate = *rf.ThrValueDate
 	}
-	c, ok := runtime.DraftHardBlockConstraint(
-		req.Code,
-		req.ActionOnBreach,
-		req.RuleType,
-		rf.ThrVariable,
-		rf.ThrOperator,
-		rf.ThrValue,
-		rf.ThrValueMode,
-		valueDate,
-	)
+	c, ok := runtime.DraftHardBlockConstraint(runtime.DraftThreshold{
+		Code:      req.Code,
+		Action:    req.ActionOnBreach,
+		RuleType:  req.RuleType,
+		Variable:  rf.ThrVariable,
+		Operator:  rf.ThrOperator,
+		Value:     rf.ThrValue,
+		ValueMode: rf.ThrValueMode,
+		ValueDate: valueDate,
+	})
 	if !ok {
 		return nil
 	}

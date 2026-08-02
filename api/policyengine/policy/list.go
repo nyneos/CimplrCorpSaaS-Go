@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errMsgListPolicies = "failed to list policies"
+
 // ListItem is the full policy list view: policy_master header columns +
 // array_agg'd trigger event codes / module codes + processing_status +
 // audit metadata (Requested / Edited / Approved) for expand panels.
@@ -127,7 +129,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 		var total int
 		if err := pool.QueryRow(ctx, countQ, countArgs...).Scan(&total); err != nil {
 			api.LogErrorForResponse(w, "policy list count: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to list policies", "POLICY_LIST_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgListPolicies, "POLICY_LIST_FAILED")
 			return
 		}
 
@@ -159,7 +161,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pool.Query(ctx, listQ, listArgs...)
 		if err != nil {
 			api.LogErrorForResponse(w, "policy list: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to list policies", "POLICY_LIST_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgListPolicies, "POLICY_LIST_FAILED")
 			return
 		}
 		defer rows.Close()
@@ -176,7 +178,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 				&it.RequestedBy, &requestedAt, &it.CheckerBy, &checkerAt,
 				&it.CheckerComment); err != nil {
 				api.LogErrorForResponse(w, "policy list scan: %v", err)
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to list policies", "POLICY_LIST_FAILED")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgListPolicies, "POLICY_LIST_FAILED")
 				return
 			}
 			it.CreatedAt = common.FormatAuditTime(createdAt)

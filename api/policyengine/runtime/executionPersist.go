@@ -48,7 +48,24 @@ func technicalExecution(code, clientSafeMessage string) *technicalExecutionRow {
 	return &technicalExecutionRow{Code: code, Message: clientSafeMessage}
 }
 
-func completedExecutionRun(runID string, req CheckRequest, started time.Time, loadDuration, evaluationDuration time.Duration, trace policyLoadTrace, results []policysvc.PolicyResult, action, outcome string) executionRunRecord {
+// execDurations groups the load/evaluation timings for completedExecutionRun
+// so the function stays within the project's max-params limit.
+type execDurations struct {
+	Load       time.Duration
+	Evaluation time.Duration
+}
+
+// execOutcome groups the evaluated results and their aggregated action/outcome
+// for completedExecutionRun so the function stays within the project's
+// max-params limit.
+type execOutcome struct {
+	Results []policysvc.PolicyResult
+	Action  string
+	Outcome string
+}
+
+func completedExecutionRun(runID string, req CheckRequest, started time.Time, durations execDurations, trace policyLoadTrace, out execOutcome) executionRunRecord {
+	results, action, outcome := out.Results, out.Action, out.Outcome
 	passCount, breachCount, errorCount := countResults(results)
 	if outcome == "ERROR" && errorCount == 0 {
 		errorCount = 1
@@ -69,8 +86,8 @@ func completedExecutionRun(runID string, req CheckRequest, started time.Time, lo
 		CandidateCount: trace.candidateCount(), ApplicableCount: trace.applicableCount(),
 		EvaluatedCount: len(results), SkippedCount: len(trace.Skips),
 		PassCount: passCount, BreachCount: breachCount, ErrorCount: errorCount,
-		AggregatedAction: action, LoadDurationMS: durationMilliseconds(loadDuration),
-		EvaluationDurationMS: durationMilliseconds(evaluationDuration),
+		AggregatedAction: action, LoadDurationMS: durationMilliseconds(durations.Load),
+		EvaluationDurationMS: durationMilliseconds(durations.Evaluation),
 		TotalDurationMS:      durationMilliseconds(completed.Sub(started)),
 		Outcome:              outcome, Status: status, StartedAt: started, CompletedAt: completed,
 		Skips: trace.Skips,
@@ -160,7 +177,10 @@ func persistExecutionRun(ctx context.Context, pool *pgxpool.Pool, run executionR
 	}
 
 	if technical != nil {
-		if _, err := insertExecutionLog(ctx, tx, run, "", technical.Code, "ERROR", "", technical.Message, technical.Code, technical.Message, nil); err != nil {
+		if _, err := insertExecutionLog(ctx, tx, run, executionLogOutcome{
+			PolicyCode: technical.Code, Result: "ERROR",
+			Detail: technical.Message, FailCode: technical.Code, FailReason: technical.Message,
+		}, nil); err != nil {
 			return err
 		}
 	}
@@ -174,11 +194,17 @@ func persistExecutionRun(ctx context.Context, pool *pgxpool.Pool, run executionR
 		if result.Result == "BREACH" || result.Result == "ERROR" {
 			failCode, failReason = result.Result, result.Message
 		}
-		executionID, err := insertExecutionLog(ctx, tx, run, result.PolicyID, result.Code, result.Result, result.Action, detail, failCode, failReason, comparisons)
+		executionID, err := insertExecutionLog(ctx, tx, run, executionLogOutcome{
+			PolicyID: result.PolicyID, PolicyCode: result.Code, Result: result.Result,
+			Action: result.Action, Detail: detail, FailCode: failCode, FailReason: failReason,
+		}, comparisons)
 		if err != nil {
 			return err
 		}
-		if err := insertComparisons(ctx, tx, run.RunID, executionID, result.PolicyID, result.Code, result.Result, comparisons); err != nil {
+		if err := insertComparisons(ctx, tx, comparisonKey{
+			RunID: run.RunID, ExecutionID: executionID, PolicyID: result.PolicyID,
+			PolicyCode: result.Code, Result: result.Result,
+		}, comparisons); err != nil {
 			return err
 		}
 	}
@@ -188,11 +214,22 @@ func persistExecutionRun(ctx context.Context, pool *pgxpool.Pool, run executionR
 	return nil
 }
 
-func insertComparisons(ctx context.Context, tx pgx.Tx, runID, executionID, policyID, policyCode, result string, comparisons []comparisonRecord) error {
+// comparisonKey identifies the run/execution/policy a batch of comparisons
+// belongs to, grouped so insertComparisons stays within the project's
+// max-params limit.
+type comparisonKey struct {
+	RunID       string
+	ExecutionID string
+	PolicyID    string
+	PolicyCode  string
+	Result      string
+}
+
+func insertComparisons(ctx context.Context, tx pgx.Tx, key comparisonKey, comparisons []comparisonRecord) error {
 	for _, comparison := range comparisons {
 		outcome := strings.ToUpper(strings.TrimSpace(comparison.Outcome))
 		if outcome == "" {
-			outcome = strings.ToUpper(strings.TrimSpace(result))
+			outcome = strings.ToUpper(strings.TrimSpace(key.Result))
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO policyengine_svc.execution_comparison (
@@ -200,7 +237,7 @@ func insertComparisons(ctx context.Context, tx pgx.Tx, runID, executionID, polic
 				actual_value, operator, expected_value, lower_bound, upper_bound,
 				unit, label, outcome
 			) VALUES ($1,$2,NULLIF($3,'')::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-			runID, executionID, policyID, common.NullIfEmpty(policyCode), comparison.Sequence,
+			key.RunID, key.ExecutionID, key.PolicyID, common.NullIfEmpty(key.PolicyCode), comparison.Sequence,
 			common.NullIfEmpty(comparison.Variable), common.NullIfEmpty(comparison.ActualValue),
 			common.NullIfEmpty(comparison.Operator), common.NullIfEmpty(comparison.ExpectedValue),
 			common.NullIfEmpty(comparison.LowerBound), common.NullIfEmpty(comparison.UpperBound),
@@ -212,7 +249,21 @@ func insertComparisons(ctx context.Context, tx pgx.Tx, runID, executionID, polic
 	return nil
 }
 
-func insertExecutionLog(ctx context.Context, tx pgx.Tx, run executionRunRecord, policyID, policyCode, result, action, detail, failCode, failReason string, comparisons []comparisonRecord) (string, error) {
+// executionLogOutcome groups the policy result fields for insertExecutionLog
+// so the function stays within the project's max-params limit.
+type executionLogOutcome struct {
+	PolicyID   string
+	PolicyCode string
+	Result     string
+	Action     string
+	Detail     string
+	FailCode   string
+	FailReason string
+}
+
+func insertExecutionLog(ctx context.Context, tx pgx.Tx, run executionRunRecord, out executionLogOutcome, comparisons []comparisonRecord) (string, error) {
+	policyID, policyCode, result := out.PolicyID, out.PolicyCode, out.Result
+	action, detail, failCode, failReason := out.Action, out.Detail, out.FailCode, out.FailReason
 	comparedVariable, comparedValue, limitValue := firstComparisonLegacyValues(comparisons)
 	var executionID string
 	err := tx.QueryRow(ctx, `

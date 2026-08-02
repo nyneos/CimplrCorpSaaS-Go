@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errMsgLoadCDMAudit = "failed to load CDM audit"
+
 // HandleAuditLog returns maker-checker audit rows for one CDM variable (newest activity first).
 func HandleAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -67,7 +69,7 @@ func HandleAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 			) DESC`, variableID)
 		if err != nil {
 			api.LogErrorForResponse(w, "cdm audit-log: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to load CDM audit", "CDM_AUDIT_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgLoadCDMAudit, "CDM_AUDIT_FAILED")
 			return
 		}
 		defer rows.Close()
@@ -94,7 +96,7 @@ func HandleAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 				&oldNullable, &newNullable, &oldStatus, &newStatus, &oldDeleted, &newDeleted,
 			); err != nil {
 				api.LogErrorForResponse(w, "cdm audit-log scan: %v", err)
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to load CDM audit", "CDM_AUDIT_FAILED")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgLoadCDMAudit, "CDM_AUDIT_FAILED")
 				return
 			}
 			row := map[string]interface{}{
@@ -131,7 +133,7 @@ func HandleAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := rows.Err(); err != nil {
 			api.LogErrorForResponse(w, "cdm audit-log rows: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to load CDM audit", "CDM_AUDIT_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgLoadCDMAudit, "CDM_AUDIT_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "CDM audit fetched", out)

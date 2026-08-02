@@ -23,6 +23,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	errLoadRedemptionForPolicyCheck = ": failed to load redemption for policy check: "
+	redemptionInitiationApprovePath = "/investment/redemption/initiation/approve"
+)
+
 // ---------------------------
 // Request/Response Types
 // ---------------------------
@@ -151,8 +156,8 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			entityCode = req.SchemeID
 		}
 		schemeName, amcName := lookupRedemptionSchemeEnrichment(ctx, pgxPool, req.SchemeID)
-		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateRedemptionSingle",
-			"/investment/redemption/initiation/create", mfSubRedemption, entityCode, userEmail,
+		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateRedemptionSingle",
+			APIPath: "/investment/redemption/initiation/create", SubModule: mfSubRedemption, EntityCode: entityCode, Actor: userEmail},
 			buildRedemptionInitiationPolicyFields(redemptionInitiationRow{
 				FolioID:           req.FolioID,
 				DematID:           req.DematID,
@@ -432,8 +437,8 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				entityCode = row.SchemeID
 			}
 			bulkSchemeName, bulkAMCName := lookupRedemptionSchemeEnrichment(ctx, pgxPool, row.SchemeID)
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "CreateRedemptionBulk",
-				"/investment/redemption/initiation/create-bulk", mfSubRedemption, entityCode, userEmail,
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateRedemptionBulk",
+				APIPath: "/investment/redemption/initiation/create-bulk", SubModule: mfSubRedemption, EntityCode: entityCode, Actor: userEmail},
 				buildRedemptionInitiationPolicyFields(redemptionInitiationRow{
 					FolioID:           row.FolioID,
 					DematID:           row.DematID,
@@ -679,8 +684,8 @@ func UpdateRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		mergedRow := applyRedemptionInitiationEdits(existingRow, req.Fields)
-		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateRedemption",
-			"/investment/redemption/initiation/update", mfSubRedemption, req.RedemptionID, userEmail,
+		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateRedemption",
+			APIPath: "/investment/redemption/initiation/update", SubModule: mfSubRedemption, EntityCode: req.RedemptionID, Actor: userEmail},
 			buildRedemptionInitiationPolicyFields(mergedRow)) {
 			return
 		}
@@ -817,8 +822,8 @@ func UpdateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			mergedRow := applyRedemptionInitiationEdits(existingRow, row.Fields)
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreEdit, "UpdateRedemptionBulk",
-				"/investment/redemption/initiation/update-bulk", mfSubRedemption, row.RedemptionID, userEmail,
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateRedemptionBulk",
+				APIPath: "/investment/redemption/initiation/update-bulk", SubModule: mfSubRedemption, EntityCode: row.RedemptionID, Actor: userEmail},
 				buildRedemptionInitiationPolicyFields(mergedRow)); !ok {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: pmsg,
@@ -950,11 +955,11 @@ func DeleteRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.RedemptionIDs {
 			row, rowErr := loadRedemptionInitiationRow(ctx, pgxPool, id)
 			if rowErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption for policy check: "+rowErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadRedemptionForPolicyCheck+rowErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreDelete, "DeleteRedemption",
-				"/investment/redemption/initiation/delete", mfSubRedemption, id, requestedBy,
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "DeleteRedemption",
+				APIPath: "/investment/redemption/initiation/delete", SubModule: mfSubRedemption, EntityCode: id, Actor: requestedBy},
 				buildRedemptionInitiationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
@@ -1021,11 +1026,11 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.RedemptionIDs {
 			row, rowErr := loadRedemptionInitiationRow(ctx, pgxPool, id)
 			if rowErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption for policy check: "+rowErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadRedemptionForPolicyCheck+rowErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveRedemptionActions",
-				"/investment/redemption/initiation/approve", mfSubRedemption, id, checkerBy,
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreApprove, HandlerName: "BulkApproveRedemptionActions",
+				APIPath: redemptionInitiationApprovePath, SubModule: mfSubRedemption, EntityCode: id, Actor: checkerBy},
 				buildRedemptionInitiationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
@@ -1222,13 +1227,13 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			approvedRedemptionIDs := req.RedemptionIDs
 			go func() {
 				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, approvedRedemptionIDs, constants.AuditActionApprove, checkerBy)
-				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/approve", approvedRedemptionIDs[0], payload.ToMap())
+				catalog.TriggerNotification(ctx, pgxPool, redemptionInitiationApprovePath, approvedRedemptionIDs[0], payload.ToMap())
 			}()
 		}
 		if len(deleteMasterIDs) > 0 {
 			go func() {
 				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, deleteMasterIDs, constants.AuditActionDelete, checkerBy)
-				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/approve", deleteMasterIDs[0], payload.ToMap())
+				catalog.TriggerNotification(ctx, pgxPool, redemptionInitiationApprovePath, deleteMasterIDs[0], payload.ToMap())
 			}()
 		}
 		api.RespondWithPayload(w, true, "", map[string]any{
@@ -1318,11 +1323,11 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.RedemptionIDs {
 			row, rowErr := loadRedemptionInitiationRow(ctx, pgxPool, id)
 			if rowErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": failed to load redemption for policy check: "+rowErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadRedemptionForPolicyCheck+rowErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectRedemptionActions",
-				"/investment/redemption/initiation/reject", mfSubRedemption, id, checkerBy,
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreReject, HandlerName: "BulkRejectRedemptionActions",
+				APIPath: "/investment/redemption/initiation/reject", SubModule: mfSubRedemption, EntityCode: id, Actor: checkerBy},
 				buildRedemptionInitiationPolicyFields(row)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return

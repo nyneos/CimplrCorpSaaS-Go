@@ -220,14 +220,14 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 	if len(policies) == 0 {
 		if strings.TrimSpace(req.ModuleCode) != "" && strings.TrimSpace(req.SubModule) == "" {
 			err := fmt.Errorf("sub_module is required when module_code is set (refusing to load all sub-modules for %s)", req.ModuleCode)
-			run := completedExecutionRun(runID, req, runStarted, time.Since(loadStarted), 0, loadTrace, nil, "", "ERROR")
+			run := completedExecutionRun(runID, req, runStarted, execDurations{Load: time.Since(loadStarted)}, loadTrace, execOutcome{Outcome: "ERROR"})
 			_ = persistExecutionRun(ctx, pool, run, technicalExecution("INVALID_SCOPE_REQUEST", "Policy check request scope is invalid"), nil)
 			return CheckResult{RunID: runID}, err
 		}
 		loaded, err := loadActivePoliciesWithTrace(ctx, pool, req.EventCode, req.ModuleCode, req.SubModule, req.EntityCode, req.Variables)
 		if err != nil {
 			logExecutionError(ctx, req.TraceID, "policy execution scope load failed: %v", err)
-			run := completedExecutionRun(runID, req, runStarted, time.Since(loadStarted), 0, loadTrace, nil, "", "ERROR")
+			run := completedExecutionRun(runID, req, runStarted, execDurations{Load: time.Since(loadStarted)}, loadTrace, execOutcome{Outcome: "ERROR"})
 			_ = persistExecutionRun(ctx, pool, run, technicalExecution("POLICY_LOAD_ERROR", "Policy scope could not be loaded"), nil)
 			return CheckResult{RunID: runID}, err
 		}
@@ -240,7 +240,7 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 	loadDuration := time.Since(loadStarted)
 
 	if len(policies) == 0 {
-		run := completedExecutionRun(runID, req, runStarted, loadDuration, 0, loadTrace, nil, "", "NO_APPLICABLE")
+		run := completedExecutionRun(runID, req, runStarted, execDurations{Load: loadDuration}, loadTrace, execOutcome{Outcome: "NO_APPLICABLE"})
 		if err := persistExecutionRun(ctx, pool, run, nil, nil); err != nil {
 			return CheckResult{RunID: runID}, err
 		}
@@ -259,7 +259,9 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 			Message:  msg,
 		}
 		duration := 0
-		run := completedExecutionRun(runID, req, runStarted, loadDuration, 0, loadTrace, []policysvc.PolicyResult{synthetic}, "HardBlock", "ERROR")
+		run := completedExecutionRun(runID, req, runStarted, execDurations{Load: loadDuration}, loadTrace, execOutcome{
+			Results: []policysvc.PolicyResult{synthetic}, Action: "HardBlock", Outcome: "ERROR",
+		})
 		_ = persistExecutionRun(ctx, pool, run, technicalExecution("POLICY_CONFLICT_IMPOSSIBLE", msg), nil)
 		return CheckResult{
 			RunID:            runID,
@@ -292,13 +294,15 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 	}
 	if err != nil {
 		logExecutionError(ctx, req.TraceID, "policy evaluation service failed: %v", err)
-		run := completedExecutionRun(runID, req, runStarted, loadDuration, evalDuration, loadTrace, nil, "", "ERROR")
+		run := completedExecutionRun(runID, req, runStarted, execDurations{Load: loadDuration, Evaluation: evalDuration}, loadTrace, execOutcome{Outcome: "ERROR"})
 		_ = persistExecutionRun(ctx, pool, run, technicalExecution("POLICY_SERVICE_ERROR", "Policy evaluation service failed"), nil)
 		return CheckResult{RunID: runID}, err
 	}
 
 	outcome := resultOutcome(resp.Results)
-	run := completedExecutionRun(runID, req, runStarted, loadDuration, evalDuration, loadTrace, resp.Results, resp.AggregatedAction, outcome)
+	run := completedExecutionRun(runID, req, runStarted, execDurations{Load: loadDuration, Evaluation: evalDuration}, loadTrace, execOutcome{
+		Results: resp.Results, Action: resp.AggregatedAction, Outcome: outcome,
+	})
 	if err := persistExecutionRun(ctx, pool, run, nil, resp.Results); err != nil {
 		return CheckResult{RunID: runID}, err
 	}
@@ -312,11 +316,6 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 		DurationMS:       duration,
 		ConflictReport:   conflictReport,
 	}, nil
-}
-
-func loadActivePolicies(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, subModule, entityCode string, vars map[string]string) ([]map[string]interface{}, error) {
-	trace, err := loadActivePoliciesWithTrace(ctx, pool, eventCode, moduleCode, subModule, entityCode, vars)
-	return trace.Applicable, err
 }
 
 func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, subModule, entityCode string, vars map[string]string) (policyLoadTrace, error) {

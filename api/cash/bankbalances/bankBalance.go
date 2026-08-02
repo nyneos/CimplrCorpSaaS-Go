@@ -24,6 +24,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// errPrefixLoadBankBalancePolicyCheck prefixes the user-facing error returned when a
+// bank balance row cannot be loaded during a policy-engine enforcement check.
+const errPrefixLoadBankBalancePolicyCheck = "failed to load bank balance for policy check: "
+
 func pgUserFriendlyMessage(err error) string {
 	if err == nil {
 		return ""
@@ -534,7 +538,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, balanceID := range req.BalanceIDs {
 			row, rowErr := loadBankBalanceRow(ctx, pgxPool, balanceID)
 			if rowErr != nil {
-				api.RespondWithResult(w, false, "failed to load bank balance for policy check: "+pgUserFriendlyMessage(rowErr))
+				api.RespondWithResult(w, false, errPrefixLoadBankBalancePolicyCheck+pgUserFriendlyMessage(rowErr))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -698,7 +702,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, balanceID := range req.BalanceIDs {
 			row, rowErr := loadBankBalanceRow(ctx, pgxPool, balanceID)
 			if rowErr != nil {
-				api.RespondWithResult(w, false, "failed to load bank balance for policy check: "+pgUserFriendlyMessage(rowErr))
+				api.RespondWithResult(w, false, errPrefixLoadBankBalancePolicyCheck+pgUserFriendlyMessage(rowErr))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -779,7 +783,7 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, balanceID := range req.BalanceIDs {
 			row, rowErr := loadBankBalanceRow(ctx, pgxPool, balanceID)
 			if rowErr != nil {
-				api.RespondWithResult(w, false, "failed to load bank balance for policy check: "+pgUserFriendlyMessage(rowErr))
+				api.RespondWithResult(w, false, errPrefixLoadBankBalancePolicyCheck+pgUserFriendlyMessage(rowErr))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -1358,7 +1362,7 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		existingRow, err := loadBankBalanceRow(ctx, pgxPool, req.BalanceID)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to load bank balance for policy check: "+pgUserFriendlyMessage(err))
+			api.RespondWithResult(w, false, errPrefixLoadBankBalancePolicyCheck+pgUserFriendlyMessage(err))
 			return
 		}
 		mergedRow := applyBankBalanceEdits(existingRow, req.Fields)

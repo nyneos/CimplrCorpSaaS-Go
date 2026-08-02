@@ -16,8 +16,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/bindref"
+	"CimplrCorpSaas/internal/logger"
 )
 
 // convertSvcResponse mirrors the JSON returned by the conversion service.
@@ -150,7 +150,13 @@ func previewLogString(s string, limit int) string {
 // BuildPreviewResponseFromFileBytes parses xls/xlsx/csv bytes and returns a
 // staging-shaped preview map (clean + status). No data is written to the database.
 func BuildPreviewResponseFromFileBytes(ctx context.Context, pool *pgxpool.Pool, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings, accountOverride string) (map[string]interface{}, error) {
-	txns, err := processSingleFilePreviewFlat(ctx, pool, fileBytes, filename, useMapping, mappings, accountOverride, false)
+	txns, err := processSingleFilePreviewFlat(ctx, pool, processSingleFilePreviewFlatParams{
+		fileBytes:       fileBytes,
+		filename:        filename,
+		useMapping:      useMapping,
+		mappings:        mappings,
+		accountOverride: accountOverride,
+	})
 	if err != nil {
 		return nil, fmt.Errorf(constants.ErrParseFmt, err)
 	}
@@ -177,7 +183,12 @@ func BuildPreviewResponseFromCSVBytes(ctx context.Context, pool *pgxpool.Pool, c
 		csvFilename = noExt + ".csv"
 	}
 
-	txns, err := processSingleFilePreviewFlat(ctx, pool, csvBytes, csvFilename, false, nil, accountOverride, true)
+	txns, err := processSingleFilePreviewFlat(ctx, pool, processSingleFilePreviewFlatParams{
+		fileBytes:       csvBytes,
+		filename:        csvFilename,
+		accountOverride: accountOverride,
+		fromPDFConvert:  true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf(constants.ErrParseFmt, err)
 	}

@@ -24,6 +24,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	errSweepInitiationCreateBlockedByPolicy       = "Sweep initiation create blocked by policy"
+	errFailedToFetchSweepInitiationForPolicyCheck = "failed to fetch sweep initiation for policy check: "
+)
+
 func validateSweepCashScope(ctx context.Context, fields map[string]interface{}) string {
 	return validation.ValidateCashMasterReferences(ctx, fields)
 }
@@ -203,7 +208,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ActorUserID:         req.UserID,
 				HandlerName:         "CreateSweepInitiation",
 				APIPath:             "/cash/sweep-initiation/create",
-				DefaultBlockMessage: "Sweep initiation create blocked by policy",
+				DefaultBlockMessage: errSweepInitiationCreateBlockedByPolicy,
 				Fields: buildSweepInitiationPolicyFields(sweepInitiationRow{
 					SweepID:                     "", // not yet created
 					EntityName:                  req.EntityName,
@@ -435,7 +440,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ActorUserID:         req.UserID,
 			HandlerName:         "CreateSweepInitiation",
 			APIPath:             "/cash/sweep-initiation/create",
-			DefaultBlockMessage: "Sweep initiation create blocked by policy",
+			DefaultBlockMessage: errSweepInitiationCreateBlockedByPolicy,
 			Fields: buildSweepInitiationPolicyFields(sweepInitiationRow{
 				SweepID:                     sweepID,
 				EntityName:                  entityName,
@@ -1113,7 +1118,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, initiationID := range req.InitiationIDs {
 			policyRow, perr := loadSweepInitiationRow(ctx, pgxPool, initiationID)
 			if perr != nil {
-				api.RespondWithResult(w, false, "failed to fetch sweep initiation for policy check: "+perr.Error())
+				api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+perr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -1271,7 +1276,7 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, initiationID := range req.InitiationIDs {
 			policyRow, perr := loadSweepInitiationRow(ctx, pgxPool, initiationID)
 			if perr != nil {
-				api.RespondWithResult(w, false, "failed to fetch sweep initiation for policy check: "+perr.Error())
+				api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+perr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -1413,7 +1418,7 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, initiationID := range req.InitiationIDs {
 			policyRow, perr := loadSweepInitiationRow(ctx, pgxPool, initiationID)
 			if perr != nil {
-				api.RespondWithResult(w, false, "failed to fetch sweep initiation for policy check: "+perr.Error())
+				api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+perr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -1605,7 +1610,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ActorUserID:         req.UserID,
 				HandlerName:         "BulkCreateSweepInitiation",
 				APIPath:             "/cash/sweep-initiation/bulk-create",
-				DefaultBlockMessage: "Sweep initiation create blocked by policy",
+				DefaultBlockMessage: errSweepInitiationCreateBlockedByPolicy,
 				Fields:              buildSweepInitiationPolicyFields(policyRow),
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
@@ -2554,7 +2559,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		currentRow, perr := loadSweepInitiationRow(ctx, pgxPool, req.InitiationID)
 		if perr != nil {
-			api.RespondWithResult(w, false, "failed to fetch sweep initiation for policy check: "+perr.Error())
+			api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+perr.Error())
 			return
 		}
 		// Build an edits map from whatever the caller actually set. Note:

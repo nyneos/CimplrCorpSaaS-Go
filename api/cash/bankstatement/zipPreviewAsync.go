@@ -121,7 +121,13 @@ func handleZipBankStatementUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *
 		return
 	}
 
-	handleZipStagingUpload(pool, w, r, zipBytes, zr, header.Filename, allowedExt, allowPDF)
+	handleZipStagingUpload(pool, w, r, handleZipStagingUploadParams{
+		zipBytes:   zipBytes,
+		zr:         zr,
+		zipName:    header.Filename,
+		allowedExt: allowedExt,
+		allowPDF:   allowPDF,
+	})
 }
 
 // handleZipDirectIngest processes a tabular-only ZIP synchronously via V2 upload
@@ -322,10 +328,24 @@ func handleZipDirectIngest(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Re
 	}
 }
 
+// handleZipStagingUploadParams groups the zip-payload fields for handleZipStagingUpload
+// so the function stays within the parameter-count limit.
+type handleZipStagingUploadParams struct {
+	zipBytes   []byte
+	zr         *zip.Reader
+	zipName    string
+	allowedExt map[string]bool
+	allowPDF   bool
+}
+
 // handleZipStagingUpload creates a staging batch and processes files asynchronously.
-func handleZipStagingUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Request, zipBytes []byte, zr *zip.Reader, zipName string, allowedExt map[string]bool, allowPDF bool) {
+func handleZipStagingUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Request, p handleZipStagingUploadParams) {
 	ctx := r.Context()
-	_ = zipBytes // reader already built from these bytes
+	_ = p.zipBytes // reader already built from these bytes
+	zr := p.zr
+	zipName := p.zipName
+	allowedExt := p.allowedExt
+	allowPDF := p.allowPDF
 
 	baseFormValues := map[string][]string{}
 	if r.MultipartForm != nil && r.MultipartForm.Value != nil {
@@ -835,7 +855,7 @@ func GetStagingBatchResultsHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		var (
-			batchID, status, sourceFilename string
+			batchID, status, sourceFilename   string
 			total, processed, failed, skipped int
 		)
 		err := pool.QueryRow(ctx, `

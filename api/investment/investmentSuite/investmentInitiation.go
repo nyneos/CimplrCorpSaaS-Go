@@ -24,6 +24,10 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// errInitiationLoadFailedSuffix is appended to a record id when a row load
+// fails while processing a bulk action, to build the per-item error message.
+const errInitiationLoadFailedSuffix = ": load failed: "
+
 // ---------------------------
 // Request/Response Types
 // ---------------------------
@@ -141,9 +145,14 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Amount:          req.Amount,
 			Source:          source,
 		}
-		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreCreate, "CreateInitiationSingle",
-			"/investment/initiation/create", mfSubInitiation, req.EntityName, userEmail,
-			buildMFInitiationPolicyFields(createRow)) {
+		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreCreate,
+			HandlerName: "CreateInitiationSingle",
+			APIPath:     "/investment/initiation/create",
+			SubModule:   mfSubInitiation,
+			EntityCode:  req.EntityName,
+			Actor:       userEmail,
+		}, buildMFInitiationPolicyFields(createRow)) {
 			return
 		}
 
@@ -318,9 +327,14 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Amount:          row.Amount,
 				Source:          source,
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreCreate, "CreateInitiationBulk",
-				"/investment/initiation/create-bulk", mfSubInitiation, entityName, userEmail,
-				buildMFInitiationPolicyFields(bulkCreateRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreCreate,
+				HandlerName: "CreateInitiationBulk",
+				APIPath:     "/investment/initiation/create-bulk",
+				SubModule:   mfSubInitiation,
+				EntityCode:  entityName,
+				Actor:       userEmail,
+			}, buildMFInitiationPolicyFields(bulkCreateRow)); !ok {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, constants.ValueError: pmsg,
 				})
@@ -449,9 +463,14 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		updatedRow := applyMFInitiationEdits(existingRow, req.Fields)
-		if !mfEnforce(ctx, w, r, pgxPool, common.TriggerPreEdit, "UpdateInitiation",
-			"/investment/initiation/update", mfSubInitiation, req.InitiationID, userEmail,
-			buildMFInitiationPolicyFields(updatedRow)) {
+		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "UpdateInitiation",
+			APIPath:     "/investment/initiation/update",
+			SubModule:   mfSubInitiation,
+			EntityCode:  req.InitiationID,
+			Actor:       userEmail,
+		}, buildMFInitiationPolicyFields(updatedRow)) {
 			return
 		}
 
@@ -586,9 +605,14 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			bulkUpdatedRow := applyMFInitiationEdits(bulkExistingRow, row.Fields)
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreEdit, "UpdateInitiationBulk",
-				"/investment/initiation/update-bulk", mfSubInitiation, row.InitiationID, userEmail,
-				buildMFInitiationPolicyFields(bulkUpdatedRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreEdit,
+				HandlerName: "UpdateInitiationBulk",
+				APIPath:     "/investment/initiation/update-bulk",
+				SubModule:   mfSubInitiation,
+				EntityCode:  row.InitiationID,
+				Actor:       userEmail,
+			}, buildMFInitiationPolicyFields(bulkUpdatedRow)); !ok {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, "initiation_id": row.InitiationID, constants.ValueError: pmsg,
 				})
@@ -725,12 +749,17 @@ func DeleteInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.InitiationIDs {
 			delRow, loadErr := loadMFInitiationRow(ctx, pgxPool, id)
 			if loadErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errInitiationLoadFailedSuffix+loadErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreDelete, "DeleteInitiation",
-				"/investment/initiation/delete", mfSubInitiation, id, requestedBy,
-				buildMFInitiationPolicyFields(delRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreDelete,
+				HandlerName: "DeleteInitiation",
+				APIPath:     "/investment/initiation/delete",
+				SubModule:   mfSubInitiation,
+				EntityCode:  id,
+				Actor:       requestedBy,
+			}, buildMFInitiationPolicyFields(delRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -797,12 +826,17 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.InitiationIDs {
 			apprRow, loadErr := loadMFInitiationRow(ctx, pgxPool, id)
 			if loadErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errInitiationLoadFailedSuffix+loadErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreApprove, "BulkApproveInitiationActions",
-				"/investment/initiation/approve", mfSubInitiation, id, checkerBy,
-				buildMFInitiationPolicyFields(apprRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreApprove,
+				HandlerName: "BulkApproveInitiationActions",
+				APIPath:     "/investment/initiation/approve",
+				SubModule:   mfSubInitiation,
+				EntityCode:  id,
+				Actor:       checkerBy,
+			}, buildMFInitiationPolicyFields(apprRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
@@ -1021,12 +1055,17 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.InitiationIDs {
 			rejRow, loadErr := loadMFInitiationRow(ctx, pgxPool, id)
 			if loadErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, id+errInitiationLoadFailedSuffix+loadErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, common.TriggerPreReject, "BulkRejectInitiationActions",
-				"/investment/initiation/reject", mfSubInitiation, id, checkerBy,
-				buildMFInitiationPolicyFields(rejRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreReject,
+				HandlerName: "BulkRejectInitiationActions",
+				APIPath:     "/investment/initiation/reject",
+				SubModule:   mfSubInitiation,
+				EntityCode:  id,
+				Actor:       checkerBy,
+			}, buildMFInitiationPolicyFields(rejRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}

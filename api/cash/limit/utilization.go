@@ -26,6 +26,8 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+const errFailedToLoadUtilizationForPolicyCheck = "failed to load utilization for policy check: "
+
 // CreateUtilization creates a single utilization entry with PENDING_APPROVAL audit
 func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -388,7 +390,7 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		existingRow, err := loadLimitUtilizationRow(ctx, pgxPool, req.UtilizationID)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to load utilization for policy check: "+err.Error())
+			api.RespondWithResult(w, false, errFailedToLoadUtilizationForPolicyCheck+err.Error())
 			return
 		}
 		mergedRow := applyLimitUtilizationEdits(existingRow, req.Fields)
@@ -583,7 +585,7 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			policyRow, perr := loadLimitUtilizationRow(ctx, pgxPool, utilizationID)
 			if perr != nil {
 				result["success"] = false
-				result["error"] = "failed to load utilization for policy check: " + perr.Error()
+				result["error"] = errFailedToLoadUtilizationForPolicyCheck + perr.Error()
 				results = append(results, result)
 				continue
 			}
@@ -1245,7 +1247,7 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, utilizationID := range req.UtilizationIDs {
 			policyRow, perr := loadLimitUtilizationRow(ctx, pgxPool, utilizationID)
 			if perr != nil {
-				api.RespondWithResult(w, false, "failed to load utilization for policy check: "+perr.Error())
+				api.RespondWithResult(w, false, errFailedToLoadUtilizationForPolicyCheck+perr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -1374,7 +1376,7 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, utilizationID := range req.UtilizationIDs {
 			policyRow, perr := loadLimitUtilizationRow(ctx, pgxPool, utilizationID)
 			if perr != nil {
-				api.RespondWithResult(w, false, "failed to load utilization for policy check: "+perr.Error())
+				api.RespondWithResult(w, false, errFailedToLoadUtilizationForPolicyCheck+perr.Error())
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{

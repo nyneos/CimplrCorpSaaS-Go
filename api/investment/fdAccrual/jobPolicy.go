@@ -21,18 +21,18 @@ func EnforceScheduledAccrualFire(ctx context.Context, pool *pgxpool.Pool, p Fire
 		eventCode = common.TriggerScheduledMonthly
 	}
 	fields := map[string]interface{}{
-		"entity_id":              p.EntityID,
-		"entity_name":            p.EntityName,
-		"run_type":               RunTypeForGranularity(p.Granularity),
-		"run_mode":               p.RunMode,
-		"accrual_period_start":   periodStart,
-		"accrual_period_end":     periodEnd,
-		"schedule_config_id":     p.ConfigID,
-		"schedule_frequency":     p.ScheduleFreq,
-		"bank_id_filter":         p.BankFilter,
-		"fd_status_filter":       p.FDStatus,
-		"created_by":             "SCHEDULER",
-		"execution_mode":         "CRON",
+		"entity_id":            p.EntityID,
+		"entity_name":          p.EntityName,
+		"run_type":             RunTypeForGranularity(p.Granularity),
+		"run_mode":             p.RunMode,
+		"accrual_period_start": periodStart,
+		"accrual_period_end":   periodEnd,
+		"schedule_config_id":   p.ConfigID,
+		"schedule_frequency":   p.ScheduleFreq,
+		"bank_id_filter":       p.BankFilter,
+		"fd_status_filter":     p.FDStatus,
+		"created_by":           "SCHEDULER",
+		"execution_mode":       "CRON",
 	}
 	if schedRow, err := loadFDAccrualScheduleRow(ctx, pool, p.ConfigID); err == nil {
 		for k, v := range buildFDAccrualSchedulePolicyFields(schedRow) {

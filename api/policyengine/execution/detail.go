@@ -14,6 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errMsgFetchExecutionRun = "failed to fetch execution run"
+
 type detailRequest struct {
 	RunID string `json:"run_id"`
 }
@@ -52,26 +54,26 @@ func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err != nil {
 			api.LogErrorForResponse(w, "execution detail run: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to fetch execution run", "EXECUTION_DETAIL_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgFetchExecutionRun, "EXECUTION_DETAIL_FAILED")
 			return
 		}
 
 		evaluated, err := loadEvaluatedPolicies(ctx, pool, run.RunID, run.IsLegacy)
 		if err != nil {
 			api.LogErrorForResponse(w, "execution detail evaluated policies: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to fetch execution run", "EXECUTION_DETAIL_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgFetchExecutionRun, "EXECUTION_DETAIL_FAILED")
 			return
 		}
 		comparisons, err := loadComparisons(ctx, pool, run.RunID, run.IsLegacy)
 		if err != nil {
 			api.LogErrorForResponse(w, "execution detail comparisons: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to fetch execution run", "EXECUTION_DETAIL_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgFetchExecutionRun, "EXECUTION_DETAIL_FAILED")
 			return
 		}
 		skips, err := loadSkips(ctx, pool, run.RunID, run.IsLegacy)
 		if err != nil {
 			api.LogErrorForResponse(w, "execution detail skips: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to fetch execution run", "EXECUTION_DETAIL_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgFetchExecutionRun, "EXECUTION_DETAIL_FAILED")
 			return
 		}
 

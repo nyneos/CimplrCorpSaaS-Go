@@ -452,7 +452,14 @@ func dispatchNotification(
 	var firstErr error
 	for _, ev := range events {
 		ev := ev // capture
-		if err := dispatchForEvent(ctx, pool, sourceRoute, correlationID, payload, &ev, resolution, allowedTemplateIDs); err != nil {
+		if err := dispatchForEvent(ctx, pool, dispatchForEventParams{
+			sourceRoute:        sourceRoute,
+			correlationID:      correlationID,
+			payload:            payload,
+			event:              &ev,
+			actor:              resolution,
+			allowedTemplateIDs: allowedTemplateIDs,
+		}); err != nil {
 			api.LogError("[NOTIF] dispatchForEvent event=%s entity=%s err=%v", ev.eventID, ev.entityName, err)
 			if firstErr == nil {
 				firstErr = err
@@ -482,19 +489,28 @@ func dedupeResolvedEventsByEventID(events []resolvedEvent) []resolvedEvent {
 	return out
 }
 
+// dispatchForEventParams groups the per-event dispatch inputs (keeps
+// dispatchForEvent's parameter count within the lint limit).
+type dispatchForEventParams struct {
+	sourceRoute        string
+	correlationID      string
+	payload            map[string]interface{}
+	event              *resolvedEvent
+	actor              actorResolution // used to send system notifications back to the triggering user
+	allowedTemplateIDs map[string]bool
+}
+
 // dispatchForEvent runs the full notification pipeline for one resolved event.
 // allowedTemplateIDs, when non-nil, restricts dispatch to templates whose
 // template_id is in the set — every other resolution step is unchanged.
-func dispatchForEvent(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	sourceRoute string,
-	correlationID string,
-	payload map[string]interface{},
-	event *resolvedEvent,
-	actor actorResolution, // used to send system notifications back to the triggering user
-	allowedTemplateIDs map[string]bool,
-) error {
+func dispatchForEvent(ctx context.Context, pool *pgxpool.Pool, params dispatchForEventParams) error {
+	sourceRoute := params.sourceRoute
+	correlationID := params.correlationID
+	payload := params.payload
+	event := params.event
+	actor := params.actor
+	allowedTemplateIDs := params.allowedTemplateIDs
+
 	api.LogInfo("[NOTIF] dispatchForEvent event=%s entity=%q correlation=%s", event.eventID, event.entityName, correlationID)
 	channels, err := lookupEnabledChannels(ctx, pool, event.eventID)
 	if err != nil {

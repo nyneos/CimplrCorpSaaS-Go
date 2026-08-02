@@ -800,31 +800,31 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			effectiveDateStr = time.Now().Format(constants.DateFormat)
 		}
 
-		if !fdEnforce(ctx, w, r, pool, common.TriggerPreCreate, "InitiateClosure", "/investment/fd/closure/initiate",
-			entityID, userEmail, buildFDClosureRequestPolicyFields(fdClosureRequestRow{
-				FDID:                 req.FDID,
-				BookingID:            bookingID,
-				ConfirmationID:       confirmationID,
-				EntityID:             entityID,
-				EntityName:           firstNonEmpty(req.EntityName, entityName),
-				ClosureType:          req.ClosureType,
-				ClosureStatus:        constants.StatusPendingApproval,
-				EffectiveClosureDate: effectiveDateStr,
-				MaturityDate:         maturityDate.Format(constants.DateFormat),
-				PrincipalAmount:      principalAmount,
-				AccruedInterest:      roundToFour(accruedInterest),
-				TDSDeducted:          roundToFour(tdsDeducted),
-				PenaltyAmount:        roundToFour(penaltyAmount),
-				NetPayoutAmount:      netPayout,
-				SettlementAccountID:  req.SettlementAccountID,
-				RolloverAmount:       req.RolloverAmount,
-				RolloverTenorDays:    req.RolloverTenorDays,
-				RolloverInterestRate: req.RolloverInterestRate,
-				MaturityInstructions: req.MaturityInstructions,
-				ClosureReason:        req.ClosureReason,
-				ClosureNotes:         req.ClosureNotes,
-				VarianceRemark:       req.VarianceRemark,
-			})) {
+		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "InitiateClosure", APIPath: "/investment/fd/closure/initiate",
+			EntityCode: entityID, Actor: userEmail}, buildFDClosureRequestPolicyFields(fdClosureRequestRow{
+			FDID:                 req.FDID,
+			BookingID:            bookingID,
+			ConfirmationID:       confirmationID,
+			EntityID:             entityID,
+			EntityName:           firstNonEmpty(req.EntityName, entityName),
+			ClosureType:          req.ClosureType,
+			ClosureStatus:        constants.StatusPendingApproval,
+			EffectiveClosureDate: effectiveDateStr,
+			MaturityDate:         maturityDate.Format(constants.DateFormat),
+			PrincipalAmount:      principalAmount,
+			AccruedInterest:      roundToFour(accruedInterest),
+			TDSDeducted:          roundToFour(tdsDeducted),
+			PenaltyAmount:        roundToFour(penaltyAmount),
+			NetPayoutAmount:      netPayout,
+			SettlementAccountID:  req.SettlementAccountID,
+			RolloverAmount:       req.RolloverAmount,
+			RolloverTenorDays:    req.RolloverTenorDays,
+			RolloverInterestRate: req.RolloverInterestRate,
+			MaturityInstructions: req.MaturityInstructions,
+			ClosureReason:        req.ClosureReason,
+			ClosureNotes:         req.ClosureNotes,
+			VarianceRemark:       req.VarianceRemark,
+		})) {
 			cleanupUpload()
 			return
 		}
@@ -1261,8 +1261,8 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			updatedRow.VarianceRemark = req.VarianceRemark
 		}
 
-		if !fdEnforce(ctx, w, r, pool, common.TriggerPreEdit, "UpdateClosure", "/investment/fd/closure/update",
-			oldEntityID, userEmail, buildFDClosureRequestPolicyFields(updatedRow)) {
+		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateClosure", APIPath: "/investment/fd/closure/update",
+			EntityCode: oldEntityID, Actor: userEmail}, buildFDClosureRequestPolicyFields(updatedRow)) {
 			return
 		}
 
@@ -2125,8 +2125,8 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, crID+": "+rowErr.Error())
 				continue
 			}
-			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreApprove, "BulkApproveClosureRequest",
-				"/investment/fd/closure/bulk-approve", entityID, userEmail, buildFDClosureRequestPolicyFields(closureRow)); !ok {
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{EventCode: common.TriggerPreApprove, HandlerName: "BulkApproveClosureRequest",
+				APIPath: "/investment/fd/closure/bulk-approve", EntityCode: entityID, Actor: userEmail}, buildFDClosureRequestPolicyFields(closureRow)); !ok {
 				errors = append(errors, crID+": "+pmsg)
 				continue
 			}
@@ -2275,8 +2275,8 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, crID+": "+rowErr.Error())
 				continue
 			}
-			if ok, pmsg := fdEnforceInline(ctx, r, pool, common.TriggerPreReject, "BulkRejectClosureRequest",
-				"/investment/fd/closure/bulk-reject", closureRow.EntityID, userEmail, buildFDClosureRequestPolicyFields(closureRow)); !ok {
+			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{EventCode: common.TriggerPreReject, HandlerName: "BulkRejectClosureRequest",
+				APIPath: "/investment/fd/closure/bulk-reject", EntityCode: closureRow.EntityID, Actor: userEmail}, buildFDClosureRequestPolicyFields(closureRow)); !ok {
 				errors = append(errors, crID+": "+pmsg)
 				continue
 			}
@@ -2429,8 +2429,8 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to load closure request for policy check")
 			return
 		}
-		if !fdEnforce(ctx, w, r, pool, common.TriggerPreDelete, "DeleteClosureRequest", "/investment/fd/closure/delete",
-			entityID, userEmail, buildFDClosureRequestPolicyFields(deleteClosureRow)) {
+		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "DeleteClosureRequest", APIPath: "/investment/fd/closure/delete",
+			EntityCode: entityID, Actor: userEmail}, buildFDClosureRequestPolicyFields(deleteClosureRow)) {
 			return
 		}
 

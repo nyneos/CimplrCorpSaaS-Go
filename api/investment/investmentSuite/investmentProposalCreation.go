@@ -218,9 +218,14 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !mfEnforce(ctx, w, r, pool, common.TriggerPreCreate, "CreateInvestmentProposal",
-			"/investment/proposal/create", mfSubProposal, req.EntityName, userEmail,
-			buildMFProposalPolicyFields(mfProposalRowFromCreate(&req))) {
+		if !mfEnforce(ctx, w, r, pool, enforceCtx{
+			EventCode:   common.TriggerPreCreate,
+			HandlerName: "CreateInvestmentProposal",
+			APIPath:     "/investment/proposal/create",
+			SubModule:   mfSubProposal,
+			EntityCode:  req.EntityName,
+			Actor:       userEmail,
+		}, buildMFProposalPolicyFields(mfProposalRowFromCreate(&req))) {
 			return
 		}
 
@@ -306,9 +311,14 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !mfEnforce(ctx, w, r, pool, common.TriggerPreEdit, "UpdateInvestmentProposal",
-			"/investment/proposal/update", mfSubProposal, req.ProposalID, userEmail,
-			buildMFProposalPolicyFields(mfProposalRowFromUpdate(&req))) {
+		if !mfEnforce(ctx, w, r, pool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "UpdateInvestmentProposal",
+			APIPath:     "/investment/proposal/update",
+			SubModule:   mfSubProposal,
+			EntityCode:  req.ProposalID,
+			Actor:       userEmail,
+		}, buildMFProposalPolicyFields(mfProposalRowFromUpdate(&req))) {
 			return
 		}
 
@@ -494,9 +504,14 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, proposalID+": load failed: "+loadErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pool, enforceEvent, "bulkProposalDecision",
-				"/investment/proposal/"+strings.ToLower(action), mfSubProposal, proposalID, userEmail,
-				buildMFProposalPolicyFields(proposalRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pool, enforceCtx{
+				EventCode:   enforceEvent,
+				HandlerName: "bulkProposalDecision",
+				APIPath:     "/investment/proposal/" + strings.ToLower(action),
+				SubModule:   mfSubProposal,
+				EntityCode:  proposalID,
+				Actor:       userEmail,
+			}, buildMFProposalPolicyFields(proposalRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, proposalID+": "+pmsg)
 				return
 			}
@@ -712,9 +727,14 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pool, common.TriggerPreDelete, "BulkDeleteProposals",
-				"/investment/proposal/delete-request", mfSubProposal, id, userEmail,
-				buildMFProposalPolicyFields(proposalRow)); !ok {
+			if ok, pmsg := mfEnforceInline(ctx, r, pool, enforceCtx{
+				EventCode:   common.TriggerPreDelete,
+				HandlerName: "BulkDeleteProposals",
+				APIPath:     "/investment/proposal/delete-request",
+				SubModule:   mfSubProposal,
+				EntityCode:  id,
+				Actor:       userEmail,
+			}, buildMFProposalPolicyFields(proposalRow)); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}

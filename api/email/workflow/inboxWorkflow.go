@@ -1273,22 +1273,9 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 					    updated_at = now()
 					WHERE inbox_id = $1::uuid
 				`, inboxID, req.Comment)
-			case constants.StatusPendingEditApproval:
-				// Reject edit → REJECTED, discard the staged edit. Row is kept so it stays
-				// visible and can be deleted.
-				_, err = pool.Exec(r.Context(), `
-					UPDATE email_svc.inbox_config
-					SET processing_status = $2,
-					    pending_edit_json = NULL,
-					    checker_comment = $3,
-					    is_active = false,
-					    is_deleted = false,
-					    updated_at = now()
-					WHERE inbox_id = $1::uuid
-				`, inboxID, constants.StatusRejected, req.Comment)
-			case constants.StatusPendingDeleteApproval:
-				// Reject delete request → REJECTED, discarding the staged prior-status
-				// marker. Row is kept (is_deleted stays false) so it stays visible.
+			case constants.StatusPendingEditApproval, constants.StatusPendingDeleteApproval:
+				// Reject edit or delete request → REJECTED, clear pending_edit_json.
+				// Row is kept (is_deleted stays false) so it stays visible.
 				_, err = pool.Exec(r.Context(), `
 					UPDATE email_svc.inbox_config
 					SET processing_status = $2,
