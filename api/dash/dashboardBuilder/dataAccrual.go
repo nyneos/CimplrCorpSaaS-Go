@@ -36,8 +36,9 @@ func queryFDAccrualRunAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 			COALESCE(r.engine_version, '') AS engine_version,
 			COALESCE(r.created_by, '') AS created_by,
 			r.created_at,
-			COALESCE(r.total_interest_accrued, 0) AS total_accrued,
-			COALESCE(r.total_tds_applicable, 0) AS total_tds_applicable,
+			-- Match /investment/fd/accrual/run/all field names (GetAccrualRuns).
+			COALESCE(r.total_interest_accrued, 0) AS total_interest_accrued,
+			COALESCE(r.total_tds_deducted, 0) AS total_tds_deducted,
 			COALESCE(r.error_count, 0) AS error_count,
 			COALESCE(a.processing_status, '') AS processing_status
 		FROM investment.fd_accrual_run r
