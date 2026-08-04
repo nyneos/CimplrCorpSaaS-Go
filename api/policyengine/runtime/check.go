@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/services/policysvc"
 
 	"github.com/google/uuid"
@@ -47,6 +48,10 @@ type CheckResult struct {
 	Results          []policysvc.PolicyResult
 	DurationMS       int
 	ConflictReport   ConflictReport
+	// TriggerApprovalMatrixID is the approval matrix pinned on the first breached
+	// TriggerApproval policy. Empty when nothing breached that way or no matrix
+	// was chosen — callers then resolve their own matrix as before.
+	TriggerApprovalMatrixID string
 }
 
 // BlocksSubmit is true when the aggregated breach action is HardBlock.
@@ -310,12 +315,37 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 	dispatchNotifyBreaches(ctx, pool, req, policies, resp.Results)
 
 	return CheckResult{
-		RunID:            runID,
-		AggregatedAction: resp.AggregatedAction,
-		Results:          resp.Results,
-		DurationMS:       duration,
-		ConflictReport:   conflictReport,
+		RunID:                   runID,
+		AggregatedAction:        resp.AggregatedAction,
+		Results:                 resp.Results,
+		DurationMS:              duration,
+		ConflictReport:          conflictReport,
+		TriggerApprovalMatrixID: breachedTriggerApprovalMatrix(policies, resp.Results),
 	}, nil
+}
+
+// breachedTriggerApprovalMatrix returns the approval matrix pinned on the first
+// breached TriggerApproval policy, or "" when none applies.
+func breachedTriggerApprovalMatrix(policies []map[string]interface{}, results []policysvc.PolicyResult) string {
+	matrixByPolicy := make(map[string]string, len(policies))
+	for _, p := range policies {
+		id, _ := p["policy_id"].(string)
+		if id == "" {
+			continue
+		}
+		if m, ok := p["approval_matrix_id"].(string); ok {
+			matrixByPolicy[id] = strings.TrimSpace(m)
+		}
+	}
+	for _, pr := range results {
+		if pr.Result != "BREACH" || pr.Action != common.BreachTriggerApproval {
+			continue
+		}
+		if m := matrixByPolicy[pr.PolicyID]; m != "" {
+			return m
+		}
+	}
+	return ""
 }
 
 func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventCode, moduleCode, subModule, entityCode string, vars map[string]string) (policyLoadTrace, error) {
@@ -336,7 +366,8 @@ func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventC
 		       p.comp_total_check_min, p.comp_total_check_max,
 		       COALESCE(p.applicability, 'Global'),
 		       COALESCE(p.instrument_filter, ''), COALESCE(p.currency_filter, ''),
-		       COALESCE(p.tenor_filter, ''), COALESCE(p.rating_filter, '')
+		       COALESCE(p.tenor_filter, ''), COALESCE(p.rating_filter, ''),
+		       COALESCE(p.approval_matrix_id, '')
 		FROM policyengine_svc.policy_master p
 		INNER JOIN policyengine_svc.policy_trigger t
 			ON t.policy_id = p.policy_id AND t.is_deleted = false AND t.event_code = ANY($1::text[])
@@ -389,6 +420,7 @@ func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventC
 			notifGroup, breachMsg, formulaExpr, formulaRet, formulaOp       string
 			slabVar, slabPercentBase, compBase, compTotalVar, applicability string
 			fltInstrument, fltCurrency, fltTenor, fltRating                 string
+			approvalMatrixID                                                string
 			thrVal, formulaVal                                              float64
 			compTotalMin, compTotalMax                                      *float64
 			listCase                                                        bool
@@ -397,10 +429,11 @@ func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventC
 			&thrVar, &thrOp, &thrVal, &thrValueDate, &thrMode, &thrBase, &listField, &listMode, &listSource, &listDynRef, &listCase,
 			&notifGroup, &breachMsg, &formulaExpr, &formulaRet, &formulaOp, &formulaVal, &slabVar, &slabPercentBase,
 			&compBase, &compTotalVar, &compTotalMin, &compTotalMax, &applicability,
-			&fltInstrument, &fltCurrency, &fltTenor, &fltRating); err != nil {
+			&fltInstrument, &fltCurrency, &fltTenor, &fltRating, &approvalMatrixID); err != nil {
 			return policyLoadTrace{}, err
 		}
 		snap := map[string]interface{}{
+			"approval_matrix_id":        approvalMatrixID,
 			"policy_id":                 id,
 			"code":                      code,
 			"name":                      name,

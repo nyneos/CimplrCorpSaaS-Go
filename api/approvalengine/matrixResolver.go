@@ -185,7 +185,81 @@ func ResolveMatrix(
 		}
 	}
 
-	// Step 2: Load all active eyes for this matrix.
+	// Step 2 + 3: Load eyes (with escalation targets) for this matrix.
+	eyes, err := loadMatrixEyes(ctx, pool, matrixID, approvalOrder)
+	if err != nil {
+		return nil, err
+	}
+	if len(eyes) == 0 {
+		return nil, nil
+	}
+
+	result := &MatrixResult{
+		MatrixID:      matrixID,
+		ApprovalOrder: approvalOrder,
+		SlaHours:      slaHours,
+		Eyes:          eyes,
+	}
+
+	api.LogInfo("[ApprovalEngine] Resolved matrix=%s order=%s eyes=%d for %s/%s/%s",
+		matrixID, approvalOrder, len(eyes), moduleCode, entityCode, transactionType)
+
+	return result, nil
+}
+
+// LoadMatrixByID returns a specific matrix by id, applying the same
+// approved/active guards as ResolveMatrix but skipping entity/amount matching.
+// Returns (nil, nil) when the matrix is missing, unapproved, deleted, inactive,
+// or has no usable eyes — callers treat that as "engine skips".
+func LoadMatrixByID(ctx context.Context, pool *pgxpool.Pool, matrixID string) (*MatrixResult, error) {
+	var approvalOrder string
+	var slaHours *int
+	err := pool.QueryRow(ctx, `
+		SELECT approval_order, sla_hours
+		FROM uam.approval_matrix_master m
+		JOIN LATERAL (
+			SELECT action_type, processing_status
+			FROM uam.audit_approval_matrix_master a
+			WHERE a.matrix_id = m.matrix_id
+			ORDER BY a.requested_at DESC, a.audit_id DESC
+			LIMIT 1
+		) ma ON true
+		WHERE m.matrix_id  = $1
+		  AND m.is_active  = true
+		  AND m.is_deleted = false
+		  AND ma.processing_status = 'APPROVED'
+		  AND ma.action_type <> 'DELETE'`,
+		matrixID,
+	).Scan(&approvalOrder, &slaHours)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			api.LogInfo("[ApprovalEngine] Matrix %s not found/approved/active — skipping", matrixID)
+			return nil, nil
+		}
+		return nil, fmt.Errorf("LoadMatrixByID query: %w", err)
+	}
+
+	eyes, err := loadMatrixEyes(ctx, pool, matrixID, approvalOrder)
+	if err != nil {
+		return nil, err
+	}
+	if len(eyes) == 0 {
+		return nil, nil
+	}
+
+	api.LogInfo("[ApprovalEngine] Pinned matrix=%s order=%s eyes=%d", matrixID, approvalOrder, len(eyes))
+	return &MatrixResult{
+		MatrixID:      matrixID,
+		ApprovalOrder: approvalOrder,
+		SlaHours:      slaHours,
+		Eyes:          eyes,
+	}, nil
+}
+
+// loadMatrixEyes loads every approved+active eye of a matrix along with its
+// approver count and escalation target. Returns an empty slice when the matrix
+// has no usable eyes.
+func loadMatrixEyes(ctx context.Context, pool *pgxpool.Pool, matrixID, approvalOrder string) ([]MatrixEye, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT e.eye_id, e.position, e.eye_count, e.sla_hours,
 		       (
@@ -276,7 +350,7 @@ func ResolveMatrix(
 		return nil, nil
 	}
 
-	// Step 3: Attach escalation member info to each eye.
+	// Attach escalation member info to each eye.
 	for i := range eyes {
 		var escRoleID, escUserID *string
 		err := pool.QueryRow(ctx, `
@@ -296,15 +370,5 @@ func ResolveMatrix(
 		eyes[i].EscalationUserID = escUserID
 	}
 
-	result := &MatrixResult{
-		MatrixID:      matrixID,
-		ApprovalOrder: approvalOrder,
-		SlaHours:      slaHours,
-		Eyes:          eyes,
-	}
-
-	api.LogInfo("[ApprovalEngine] Resolved matrix=%s order=%s eyes=%d for %s/%s/%s",
-		matrixID, approvalOrder, len(eyes), moduleCode, entityCode, transactionType)
-
-	return result, nil
+	return eyes, nil
 }
