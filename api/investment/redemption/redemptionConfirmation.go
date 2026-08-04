@@ -2107,10 +2107,9 @@ func ConfirmRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadRedemptionConfirmationForPolicyCheck+rowErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "ConfirmRedemption",
+			if !mfEnforceBlock(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "ConfirmRedemption",
 				APIPath: "/investment/redemption/confirmation/confirm", SubModule: mfSubRedemptionConf, EntityCode: id, Actor: confirmedBy},
-				buildRedemptionConfirmationPolicyFields(row)); !ok {
-				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+				buildRedemptionConfirmationPolicyFields(row), id) {
 				return
 			}
 		}

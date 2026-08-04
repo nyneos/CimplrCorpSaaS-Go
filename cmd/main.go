@@ -77,7 +77,7 @@ func main() {
 	manager := appmanager.NewAppManager()
 
 	// Load service configs from YAML
-	servicesCfg, err := appmanager.LoadServiceSequence("../services.yaml")
+	servicesCfg, err := appmanager.LoadServiceSequence("./services.yaml")
 	if err != nil {
 		log.Fatal("failed to load service sequence:", err)
 	}
@@ -101,17 +101,13 @@ func main() {
 	}
 	api.SetAuthService(realAuthSvc)
 
-	// Register logout hook: clear in-memory system notifications when a user logs out
-	// so stale pipeline-error alerts don't persist across sessions.
 	auth.OnLogoutHook = catalog.ClearSystemNotifications
 
-	// Graceful shutdown handling
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	<-sigs
-	//Kanav
 
-	// Stop all services
+	
 	if err := manager.StopAll(); err != nil {
 		log.Fatal("failed to stop:", err)
 	}

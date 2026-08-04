@@ -43,6 +43,29 @@ func mfEnforce(
 	})
 }
 
+func mfEnforceBlock(
+	ctx context.Context,
+	w http.ResponseWriter,
+	r *http.Request,
+	pool *pgxpool.Pool,
+	cc enforceCtx,
+	fields map[string]interface{},
+	recordID string,
+) bool {
+	out := runtime.EnforceDetailed(ctx, r, pool, runtime.EnforceInput{
+		EventCode:        cc.EventCode,
+		ModuleCode:       common.ModuleInvestmentMF,
+		SubModule:        cc.SubModule,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
+		Fields:           fields,
+		RequireVariables: false,
+	})
+	return runtime.WriteBlockResponse(w, out, recordID)
+}
+
 func mfEnforceInline(
 	ctx context.Context,
 	r *http.Request,
