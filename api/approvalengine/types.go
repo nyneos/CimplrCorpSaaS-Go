@@ -56,6 +56,10 @@ type InstanceRequest struct {
 	Amount           float64
 	SubmittedBy      string // public.users.id
 	SubmittedByEmail string
+	// MatrixID pins the approval matrix instead of resolving one from
+	// module/entity/transaction_type/amount. Set by policy-engine TriggerApproval
+	// breaches, which carry the matrix chosen on the policy. Empty = resolve normally.
+	MatrixID string
 }
 
 // ActionRequest is passed to RecordAction when an approver acts on an eye.

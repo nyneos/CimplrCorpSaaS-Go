@@ -23,8 +23,14 @@ func CreateInstance(ctx context.Context, pool *pgxpool.Pool, req InstanceRequest
 		return "", nil
 	}
 
-	// Step 2: Resolve matrix.
-	matrix, err := ResolveMatrix(ctx, pool, req.ModuleCode, req.EntityCode, req.TransactionType, req.Amount)
+	// Step 2: Resolve matrix — pinned when the caller supplied one, else by scope.
+	var matrix *MatrixResult
+	var err error
+	if strings.TrimSpace(req.MatrixID) != "" {
+		matrix, err = LoadMatrixByID(ctx, pool, strings.TrimSpace(req.MatrixID))
+	} else {
+		matrix, err = ResolveMatrix(ctx, pool, req.ModuleCode, req.EntityCode, req.TransactionType, req.Amount)
+	}
 	if err != nil {
 		return "", err
 	}

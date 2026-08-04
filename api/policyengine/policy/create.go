@@ -23,6 +23,7 @@ type createReq struct {
 	ValidationLevel   string `json:"validation_level"`
 	Criticality       string `json:"criticality"`
 	ActionOnBreach    string `json:"action_on_breach"`
+	ApprovalMatrixID  string `json:"approval_matrix_id"`
 	NotificationGroup string `json:"notification_group"`
 	// NotificationTemplateIDs — curated notification_svc.template picks from
 	// the policy form's template multi-select. Empty = every enabled channel
@@ -64,6 +65,7 @@ func (req *createReq) trim() {
 	req.ValidationLevel = strings.TrimSpace(req.ValidationLevel)
 	req.Criticality = strings.TrimSpace(req.Criticality)
 	req.ActionOnBreach = strings.TrimSpace(req.ActionOnBreach)
+	req.ApprovalMatrixID = strings.TrimSpace(req.ApprovalMatrixID)
 	req.NotificationGroup = strings.TrimSpace(req.NotificationGroup)
 	req.BreachMessage = strings.TrimSpace(req.BreachMessage)
 	req.Applicability = strings.TrimSpace(req.Applicability)
@@ -188,6 +190,10 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
 			return
 		}
+		if err := validateTriggerApprovalMatrix(r.Context(), pool, req.ActionOnBreach, req.ApprovalMatrixID); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
+			return
+		}
 		draft := draftConstraintFromReq(req, rf)
 		conflictReport, conflictErr := evaluateLaneConflicts(r.Context(), pool, req.Modules, req.SubModules, req.TriggerEvents, "", draft)
 		if conflictErr != nil {
@@ -227,7 +233,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				list_target_field, list_mode, list_source, list_dynamic_ref, list_case_sensitive,
 				formula_expression, formula_return_type, formula_operator, formula_value,
 				addl_expression, status, version, effective_start, effective_end,
-				processing_status, created_by, last_modified_by
+				processing_status, created_by, last_modified_by, approval_matrix_id
 			) VALUES (
 				$1,$2,$3,$4,NULLIF($5,''),'Custom',
 				$6,$7,$8,NULLIF($9,''),$10,
@@ -240,7 +246,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				NULLIF($32,''),NULLIF($33,''),NULLIF($34,''),NULLIF($35,''),$36,
 				NULLIF($37,''),NULLIF($38,''),NULLIF($39,''),$40,
 				NULLIF($41,''),'PendingApproval',1,$42::date,NULLIF($43,'')::date,
-				'PENDING_APPROVAL',$44,$44
+				'PENDING_APPROVAL',$44,$44,NULLIF($48,'')
 			) RETURNING policy_id::text`,
 			req.Code, req.Name, req.Description, req.Category, req.SubCategory,
 			req.ValidationLevel, req.Criticality, req.ActionOnBreach, req.NotificationGroup, req.BreachMessage,
@@ -254,6 +260,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			rf.FormulaExpression, rf.FormulaReturnType, rf.FormulaOperator, rf.FormulaValue,
 			req.AddlExpression, req.EffectiveStart, req.EffectiveEnd,
 			actor, rf.ThrValueDate, req.NullHandlingDefault, rf.SlabPercentBase,
+			req.ApprovalMatrixID,
 		).Scan(&policyID)
 		if err != nil {
 			api.LogErrorForResponse(w, "policy create insert: %v", err)

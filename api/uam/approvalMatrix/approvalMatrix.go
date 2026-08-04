@@ -351,14 +351,33 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		if req.EntityCode == "" || req.TransactionType == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "entity_code and transaction_type are required")
+		if req.TransactionType == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "transaction_type is required")
 			return
 		}
-		scope := ctxutil.FromContext(r.Context())
-		if !scope.HasEntityAccess(req.EntityCode) {
-			api.RespondWithError(w, http.StatusForbidden,
-				fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityCode))
+		if req.EntityCode == "" {
+			req.EntityCode = "DEFAULT"
+		}
+		if req.EntityCode != "DEFAULT" {
+			scope := ctxutil.FromContext(r.Context())
+			if !scope.HasEntityAccess(req.EntityCode) {
+				api.RespondWithError(w, http.StatusForbidden,
+					fmt.Sprintf(constants.ErrEntityIDNotAuthorized, req.EntityCode))
+				return
+			}
+		}
+		var existingMatrices int
+		if err := pgxPool.QueryRow(r.Context(), `
+			SELECT COUNT(*) FROM uam.approval_matrix_master
+			WHERE module_code = $1 AND transaction_type = $2 AND is_deleted = false`,
+			req.ModuleCode, req.TransactionType,
+		).Scan(&existingMatrices); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Could not verify existing approval matrices")
+			return
+		}
+		if existingMatrices > 0 {
+			api.RespondWithError(w, http.StatusConflict,
+				fmt.Sprintf("An approval matrix already exists for %s / %s.", req.ModuleCode, req.TransactionType))
 			return
 		}
 		// Master SLA column is used by list/grid views; if omitted, mirror the highest per-eye SLA (when any).

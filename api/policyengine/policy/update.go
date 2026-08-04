@@ -56,6 +56,10 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
 			return
 		}
+		if err := validateTriggerApprovalMatrix(r.Context(), pool, req.ActionOnBreach, req.ApprovalMatrixID); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, err.Error(), "VALIDATION_ERROR")
+			return
+		}
 		draft := draftConstraintFromReq(req.createReq, rf)
 		conflictReport, conflictErr := evaluateLaneConflicts(r.Context(), pool, req.Modules, req.SubModules, req.TriggerEvents, req.PolicyID, draft)
 		if conflictErr != nil {
@@ -112,6 +116,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 				formula_expression = NULLIF($37,''), formula_return_type = NULLIF($38,''),
 				formula_operator = NULLIF($39,''), formula_value = $40,
 				addl_expression = NULLIF($41,''), effective_start = $42::date, effective_end = NULLIF($43,'')::date,
+				approval_matrix_id = NULLIF($49,''),
 				version = version + 1, processing_status = 'PENDING_EDIT_APPROVAL',
 				last_modified_by = $44, last_modified_at = now()
 			WHERE policy_id = $45::uuid`,
@@ -126,6 +131,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			rf.FormulaExpression, rf.FormulaReturnType, rf.FormulaOperator, rf.FormulaValue,
 			req.AddlExpression, req.EffectiveStart, req.EffectiveEnd,
 			actor, req.PolicyID, rf.ThrValueDate, req.NullHandlingDefault, rf.SlabPercentBase,
+			req.ApprovalMatrixID,
 		); err != nil {
 			api.LogErrorForResponse(w, "policy update exec: %v", err)
 			api.RespondEnvelopeError(w, http.StatusConflict, "failed to update policy (duplicate code?)", "POLICY_UPDATE_FAILED")
