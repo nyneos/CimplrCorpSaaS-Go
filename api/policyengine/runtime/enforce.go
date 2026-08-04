@@ -68,6 +68,28 @@ func Enforce(ctx context.Context, w http.ResponseWriter, r *http.Request, pool *
 	return false
 }
 
+// EnforceWithMatrix behaves exactly like Enforce, but also returns the approval
+// matrix pinned by a breached TriggerApproval policy. The string is empty when
+// nothing breached that way, in which case callers resolve their own matrix.
+func EnforceWithMatrix(ctx context.Context, w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, in EnforceInput) (bool, string) {
+	out := EnforceDetailed(ctx, r, pool, in)
+	if out.OK {
+		out.Result.WriteSummaryHeader(w)
+		return true, out.Result.TriggerApprovalMatrixID
+	}
+	status := http.StatusUnprocessableEntity
+	msg := out.Message
+	if msg == "" {
+		msg = "Blocked by policy"
+	}
+	if strings.HasPrefix(msg, "policy check failed") {
+		api.RespondEnvelopeError(w, http.StatusBadGateway, msg, "POLICY_SERVICE_ERROR")
+		return false, ""
+	}
+	api.RespondEnvelopeFailureWithData(w, status, msg, "POLICY_BREACH", out.Result.BlockPayload())
+	return false, ""
+}
+
 // EnforceInline returns (ok, errorMessage) without writing HTTP — for bulk loops.
 func EnforceInline(ctx context.Context, r *http.Request, pool *pgxpool.Pool, in EnforceInput) (bool, string) {
 	out := EnforceDetailed(ctx, r, pool, in)

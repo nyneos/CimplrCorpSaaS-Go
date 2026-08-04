@@ -56,3 +56,26 @@ func fdEnforceInline(
 		RequireVariables: false,
 	})
 }
+
+// fdEnforceMatrix behaves like fdEnforce but also returns the approval matrix
+// pinned by a breached TriggerApproval policy ("" when none applies).
+func fdEnforceMatrix(
+	ctx context.Context,
+	w http.ResponseWriter,
+	r *http.Request,
+	pool *pgxpool.Pool,
+	cc enforceCtx,
+	fields map[string]interface{},
+) (bool, string) {
+	return runtime.EnforceWithMatrix(ctx, w, r, pool, runtime.EnforceInput{
+		EventCode:        cc.EventCode,
+		ModuleCode:       common.ModuleInvestmentFD,
+		SubModule:        fdSubTDSRegister,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
+		Fields:           fields,
+		RequireVariables: false,
+	})
+}

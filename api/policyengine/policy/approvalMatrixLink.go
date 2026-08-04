@@ -14,8 +14,14 @@ import (
 
 const breachTriggerApproval = "TriggerApproval"
 
+// policyEngineMatrixModule scopes the TriggerApproval picker to matrices created
+// from the Policy Engine Approval Matrix screen. Module matrices (FD and others)
+// keep governing their own transactions and must never appear here.
+const policyEngineMatrixModule = "POLICY_ENGINE"
+
 const approvedActiveMatrixWhere = `
-	m.is_active  = true
+	m.module_code = '` + policyEngineMatrixModule + `'
+	AND m.is_active  = true
 	AND m.is_deleted = false
 	AND ma.processing_status = 'APPROVED'
 	AND ma.action_type <> 'DELETE'`
@@ -45,13 +51,20 @@ func HandleApprovalMatrixOptions(pool *pgxpool.Pool) http.HandlerFunc {
 		if !common.RequirePOST(w, r) {
 			return
 		}
+		var req struct {
+			SubModule string `json:"sub_module"`
+		}
+		_ = common.DecodeJSON(r, &req)
+		subModule := strings.TrimSpace(req.SubModule)
+
 		rows, err := pool.Query(r.Context(), `
 			SELECT m.matrix_id, m.module_code, m.transaction_type, m.approval_order,
 			       (SELECT COUNT(*) FROM uam.approval_matrix_eye e
 			         WHERE e.matrix_id = m.matrix_id AND e.is_active = true AND e.is_deleted = false)
 			FROM uam.approval_matrix_master m`+latestMatrixAudit+`
 			WHERE`+approvedActiveMatrixWhere+`
-			ORDER BY m.module_code, m.transaction_type`)
+			  AND ($1 = '' OR m.transaction_type LIKE $1 || '%')
+			ORDER BY m.module_code, m.transaction_type`, subModule)
 		if err != nil {
 			api.LogErrorForResponse(w, "approval matrix options: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to load approval matrices", "MATRIX_LOAD_FAILED")

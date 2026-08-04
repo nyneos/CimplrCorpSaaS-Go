@@ -484,7 +484,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, enforceCtx{
+			ok, pmsg, policyRes := enforceFDBookingPolicyInline(ctx, r, pgxPool, enforceCtx{
 				EventCode:   common.TriggerPreCreate,
 				HandlerName: "CreateBookingBulk",
 				APIPath:     "/investment/fd/booking/create-bulk",
@@ -507,13 +507,15 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"maturity_date":       row.MaturityDate,
 					"requested_at":        time.Now().UTC().Format(time.RFC3339),
 				},
-			); !ok {
+			)
+			if !ok {
 				results = append(results, map[string]interface{}{
 					"row_index": i, "entity_id": row.EntityID,
 					constants.ValueSuccess: false, constants.ValueError: pmsg,
 				})
 				continue
 			}
+			bulkMatrixID := policyRes.TriggerApprovalMatrixID
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
@@ -679,7 +681,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				constants.ValueSuccess: true,
 			})
 
-			go func(bID, uID, uEmail, entityID string, amount float64) {
+			go func(bID, uID, uEmail, entityID, matrixID string, amount float64) {
 				defer func() {
 					if rec := recover(); rec != nil {
 						api.LogError("[FDBooking] CreateInstance goroutine panic for booking %s: %v", bID, rec)
@@ -693,6 +695,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					RecordTable: constants.QuerryBookingRequest, AuditTable: constants.QuerryAuditBookingRequest,
 					AuditIDColumn: "booking_id", ActionType: "CREATE",
 					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
+					MatrixID: matrixID,
 				})
 				if err != nil {
 					api.LogError("[FDBooking] CreateInstance failed for booking %s: %v", bID, err)
@@ -709,7 +712,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				} else {
 					api.LogInfo("[FDBooking] No matrix for booking %s — stays DRAFT", bID)
 				}
-			}(bookingID, req.UserID, userEmail, row.EntityID, row.PrincipalAmount)
+			}(bookingID, req.UserID, userEmail, row.EntityID, bulkMatrixID, row.PrincipalAmount)
 
 			go func(bID, eID, uEmail string, amount float64) {
 				defer func() {
@@ -877,14 +880,15 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for k, v := range req.Fields {
 			merged[k] = v
 		}
-		if ok, _ := enforceFDBookingPolicy(ctx, w, r, pgxPool, enforceCtx{
+		editPolicyOK, editMatrixID := enforceFDBookingPolicy(ctx, w, r, pgxPool, enforceCtx{
 			EventCode:   common.TriggerPreEdit,
 			HandlerName: "UpdateBooking",
 			APIPath:     "/investment/fd/booking/update",
 			EntityCode:  entityID,
 			Actor:       userEmail,
 		}, merged,
-		); !ok {
+		)
+		if !editPolicyOK {
 			return
 		}
 
@@ -1006,7 +1010,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		go func(bID, uID, uEmail, eID string, amount float64) {
+		go func(bID, uID, uEmail, eID, matrixID string, amount float64) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDBooking] UpdateBooking engine goroutine panic for booking %s: %v", bID, rec)
@@ -1025,6 +1029,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordTable: constants.QuerryBookingRequest, AuditTable: constants.QuerryAuditBookingRequest,
 				AuditIDColumn: "booking_id", ActionType: "EDIT",
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
+				MatrixID: matrixID,
 			})
 			if err != nil {
 				api.LogError("[FDBooking] CreateInstance(EDIT) failed for booking %s: %v", bID, err)
@@ -1039,7 +1044,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.LogInfo("[FDBooking] CreateInstance(EDIT) %s → booking %s APPROVAL_PENDING", instID, bID)
 				}
 			}
-		}(req.BookingID, req.UserID, userEmail, entityID, oldPrincipal)
+		}(req.BookingID, req.UserID, userEmail, entityID, editMatrixID, oldPrincipal)
 
 		go func(bID, eID, uEmail string, amount float64) {
 			defer func() {
@@ -1091,22 +1096,26 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		var policyBlocked []string
+		deleteMatrixByBooking := make(map[string]string, len(req.BookingIDs))
 		for _, bID := range req.BookingIDs {
 			fields, entityID, loadErr := loadFDBookingCDMFields(ctx, pgxPool, bID)
 			if loadErr != nil {
 				// Soft-deleted / missing rows are skipped by the delete query below.
 				continue
 			}
-			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, enforceCtx{
+			ok, pmsg, policyRes := enforceFDBookingPolicyInline(ctx, r, pgxPool, enforceCtx{
 				EventCode:   common.TriggerPreDelete,
 				HandlerName: "DeleteBooking",
 				APIPath:     "/investment/fd/booking/delete",
 				EntityCode:  entityID,
 				Actor:       userEmail,
 			}, fields,
-			); !ok {
+			)
+			if !ok {
 				policyBlocked = append(policyBlocked, bID+": "+pmsg)
+				continue
 			}
+			deleteMatrixByBooking[bID] = policyRes.TriggerApprovalMatrixID
 		}
 		if len(policyBlocked) > 0 && len(policyBlocked) >= len(req.BookingIDs) {
 			api.RespondWithError(w, http.StatusUnprocessableEntity, strings.Join(policyBlocked, "; "))
@@ -1218,7 +1227,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Fire engine goroutines after commit — cancel prior instances first (like update)
 		for _, bm := range validBookings {
-			go func(bID, uID, uEmail, eID string, amount float64) {
+			go func(bID, uID, uEmail, eID, matrixID string, amount float64) {
 				defer func() {
 					if rec := recover(); rec != nil {
 						api.LogError("[FDBooking] DeleteBooking engine goroutine panic for booking %s: %v", bID, rec)
@@ -1237,6 +1246,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					RecordTable: constants.QuerryBookingRequest, AuditTable: constants.QuerryAuditBookingRequest,
 					AuditIDColumn: "booking_id", ActionType: "DELETE",
 					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
+					MatrixID: matrixID,
 				})
 				if err != nil {
 					api.LogError("[FDBooking] CreateInstance(DELETE) failed for booking %s: %v", bID, err)
@@ -1251,7 +1261,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						api.LogInfo("[FDBooking] CreateInstance(DELETE) %s → booking %s PENDING_DELETE_APPROVAL", instID, bID)
 					}
 				}
-			}(bm.id, req.UserID, userEmail, bm.entity, bm.amount)
+			}(bm.id, req.UserID, userEmail, bm.entity, deleteMatrixByBooking[bm.id], bm.amount)
 
 			go func(bID, eID, uEmail string) {
 				defer func() {

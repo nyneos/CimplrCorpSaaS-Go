@@ -205,8 +205,9 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			ReconcileStatus:   "PENDING",
 			ExceptionRaised:   exceptionRaised,
 		}
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateTDSRegister", APIPath: "/investment/fd/tds-register/create",
-			EntityCode: req.EntityID, Actor: userEmail}, buildFDTDSRegisterPolicyFields(createRow)) {
+		tdsCreateOK, tdsCreateMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateTDSRegister", APIPath: "/investment/fd/tds-register/create",
+			EntityCode: req.EntityID, Actor: userEmail}, buildFDTDSRegisterPolicyFields(createRow))
+		if !tdsCreateOK {
 			return
 		}
 
@@ -275,7 +276,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"tds_variance":        tdsVariance,
 			"exception_raised":    exceptionRaised,
 		})
-		go func(id, uEmail, fID, eID string) {
+		go func(id, uEmail, fID, eID, matrixID string) {
 			defer func() { recover() }() //nolint:errcheck
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
@@ -283,6 +284,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       eID,
 				TransactionType:  "FD_TDS_REGISTER_CREATE",
+				MatrixID:         matrixID,
 				RecordID:         id,
 				RecordTable:      constants.QuerryTDSReceipt,
 				AuditTable:       constants.QuerryAuditTDSReceipt,
@@ -299,7 +301,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				"record_id": id, "event": "FD_TDS_REGISTER_CREATED", "actor_email": uEmail,
 				"fd_id": fID, "entity_id": eID,
 			})
-		}(tdsID, userEmail, req.FDID, req.EntityID)
+		}(tdsID, userEmail, req.FDID, req.EntityID, tdsCreateMatrixID)
 	}
 }
 
@@ -538,13 +540,14 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		// build fields from here, so this stays entity/request-scoped rather than
 		// using buildFDTDSRegisterPolicyFields. tolerance_amount added so a policy
 		// can actually see the value driving the AUTO branch's accept/flag split.
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreSubmit, HandlerName: "ReconcileTDSRegister", APIPath: "/investment/fd/tds-register/reconcile",
+		tdsReconcileOK, tdsReconcileMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreSubmit, HandlerName: "ReconcileTDSRegister", APIPath: "/investment/fd/tds-register/reconcile",
 			EntityCode: req.EntityID, Actor: userEmail}, map[string]interface{}{
 			"entity_id":        req.EntityID,
 			"entity_code":      req.EntityID,
 			"reconcile_action": req.ReconcileAction,
 			"tolerance_amount": req.ToleranceAmount,
-		}) {
+		})
+		if !tdsReconcileOK {
 			return
 		}
 
@@ -617,7 +620,7 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"updated_count": updatedCount,
 			"action":        req.ReconcileAction,
 		})
-		go func(uEmail, eID, action string) {
+		go func(uEmail, eID, action, matrixID string) {
 			defer func() { recover() }() //nolint:errcheck
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
@@ -625,6 +628,7 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       eID,
 				TransactionType:  "FD_TDS_REGISTER_RECONCILE",
+				MatrixID:         matrixID,
 				RecordID:         eID,
 				RecordTable:      constants.QuerryTDSReceipt,
 				AuditTable:       constants.QuerryAuditTDSReceipt,
@@ -641,7 +645,7 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				"record_id": eID, "event": "FD_TDS_REGISTER_RECONCILED", "actor_email": uEmail,
 				"entity_id": eID, "reconcile_action": action,
 			})
-		}(userEmail, req.EntityID, req.ReconcileAction)
+		}(userEmail, req.EntityID, req.ReconcileAction, tdsReconcileMatrixID)
 	}
 }
 
@@ -869,8 +873,9 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"tds_section":         req.TDSSection,
 			"has_pan":             req.HasPAN,
 		})
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateTDSRegister", APIPath: "/investment/fd/tds-register/update",
-			EntityCode: editedRow.EntityID, Actor: userEmail}, buildFDTDSRegisterPolicyFields(editedRow)) {
+		tdsEditOK, tdsEditMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateTDSRegister", APIPath: "/investment/fd/tds-register/update",
+			EntityCode: editedRow.EntityID, Actor: userEmail}, buildFDTDSRegisterPolicyFields(editedRow))
+		if !tdsEditOK {
 			return
 		}
 
@@ -921,7 +926,7 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		go func(tID, uEmail, eID string) {
+		go func(tID, uEmail, eID, matrixID string) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDTDS] UpdateTDSRegister engine panic for %s: %v", tID, rec)
@@ -934,6 +939,7 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       eID,
 				TransactionType:  "FD_TDS_REGISTER_EDIT",
+				MatrixID:         matrixID,
 				RecordID:         tID,
 				RecordTable:      constants.QuerryTDSReceipt,
 				AuditTable:       constants.QuerryAuditTDSReceipt,
@@ -947,7 +953,7 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			api.LogInfo("[FDTDS] UpdateTDSRegister engine instance %s for tds %s", instID, tID)
-		}(req.TDSID, userEmail, entityID)
+		}(req.TDSID, userEmail, entityID, tdsEditMatrixID)
 
 		go func(tID, uEmail, eID string) {
 			defer func() {

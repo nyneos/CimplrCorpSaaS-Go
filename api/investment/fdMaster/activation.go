@@ -1050,7 +1050,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if !fdEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "ActivateFD", APIPath: "/investment/fd/master/activate",
+		activatePolicyOK, activateMatrixID := fdEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "ActivateFD", APIPath: "/investment/fd/master/activate",
 			SubModule: fdSubMaster, EntityCode: rec.EntityID, Actor: userEmail}, buildFDMasterPolicyFields(fdMasterRow{
 			BookingID:               rec.BookingID,
 			ConfirmationID:          rec.ConfirmationID,
@@ -1085,7 +1085,8 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FirstCapitalizationDate: rec.FirstCapitalizationDate.Format(dateLayoutISO),
 			ReceiptDate:             receiptDate.Format(dateLayoutISO),
 			PrematureClosureTerms:   rec.PrematureClosureTerms,
-		})) {
+		}))
+		if !activatePolicyOK {
 			return
 		}
 
@@ -1144,7 +1145,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		go func(fdRecordID string, confirmationID string, email string, entityID string, amount float64, req activateFDRequest) {
+		go func(fdRecordID string, confirmationID string, email string, entityID string, matrixID string, amount float64, req activateFDRequest) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDMaster] ActivateFD engine goroutine panic for fd %s: %v", fdRecordID, rec)
@@ -1172,6 +1173,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Amount:           amount,
 				SubmittedBy:      req.UserID,
 				SubmittedByEmail: email,
+				MatrixID:         matrixID,
 			})
 			if err != nil {
 				api.LogError("[FDMaster] CreateInstance failed for fd %s: %v", fdRecordID, err)
@@ -1195,7 +1197,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				api.LogInfo("[FDMaster] No matrix for fd %s — stays PENDING_APPROVAL", fdRecordID)
 			}
-		}(fdID, req.ConfirmationID, userEmail, rec.EntityID, rec.PrincipalAmount, req)
+		}(fdID, req.ConfirmationID, userEmail, rec.EntityID, activateMatrixID, rec.PrincipalAmount, req)
 
 		go func(fdRecordID, eID, uEmail string, amount float64) {
 			defer func() {
@@ -3186,9 +3188,10 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if snap.receiptClr != nil {
 			editCashflowRow.ReceiptCleared = *snap.receiptClr
 		}
-		if !fdEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "EditCashflowLineItem",
+		cashflowEditOK, cashflowEditMatrixID := fdEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "EditCashflowLineItem",
 			APIPath: "/investment/fd/master/cashflow/edit", SubModule: fdSubCashflow, EntityCode: entityID, Actor: userEmail},
-			buildFDCashflowPolicyFields(editCashflowRow)) {
+			buildFDCashflowPolicyFields(editCashflowRow))
+		if !cashflowEditOK {
 			return
 		}
 
@@ -3243,7 +3246,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Spawn approval engine goroutine ──────────────────────────────────
 		if auditID != "" {
-			go func(auditID, cashflowID, fdID, entityID, userID, email string, amount float64) {
+			go func(auditID, cashflowID, fdID, entityID, userID, email, matrixID string, amount float64) {
 				defer func() {
 					if rec := recover(); rec != nil {
 						api.LogError("[CashflowEdit] engine goroutine panic for audit %s: %v", auditID, rec)
@@ -3255,6 +3258,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					ModuleCode:       "FIXED_DEPOSIT",
 					EntityCode:       entityID,
 					TransactionType:  "FD_CASHFLOW_EDIT",
+					MatrixID:         matrixID,
 					RecordID:         auditID,
 					RecordTable:      constants.QuerryAuditCashflowSchedule,
 					AuditTable:       constants.QuerryAuditCashflowSchedule,
@@ -3281,7 +3285,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						api.LogError("[CashflowEdit] Auto-approve apply failed audit=%s: %v", auditID, applyErr)
 					}
 				}
-			}(auditID, req.CashflowID, req.FDID, entityID, req.UserID, userEmail, principalAmount)
+			}(auditID, req.CashflowID, req.FDID, entityID, req.UserID, userEmail, cashflowEditMatrixID, principalAmount)
 		}
 
 		go func(cfID, fdID, eID, uEmail string) {
@@ -3934,9 +3938,10 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		)
 
 		deleteCFRow, _ := loadFDCashflowRow(ctx, pgxPool, req.CashflowID)
-		if !fdEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "DeleteCashflowLineItem",
+		cashflowDeleteOK, cashflowDeleteMatrixID := fdEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "DeleteCashflowLineItem",
 			APIPath: "/investment/fd/master/cashflow/delete", SubModule: fdSubCashflow, EntityCode: deleteCFRow.EntityID, Actor: userEmail},
-			buildFDCashflowPolicyFields(deleteCFRow)) {
+			buildFDCashflowPolicyFields(deleteCFRow))
+		if !cashflowDeleteOK {
 			return
 		}
 
@@ -3988,7 +3993,7 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&cfPrincipal)
 
 		if auditID != "" {
-			go func(aID, cfID, fdID, eID, uID, uEmail string, amount float64) {
+			go func(aID, cfID, fdID, eID, uID, uEmail, matrixID string, amount float64) {
 				defer func() {
 					if rec := recover(); rec != nil {
 						api.LogError("[FDMaster] DeleteCashflowLineItem engine panic for %s: %v", cfID, rec)
@@ -4004,6 +4009,7 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					ModuleCode:       "FIXED_DEPOSIT",
 					EntityCode:       eID,
 					TransactionType:  "FD_CASHFLOW_DELETE",
+					MatrixID:         matrixID,
 					RecordID:         aID,
 					RecordTable:      constants.QuerryAuditCashflowSchedule,
 					AuditTable:       constants.QuerryAuditCashflowSchedule,
@@ -4020,7 +4026,7 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if instID != "" {
 					api.LogInfo("[FDMaster] DeleteCashflowLineItem engine instance %s for audit %s", instID, aID)
 				}
-			}(auditID, req.CashflowID, req.FDID, deleteCFRow.EntityID, req.UserID, userEmail, cfPrincipal)
+			}(auditID, req.CashflowID, req.FDID, deleteCFRow.EntityID, req.UserID, userEmail, cashflowDeleteMatrixID, cfPrincipal)
 		}
 
 		go func(cfID, fdID, eID, uEmail string) {

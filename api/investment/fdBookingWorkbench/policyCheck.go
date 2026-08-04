@@ -169,7 +169,7 @@ func loadFDBookingCDMFields(ctx context.Context, pool *pgxpool.Pool, bookingID s
 		       COALESCE(source_account_id,''), COALESCE(source_account_number,''), COALESCE(product_code,''),
 		       COALESCE(booking_remarks,''), COALESCE(booking_status,''), COALESCE(TO_CHAR(offer_valid_till,'YYYY-MM-DD'),''),
 		       COALESCE(auto_renewal,false),
-		       requested_at
+		       created_at
 		FROM investment.fd_booking_request
 		WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false`, bookingID).Scan(
 		&entityID, &entityName, &bankID, &bankName, &principal, &rate,

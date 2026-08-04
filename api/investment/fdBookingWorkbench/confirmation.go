@@ -361,7 +361,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tenorType = "DAYS"
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		capturePolicyOK, captureMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleInvestmentFD,
 			SubModule:           "FD_CONFIRMATION",
@@ -398,7 +398,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ValueType:                 req.ValueType,
 				ConfirmationStatus:        "PENDING_APPROVAL",
 			}),
-		}) {
+		})
+		if !capturePolicyOK {
 			cleanupUpload()
 			return
 		}
@@ -587,7 +588,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		go func(cID, uID, uEmail, eID string, amount float64) {
+		go func(cID, uID, uEmail, eID, matrixID string, amount float64) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDBooking] CaptureConfirmation engine panic for %s: %v", cID, rec)
@@ -607,6 +608,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Amount:           amount,
 				SubmittedBy:      uID,
 				SubmittedByEmail: uEmail,
+				MatrixID:         matrixID,
 			})
 			if err != nil {
 				api.LogError("[FDBooking] CaptureConfirmation CreateInstance failed for %s: %v", cID, err)
@@ -619,7 +621,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDBooking] CaptureConfirmation status→APPROVAL_PENDING failed for %s: %v", cID, uerr)
 				}
 			}
-		}(confirmationID, req.UserID, userEmail, entityID, req.ConfirmedPrincipalAmount)
+		}(confirmationID, req.UserID, userEmail, entityID, captureMatrixID, req.ConfirmedPrincipalAmount)
 
 		go func(cID, bID, eID, uEmail string, amount float64) {
 			defer func() {
@@ -941,7 +943,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		varPolicyOK, varMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleInvestmentFD,
 			SubModule:           "FD_CONFIRMATION",
@@ -975,7 +977,8 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FirstPayoutDate:           req.FirstPayoutDate,
 				FirstCapitalizationDate:   req.FirstCapitalizationDate,
 			}),
-		}) {
+		})
+		if !varPolicyOK {
 			return
 		}
 
@@ -1210,7 +1213,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Fire approval engine
-		go func(cID, uID, uEmail, eID string, amount float64, update bool) {
+		go func(cID, uID, uEmail, eID, matrixID string, amount float64, update bool) {
 			defer func() { recover() }() //nolint:errcheck
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
@@ -1227,8 +1230,9 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 				AuditIDColumn: "confirmation_id", ActionType: actionType,
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
+				MatrixID: matrixID,
 			})
-		}(confirmationID, req.UserID, userEmail, entityID, req.ConfirmedPrincipalAmount, isUpdate)
+		}(confirmationID, req.UserID, userEmail, entityID, varMatrixID, req.ConfirmedPrincipalAmount, isUpdate)
 
 		go func(cID, bID, eID, uEmail string, hasVar bool) {
 			defer func() {
@@ -1729,7 +1733,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			editedFields[k] = v
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		editConfPolicyOK, editConfMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleInvestmentFD,
 			SubModule:           "FD_CONFIRMATION",
@@ -1739,7 +1743,8 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/investment/fd/confirmation/edit",
 			DefaultBlockMessage: "FD confirmation edit blocked by policy",
 			Fields:              editedFields,
-		}) {
+		})
+		if !editConfPolicyOK {
 			return
 		}
 
@@ -1784,7 +1789,7 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// ── Trigger approval engine sequence ────────────────────────────────
-		go func(cID, uID, uEmail, eID string, amount float64) {
+		go func(cID, uID, uEmail, eID, matrixID string, amount float64) {
 			defer func() { recover() }() //nolint:errcheck
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
@@ -1795,8 +1800,9 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 				AuditIDColumn: "confirmation_id", ActionType: "EDIT",
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
+				MatrixID: matrixID,
 			})
-		}(req.ConfirmationID, req.UserID, userEmail, entityID, updateAmount)
+		}(req.ConfirmationID, req.UserID, userEmail, entityID, editConfMatrixID, updateAmount)
 
 		go func(cID, bID, eID, uEmail string, hasVar bool) {
 			defer func() {
@@ -3445,12 +3451,13 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var policyErrors []string
+		deleteConfMatrixByID := map[string]string{}
 		for _, cm := range validConfs {
 			deleteRow, loadErr := loadFDConfirmationRow(ctx, pgxPool, cm.id)
 			if loadErr != nil {
 				deleteRow = fdConfirmationRow{ConfirmationID: cm.id, EntityID: cm.entity, ActualPrincipal: cm.amount}
 			}
-			if ok, pmsg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+			delOut := runtime.EnforceDetailed(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleInvestmentFD,
 				SubModule:           "FD_CONFIRMATION",
@@ -3460,9 +3467,12 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				APIPath:             "/investment/fd/confirmation/delete",
 				DefaultBlockMessage: "FD confirmation delete blocked by policy",
 				Fields:              buildFDConfirmationPolicyFields(deleteRow),
-			}); !ok {
-				policyErrors = append(policyErrors, cm.id+": "+pmsg)
+			})
+			if !delOut.OK {
+				policyErrors = append(policyErrors, cm.id+": "+delOut.Message)
+				continue
 			}
+			deleteConfMatrixByID[cm.id] = delOut.Result.TriggerApprovalMatrixID
 		}
 		if len(policyErrors) > 0 {
 			api.RespondWithPayload(w, false, "Policy check blocked delete", map[string]interface{}{
@@ -3496,7 +3506,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Fire engine goroutines after commit — cancel prior instances first (like update/delete booking)
 		for _, cm := range validConfs {
-			go func(cID, uID, uEmail, eID string, amount float64) {
+			go func(cID, uID, uEmail, eID, matrixID string, amount float64) {
 				defer func() {
 					if rec := recover(); rec != nil {
 						api.LogError("[FDBooking] DeleteConfirmation engine goroutine panic for confirmation %s: %v", cID, rec)
@@ -3515,6 +3525,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 					AuditIDColumn: "confirmation_id", ActionType: "DELETE",
 					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
+					MatrixID: matrixID,
 				})
 				if err != nil {
 					api.LogError("[FDBooking] CreateInstance(DELETE) failed for confirmation %s: %v", cID, err)
@@ -3529,7 +3540,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						api.LogInfo("[FDBooking] CreateInstance(DELETE) %s → confirmation %s PENDING_DELETE_APPROVAL", instID, cID)
 					}
 				}
-			}(cm.id, req.UserID, userEmail, cm.entity, cm.amount)
+			}(cm.id, req.UserID, userEmail, cm.entity, deleteConfMatrixByID[cm.id], cm.amount)
 
 			go func(cID, eID, uEmail string) {
 				defer func() {

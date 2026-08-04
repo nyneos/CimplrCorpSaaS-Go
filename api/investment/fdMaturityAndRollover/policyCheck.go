@@ -71,3 +71,24 @@ func cimplrClosureUploadEntityID(ctx context.Context, pool *pgxpool.Pool, initia
 	}
 	return entityID
 }
+
+func fdEnforceMatrix(
+	ctx context.Context,
+	w http.ResponseWriter,
+	r *http.Request,
+	pool *pgxpool.Pool,
+	cc enforceCtx,
+	fields map[string]interface{},
+) (bool, string) {
+	return runtime.EnforceWithMatrix(ctx, w, r, pool, runtime.EnforceInput{
+		EventCode:        cc.EventCode,
+		ModuleCode:       common.ModuleInvestmentFD,
+		SubModule:        fdSubClosure,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
+		Fields:           fields,
+		RequireVariables: false,
+	})
+}
