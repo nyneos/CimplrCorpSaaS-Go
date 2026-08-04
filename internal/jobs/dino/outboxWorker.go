@@ -33,8 +33,10 @@ package jobs
 
 import (
 	"CimplrCorpSaas/api/constants"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -63,8 +65,10 @@ func StartOutboxWorker(ctx context.Context, pool *pgxpool.Pool) {
 		return
 	}
 
-	// endpointURL := strings.TrimSpace(os.Getenv("SEND_ENDPOINT_URL"))
-	target := resolveRoute()
+	target := strings.TrimSpace(os.Getenv("SEND_ENDPOINT_URL"))
+	if target == "" {
+		target = resolveRoute()
+	}
 
 	if target == "" {
 		logger.LogInfo("[outbox-worker] route not configured")
@@ -110,22 +114,32 @@ type owOutboxRow struct {
 	AuditID         string
 	CorrelationID   string
 	RecipientUserID string
+	CcEmails        string // comma-separated Cc for MIME / SES Destinations
 }
 
 // owSendPayload is one item in the JSON array POSTed to SEND_ENDPOINT_URL.
 type owSendPayload struct {
-	OutboxID        string `json:"outbox_id"`
-	To              string `json:"to"`
-	From            string `json:"from,omitempty"`
-	Subject         string `json:"subject"`
-	HTMLBody        string `json:"html_body"`
-	RecipientName   string `json:"recipient_name,omitempty"`
-	SenderName      string `json:"sender_name,omitempty"`
-	EventID         string `json:"event_id,omitempty"`
-	CorrelationID   string `json:"correlation_id,omitempty"`
-	AuditID         string `json:"audit_id,omitempty"`
-	RecipientUserID string `json:"recipient_user_id,omitempty"`
-	RetryCount      int    `json:"retry_count"`
+	OutboxID        string             `json:"outbox_id"`
+	To              string             `json:"to"`
+	Cc              string             `json:"cc,omitempty"`
+	From            string             `json:"from,omitempty"`
+	Subject         string             `json:"subject"`
+	HTMLBody        string             `json:"html_body"`
+	RecipientName   string             `json:"recipient_name,omitempty"`
+	SenderName      string             `json:"sender_name,omitempty"`
+	EventID         string             `json:"event_id,omitempty"`
+	CorrelationID   string             `json:"correlation_id,omitempty"`
+	AuditID         string             `json:"audit_id,omitempty"`
+	RecipientUserID string             `json:"recipient_user_id,omitempty"`
+	RetryCount      int                `json:"retry_count"`
+	Attachments     []owSendAttachment `json:"attachments,omitempty"`
+}
+
+// owSendAttachment is a base64-encoded file for Notification-Service SendRawEmail.
+type owSendAttachment struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	DataBase64  string `json:"data_base64"`
 }
 
 // owBulkResponse is what SEND_ENDPOINT_URL must return.
@@ -153,7 +167,8 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 		       o.rendered_subject, o.rendered_body,
 		       o.sender_email, o.sender_name,
 		       o.retry_count, o.priority_level,
-		       o.event_id, o.audit_id::text, o.correlation_id, o.recipient_user_id
+		       o.event_id, o.audit_id::text, o.correlation_id, o.recipient_user_id,
+		       COALESCE(o.cc_emails, '')
 		FROM   notification_svc.outbox o
 		WHERE  o.processing_status = 'PENDING'
 		  AND  o.channel = 'EMAIL'
@@ -179,6 +194,7 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 	for rows.Next() {
 		var r owOutboxRow
 		var recipientName, senderEmail, senderName, auditID, correlationID, recipientUserID *string
+		var ccEmails string
 		if err := rows.Scan(
 			&r.OutboxID, &r.Channel,
 			&r.RecipientEmail, &recipientName,
@@ -186,6 +202,7 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 			&senderEmail, &senderName,
 			&r.RetryCount, &r.PriorityLevel,
 			&r.EventID, &auditID, &correlationID, &recipientUserID,
+			&ccEmails,
 		); err != nil {
 			logger.LogError("[outbox-worker] scan row: %v", err)
 			continue
@@ -196,6 +213,7 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 		owDeref(&r.AuditID, auditID)
 		owDeref(&r.CorrelationID, correlationID)
 		owDeref(&r.RecipientUserID, recipientUserID)
+		r.CcEmails = strings.TrimSpace(ccEmails)
 		batch = append(batch, r)
 	}
 	rows.Close()
@@ -235,12 +253,25 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 		return
 	}
 
+	// DMS document emails: prefer cover rendered on generation_run (real EMAIL
+	// template) over the notification-catalog system body, even if dispatch
+	// lost a race updating outbox before this worker claimed the row.
+	owApplyDmsEmailCovers(ctx, pool, toSend)
+
 	// Step 3 — Build the bulk payload and POST to SEND_ENDPOINT_URL
+	attsByOutbox, attErrs := owLoadAttachments(ctx, pool, toSend)
+	var ready []owOutboxRow
 	payloads := make([]owSendPayload, 0, len(toSend))
 	for _, row := range toSend {
+		if errMsg, bad := attErrs[row.OutboxID]; bad {
+			owHandleFailure(ctx, pool, row, "attachment download failed: "+errMsg)
+			continue
+		}
+		ready = append(ready, row)
 		payloads = append(payloads, owSendPayload{
 			OutboxID:        row.OutboxID,
 			To:              row.RecipientEmail,
+			Cc:              row.CcEmails,
 			From:            row.SenderEmail,
 			Subject:         row.RenderedSubject,
 			HTMLBody:        row.RenderedBody,
@@ -251,13 +282,73 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 			AuditID:         row.AuditID,
 			RecipientUserID: row.RecipientUserID,
 			RetryCount:      row.RetryCount,
+			Attachments:     attsByOutbox[row.OutboxID],
 		})
 	}
+	if len(payloads) == 0 {
+		return
+	}
 
-	resultMap := owCallEndpoint(ctx, endpointURL, payloads)
+	// Split: body-only → remote Notification-Service; with files → SES SendRawEmail
+	// locally. Older NS deploys ignore attachments[] and send body-only via
+	// SES SendEmail (cannot carry files) — that is why Outlook showed no PDF.
+	//
+	// Fail closed: if the DB has outbox_attachment rows but we somehow built a
+	// zero-length payload (missed download / race), NEVER route to remote —
+	// that delivers a "PDF is attached" body with no file.
+	dbAttCount := map[string]int{}
+	ids := make([]string, 0, len(ready))
+	for _, r := range ready {
+		ids = append(ids, r.OutboxID)
+	}
+	if qrows, qerr := pool.Query(ctx, `
+		SELECT outbox_id, count(*)::int
+		FROM notification_svc.outbox_attachment
+		WHERE outbox_id = ANY($1::text[])
+		GROUP BY outbox_id`, ids); qerr == nil {
+		for qrows.Next() {
+			var id string
+			var n int
+			if qrows.Scan(&id, &n) == nil {
+				dbAttCount[id] = n
+			}
+		}
+		qrows.Close()
+	}
+
+	var remotePayloads []owSendPayload
+	resultMap := make(map[string]owItemResult, len(payloads))
+	for _, p := range payloads {
+		if want := dbAttCount[p.OutboxID]; want > 0 && len(p.Attachments) == 0 {
+			resultMap[p.OutboxID] = owItemResult{
+				OutboxID: p.OutboxID,
+				Success:  false,
+				Error:    fmt.Sprintf("refusing body-only send: DB has %d attachment(s) but none loaded", want),
+			}
+			logger.LogError("[outbox-worker] REFUSED body-only outbox=%s expected_atts=%d", p.OutboxID, want)
+			continue
+		}
+		if len(p.Attachments) == 0 {
+			remotePayloads = append(remotePayloads, p)
+			continue
+		}
+		msgID, err := owSendViaSESRaw(ctx, p)
+		if err != nil {
+			resultMap[p.OutboxID] = owItemResult{OutboxID: p.OutboxID, Success: false, Error: "ses raw: " + err.Error()}
+			logger.LogError("[outbox-worker] SES raw send failed outbox=%s: %v", p.OutboxID, err)
+			continue
+		}
+		resultMap[p.OutboxID] = owItemResult{OutboxID: p.OutboxID, Success: true, MessageID: msgID}
+		logger.LogInfo("[outbox-worker] SES raw SENT outbox=%s to=%s atts=%d msg=%s", p.OutboxID, p.To, len(p.Attachments), msgID)
+	}
+	if len(remotePayloads) > 0 {
+		for id, res := range owCallEndpoint(ctx, endpointURL, remotePayloads) {
+			resultMap[id] = res
+		}
+	}
 
 	// Step 4 — Update DB based on provider response
-	for _, row := range toSend {
+	for _, row := range ready {
 		res, found := resultMap[row.OutboxID]
 		if !found {
 			owHandleFailure(ctx, pool, row, "send endpoint returned no result for this outbox_id")
@@ -290,7 +381,14 @@ func owCallEndpoint(ctx context.Context, endpointURL string, payloads []owSendPa
 		return resultMap
 	}
 
-	timeout := time.Duration(owGetenvInt("OUTBOX_WORKER_TIMEOUT_SECS", 15)) * time.Second
+	timeoutSecs := owGetenvInt("OUTBOX_WORKER_TIMEOUT_SECS", 15)
+	for _, p := range payloads {
+		if len(p.Attachments) > 0 && timeoutSecs < 60 {
+			timeoutSecs = 60
+			break
+		}
+	}
+	timeout := time.Duration(timeoutSecs) * time.Second
 	client := &http.Client{Timeout: timeout}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
@@ -487,6 +585,141 @@ func owTruncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + fmt.Sprintf("…[+%d bytes]", len(s)-max)
+}
+
+// owApplyDmsEmailCovers replaces system notification subject/body with the
+// merged DMS EMAIL template stored on generation_run (when present).
+func owApplyDmsEmailCovers(ctx context.Context, pool *pgxpool.Pool, rows []owOutboxRow) {
+	for i := range rows {
+		corr := strings.TrimSpace(rows[i].CorrelationID)
+		if !strings.HasPrefix(corr, "DMS-RUN-") {
+			continue
+		}
+		runID := strings.TrimPrefix(corr, "DMS-RUN-")
+		if runID == "" {
+			continue
+		}
+		var subject, body *string
+		err := pool.QueryRow(ctx, `
+			SELECT email_subject, email_body_html
+			FROM dms_svc.generation_run
+			WHERE run_id = $1::uuid`, runID,
+		).Scan(&subject, &body)
+		if err != nil || subject == nil || body == nil {
+			continue
+		}
+		sub := strings.TrimSpace(*subject)
+		bod := strings.TrimSpace(*body)
+		if sub == "" || bod == "" {
+			continue
+		}
+		rows[i].RenderedSubject = sub
+		rows[i].RenderedBody = *body
+		_, _ = pool.Exec(ctx, `
+			UPDATE notification_svc.outbox
+			   SET rendered_subject = $2, rendered_body = $3
+			 WHERE outbox_id = $1`, rows[i].OutboxID, sub, *body)
+		logger.LogInfo("[outbox-worker] applied DMS EMAIL cover outbox_id=%s subject=%q", rows[i].OutboxID, sub)
+	}
+}
+
+// owLoadAttachments loads outbox_attachment rows for the batch, downloads each
+// S3 object once (keyed by s3_key), and returns per-outbox base64 payloads.
+// attErrs maps outbox_id → error message when that row had attachment metadata
+// but at least one download failed — callers must fail those sends rather than
+// deliver a body-only email.
+func owLoadAttachments(ctx context.Context, pool *pgxpool.Pool, rows []owOutboxRow) (map[string][]owSendAttachment, map[string]string) {
+	out := make(map[string][]owSendAttachment)
+	attErrs := make(map[string]string)
+	if len(rows) == 0 {
+		return out, attErrs
+	}
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.OutboxID)
+	}
+	dbRows, err := pool.Query(ctx, `
+		SELECT outbox_id, s3_key, filename, content_type
+		FROM notification_svc.outbox_attachment
+		WHERE outbox_id = ANY($1::text[])
+		ORDER BY outbox_id, sort_order`, ids)
+	if err != nil {
+		logger.LogError("[outbox-worker] load attachments: %v", err)
+		for _, row := range rows {
+			attErrs[row.OutboxID] = err.Error()
+		}
+		return out, attErrs
+	}
+	defer dbRows.Close()
+
+	type meta struct {
+		outboxID    string
+		s3Key       string
+		filename    string
+		contentType string
+	}
+	var metas []meta
+	for dbRows.Next() {
+		var m meta
+		if err := dbRows.Scan(&m.outboxID, &m.s3Key, &m.filename, &m.contentType); err != nil {
+			continue
+		}
+		metas = append(metas, m)
+	}
+	if len(metas) == 0 {
+		return out, attErrs
+	}
+
+	// Fail closed: never send a body-only email when the DB says files exist.
+	expected := map[string]int{}
+	for _, m := range metas {
+		expected[m.outboxID]++
+	}
+
+	cache := map[string][]byte{}
+	cacheErr := map[string]string{}
+	for _, m := range metas {
+		if _, failed := attErrs[m.outboxID]; failed {
+			continue
+		}
+		data, ok := cache[m.s3Key]
+		if !ok {
+			if prev, bad := cacheErr[m.s3Key]; bad {
+				attErrs[m.outboxID] = prev
+				continue
+			}
+			var err error
+			data, err = s3storage.GetObjectBytes(ctx, m.s3Key)
+			if err != nil {
+				msg := fmt.Sprintf("s3 key %s: %v", m.s3Key, err)
+				logger.LogError("[outbox-worker] s3 download outbox=%s: %s", m.outboxID, msg)
+				cacheErr[m.s3Key] = msg
+				attErrs[m.outboxID] = msg
+				continue
+			}
+			if len(data) == 0 {
+				msg := fmt.Sprintf("s3 key %s: empty object", m.s3Key)
+				cacheErr[m.s3Key] = msg
+				attErrs[m.outboxID] = msg
+				continue
+			}
+			cache[m.s3Key] = data
+		}
+		out[m.outboxID] = append(out[m.outboxID], owSendAttachment{
+			Filename:    m.filename,
+			ContentType: m.contentType,
+			DataBase64:  base64.StdEncoding.EncodeToString(data),
+		})
+	}
+	for id, n := range expected {
+		if len(out[id]) < n && attErrs[id] == "" {
+			attErrs[id] = fmt.Sprintf("expected %d attachment(s), loaded %d", n, len(out[id]))
+		}
+		if len(out[id]) > 0 {
+			logger.LogInfo("[outbox-worker] outbox=%s attachments=%d", id, len(out[id]))
+		}
+	}
+	return out, attErrs
 }
 
 func resolveRoute() string {

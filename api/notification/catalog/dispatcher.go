@@ -96,7 +96,7 @@ func TriggerNotification(
 	if pool == nil || sourceRoute == "" || correlationID == "" {
 		return
 	}
-	if err := dispatchNotification(ctx, pool, sourceRoute, correlationID, payload, nil); err != nil {
+	if err := dispatchNotification(ctx, pool, sourceRoute, correlationID, payload, nil, nil); err != nil {
 		api.LogError("TriggerNotification sourceRoute=%s correlation=%s err=%v", sourceRoute, correlationID, err)
 	}
 }
@@ -117,6 +117,31 @@ func TriggerNotificationForTemplates(
 	payload map[string]interface{},
 	allowedTemplateIDs []string,
 ) {
+	TriggerNotificationForTemplatesWithAttachments(ctx, pool, sourceRoute, correlationID, payload, allowedTemplateIDs, nil)
+}
+
+// AttachmentRef is an S3-backed file to attach to every EMAIL outbox row
+// produced by a dispatch. Stored in notification_svc.outbox_attachment; the
+// outbox worker downloads bytes and the Notification-Service SendRawEmail path
+// builds the MIME message.
+type AttachmentRef struct {
+	S3Key       string
+	Filename    string
+	ContentType string
+}
+
+// TriggerNotificationForTemplatesWithAttachments is TriggerNotificationForTemplates
+// plus optional file attachments (DMS document dispatch). Attachments are
+// ignored for non-EMAIL channels.
+func TriggerNotificationForTemplatesWithAttachments(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	sourceRoute string,
+	correlationID string,
+	payload map[string]interface{},
+	allowedTemplateIDs []string,
+	attachments []AttachmentRef,
+) {
 	if pool == nil || sourceRoute == "" || correlationID == "" {
 		return
 	}
@@ -129,8 +154,8 @@ func TriggerNotificationForTemplates(
 			}
 		}
 	}
-	if err := dispatchNotification(ctx, pool, sourceRoute, correlationID, payload, filter); err != nil {
-		api.LogError("TriggerNotificationForTemplates sourceRoute=%s correlation=%s err=%v", sourceRoute, correlationID, err)
+	if err := dispatchNotification(ctx, pool, sourceRoute, correlationID, payload, filter, attachments); err != nil {
+		api.LogError("TriggerNotificationForTemplatesWithAttachments sourceRoute=%s correlation=%s err=%v", sourceRoute, correlationID, err)
 	}
 }
 
@@ -329,6 +354,7 @@ func dispatchNotification(
 	correlationID string,
 	payload map[string]interface{},
 	allowedTemplateIDs map[string]bool,
+	attachments []AttachmentRef,
 ) error {
 	api.LogInfo("[NOTIF] dispatchNotification START correlation=%s route=%s", correlationID, sourceRoute)
 
@@ -459,6 +485,7 @@ func dispatchNotification(
 			event:              &ev,
 			actor:              resolution,
 			allowedTemplateIDs: allowedTemplateIDs,
+			attachments:        attachments,
 		}); err != nil {
 			api.LogError("[NOTIF] dispatchForEvent event=%s entity=%s err=%v", ev.eventID, ev.entityName, err)
 			if firstErr == nil {
@@ -498,6 +525,7 @@ type dispatchForEventParams struct {
 	event              *resolvedEvent
 	actor              actorResolution // used to send system notifications back to the triggering user
 	allowedTemplateIDs map[string]bool
+	attachments        []AttachmentRef
 }
 
 // dispatchForEvent runs the full notification pipeline for one resolved event.
@@ -730,6 +758,14 @@ func dispatchForEvent(ctx context.Context, pool *pgxpool.Pool, params dispatchFo
 				if err != nil {
 					renderedSubject = tw.tpl.subject
 				}
+				// DMS (and similar) may pass a fully-rendered cover email that must
+				// replace the notification-catalog template — set BEFORE nudge/send.
+				if v, ok := localPayload["EmailSubject"].(string); ok && strings.TrimSpace(v) != "" {
+					renderedSubject = strings.TrimSpace(v)
+				}
+				if v, ok := localPayload["EmailBodyHTML"].(string); ok && strings.TrimSpace(v) != "" {
+					renderedBody = v
+				}
 				if strings.EqualFold(tw.tpl.channel, "PUSH") {
 					renderedSubject = fallbackPushSubject(renderedSubject)
 					renderedBody = fallbackPushBody(renderedSubject, renderedBody)
@@ -815,6 +851,14 @@ func dispatchForEvent(ctx context.Context, pool *pgxpool.Pool, params dispatchFo
 		return err
 	}
 
+	// Step 5b — attach S3-backed files to EMAIL outbox rows (DMS / future callers).
+	if err := insertOutboxAttachments(ctx, pool, outboxRows, outboxIDMap, params.attachments); err != nil {
+		api.LogError("[NOTIF] insertOutboxAttachments failed: %v", err)
+		if len(params.attachments) > 0 {
+			return err
+		}
+	}
+
 	// Step 6 — write PUSH rows into the persistent in-app inbox (non-fatal)
 	if err := insertInAppNotification(ctx, pool, outboxRows, outboxIDMap); err != nil {
 		api.LogError("[NOTIF] insertInAppNotification failed (non-fatal): %v", err)
@@ -823,12 +867,22 @@ func dispatchForEvent(ctx context.Context, pool *pgxpool.Pool, params dispatchFo
 	// Step 7 — one-shot delivery pass (same logic as outbox / browser-push / inbox worker ticks).
 	// Periodic workers remain; this removes the worst-case wait of OUTBOX_WORKER_POLL_SECS /
 	// BROWSER_PUSH_POLL_SECS / IN_APP_WORKER_POLL_SECS for freshly enqueued rows.
-	p := pool
-	go func() {
-		nctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		dinojobs.NudgeDeliveryAfterEnqueue(nctx, p)
-	}()
+	//
+	// DMS document dispatch sets DeferDeliveryNudge=true so it can finish applying
+	// attachments / cover first, then nudge itself — otherwise the race sends a
+	// body-only email before outbox_attachment rows are readable.
+	deferNudge := false
+	if v, ok := payload["DeferDeliveryNudge"].(bool); ok && v {
+		deferNudge = true
+	}
+	if !deferNudge {
+		p := pool
+		go func() {
+			nctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			dinojobs.NudgeDeliveryAfterEnqueue(nctx, p)
+		}()
+	}
 	return nil
 }
 
@@ -1210,7 +1264,61 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 		}
 	}
 
+	// DMS (and similar) may pass an explicit To list that replaces template_recipient.
+	if override := payloadEmailList(payload, "RecipientEmails", "recipient_emails", "EmailTo"); len(override) > 0 {
+		out = make([]resolvedRecipient, 0, len(override))
+		seen := make(map[string]struct{}, len(override))
+		for _, email := range override {
+			email = strings.ToLower(strings.TrimSpace(email))
+			if email == "" || !strings.Contains(email, "@") {
+				continue
+			}
+			if _, dup := seen[email]; dup {
+				continue
+			}
+			seen[email] = struct{}{}
+			out = append(out, resolvedRecipient{
+				userID: email, // raw email as idempotency key when no user row
+				email:  email,
+				name:   nameFromEmail(email),
+			})
+		}
+	}
+
 	return out, nil
+}
+
+// payloadEmailList reads a string-slice payload key (JSON array of emails).
+func payloadEmailList(payload map[string]interface{}, keys ...string) []string {
+	for _, k := range keys {
+		v, ok := payload[k]
+		if !ok || v == nil {
+			continue
+		}
+		switch t := v.(type) {
+		case []string:
+			return t
+		case []interface{}:
+			out := make([]string, 0, len(t))
+			for _, item := range t {
+				if s, ok := item.(string); ok {
+					out = append(out, s)
+				}
+			}
+			return out
+		case string:
+			if strings.TrimSpace(t) == "" {
+				return nil
+			}
+			parts := strings.Split(t, ",")
+			out := make([]string, 0, len(parts))
+			for _, p := range parts {
+				out = append(out, strings.TrimSpace(p))
+			}
+			return out
+		}
+	}
+	return nil
 }
 
 // insertOutbox batch-inserts outbox rows and immediately writes a 'QUEUED'
@@ -1389,6 +1497,74 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) (ma
 		outboxIDMap[key] = ir.outboxID
 	}
 	return outboxIDMap, nil
+}
+
+// insertOutboxAttachments writes notification_svc.outbox_attachment rows for
+// every EMAIL outbox row just inserted. Same attachment set is linked to each
+// recipient's outbox_id. Non-EMAIL channels are skipped.
+func insertOutboxAttachments(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	rows []outboxRow,
+	outboxIDMap map[string]string,
+	attachments []AttachmentRef,
+) error {
+	if len(attachments) == 0 || len(rows) == 0 || len(outboxIDMap) == 0 {
+		return nil
+	}
+	clean := make([]AttachmentRef, 0, len(attachments))
+	for _, a := range attachments {
+		key := strings.TrimSpace(a.S3Key)
+		if key == "" {
+			continue
+		}
+		filename := strings.TrimSpace(a.Filename)
+		if filename == "" {
+			filename = "attachment.bin"
+		}
+		ct := strings.TrimSpace(a.ContentType)
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		clean = append(clean, AttachmentRef{S3Key: key, Filename: filename, ContentType: ct})
+	}
+	if len(clean) == 0 {
+		return nil
+	}
+
+	seenOutbox := map[string]bool{}
+	var vals []string
+	var args []interface{}
+	pos := 1
+	for _, r := range rows {
+		if !strings.EqualFold(r.channel, "EMAIL") {
+			continue
+		}
+		key := r.correlationID + "|" + r.channel + "|" + r.auditID + "|" + r.recipientUserID
+		outboxID := outboxIDMap[key]
+		if outboxID == "" || seenOutbox[outboxID] {
+			continue
+		}
+		seenOutbox[outboxID] = true
+		for i, a := range clean {
+			vals = append(vals, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d)", pos, pos+1, pos+2, pos+3, pos+4))
+			args = append(args, outboxID, a.S3Key, a.Filename, a.ContentType, i)
+			pos += 5
+		}
+	}
+	if len(vals) == 0 {
+		return nil
+	}
+	q := fmt.Sprintf(`
+		INSERT INTO notification_svc.outbox_attachment
+			(outbox_id, s3_key, filename, content_type, sort_order)
+		VALUES %s`, strings.Join(vals, ","))
+	_, err := pool.Exec(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("insertOutboxAttachments: %w", err)
+	}
+	api.LogInfo("[NOTIF] attached %d file(s) × %d outbox row(s)", len(clean), len(seenOutbox))
+	return nil
 }
 
 // InsertSendHistory records a delivery attempt result in send_history.

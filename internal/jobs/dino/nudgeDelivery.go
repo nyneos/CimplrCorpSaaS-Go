@@ -26,7 +26,11 @@ func NudgeDeliveryAfterEnqueue(ctx context.Context, pool *pgxpool.Pool) {
 	}
 
 	if owGetenvBool("OUTBOX_WORKER_ENABLED", true) {
-		if target := resolveRoute(); target != "" {
+		target := strings.TrimSpace(os.Getenv("SEND_ENDPOINT_URL"))
+		if target == "" {
+			target = resolveRoute()
+		}
+		if target != "" {
 			batch := owGetenvInt("OUTBOX_WORKER_BATCH_SIZE", 50)
 			owProcessBatch(ctx, pool, target, batch)
 		}

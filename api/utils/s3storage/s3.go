@@ -275,6 +275,7 @@ var moduleDefaultPrefixes = map[string]string{
 	"email-inbound":                "email/inbound/",
 	"email-attachment":             "email/inbound/attachments/",
 	"fd-rate-negotiation":          "fd/rate-negotiation/",
+	"dms":                          "dms/",
 }
 
 func moduleDefaultPrefix(module string) string {

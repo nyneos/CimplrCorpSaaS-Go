@@ -61,6 +61,10 @@ services:
     start_order: 14
     config:
       port: 8185
+  - name: dms
+    start_order: 14
+    config:
+      port: 8186
   - name: cron
     start_order: 15
     config:

@@ -9,6 +9,7 @@ import (
 	fdAccrual "CimplrCorpSaas/api/investment/fdAccrual"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	dinojobs "CimplrCorpSaas/internal/jobs/dino"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	emailjobs "CimplrCorpSaas/internal/jobs/email"
 	investmentjobs "CimplrCorpSaas/internal/jobs/investment"
 	"CimplrCorpSaas/internal/logger"
@@ -103,6 +104,8 @@ func (s *CronService) Start() error {
 	go dinojobs.StartOutboxWorker(ctx, s.db)
 	go dinojobs.StartInboxWorker(ctx, s.db)
 	go dinojobs.StartBrowserPushWorker(ctx, s.db)
+	go dmsjobs.StartScheduleWorker(ctx, s.db)
+	go dmsjobs.StartDispatchWorker(ctx, s.db)
 	emailjobs.EnsureInboxCredentialSchema(ctx, s.db)
 	go emailjobs.StartInboundPoller(ctx, s.db)
 	go emailjobs.StartGraphPoller(ctx, s.db)

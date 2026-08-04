@@ -34,10 +34,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// widgetFilterRule mirrors the frontend FilterRule. Type is supplied by the
+// WidgetFilterRule mirrors the frontend FilterRule. Type is supplied by the
 // frontend (from dataSourceFields) so comparisons can be cast correctly without
 // maintaining a per-source column registry on the backend.
-type widgetFilterRule struct {
+type WidgetFilterRule struct {
 	Field       string `json:"field"`
 	Type        string `json:"type"` // text | id | numeric | date | boolean
 	Op          string `json:"op"`
@@ -70,7 +70,7 @@ var (
 // sort, and row-limit into SQL when the request carries any and they all translate.
 // baseQ/baseArgs are the untouched template and args (args[0]=limit, args[1]=offset).
 func runSourceQuery(ctx context.Context, pool *pgxpool.Pool, baseQ string, baseArgs []any) ([]map[string]any, error) {
-	filters, _ := ctx.Value(ctxKeyReqWidgetFilters).([]widgetFilterRule)
+	filters, _ := ctx.Value(ctxKeyReqWidgetFilters).([]WidgetFilterRule)
 	sortField, _ := ctx.Value(ctxKeyReqSortField).(string)
 	sortDir, _ := ctx.Value(ctxKeyReqSortDir).(string)
 	sortType, _ := ctx.Value(ctxKeyReqSortType).(string)
@@ -178,7 +178,7 @@ func buildSortSQL(field, dir, fieldType string) string {
 // Returns ok=false if any non-empty rule cannot be faithfully translated; callers must
 // then push nothing. An empty-valued rule is a no-op (the client treats it as "match
 // all"), so it is skipped without failing translation.
-func buildWidgetFilterSQL(filters []widgetFilterRule, startArgs int) (clause string, args []any, ok bool) {
+func buildWidgetFilterSQL(filters []WidgetFilterRule, startArgs int) (clause string, args []any, ok bool) {
 	expr := ""
 	idx := startArgs + 1
 	for _, f := range filters {
@@ -214,7 +214,7 @@ func buildWidgetFilterSQL(filters []widgetFilterRule, startArgs int) (clause str
 	return " AND (" + expr + ")", args, true
 }
 
-func filterRuleIsEmpty(f widgetFilterRule) bool {
+func filterRuleIsEmpty(f WidgetFilterRule) bool {
 	if f.Op == "between" {
 		return strings.TrimSpace(f.Value) == "" || strings.TrimSpace(f.Value2) == ""
 	}
@@ -223,7 +223,7 @@ func filterRuleIsEmpty(f widgetFilterRule) bool {
 
 // buildFilterPredicate emits one SQL predicate for a rule. translated=false means the
 // op/type combination is not supported and the whole push-down must be abandoned.
-func buildFilterPredicate(field string, f widgetFilterRule, idx int) (sql string, args []any, translated bool) {
+func buildFilterPredicate(field string, f WidgetFilterRule, idx int) (sql string, args []any, translated bool) {
 	col := `base."` + field + `"`
 	switch f.Type {
 	case "numeric":
@@ -239,7 +239,7 @@ func buildFilterPredicate(field string, f widgetFilterRule, idx int) (sql string
 	}
 }
 
-func numericPredicate(col string, f widgetFilterRule, idx int) (string, []any, bool) {
+func numericPredicate(col string, f WidgetFilterRule, idx int) (string, []any, bool) {
 	n := "NULLIF(" + col + "::text,'')::numeric"
 	num := func(s string) (float64, bool) {
 		v, err := strconv.ParseFloat(strings.ReplaceAll(strings.TrimSpace(s), ",", ""), 64)
@@ -262,7 +262,7 @@ func numericPredicate(col string, f widgetFilterRule, idx int) (string, []any, b
 	return "", nil, false
 }
 
-func datePredicate(col string, f widgetFilterRule, idx int) (string, []any, bool) {
+func datePredicate(col string, f WidgetFilterRule, idx int) (string, []any, bool) {
 	d := col + "::date"
 	iso := func(s string) (string, bool) {
 		v := strings.TrimSpace(s)
@@ -290,7 +290,7 @@ func datePredicate(col string, f widgetFilterRule, idx int) (string, []any, bool
 	return "", nil, false
 }
 
-func booleanPredicate(col string, f widgetFilterRule, idx int) (string, []any, bool) {
+func booleanPredicate(col string, f WidgetFilterRule, idx int) (string, []any, bool) {
 	b := strings.EqualFold(strings.TrimSpace(f.Value), "true")
 	switch f.Op {
 	case "=":
@@ -303,7 +303,7 @@ func booleanPredicate(col string, f widgetFilterRule, idx int) (string, []any, b
 
 // idPredicate mirrors the client's id handling: equality/membership are trimmed but
 // not lower-cased; contains is case-insensitive.
-func idPredicate(col string, f widgetFilterRule, idx int) (string, []any, bool) {
+func idPredicate(col string, f WidgetFilterRule, idx int) (string, []any, bool) {
 	t := "TRIM(" + col + "::text)"
 	lower := "LOWER(" + t + ")"
 	val := strings.TrimSpace(f.Value)
@@ -325,7 +325,7 @@ func idPredicate(col string, f widgetFilterRule, idx int) (string, []any, bool) 
 }
 
 // textPredicate mirrors the client's text handling: normalized to lower(trim(...)).
-func textPredicate(col string, f widgetFilterRule, idx int) (string, []any, bool) {
+func textPredicate(col string, f WidgetFilterRule, idx int) (string, []any, bool) {
 	t := "LOWER(TRIM(" + col + "::text))"
 	val := strings.ToLower(strings.TrimSpace(f.Value))
 	switch f.Op {

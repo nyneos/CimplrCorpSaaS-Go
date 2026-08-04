@@ -105,11 +105,20 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 			ss.uploaded_at,
 			COALESCE(ss.opening_balance, 0)          AS opening_balance,
 			COALESCE(ss.closing_balance, 0)          AS closing_balance,
+			COALESCE(txn.total_transactions, 0)      AS total_transactions,
+			COALESCE(txn.uncategorized_count, 0)     AS uncategorized_count,
 			COALESCE(da.processing_status, '')       AS processing_status,
 			COALESCE(ha.actiontype, '')              AS action_type
 		FROM scoped_statements ss
 		LEFT JOIN head_audit ha ON ha.bankstatementid = ss.bank_statement_id
 		LEFT JOIN display_audit da ON da.bankstatementid = ss.bank_statement_id
+		LEFT JOIN LATERAL (
+			SELECT
+				COUNT(*)::int AS total_transactions,
+				COUNT(*) FILTER (WHERE t.category_id IS NULL)::int AS uncategorized_count
+			FROM cimplrcorpsaas.bank_statement_transactions t
+			WHERE t.bank_statement_id = ss.bank_statement_id
+		) txn ON true
 		ORDER BY GREATEST(COALESCE(ha.requested_at, ss.uploaded_at), COALESCE(ha.checker_at, ss.uploaded_at)) DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, extraFilters,
@@ -149,8 +158,12 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 		SELECT
 			COALESCE(t.transaction_id::text, '')    AS transaction_id,
 			COALESCE(t.bank_statement_id::text, '') AS statement_id,
+			COALESCE(t.bank_statement_id::text, '') AS bank_statement_id,
 			COALESCE(s.entity_id, '')               AS entity_id,
 			COALESCE(e.entity_name, '')             AS entity_name,
+			COALESCE(s.account_number, '')          AS account_number,
+			COALESCE(mb.bank_name, '')              AS bank_name,
+			COALESCE(mba.account_nickname, '')      AS account_nickname,
 			COALESCE(t.tran_id, '')                 AS tran_id,
 			t.value_date,
 			t.transaction_date,
@@ -170,6 +183,7 @@ func queryCashBankStatementTransactions(ctx context.Context, pool *pgxpool.Pool,
 		JOIN cimplrcorpsaas.bank_statements s ON t.bank_statement_id = s.bank_statement_id
 		LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
 		LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND COALESCE(mba.is_deleted, false) = false
+		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id AND COALESCE(mb.is_deleted, false) = false
 		LEFT JOIN public.mastercashflowcategory mcc ON mcc.category_id = t.category_id
 		WHERE COALESCE(s.is_deleted, false) = false %s %s
 		ORDER BY t.value_date DESC NULLS LAST

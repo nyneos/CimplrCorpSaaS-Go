@@ -1,0 +1,91 @@
+package rules
+
+import (
+	"net/http"
+	"strings"
+
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/dms/common"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+type deleteReq struct {
+	IDs     []string `json:"ids"`
+	Reason  string   `json:"reason"`
+	ActorID string   `json:"actor_id"`
+}
+
+// HandleDelete raises a delete request only — soft-delete happens on approve.
+func HandleDelete(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !common.RequirePOST(w, r) {
+			return
+		}
+		var req deleteReq
+		if err := common.DecodeJSON(r, &req); err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		if len(req.IDs) == 0 {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "ids is required", "VALIDATION_ERROR")
+			return
+		}
+		actor, ip := requestActorAndIP(r, req.ActorID)
+
+		tx, err := pool.Begin(r.Context())
+		if err != nil {
+			api.LogErrorForResponse(w, "dms rule delete begin: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to request rule delete", "DMS_RULE_DELETE_FAILED")
+			return
+		}
+		defer tx.Rollback(r.Context())
+
+		requested := make([]string, 0, len(req.IDs))
+		skipped := make([]string, 0)
+		errs := make([]string, 0)
+
+		for _, raw := range req.IDs {
+			id := strings.TrimSpace(raw)
+			if id == "" {
+				continue
+			}
+			if err := requirePendingFree(r.Context(), tx, id); err != nil {
+				skipped = append(skipped, id)
+				continue
+			}
+			if _, err := tx.Exec(r.Context(), `
+				UPDATE dms_svc.generation_rule SET processing_status = 'PENDING_DELETE_APPROVAL',
+					last_modified_by = $1, last_modified_at = now()
+				WHERE rule_id = $2::uuid`, actor, id); err != nil {
+				errs = append(errs, id+": "+err.Error())
+				continue
+			}
+			a := &auditRow{}
+			a.set("rule_id", id)
+			a.set("action_type", "DELETE")
+			a.set("processing_status", "PENDING_DELETE_APPROVAL")
+			a.set("reason", common.NullIfEmpty(req.Reason))
+			a.set("requested_by", actor)
+			a.set("requested_ip", common.NullIfEmpty(ip))
+			a.set("old_is_deleted", false)
+			a.set("new_is_deleted", true)
+			if err := a.exec(r.Context(), tx); err != nil {
+				errs = append(errs, id+": "+err.Error())
+				continue
+			}
+			requested = append(requested, id)
+		}
+
+		if err := tx.Commit(r.Context()); err != nil {
+			api.LogErrorForResponse(w, "dms rule delete commit: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to request rule delete", "DMS_RULE_DELETE_FAILED")
+			return
+		}
+		api.RespondEnvelopeSuccess(w, "Rule delete submitted for approval", map[string]interface{}{
+			"requested": requested,
+			"skipped":   skipped,
+			"errors":    errs,
+		})
+	}
+}
