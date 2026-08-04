@@ -26,6 +26,7 @@ func RegisterUAMRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool.
 
 	/*Approval Matrix*/
 	mux.Handle("/uam/approval-matrix/create", midUAM(approvalMatrix.CreateApprovalMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/policy-engine/create", midUAM(approvalMatrix.CreatePolicyEngineMatrix(pgxPool)))
 	mux.Handle("/uam/approval-matrix/update", midUAM(approvalMatrix.UpdateApprovalMatrix(pgxPool)))
 	mux.Handle("/uam/approval-matrix/delete", midUAM(approvalMatrix.DeleteApprovalMatrix(pgxPool)))
 	mux.Handle("/uam/approval-matrix/bulk-approve", midUAM(approvalMatrix.BulkApproveMatrix(pgxPool)))

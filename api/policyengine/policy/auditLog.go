@@ -57,6 +57,7 @@ func HandleAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 				old_validation_level, new_validation_level,
 				old_criticality, new_criticality,
 				old_action_on_breach, new_action_on_breach,
+				old_approval_matrix_id, new_approval_matrix_id,
 				old_notification_group, new_notification_group,
 				old_breach_message, new_breach_message,
 				old_requires_approval, new_requires_approval,

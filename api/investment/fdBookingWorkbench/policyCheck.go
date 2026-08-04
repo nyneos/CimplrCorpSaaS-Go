@@ -30,17 +30,17 @@ func enforceFDBookingPolicy(
 	pool *pgxpool.Pool,
 	cc enforceCtx,
 	fields map[string]interface{},
-) bool {
+) (bool, string) {
 	vars, err := runtime.BuildFdBookingVariables(ctx, pool, fields)
 	if err != nil {
 		api.LogErrorForResponse(w, "fd booking build CDM vars: %v", err)
 		api.RespondEnvelopeError(w, http.StatusBadGateway, "Policy check failed — could not map booking fields to CDM", "POLICY_CDM_MAP")
-		return false
+		return false, ""
 	}
 	if len(vars) == 0 {
 		api.LogErrorForResponse(w, "fd booking policy check: empty CDM variable map for %s", cc.HandlerName)
 		api.RespondEnvelopeError(w, http.StatusBadGateway, "Policy check failed — no CDM variables mapped from booking", "POLICY_CDM_EMPTY")
-		return false
+		return false, ""
 	}
 
 	traceID := observability.TraceIDFromContext(ctx)
@@ -64,15 +64,15 @@ func enforceFDBookingPolicy(
 	if err != nil {
 		api.LogErrorForResponse(w, "fd booking policy check: %v", err)
 		api.RespondEnvelopeError(w, http.StatusBadGateway, "Policy check failed — please try again later", "POLICY_SERVICE_ERROR")
-		return false
+		return false, ""
 	}
 	if result.BlocksSubmit() {
 		msg := result.ClientMessage("FD booking blocked by policy")
 		api.RespondEnvelopeFailureWithData(w, http.StatusUnprocessableEntity, msg, "POLICY_BREACH", result.BlockPayload())
-		return false
+		return false, ""
 	}
 	result.WriteSummaryHeader(w)
-	return true
+	return true, result.TriggerApprovalMatrixID
 }
 
 // enforceFDBookingPolicyInline is for bulk loops — returns (ok, errorMessage, result)
@@ -169,7 +169,7 @@ func loadFDBookingCDMFields(ctx context.Context, pool *pgxpool.Pool, bookingID s
 		       COALESCE(source_account_id,''), COALESCE(source_account_number,''), COALESCE(product_code,''),
 		       COALESCE(booking_remarks,''), COALESCE(booking_status,''), COALESCE(TO_CHAR(offer_valid_till,'YYYY-MM-DD'),''),
 		       COALESCE(auto_renewal,false),
-		       requested_at
+		       created_at
 		FROM investment.fd_booking_request
 		WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false`, bookingID).Scan(
 		&entityID, &entityName, &bankID, &bankName, &principal, &rate,

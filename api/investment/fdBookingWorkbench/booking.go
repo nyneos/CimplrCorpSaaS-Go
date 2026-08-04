@@ -119,7 +119,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// ── Policy check — CDM vars from domain_catalog.field.cdm_path ────────
 		correlationID := common.ResolveCorrelationID(r, req.CorrelationID)
-		if !enforceFDBookingPolicy(r.Context(), w, r, pgxPool, enforceCtx{
+		policyOK, triggerApprovalMatrixID := enforceFDBookingPolicy(r.Context(), w, r, pgxPool, enforceCtx{
 			EventCode:     common.TriggerPreCreate,
 			HandlerName:   "CreateBookingSingle",
 			APIPath:       "/investment/fd/booking/create",
@@ -162,7 +162,8 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"auto_renewal":           req.AutoRenewal,
 				"requested_at":           time.Now().UTC().Format(time.RFC3339),
 			},
-		) {
+		)
+		if !policyOK {
 			return
 		}
 		// ────────────────────────────────────────────────────────────────────
@@ -312,7 +313,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		go func(bID, uID, uEmail, entityID string, amount float64) {
+		go func(bID, uID, uEmail, entityID, matrixID string, amount float64) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDBooking] CreateInstance goroutine panic for booking %s: %v", bID, rec)
@@ -332,6 +333,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Amount:           amount,
 				SubmittedBy:      uID,
 				SubmittedByEmail: uEmail,
+				MatrixID:         matrixID,
 			})
 			if err != nil {
 				api.LogError("[FDBooking] CreateInstance failed for booking %s: %v", bID, err)
@@ -349,7 +351,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				api.LogInfo("[FDBooking] No matrix for booking %s — stays DRAFT", bID)
 			}
-		}(bookingID, req.UserID, userEmail, req.EntityID, req.PrincipalAmount)
+		}(bookingID, req.UserID, userEmail, req.EntityID, triggerApprovalMatrixID, req.PrincipalAmount)
 
 		go func(bID, eID, uEmail string, amount float64) {
 			defer func() {
@@ -875,14 +877,14 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for k, v := range req.Fields {
 			merged[k] = v
 		}
-		if !enforceFDBookingPolicy(ctx, w, r, pgxPool, enforceCtx{
+		if ok, _ := enforceFDBookingPolicy(ctx, w, r, pgxPool, enforceCtx{
 			EventCode:   common.TriggerPreEdit,
 			HandlerName: "UpdateBooking",
 			APIPath:     "/investment/fd/booking/update",
 			EntityCode:  entityID,
 			Actor:       userEmail,
 		}, merged,
-		) {
+		); !ok {
 			return
 		}
 
