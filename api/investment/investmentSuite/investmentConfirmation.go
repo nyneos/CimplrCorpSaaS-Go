@@ -2065,15 +2065,14 @@ func ConfirmInvestment(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadFailedSuffix+loadErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+			if !mfEnforceBlock(ctx, w, r, pgxPool, enforceCtx{
 				EventCode:   common.TriggerPreCreate,
 				HandlerName: "ConfirmInvestment",
 				APIPath:     "/investment/confirmation/confirm",
 				SubModule:   mfSubConfirmation,
 				EntityCode:  id,
 				Actor:       confirmedBy,
-			}, buildMFConfirmationPolicyFields(confirmRow)); !ok {
-				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
+			}, buildMFConfirmationPolicyFields(confirmRow), id) {
 				return
 			}
 		}

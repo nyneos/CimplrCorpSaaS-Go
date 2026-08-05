@@ -90,6 +90,26 @@ func EnforceWithMatrix(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	return false, ""
 }
 
+func WriteBlockResponse(w http.ResponseWriter, out EnforceOutcome, recordID string) bool {
+	if out.OK {
+		out.Result.WriteSummaryHeader(w)
+		return true
+	}
+	msg := out.Message
+	if msg == "" {
+		msg = "Blocked by policy"
+	}
+	if strings.HasPrefix(msg, "policy check failed") {
+		api.RespondEnvelopeError(w, http.StatusBadGateway, msg, "POLICY_SERVICE_ERROR")
+		return false
+	}
+	if id := strings.TrimSpace(recordID); id != "" {
+		msg = id + ": " + msg
+	}
+	api.RespondEnvelopeFailureWithData(w, http.StatusUnprocessableEntity, msg, "POLICY_BREACH", out.Result.BlockPayload())
+	return false
+}
+
 // EnforceInline returns (ok, errorMessage) without writing HTTP — for bulk loops.
 func EnforceInline(ctx context.Context, r *http.Request, pool *pgxpool.Pool, in EnforceInput) (bool, string) {
 	out := EnforceDetailed(ctx, r, pool, in)
