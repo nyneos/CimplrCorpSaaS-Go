@@ -66,6 +66,42 @@ var dynamicListResolvers = map[string]dynamicListQuery{
 			   AND NULLIF(TRIM(currency_code), '') IS NOT NULL
 			 ORDER BY 1`,
 	},
+	"APPROVED_ENTITIES": {
+		sql: `
+			SELECT DISTINCT TRIM(m.entity_name)
+			  FROM masterentitycash m
+			  LEFT JOIN LATERAL (
+			       SELECT a.processing_status
+			         FROM auditactionentity a
+			        WHERE a.entity_id = m.entity_id
+			          AND a.actiontype IN ('CREATE','EDIT','DELETE')
+			        ORDER BY a.requested_at DESC
+			        LIMIT 1
+			  ) ma ON TRUE
+			 WHERE COALESCE(m.is_deleted, false) = false
+			   AND m.active_status = 'Active'
+			   AND COALESCE(ma.processing_status, 'REJECTED') = 'APPROVED'
+			   AND NULLIF(TRIM(m.entity_name), '') IS NOT NULL
+			 ORDER BY 1`,
+	},
+	"APPROVED_ENTITY_IDS": {
+		sql: `
+			SELECT DISTINCT TRIM(m.entity_id::text)
+			  FROM masterentitycash m
+			  LEFT JOIN LATERAL (
+			       SELECT a.processing_status
+			         FROM auditactionentity a
+			        WHERE a.entity_id = m.entity_id
+			          AND a.actiontype IN ('CREATE','EDIT','DELETE')
+			        ORDER BY a.requested_at DESC
+			        LIMIT 1
+			  ) ma ON TRUE
+			 WHERE COALESCE(m.is_deleted, false) = false
+			   AND m.active_status = 'Active'
+			   AND COALESCE(ma.processing_status, 'REJECTED') = 'APPROVED'
+			   AND NULLIF(TRIM(m.entity_id::text), '') IS NOT NULL
+			 ORDER BY 1`,
+	},
 }
 
 type dynamicListCacheEntry struct {

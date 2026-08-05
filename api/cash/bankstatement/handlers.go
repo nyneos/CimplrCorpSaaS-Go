@@ -1014,7 +1014,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				}
 			}
 			if actionType == constants.AuditActionDelete && processingStatus == constants.StatusPendingDeleteApproval {
-				if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				if out := runtime.EnforceDetailed(ctx, r, pool, runtime.EnforceInput{
 					EventCode:           common.TriggerPreApprove,
 					ModuleCode:          common.ModuleCash,
 					SubModule:           "BANK_STATEMENT",
@@ -1024,11 +1024,12 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					APIPath:             bankStatementApproveRoute,
 					DefaultBlockMessage: "Bank statement approval blocked by policy",
 					Fields:              loadBankStatementPolicyFields(ctx, pool, bsid, entityID, actionType),
-				}); !ok {
+				}); !out.OK {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
 						"success":           false,
-						"error":             msg,
+						"error":             out.Message,
+						"policy":            out.Result.BlockPayload(),
 					})
 					continue
 				}
@@ -1128,7 +1129,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					"message":           "Bank statement soft deleted after approval",
 				})
 			} else {
-				if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				if out := runtime.EnforceDetailed(ctx, r, pool, runtime.EnforceInput{
 					EventCode:           common.TriggerPreApprove,
 					ModuleCode:          common.ModuleCash,
 					SubModule:           "BANK_STATEMENT",
@@ -1138,11 +1139,12 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					APIPath:             bankStatementApproveRoute,
 					DefaultBlockMessage: "Bank statement approval blocked by policy",
 					Fields:              loadBankStatementPolicyFields(ctx, pool, bsid, entityID, actionType),
-				}); !ok {
+				}); !out.OK {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
 						"success":           false,
-						"error":             msg,
+						"error":             out.Message,
+						"policy":            out.Result.BlockPayload(),
 					})
 					continue
 				}
@@ -1493,7 +1495,7 @@ func RejectBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					LIMIT 1
 				`, bsid).Scan(&rejectActionType)
 			}
-			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+			if out := runtime.EnforceDetailed(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreReject,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "BANK_STATEMENT",
@@ -1503,11 +1505,12 @@ func RejectBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				APIPath:             "/cash/bank-statements/v2/reject",
 				DefaultBlockMessage: "Bank statement rejection blocked by policy",
 				Fields:              loadBankStatementPolicyFields(ctx, pool, bsid, entityID, rejectActionType),
-			}); !ok {
+			}); !out.OK {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
 					"success":           false,
-					"error":             msg,
+					"error":             out.Message,
+					"policy":            out.Result.BlockPayload(),
 				})
 				continue
 			}
@@ -1649,7 +1652,7 @@ func DeleteBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 			if strings.TrimSpace(deleteComment) == "" {
 				deleteComment = body.Reason
 			}
-			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+			if out := runtime.EnforceDetailed(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "BANK_STATEMENT",
@@ -1659,11 +1662,12 @@ func DeleteBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				APIPath:             "/cash/bank-statements/v2/delete",
 				DefaultBlockMessage: "Bank statement delete blocked by policy",
 				Fields:              loadBankStatementPolicyFields(ctx, pool, bsid, entityID, constants.AuditActionDelete),
-			}); !ok {
+			}); !out.OK {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
 					"success":           false,
-					"error":             msg,
+					"error":             out.Message,
+					"policy":            out.Result.BlockPayload(),
 				})
 				continue
 			}

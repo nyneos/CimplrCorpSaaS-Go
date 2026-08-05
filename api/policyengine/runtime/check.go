@@ -496,6 +496,7 @@ func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventC
 		return policyLoadTrace{}, err
 	}
 	entityCode = strings.TrimSpace(entityCode)
+	entityCodes := entityCodeAliases(ctx, pool, entityCode)
 	filtered := make([]map[string]interface{}, 0, len(out))
 	skips := make([]policyScopeSkip, 0)
 	for _, snap := range out {
@@ -512,7 +513,7 @@ func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventC
 			continue
 		}
 		scope := entityMap[id]
-		if policyAppliesToEntity(applicability, entityCode, scope.include, scope.exclude) {
+		if policyAppliesToEntity(applicability, entityCodes, scope.include, scope.exclude) {
 			delete(snap, "_filter_instrument")
 			delete(snap, "_filter_currency")
 			delete(snap, "_filter_tenor")
@@ -566,10 +567,43 @@ func loadPolicyEntityScopes(ctx context.Context, pool *pgxpool.Pool, policyIDs [
 
 // policyAppliesToEntity enforces mutual exclusion semantics:
 // exclude always removes; when include is non-empty the entity must be listed.
-func policyAppliesToEntity(applicability, entityCode string, include, exclude []string) bool {
+func entityCodeAliases(ctx context.Context, pool *pgxpool.Pool, entityCode string) []string {
+	entityCode = strings.TrimSpace(entityCode)
+	if entityCode == "" || pool == nil {
+		return nil
+	}
+	aliases := []string{entityCode}
+	rows, err := pool.Query(ctx, `
+		SELECT COALESCE(entity_id,''), COALESCE(entity_name,'')
+		FROM masterentitycash
+		WHERE lower(entity_id) = lower($1) OR lower(entity_name) = lower($1)`, entityCode)
+	if err != nil {
+		return aliases
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			continue
+		}
+		for _, candidate := range []string{id, name} {
+			candidate = strings.TrimSpace(candidate)
+			if candidate != "" && !containsFold(aliases, candidate) {
+				aliases = append(aliases, candidate)
+			}
+		}
+	}
+	return aliases
+}
+
+func policyAppliesToEntity(applicability string, entityCodes []string, include, exclude []string) bool {
 	applicability = strings.TrimSpace(applicability)
 	if applicability == "" {
 		applicability = "Global"
+	}
+
+	matchesRequest := func(scopeEntry string) bool {
+		return containsFold(entityCodes, scopeEntry)
 	}
 
 	incSet := make(map[string]struct{}, len(include))
@@ -587,9 +621,21 @@ func policyAppliesToEntity(applicability, entityCode string, include, exclude []
 		if _, inInc := incSet[e]; inInc {
 			continue // include wins over exclude if both somehow present
 		}
-		if entityCode != "" && e == entityCode {
+		if matchesRequest(e) {
 			return false
 		}
+	}
+
+	includedByRequest := func() bool {
+		if len(entityCodes) == 0 {
+			return false
+		}
+		for e := range incSet {
+			if matchesRequest(e) {
+				return true
+			}
+		}
+		return false
 	}
 
 	switch applicability {
@@ -597,18 +643,10 @@ func policyAppliesToEntity(applicability, entityCode string, include, exclude []
 		if len(incSet) == 0 {
 			return false
 		}
-		if entityCode == "" {
-			return false
-		}
-		_, ok := incSet[entityCode]
-		return ok
+		return includedByRequest()
 	case "Custom":
 		if len(incSet) > 0 {
-			if entityCode == "" {
-				return false
-			}
-			_, ok := incSet[entityCode]
-			return ok
+			return includedByRequest()
 		}
 		return true
 	default:

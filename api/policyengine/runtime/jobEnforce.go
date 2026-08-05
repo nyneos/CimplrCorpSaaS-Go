@@ -74,6 +74,19 @@ func enforceJobDetailed(ctx context.Context, pool *pgxpool.Pool, in JobEnforceIn
 	})
 }
 
+func EnforcePostCommit(ctx context.Context, pool *pgxpool.Pool, in JobEnforceInput) {
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				api.LogError("policy post-commit check panic handler=%s event=%s: %v",
+					in.HandlerName, in.EventCode, rec)
+			}
+		}()
+		EnforceJob(bg, pool, in)
+	}()
+}
+
 // EnforceJobInline returns (ok, message) for job loops.
 // Async/cron jobs never hard-block — ok is false only for infrastructure/CDM failures.
 func EnforceJobInline(ctx context.Context, pool *pgxpool.Pool, in JobEnforceInput) (bool, string) {
