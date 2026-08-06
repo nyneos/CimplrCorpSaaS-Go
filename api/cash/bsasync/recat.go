@@ -80,7 +80,7 @@ func EnforceSmartCatJob(ctx context.Context, pool *pgxpool.Pool, bankStatementID
 		return false, "policy check failed — could not load bank statement"
 	}
 	return runtime.EnforceJobInline(ctx, pool, runtime.JobEnforceInput{
-		EventCode: eventCode, ModuleCode: common.ModuleCash, SubModule: "BANK_STATEMENT",
+		EventCode: eventCode, ModuleCode: common.ModuleCash, SubModule: "SMART_CATEGORIZATION",
 		EntityCode: entityID, ActorUserID: "SYSTEM:smart-cat",
 		HandlerName: "ProcessUncategorizedTransactions", APIPath: JobPathSmartCat,
 		CorrelationID: fmt.Sprintf("SMARTCAT-%s", bankStatementID),
@@ -96,7 +96,7 @@ func EnforcePostUploadJob(ctx context.Context, pool *pgxpool.Pool, bankStatement
 		return false, "policy check failed — could not load bank statement"
 	}
 	return runtime.EnforceJobInline(ctx, pool, runtime.JobEnforceInput{
-		EventCode: common.TriggerOnDataImport, ModuleCode: common.ModuleCash, SubModule: "BANK_STATEMENT",
+		EventCode: common.TriggerOnDataImport, ModuleCode: common.ModuleCash, SubModule: "SMART_CATEGORIZATION",
 		EntityCode: entityID, ActorUserID: "SYSTEM:bs-upload",
 		HandlerName: "PostUploadSmartCat", APIPath: JobPathBSPostUpload,
 		CorrelationID: fmt.Sprintf("BS-UPLOAD-%s", bankStatementID),
