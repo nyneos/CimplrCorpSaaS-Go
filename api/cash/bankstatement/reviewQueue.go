@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
 	cat "CimplrCorpSaas/internal/services/categorizer"
 	"context"
@@ -352,6 +353,11 @@ func ReviewActionHandler(pool *pgxpool.Pool) http.Handler {
 				sourceRef = "ai_assisted_confirm"
 			}
 
+			if !enforceSmartCatReview(ctx, w, r, pool, req.TransactionID, catToConfirm,
+				common.TriggerPreApprove, req.UserID, "Review confirm blocked by policy") {
+				return
+			}
+
 			confirmTx, txErr := pool.Begin(ctx)
 			if txErr != nil {
 				writeErrJSON(w, "begin tx: "+txErr.Error(), http.StatusInternalServerError)
@@ -398,6 +404,23 @@ func ReviewActionHandler(pool *pgxpool.Pool) http.Handler {
 			opErr = applyCorrection(ctx, pool, req.TransactionID, req.CategoryID, reviewedBy)
 
 		case "DISMISS":
+			var dismissedCat *string
+			if err := pool.QueryRow(ctx, `
+				SELECT suggested_cat
+				FROM cimplrcorpsaas.categorization_review_queue
+				WHERE transaction_id = $1
+			`, req.TransactionID).Scan(&dismissedCat); err != nil {
+				writeErrJSON(w, "failed to fetch queue entry: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			dismissedCatID := ""
+			if dismissedCat != nil {
+				dismissedCatID = *dismissedCat
+			}
+			if !enforceSmartCatReview(ctx, w, r, pool, req.TransactionID, dismissedCatID,
+				common.TriggerPreReject, req.UserID, "Review dismiss blocked by policy") {
+				return
+			}
 			_, opErr = pool.Exec(ctx, `
 				UPDATE cimplrcorpsaas.categorization_review_queue
 				SET status='DISMISSED', reviewed_by=$1, reviewed_at=now()
