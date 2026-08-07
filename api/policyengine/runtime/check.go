@@ -171,6 +171,9 @@ func (r CheckResult) ResultsPayload() []map[string]interface{} {
 		if um := strings.TrimSpace(pr.UserMessage); um != "" {
 			row["user_message"] = um
 		}
+		if len(pr.Comparisons) > 0 {
+			row["comparisons"] = pr.Comparisons
+		}
 		out = append(out, row)
 	}
 	return out
@@ -524,6 +527,7 @@ func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventC
 			skips = appendScopeSkip(skips, snap, "ENTITY_SCOPE", code, reason)
 		}
 	}
+	filtered, skips = resolveScopeOverrides(filtered, skips)
 	return policyLoadTrace{Candidates: out, Applicable: filtered, Skips: skips}, nil
 }
 
