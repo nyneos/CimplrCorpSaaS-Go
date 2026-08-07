@@ -2,9 +2,32 @@ package bankstatement
 
 import (
 	"context"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// lookupEntityIDForAccount resolves the owning entity for an account number so
+// the PRE_UPLOAD gate can supply entity_id / EntityCode. Upload runs before the
+// file is parsed, so without this an entity-keyed rule sees no value at all and
+// falls through to null_handling — breaching on every file regardless of which
+// entity it belongs to. Empty result keeps the previous behaviour (no entity
+// known) rather than failing the upload.
+func lookupEntityIDForAccount(ctx context.Context, pool *pgxpool.Pool, accountNumber string) string {
+	accountNumber = strings.TrimSpace(accountNumber)
+	if accountNumber == "" || pool == nil {
+		return ""
+	}
+	var entityID string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(entity_id, '')
+		FROM public.masterbankaccount
+		WHERE account_number = $1 AND is_deleted = false
+		LIMIT 1`, accountNumber).Scan(&entityID); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(entityID)
+}
 
 // bankStatementRow is the canonical business-field shape for BANK_STATEMENT —
 // one field per real scalar column on cimplrcorpsaas.bank_statements (the

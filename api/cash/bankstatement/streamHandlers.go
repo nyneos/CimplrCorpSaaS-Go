@@ -1054,9 +1054,9 @@ func CommitHandler(pool *pgxpool.Pool) http.Handler {
 		if actorUserID == "" {
 			actorUserID = strings.TrimSpace(payload.ID)
 		}
-		// bank_statement_id/entity_id/file_hash/etc. don't exist yet at this point —
-		// the master row hasn't been inserted (entity_id is only resolved further
-		// below via resolveMasterBankAccountForPreview, and file_hash/closing_balance
+		// bank_statement_id/file_hash/etc. don't exist yet at this point —
+		// the master row hasn't been inserted (entity_id is resolved here from the
+		// account number, and file_hash/closing_balance
 		// are only computed after this check). Build the canonical row from the
 		// pre-insert data actually available here, same as CreateBankBalance does
 		// for BANK_BALANCE. staging_id has no domain_catalog field_code for this
@@ -1069,16 +1069,18 @@ func CommitHandler(pool *pgxpool.Pool) http.Handler {
 		if payload.Clean.Metadata.PeriodEnd != nil {
 			commitPeriodEnd = strings.TrimSpace(*payload.Clean.Metadata.PeriodEnd)
 		}
+		commitEntityID := lookupEntityIDForAccount(ctx, pool, accountNumber)
 		if !runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "BANK_STATEMENT",
-			EntityCode:          accountNumber,
+			EntityCode:          commitEntityID,
 			ActorUserID:         actorUserID,
 			HandlerName:         "CommitHandler",
 			APIPath:             "/cash/commit",
 			DefaultBlockMessage: "Bank statement commit blocked by policy",
 			Fields: buildBankStatementPolicyFields(bankStatementRow{
+				EntityID:             commitEntityID,
 				AccountNumber:        accountNumber,
 				StatementPeriodStart: commitPeriodStart,
 				StatementPeriodEnd:   commitPeriodEnd,

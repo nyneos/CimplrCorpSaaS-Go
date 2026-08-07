@@ -1741,10 +1741,14 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 			uploadActor = requestedByFromCtx(r.Context(), "")
 		}
 		enforceBankStatementUpload := func(fields map[string]interface{}) bool {
+			uploadAccount, _ := fields["account_number"].(string)
+			uploadEntityID := lookupEntityIDForAccount(r.Context(), pgxPool, uploadAccount)
+			fields["entity_id"] = uploadEntityID
 			return runtime.Enforce(r.Context(), w, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreUpload,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "BANK_STATEMENT",
+				EntityCode:          uploadEntityID,
 				ActorUserID:         uploadActor,
 				HandlerName:         "UploadBankStatementV2Handler",
 				APIPath:             "/cash/upload-bank-statement",

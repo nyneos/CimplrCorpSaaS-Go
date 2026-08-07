@@ -80,6 +80,45 @@ func entityScopeSkip(applicability, entityCode string, include, exclude []string
 	return "ENTITY_NOT_INCLUDED", fmt.Sprintf("entity %q is not in the policy include scope", entityCode)
 }
 
+func scopeSpecificity(applicability string) int {
+	switch strings.TrimSpace(applicability) {
+	case "Entity":
+		return 3
+	case "Custom":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func resolveScopeOverrides(applicable []map[string]interface{}, skips []policyScopeSkip) ([]map[string]interface{}, []policyScopeSkip) {
+	if len(applicable) < 2 {
+		return applicable, skips
+	}
+	best := make(map[string]int, len(applicable))
+	for _, snap := range applicable {
+		key := strings.ToLower(snapshotString(snap, "code"))
+		if key == "" {
+			continue
+		}
+		if rank := scopeSpecificity(snapshotString(snap, "applicability")); rank > best[key] {
+			best[key] = rank
+		}
+	}
+	kept := make([]map[string]interface{}, 0, len(applicable))
+	for _, snap := range applicable {
+		key := strings.ToLower(snapshotString(snap, "code"))
+		applicability := snapshotString(snap, "applicability")
+		if key == "" || scopeSpecificity(applicability) >= best[key] {
+			kept = append(kept, snap)
+			continue
+		}
+		skips = appendScopeSkip(skips, snap, "SCOPE_OVERRIDE", "OVERRIDDEN_BY_MORE_SPECIFIC_SCOPE",
+			fmt.Sprintf("%q scope instance is overridden by a more specific instance of policy code %q", applicability, snapshotString(snap, "code")))
+	}
+	return kept, skips
+}
+
 func containsFold(values []string, target string) bool {
 	for _, value := range values {
 		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(target)) {
