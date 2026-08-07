@@ -2,9 +2,31 @@ package bankbalances
 
 import (
 	"context"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// lookupEntityIDForAccountNo resolves the owning entity for a bank balance.
+// bank_balances_manual carries no entity column of its own — the entity comes
+// from the account, the same join the list query uses. Without it EnforceInput
+// carries no EntityCode, so an entity include/exclude scope cannot filter and
+// the policy runs against every entity.
+func lookupEntityIDForAccountNo(ctx context.Context, pool *pgxpool.Pool, accountNo string) string {
+	accountNo = strings.TrimSpace(accountNo)
+	if accountNo == "" || pool == nil {
+		return ""
+	}
+	var entityID string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(entity_id, '')
+		FROM public.masterbankaccount
+		WHERE account_number = $1 AND is_deleted = false
+		LIMIT 1`, accountNo).Scan(&entityID); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(entityID)
+}
 
 // bankBalanceRow is the canonical business-field shape for BANK_BALANCE — one
 // field per domain_catalog.field row for this sub-module. Every policy-check
