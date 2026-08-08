@@ -36,6 +36,31 @@ type cancelRollActionItem struct {
 	RequestDate string `json:"request_date"`
 }
 
+func lookupEntityForBookings(ctx context.Context, pool *pgxpool.Pool, bookingIDs []string) string {
+	if len(bookingIDs) == 0 || pool == nil {
+		return ""
+	}
+	var entity string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(entity_level_0, '')
+		FROM forward_bookings
+		WHERE system_transaction_id = ANY($1)
+		LIMIT 1`, bookingIDs).Scan(&entity); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(entity)
+}
+
+func bookingIDsFromAmounts(bookingAmounts map[string]float64) []string {
+	ids := make([]string, 0, len(bookingAmounts))
+	for id := range bookingAmounts {
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 func normalizeCancelRollType(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case cancelRollTypeCancellation:
@@ -370,6 +395,7 @@ func CancellationStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			EventCode:           cancelEventCode,
 			ModuleCode:          common.ModuleFX,
 			SubModule:           "FORWARD_CANCELLATION",
+			EntityCode:          lookupEntityForBookings(r.Context(), pool, bookingIDsFromAmounts(req.BookingAmounts)),
 			ActorUserID:         req.UserID,
 			HandlerName:         "CancellationStatusRequest",
 			APIPath:             "/fx/forwards/cancellation-status-request",
@@ -768,6 +794,7 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 				EventCode:           actionEventCode,
 				ModuleCode:          common.ModuleFX,
 				SubModule:           "FORWARD_CANCEL_ROLL",
+				EntityCode:          lookupEntityForBookings(r.Context(), pool, []string{bookingID}),
 				ActorUserID:         req.UserID,
 				HandlerName:         "CancellationRolloverAction",
 				APIPath:             "/fx/forwards/cancel-roll/action",
@@ -926,6 +953,7 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleFX,
 			SubModule:           "FORWARD_ROLLOVER",
+			EntityCode:          lookupEntityForBookings(r.Context(), pool, bookingIDsFromAmounts(req.BookingAmounts)),
 			ActorUserID:         req.UserID,
 			HandlerName:         "RolloverForwardBooking",
 			APIPath:             "/fx/forwards/create-forward-rollover",
@@ -1255,6 +1283,7 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleFX,
 			SubModule:           "FORWARD_CANCELLATION",
+			EntityCode:          lookupEntityForBookings(r.Context(), pool, bookingIDsFromAmounts(req.BookingAmounts)),
 			ActorUserID:         req.UserID,
 			HandlerName:         "CreateForwardCancellations",
 			APIPath:             "/fx/forwards/create-forward-cancellations",
@@ -1325,6 +1354,7 @@ func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			EventCode:           rolloverEventCode,
 			ModuleCode:          common.ModuleFX,
 			SubModule:           "FORWARD_ROLLOVER",
+			EntityCode:          lookupEntityForBookings(r.Context(), pool, bookingIDsFromAmounts(req.BookingAmounts)),
 			ActorUserID:         req.UserID,
 			HandlerName:         "RolloverStatusRequest",
 			APIPath:             "/fx/forwards/rollover-status-request",
