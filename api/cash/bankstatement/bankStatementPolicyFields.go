@@ -2,10 +2,53 @@ package bankstatement
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var policyAccountDigitsRe = regexp.MustCompile(`\d{6,}`)
+func lookupAccountNumberFromContent(ctx context.Context, pool *pgxpool.Pool, rows [][]string) string {
+	if pool == nil || len(rows) == 0 {
+		return ""
+	}
+	limit := 20
+	if len(rows) < limit {
+		limit = len(rows)
+	}
+	seen := make(map[string]bool)
+	candidates := make([]string, 0)
+	addCandidate := func(v string) {
+		if v == "" || seen[v] {
+			return
+		}
+		seen[v] = true
+		candidates = append(candidates, v)
+	}
+	for i := 0; i < limit; i++ {
+		for _, cell := range rows[i] {
+			for _, match := range policyAccountDigitsRe.FindAllString(cell, -1) {
+				addCandidate(match)
+				addCandidate(strings.TrimLeft(match, "0"))
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	var accountNumber string
+	if err := pool.QueryRow(ctx, `
+		SELECT account_number
+		FROM public.masterbankaccount
+		WHERE COALESCE(is_deleted, false) = false
+		  AND (TRIM(account_number) = ANY($1) OR ltrim(TRIM(account_number), '0') = ANY($1))
+		ORDER BY length(TRIM(account_number)) DESC
+		LIMIT 1`, candidates).Scan(&accountNumber); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(accountNumber)
+}
 
 // lookupEntityIDForAccount resolves the owning entity for an account number so
 // the PRE_UPLOAD gate can supply entity_id / EntityCode. Upload runs before the
