@@ -79,8 +79,8 @@ var dynamicListResolvers = map[string]dynamicListQuery{
 			        LIMIT 1
 			  ) ma ON TRUE
 			 WHERE COALESCE(m.is_deleted, false) = false
-			   AND m.active_status = 'Active'
-			   AND COALESCE(ma.processing_status, 'REJECTED') = 'APPROVED'
+			   AND LOWER(TRIM(m.active_status)) = 'active'
+			   AND UPPER(TRIM(COALESCE(ma.processing_status, 'REJECTED'))) = 'APPROVED'
 			   AND NULLIF(TRIM(m.entity_name), '') IS NOT NULL
 			 ORDER BY 1`,
 	},
@@ -97,9 +97,27 @@ var dynamicListResolvers = map[string]dynamicListQuery{
 			        LIMIT 1
 			  ) ma ON TRUE
 			 WHERE COALESCE(m.is_deleted, false) = false
-			   AND m.active_status = 'Active'
-			   AND COALESCE(ma.processing_status, 'REJECTED') = 'APPROVED'
+			   AND LOWER(TRIM(m.active_status)) = 'active'
+			   AND UPPER(TRIM(COALESCE(ma.processing_status, 'REJECTED'))) = 'APPROVED'
 			   AND NULLIF(TRIM(m.entity_id::text), '') IS NOT NULL
+			 ORDER BY 1`,
+	},
+	"APPROVED_ACCOUNT_NUMBERS": {
+		sql: `
+			SELECT DISTINCT TRIM(a.account_number)
+			  FROM masterbankaccount a
+			  LEFT JOIN LATERAL (
+			       SELECT aa.processing_status
+			         FROM auditactionbankaccount aa
+			        WHERE aa.account_id = a.account_id
+			          AND aa.actiontype IN ('CREATE','EDIT','DELETE')
+			        ORDER BY aa.requested_at DESC
+			        LIMIT 1
+			  ) ma ON TRUE
+			 WHERE COALESCE(a.is_deleted, false) = false
+			   AND LOWER(TRIM(a.status)) = 'active'
+			   AND UPPER(TRIM(COALESCE(ma.processing_status, 'REJECTED'))) = 'APPROVED'
+			   AND NULLIF(TRIM(a.account_number), '') IS NOT NULL
 			 ORDER BY 1`,
 	},
 }

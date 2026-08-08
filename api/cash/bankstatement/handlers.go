@@ -1935,9 +1935,20 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] Multiple accounts, no weighted match found for %s — relying on file content extraction", uploadFileName)
 			}
 		}
+		policyAccount := accountOverride
+		if policyAccount == "" {
+			var policyFileContent [][]string
+			if parsedRows, parseErr := parseFileToRows(fileBytes); parseErr == nil {
+				policyFileContent = parsedRows
+			}
+			policyAccount = matchAccountNumberToFile(r.Context(), pgxPool, uploadFileName, "", nil, policyFileContent)
+			if policyAccount == "" {
+				policyAccount = lookupAccountNumberFromContent(r.Context(), pgxPool, policyFileContent)
+			}
+		}
 		if !enforceBankStatementUpload(map[string]interface{}{
 			"upload_file_name": uploadFileName,
-			"account_number":   accountOverride,
+			"account_number":   policyAccount,
 			"use_mapping":      useMapping,
 		}) {
 			return
