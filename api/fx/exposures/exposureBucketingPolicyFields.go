@@ -3,9 +3,26 @@ package exposures
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// exposureEntityForHeader resolves the owning entity for an exposure header.
+// exposure_bucketing has no entity column of its own, and passing the header
+// ID as EntityCode (as these handlers used to) never matches an entity scope —
+// so an include list silently skips the policy and an exclude list stops
+// excluding. Empty on failure, which is the same as supplying nothing.
+func exposureEntityForHeader(ctx context.Context, pool *pgxpool.Pool, exposureHeaderID string) string {
+	if strings.TrimSpace(exposureHeaderID) == "" || pool == nil {
+		return ""
+	}
+	row, err := LoadExposureCreationRow(ctx, pool, exposureHeaderID)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(row.Entity)
+}
 
 // exposureBucketingRow is the canonical business-field shape for
 // EXPOSURE_BUCKETING — one field per real scalar column on

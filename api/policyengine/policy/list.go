@@ -106,6 +106,17 @@ const listAuditFrom = `
 const listWhere = `
 	WHERE p.is_deleted = false`
 
+const listSearchWhere = `
+	AND (p.code ILIKE $1 OR p.name ILIKE $1 OR p.category ILIKE $1
+	     OR EXISTS (
+	         SELECT 1 FROM policyengine_svc.policy_module pm
+	         WHERE pm.policy_id = p.policy_id AND pm.is_deleted = false AND pm.module_code ILIKE $1
+	     )
+	     OR EXISTS (
+	         SELECT 1 FROM policyengine_svc.policy_sub_module psm
+	         WHERE psm.policy_id = p.policy_id AND psm.is_deleted = false AND psm.sub_module_code ILIKE $1
+	     ))`
+
 func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !common.RequirePOST(w, r) {
@@ -123,7 +134,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 		countQ := `SELECT COUNT(*) ` + listFrom + listWhere
 		countArgs := []interface{}{}
 		if search != "" {
-			countQ += ` AND (p.code ILIKE $1 OR p.name ILIKE $1 OR p.category ILIKE $1)`
+			countQ += listSearchWhere
 			countArgs = append(countArgs, search)
 		}
 		var total int
@@ -151,7 +162,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 		listArgs := []interface{}{}
 		argN := 1
 		if search != "" {
-			listQ += ` AND (p.code ILIKE $1 OR p.name ILIKE $1 OR p.category ILIKE $1)`
+			listQ += listSearchWhere
 			listArgs = append(listArgs, search)
 			argN = 2
 		}

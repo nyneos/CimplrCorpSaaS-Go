@@ -500,7 +500,7 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleFX,
 			SubModule:           "HEDGE_LINK",
-			EntityCode:          req.ExposureHeaderID,
+			EntityCode:          exposureEntityForHeader(ctx, pool, req.ExposureHeaderID),
 			ActorUserID:         req.UserID,
 			HandlerName:         "LinkExposureHedge",
 			APIPath:             "/fx/exposures/link-exposure-hedge",

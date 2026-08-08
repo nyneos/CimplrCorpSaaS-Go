@@ -290,6 +290,31 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
+		missing := make([]string, 0)
+		for _, f := range []struct{ name, value string }{
+			{"internal_reference_id", req.InternalReferenceID},
+			{"entity_level_0", req.EntityLevel0},
+			{"order_type", req.OrderType},
+			{"transaction_type", req.TransactionType},
+			{"counterparty", req.Counterparty},
+			{"currency_pair", req.CurrencyPair},
+			{"value_type", req.ValueType},
+			{"mode_of_delivery", req.ModeOfDelivery},
+			{"internal_dealer", req.InternalDealer},
+			{"counterparty_dealer", req.CounterpartyDealer},
+		} {
+			if strings.TrimSpace(f.value) == "" {
+				missing = append(missing, f.name)
+			}
+		}
+		if amt, err := req.BookingAmount.Float64(); err != nil || amt <= 0 {
+			missing = append(missing, "booking_amount")
+		}
+		if len(missing) > 0 {
+			respondEnvelopeError(w, http.StatusBadRequest,
+				"missing or invalid required field(s): "+strings.Join(missing, ", "))
+			return
+		}
 		// We no longer enforce a strict magnitude limit here; DB has unlimited numeric precision.
 		scope := ctxutil.FromContext(r.Context())
 		buNames := scope.EntityNames
