@@ -198,9 +198,40 @@ func (r CheckResult) WriteSummaryHeader(w http.ResponseWriter) {
 	if w == nil {
 		return
 	}
-	if line := r.SummaryLine(); line != "" {
+	if line := headerASCII(r.headerSummaryLine()); line != "" {
 		w.Header().Set("X-Policy-Summary", line)
 	}
+}
+
+func (r CheckResult) headerSummaryLine() string {
+	passed, failed := r.CountPassedFailed()
+	if passed+failed == 0 {
+		return ""
+	}
+	passNames, failNames := r.policyNameLists()
+	if failed == 0 {
+		if len(passNames) > 0 {
+			return "Policy check passed: " + strings.Join(passNames, ", ")
+		}
+		return "Policy check passed"
+	}
+	if len(failNames) > 0 {
+		return "Policy check failed - " + strings.Join(failNames, ", ")
+	}
+	return "Policy check failed"
+}
+
+func headerASCII(s string) string {
+	var b strings.Builder
+	for _, ch := range s {
+		switch {
+		case ch == '–' || ch == '—':
+			b.WriteByte('-')
+		case ch >= 32 && ch < 127:
+			b.WriteRune(ch)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // LoadActivePolicySnapshots returns Active+APPROVED policy snapshots for the
