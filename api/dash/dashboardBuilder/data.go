@@ -312,8 +312,12 @@ var dataSources = map[string]dataSourceFn{
 	"fxExposureBucketing": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFXExposureBucketing(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
-	"fxHedgingProposals": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
-		return queryFXHedgingProposals(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	"fxHedgingProposal": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFXHedgingProposalDocuments(ctx, pool, req.Limit, req.Offset)
+	},
+	"fxHedgingProposalLineItem": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		// Empty proposal_ids → no rows (scope required, like bank statements).
+		return queryFXHedgingProposalDocumentLines(ctx, pool, req.Limit, req.Offset, resolveProjectionProposalIDs(req))
 	},
 	"fxHedgeLinksDetails": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFXHedgeLinksDetails(ctx, pool, req.EntityIDs, req.Limit, req.Offset)

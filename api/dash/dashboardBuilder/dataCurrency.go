@@ -71,6 +71,23 @@ var sourceCurrencyConfig = map[string]currencyNormConfig{
 			"month_6plus":           {},
 		},
 	},
+	"fxHedgingProposalLineItem": {
+		currencyField: "currency",
+		amountFields: map[string]struct{}{
+			"hedge_month1":         {},
+			"hedge_month2":         {},
+			"hedge_month3":         {},
+			"hedge_month4":         {},
+			"hedge_month4to6":      {},
+			"hedge_month6plus":     {},
+			"old_hedge_month1":     {},
+			"old_hedge_month2":     {},
+			"old_hedge_month3":     {},
+			"old_hedge_month4":     {},
+			"old_hedge_month4to6":  {},
+			"old_hedge_month6plus": {},
+		},
+	},
 	"fxMtmManagement": {
 		currencyPairField: "currency_pair",
 		amountFields: map[string]struct{}{

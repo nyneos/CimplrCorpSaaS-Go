@@ -167,6 +167,14 @@ func RegisterFXRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool.P
 	/*hedging-proposals */
 	mux.Handle("/fx/exposures/get-hedging-proposals", midFX(exposures.GetHedgingProposalsAggregated(pgxPool)))
 	mux.Handle("/fx/exposures/hedge-proposal/audit", midFX(NewFXAuditHandler(pgxPool, fxHedgeProposalAuditConfig())))
+	mux.Handle("/fx/exposures/hedging-proposals/list", midFX(exposures.ListHedgingProposalDocuments(pgxPool)))
+	mux.Handle("/fx/exposures/hedging-proposals/get", midFX(exposures.GetHedgingProposalDocument(pgxPool)))
+	mux.Handle("/fx/exposures/hedging-proposals/save", midFX(exposures.SaveHedgingProposalDocument(pgxPool)))
+	mux.Handle("/fx/hedging-proposals/save", midFX(exposures.SaveHedgingProposalDocument(pgxPool)))
+	mux.Handle("/fx/exposures/hedging-proposals/approve", midFX(exposures.ApproveHedgingProposalDocuments(pgxPool)))
+	mux.Handle("/fx/exposures/hedging-proposals/reject", midFX(exposures.RejectHedgingProposalDocuments(pgxPool)))
+	mux.Handle("/fx/exposures/hedging-proposals/delete", midFX(exposures.DeleteHedgingProposalDocuments(pgxPool)))
+	mux.Handle("/fx/exposures/hedging-proposals/document-audit", midFX(NewFXAuditHandler(pgxPool, fxHedgeProposalDocumentAuditConfig())))
 	/*linkage */
 	mux.Handle("/fx/exposures/hedge-links-details", midFX(exposures.HedgeLinksDetails(pgxPool)))
 	mux.Handle("/fx/exposures/expfwd-linking-bookings", midFX(exposures.ExpFwdLinkingBookings(pgxPool)))

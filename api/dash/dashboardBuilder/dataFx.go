@@ -83,40 +83,75 @@ func queryFXExposureBucketing(ctx context.Context, pool *pgxpool.Pool, entityIDs
 	return runSourceQuery(ctx, pool, q, args)
 }
 
-// ── Hedging Proposals ──────────────────────────────────────────────────────
-func queryFXHedgingProposals(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "h", "entity")
-
-	q := fmt.Sprintf(`
-		WITH latest_audit AS (
-			SELECT DISTINCT ON (exposure_header_id)
-				exposure_header_id,
-				processing_status,
-				requested_at,
-				checker_at
-			FROM public.auditactionhedgeproposal
-			ORDER BY exposure_header_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
-		)
+// ── Hedging Proposal Documents (named proposals) ───────────────────────────
+// Header rows from public.hedging_proposal_document (All Hedging Proposals list).
+func queryFXHedgingProposalDocuments(ctx context.Context, pool *pgxpool.Pool, limit int, offset int) ([]map[string]any, error) {
+	args := limitOffsetArgs(limit, offset)
+	q := `
 		SELECT
-			COALESCE(hp.reference_no, '') AS reference_no,
-			COALESCE(hp.exposure_header_id::text, '') AS exposure_header_id,
-			COALESCE(h.entity, '') AS entity_id,
-			COALESCE(hp.hedge_month1, 0) AS hedge_month1,
-			COALESCE(hp.hedge_month2, 0) AS hedge_month2,
-			COALESCE(hp.hedge_month3, 0) AS hedge_month3,
-			COALESCE(hp.hedge_month4, 0) AS hedge_month4,
-			COALESCE(hp.hedge_month4to6, 0) AS hedge_month4to6,
-			COALESCE(hp.hedge_month6plus, 0) AS hedge_month6plus,
-			COALESCE(hp.status_hedging, '') AS status,
-			COALESCE(a.processing_status, '') AS processing_status
-		FROM public.hedging_proposal hp
-		JOIN public.exposure_headers h ON hp.exposure_header_id = h.exposure_header_id
-		LEFT JOIN latest_audit a ON a.exposure_header_id = hp.exposure_header_id::text
-		WHERE COALESCE(h.is_deleted, false) = false %s
-		ORDER BY hp.created_at DESC NULLS LAST
+			COALESCE(d.proposal_id::text, '') AS proposal_id,
+			COALESCE(d.proposal_name, '') AS proposal_name,
+			COALESCE(d.processing_status, '') AS processing_status,
+			COALESCE(d.created_by, '') AS created_by,
+			d.created_at,
+			COALESCE(d.updated_by, '') AS updated_by,
+			d.updated_at,
+			COALESCE(d.comments, '') AS comments,
+			COALESCE((
+				SELECT COUNT(*)::int
+				FROM public.hedging_proposal_document_line l
+				WHERE l.proposal_id = d.proposal_id
+			), 0) AS line_count
+		FROM public.hedging_proposal_document d
+		WHERE COALESCE(d.is_deleted, false) = false
+		ORDER BY d.created_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
-	`, ef)
+	`
+	return runSourceQuery(ctx, pool, q, args)
+}
 
+// Line items from public.hedging_proposal_document_line.
+// proposalIDs filters to selected documents; empty = no rows (require scope like bank statements).
+func queryFXHedgingProposalDocumentLines(ctx context.Context, pool *pgxpool.Pool, limit int, offset int, proposalIDs []string) ([]map[string]any, error) {
+	proposalIDs = normalizeProposalIDs(proposalIDs)
+	if len(proposalIDs) == 0 {
+		return []map[string]any{}, nil
+	}
+
+	args := []any{limit, offset, proposalIDs}
+	q := `
+		SELECT
+			COALESCE(l.line_id::text, '') AS line_id,
+			COALESCE(l.proposal_id::text, '') AS proposal_id,
+			COALESCE(d.proposal_name, '') AS proposal_name,
+			COALESCE(d.processing_status, '') AS processing_status,
+			COALESCE(l.business_unit, '') AS business_unit,
+			COALESCE(l.currency, '') AS currency,
+			COALESCE(l.exposure_type, '') AS exposure_type,
+			COALESCE(array_to_string(l.contributing_header_ids, ','), '') AS contributing_header_ids,
+			COALESCE(l.hedge_month1, 0) AS hedge_month1,
+			COALESCE(l.hedge_month2, 0) AS hedge_month2,
+			COALESCE(l.hedge_month3, 0) AS hedge_month3,
+			COALESCE(l.hedge_month4, 0) AS hedge_month4,
+			COALESCE(l.hedge_month4to6, 0) AS hedge_month4to6,
+			COALESCE(l.hedge_month6plus, 0) AS hedge_month6plus,
+			COALESCE(l.old_hedge_month1, 0) AS old_hedge_month1,
+			COALESCE(l.old_hedge_month2, 0) AS old_hedge_month2,
+			COALESCE(l.old_hedge_month3, 0) AS old_hedge_month3,
+			COALESCE(l.old_hedge_month4, 0) AS old_hedge_month4,
+			COALESCE(l.old_hedge_month4to6, 0) AS old_hedge_month4to6,
+			COALESCE(l.old_hedge_month6plus, 0) AS old_hedge_month6plus,
+			COALESCE(l.line_status, '') AS status,
+			COALESCE(l.comments, '') AS comments,
+			l.created_at,
+			l.updated_at
+		FROM public.hedging_proposal_document_line l
+		JOIN public.hedging_proposal_document d ON d.proposal_id = l.proposal_id
+		WHERE COALESCE(d.is_deleted, false) = false
+		  AND l.proposal_id::text = ANY($3)
+		ORDER BY d.proposal_name, l.business_unit, l.currency, l.exposure_type, l.line_id
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`
 	return runSourceQuery(ctx, pool, q, args)
 }
 

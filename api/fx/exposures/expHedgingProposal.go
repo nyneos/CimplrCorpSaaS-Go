@@ -40,22 +40,25 @@ func GetHedgingProposalsAggregated(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Ensure all exposure_header_id are present in hedging_proposal
+		// Ensure hedging_proposal rows exist for approved bucketing exposures
 		_, _ = pool.Exec(ctx, `INSERT INTO hedging_proposal (exposure_header_id)
-			SELECT exposure_header_id
-			FROM exposure_headers
-			WHERE entity = ANY($1)
-			  AND exposure_header_id NOT IN (
+			SELECT h.exposure_header_id
+			FROM exposure_headers h
+			JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id
+			WHERE h.entity = ANY($1)
+			  AND COALESCE(h.is_deleted, false) = false
+			  AND lower(COALESCE(b.status_bucketing, '')) = 'approved'
+			  AND h.exposure_header_id NOT IN (
 				SELECT exposure_header_id FROM hedging_proposal
 			  )`, buNames)
 
-		// Aggregate hedging proposals
+		// Aggregate hedging proposals from approved bucketing only
 		query := `
 			SELECT 
 				h.entity AS business_unit,
 				h.currency,
 				h.exposure_type,
-				ARRAY_AGG(h.exposure_header_id) AS contributing_header_ids,
+				ARRAY_AGG(DISTINCT h.exposure_header_id::text) AS contributing_header_ids,
 				SUM(COALESCE(b.month_1, 0)) AS hedge_month1,
 				SUM(COALESCE(b.month_2, 0)) AS hedge_month2,
 				SUM(COALESCE(b.month_3, 0)) AS hedge_month3,
@@ -69,12 +72,17 @@ func GetHedgingProposalsAggregated(pool *pgxpool.Pool) http.HandlerFunc {
 				SUM(COALESCE(b.old_month4to6, 0)) AS old_hedge_month4to6,
 				SUM(COALESCE(b.old_month6plus, 0)) AS old_hedge_month6plus,
 				MAX(hp.comments) AS comments,
-				MAX(hp.status_hedging) AS status
+				COALESCE(NULLIF(MAX(hp.status_hedging), ''), 'pending') AS status
 			FROM exposure_headers h
-			JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id AND (b.status_bucketing = 'approved' OR b.status_bucketing = 'Approved')
-			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
+			JOIN exposure_bucketing b
+			  ON h.exposure_header_id = b.exposure_header_id
+			 AND lower(COALESCE(b.status_bucketing, '')) = 'approved'
 			LEFT JOIN hedging_proposal hp ON h.exposure_header_id = hp.exposure_header_id
 			WHERE h.entity = ANY($1)
+			  AND COALESCE(h.is_deleted, false) = false
+			  AND EXISTS (
+				SELECT 1 FROM exposure_line_items l WHERE l.exposure_header_id = h.exposure_header_id
+			  )
 			GROUP BY h.entity, h.currency, h.exposure_type
 		`
 		rows, err := pool.Query(ctx, query, buNames)

@@ -711,6 +711,10 @@ func fxHedgeProposalAuditConfig() fxAuditConfig {
 	return fxAuditConfig{ActionTable: auditutil.TableHedgeProposal, ActionParentCol: "exposure_header_id", Source: "FX_HEDGE_PROPOSAL"}
 }
 
+func fxHedgeProposalDocumentAuditConfig() fxAuditConfig {
+	return fxAuditConfig{ActionTable: auditutil.TableHedgeProposalDocument, ActionParentCol: "proposal_id", Source: "FX_HEDGE_PROPOSAL_DOCUMENT"}
+}
+
 func fxHedgeLinkAuditConfig() fxAuditConfig {
 	return fxAuditConfig{ActionTable: auditutil.TableHedgeLink, ActionParentCol: "exposure_header_id", ExtraFilterCol: "booking_id", Source: "FX_HEDGE_LINK"}
 }
