@@ -60,7 +60,7 @@ func dataFilterSkip(instrument, currency, tenor, rating string, vars map[string]
 	}
 	for _, check := range checks {
 		expected := strings.TrimSpace(check.filter)
-		if expected != "" && !strings.EqualFold(expected, check.actual) {
+		if expected != "" && check.actual != "" && !strings.EqualFold(expected, check.actual) {
 			return check.code, fmt.Sprintf("%s scope requires %q; request resolved %q", check.field, expected, check.actual), true
 		}
 	}
