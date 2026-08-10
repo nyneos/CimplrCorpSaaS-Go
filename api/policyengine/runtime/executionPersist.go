@@ -10,9 +10,18 @@ import (
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/services/policysvc"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func uuidOrBlank(s string) string {
+	s = strings.TrimSpace(s)
+	if _, err := uuid.Parse(s); err != nil {
+		return ""
+	}
+	return s
+}
 
 type executionRunRecord struct {
 	RunID, CorrelationID, TraceID, EventCode, ModuleCode, SubModule, FormID string
@@ -237,7 +246,7 @@ func insertComparisons(ctx context.Context, tx pgx.Tx, key comparisonKey, compar
 				actual_value, operator, expected_value, lower_bound, upper_bound,
 				unit, label, outcome
 			) VALUES ($1,$2,NULLIF($3,'')::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-			key.RunID, key.ExecutionID, key.PolicyID, common.NullIfEmpty(key.PolicyCode), comparison.Sequence,
+			key.RunID, key.ExecutionID, uuidOrBlank(key.PolicyID), common.NullIfEmpty(key.PolicyCode), comparison.Sequence,
 			common.NullIfEmpty(comparison.Variable), common.NullIfEmpty(comparison.ActualValue),
 			common.NullIfEmpty(comparison.Operator), common.NullIfEmpty(comparison.ExpectedValue),
 			common.NullIfEmpty(comparison.LowerBound), common.NullIfEmpty(comparison.UpperBound),
@@ -262,7 +271,7 @@ type executionLogOutcome struct {
 }
 
 func insertExecutionLog(ctx context.Context, tx pgx.Tx, run executionRunRecord, out executionLogOutcome, comparisons []comparisonRecord) (string, error) {
-	policyID, policyCode, result := out.PolicyID, out.PolicyCode, out.Result
+	policyID, policyCode, result := uuidOrBlank(out.PolicyID), out.PolicyCode, out.Result
 	action, detail, failCode, failReason := out.Action, out.Detail, out.FailCode, out.FailReason
 	comparedVariable, comparedValue, limitValue := firstComparisonLegacyValues(comparisons)
 	var executionID string

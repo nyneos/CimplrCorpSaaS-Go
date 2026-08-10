@@ -252,6 +252,9 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 	if req.Variables == nil {
 		req.Variables = map[string]string{}
 	}
+	if strings.TrimSpace(req.EntityCode) == "" {
+		req.EntityCode = entityFromRecord(req.NotifyFields, req.Variables)
+	}
 
 	policies := req.Policies
 	loadTrace := policyLoadTrace{}
@@ -377,6 +380,30 @@ func breachedTriggerApprovalMatrix(policies []map[string]interface{}, results []
 		}
 		if m := matrixByPolicy[pr.PolicyID]; m != "" {
 			return m
+		}
+	}
+	return ""
+}
+
+
+var entityFieldKeys = []string{"entity_id", "entity_name", "entity_code", "entity", "entity_level_0"}
+
+func entityFromRecord(fields map[string]interface{}, vars map[string]string) string {
+	for _, key := range entityFieldKeys {
+		if raw, ok := fields[key]; ok && raw != nil {
+			if s := strings.TrimSpace(stringifyCDMValue(raw)); s != "" {
+				return s
+			}
+		}
+	}
+	for _, key := range entityFieldKeys {
+		suffix := "." + key
+		for path, val := range vars {
+			if strings.HasSuffix(path, suffix) {
+				if s := strings.TrimSpace(val); s != "" {
+					return s
+				}
+			}
 		}
 	}
 	return ""
@@ -608,10 +635,17 @@ func entityCodeAliases(ctx context.Context, pool *pgxpool.Pool, entityCode strin
 		return nil
 	}
 	aliases := []string{entityCode}
+	// Both entity masters: cash records carry masterentitycash codes, while FX /
+	// FD / investment records carry masterentity names. Resolving only one left
+	// the other's include/exclude lists matchable by exact string alone.
 	rows, err := pool.Query(ctx, `
-		SELECT COALESCE(entity_id,''), COALESCE(entity_name,'')
+		SELECT COALESCE(entity_id::text,''), COALESCE(entity_name,'')
 		FROM masterentitycash
-		WHERE lower(entity_id) = lower($1) OR lower(entity_name) = lower($1)`, entityCode)
+		WHERE lower(entity_id::text) = lower($1) OR lower(entity_name) = lower($1)
+		UNION
+		SELECT COALESCE(entity_id::text,''), COALESCE(entity_name,'')
+		FROM masterentity
+		WHERE lower(entity_id::text) = lower($1) OR lower(entity_name) = lower($1)`, entityCode)
 	if err != nil {
 		return aliases
 	}
