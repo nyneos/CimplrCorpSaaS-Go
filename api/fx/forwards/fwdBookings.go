@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"bytes"
 	"context"
 	"database/sql"
@@ -450,8 +451,10 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 		var systemTransactionID string
 		_ = pool.QueryRow(r.Context(), `SELECT system_transaction_id FROM forward_bookings WHERE internal_reference_id = $1 AND entity_level_0 = $2 LIMIT 1`, req.InternalReferenceID, req.EntityLevel0).Scan(&systemTransactionID)
 		if strings.TrimSpace(systemTransactionID) != "" {
-			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: result})
-			triggerForwardBookingNotif(r.Context(), pool, routeForwardManualEntry, "CREATE", auditutil.Actor(req.UserID), "pending", []string{systemTransactionID})
+			actor := auditutil.Actor(req.UserID)
+			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: actor, OldValues: nil, NewValues: result})
+			triggerForwardBookingNotif(r.Context(), pool, routeForwardManualEntry, "CREATE", actor, "pending", []string{systemTransactionID})
+			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_CREATE", []string{systemTransactionID}, actor)
 		}
 		respondEnvelopeSuccess(w, "Forward booking created successfully", result)
 	}
@@ -583,14 +586,20 @@ func UploadForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
+		var uploadedIDs []string
 		for _, result := range results {
 			s3Key, _ := result["upload_s3_key"].(string)
 			if strings.TrimSpace(s3Key) == "" {
 				continue
 			}
 			if inserted, ok := result["inserted"].(int); ok && inserted > 0 {
-				triggerForwardBookingNotif(ctx, pool, routeForwardUploadMulti, "UPLOAD", uploadedBy, "pending", fetchBookingIDsByUploadKey(ctx, pool, s3Key))
+				ids := fetchBookingIDsByUploadKey(ctx, pool, s3Key)
+				uploadedIDs = append(uploadedIDs, ids...)
+				triggerForwardBookingNotif(ctx, pool, routeForwardUploadMulti, "UPLOAD", uploadedBy, "pending", ids)
 			}
+		}
+		if len(uploadedIDs) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_UPLOAD", uploadedIDs, uploadedBy)
 		}
 		respondEnvelopeSuccess(w, "Forward bookings uploaded successfully", map[string]interface{}{
 			"results": results,

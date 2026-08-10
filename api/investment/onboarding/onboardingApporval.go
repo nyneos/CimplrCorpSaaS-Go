@@ -11,6 +11,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/policyengine/common"
 	jobs "CimplrCorpSaas/internal/jobs/investment"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/logger"
 
 	"github.com/jackc/pgx/v5"
@@ -272,10 +273,30 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		actionCopy := req.Action
 		userEmailCopy := userEmail
 		batchIDsCopy := append([]string(nil), batchIDs...)
+		batchResultsCopy := make(map[string]interface{}, len(batchResults))
+		for k, v := range batchResults {
+			batchResultsCopy[k] = v
+		}
 		poolRef := pgxPool
 		go func() {
+			trigger := "POST_APPROVE"
+			if actionCopy == constants.AuditActionReject {
+				trigger = "POST_REJECT"
+			}
 			for _, bid := range batchIDsCopy {
 				BuildOnboardApprovalNotifPayload(context.Background(), poolRef, bid, actionCopy, userEmailCopy)
+				dmsjobs.FireDmsEvent(poolRef, "INVESTMENT_MF", "MF_ONBOARD", trigger, []string{bid}, userEmailCopy)
+				if actionCopy == constants.AuditActionApprove {
+					if br, ok := batchResultsCopy[bid].(map[string]interface{}); ok {
+						hadEdit, hadDelete := onboardBatchResultFlags(br)
+						if hadEdit {
+							dmsjobs.FireDmsEvent(poolRef, "INVESTMENT_MF", "MF_ONBOARD", "POST_EDIT", []string{bid}, userEmailCopy)
+						}
+						if hadDelete {
+							dmsjobs.FireDmsEvent(poolRef, "INVESTMENT_MF", "MF_ONBOARD", "POST_DELETE", []string{bid}, userEmailCopy)
+						}
+					}
+				}
 			}
 
 			// Refresh portfolio snapshot in background if APPROVED
@@ -324,6 +345,7 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 	}
 
 	actionIDs := []string{}
+	editApproved := 0
 	deleteAMCIDs := []string{}
 	amcsWithAudit := make(map[string]bool)
 	autoApproved := 0
@@ -352,6 +374,9 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 				deleteAMCIDs = append(deleteAMCIDs, row.entityID)
 			} else if row.status == constants.StatusPendingApproval || row.status == constants.StatusPendingEditApproval {
 				actionIDs = append(actionIDs, row.actionID)
+				if row.status == constants.StatusPendingEditApproval {
+					editApproved++
+				}
 			}
 		} else if action == constants.AuditActionReject {
 			if row.status == constants.StatusPendingApproval || row.status == constants.StatusPendingEditApproval || row.status == constants.StatusPendingDeleteApproval {
@@ -394,9 +419,10 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 	}
 
 	return map[string]interface{}{
-		"processed":    len(actionIDs) + len(deleteAMCIDs) + autoApproved,
-		"approved_ids": actionIDs,
-		"deleted_ids":  deleteAMCIDs,
+		"processed":     len(actionIDs) + len(deleteAMCIDs) + autoApproved,
+		"approved_ids":  actionIDs,
+		"deleted_ids":   deleteAMCIDs,
+		"edit_approved": editApproved,
 	}, nil
 }
 
@@ -417,6 +443,7 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 	}
 
 	actionIDs := []string{}
+	editApproved := 0
 	deleteSchemeIDs := []string{}
 	schemesWithAudit := make(map[string]bool)
 	autoApproved := 0
@@ -444,6 +471,9 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 			deleteSchemeIDs = append(deleteSchemeIDs, row.entityID)
 		} else if row.status == constants.StatusPendingApproval || row.status == constants.StatusPendingEditApproval || (action == constants.AuditActionReject && row.status == constants.StatusPendingDeleteApproval) {
 			actionIDs = append(actionIDs, row.actionID)
+			if action == constants.AuditActionApprove && row.status == constants.StatusPendingEditApproval {
+				editApproved++
+			}
 		}
 	}
 
@@ -481,7 +511,8 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 	return map[string]interface{}{
 		"processed":    len(actionIDs) + len(deleteSchemeIDs) + autoApproved,
 		"approved_ids": actionIDs,
-		"deleted_ids":  deleteSchemeIDs,
+		"deleted_ids":   deleteSchemeIDs,
+		"edit_approved": editApproved,
 	}, nil
 }
 
@@ -502,6 +533,7 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 	}
 
 	actionIDs := []string{}
+	editApproved := 0
 	deleteDPIDs := []string{}
 	dpsWithAudit := make(map[string]bool)
 	autoApproved := 0
@@ -529,6 +561,9 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 			deleteDPIDs = append(deleteDPIDs, row.entityID)
 		} else if row.status == constants.StatusPendingApproval || row.status == constants.StatusPendingEditApproval || (action == constants.AuditActionReject && row.status == constants.StatusPendingDeleteApproval) {
 			actionIDs = append(actionIDs, row.actionID)
+			if action == constants.AuditActionApprove && row.status == constants.StatusPendingEditApproval {
+				editApproved++
+			}
 		}
 	}
 
@@ -565,7 +600,8 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 	return map[string]interface{}{
 		"processed":    len(actionIDs) + len(deleteDPIDs) + autoApproved,
 		"approved_ids": actionIDs,
-		"deleted_ids":  deleteDPIDs,
+		"deleted_ids":   deleteDPIDs,
+		"edit_approved": editApproved,
 	}, nil
 }
 
@@ -586,6 +622,7 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 	}
 
 	actionIDs := []string{}
+	editApproved := 0
 	deleteDematIDs := []string{}
 	dematsWithAudit := make(map[string]bool)
 	autoApproved := 0
@@ -613,6 +650,9 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 			deleteDematIDs = append(deleteDematIDs, row.entityID)
 		} else if row.status == constants.StatusPendingApproval || row.status == constants.StatusPendingEditApproval || (action == constants.AuditActionReject && row.status == constants.StatusPendingDeleteApproval) {
 			actionIDs = append(actionIDs, row.actionID)
+			if action == constants.AuditActionApprove && row.status == constants.StatusPendingEditApproval {
+				editApproved++
+			}
 		}
 	}
 
@@ -649,7 +689,8 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 	return map[string]interface{}{
 		"processed":    len(actionIDs) + len(deleteDematIDs) + autoApproved,
 		"approved_ids": actionIDs,
-		"deleted_ids":  deleteDematIDs,
+		"deleted_ids":   deleteDematIDs,
+		"edit_approved": editApproved,
 	}, nil
 }
 
@@ -670,6 +711,7 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 	}
 
 	actionIDs := []string{}
+	editApproved := 0
 	deleteFolioIDs := []string{}
 	foliosWithAudit := make(map[string]bool)
 	autoApproved := 0
@@ -697,6 +739,9 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 			deleteFolioIDs = append(deleteFolioIDs, row.entityID)
 		} else if row.status == constants.StatusPendingApproval || row.status == constants.StatusPendingEditApproval || (action == constants.AuditActionReject && row.status == constants.StatusPendingDeleteApproval) {
 			actionIDs = append(actionIDs, row.actionID)
+			if action == constants.AuditActionApprove && row.status == constants.StatusPendingEditApproval {
+				editApproved++
+			}
 		}
 	}
 
@@ -733,6 +778,23 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 	return map[string]interface{}{
 		"processed":    len(actionIDs) + len(deleteFolioIDs) + autoApproved,
 		"approved_ids": actionIDs,
-		"deleted_ids":  deleteFolioIDs,
+		"deleted_ids":   deleteFolioIDs,
+		"edit_approved": editApproved,
 	}, nil
+}
+
+func onboardBatchResultFlags(batchResult map[string]interface{}) (hadEdit, hadDelete bool) {
+	for _, key := range []string{"amc", "scheme", "dp", "demat", "folio"} {
+		sub, ok := batchResult[key].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if deleted, ok := sub["deleted_ids"].([]string); ok && len(deleted) > 0 {
+			hadDelete = true
+		}
+		if n, ok := sub["edit_approved"].(int); ok && n > 0 {
+			hadEdit = true
+		}
+	}
+	return hadEdit, hadDelete
 }

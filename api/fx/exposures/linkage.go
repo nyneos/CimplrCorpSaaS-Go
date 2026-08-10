@@ -8,6 +8,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/logger"
 	"context"
 	"encoding/json"
@@ -509,6 +510,12 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 		}) {
 			return
 		}
+		var linkExisted bool
+		_ = pool.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM exposure_hedge_links
+				WHERE exposure_header_id = $1 AND booking_id = $2
+			)`, req.ExposureHeaderID, req.BookingID).Scan(&linkExisted)
 		// Upsert exposure_hedge_links
 		upsertQuery := `
 			INSERT INTO exposure_hedge_links (exposure_header_id, booking_id, hedged_amount, is_active)
@@ -551,6 +558,13 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 		respondWithSuccess(w, http.StatusOK, "Exposure hedge link saved successfully", map[string]interface{}{
 			"link": linkMap,
 		})
+
+		actor := auditutil.Actor(req.UserID)
+		if linkExisted {
+			dmsjobs.FireDmsEvent(pool, "FX", "HEDGE_LINK", "POST_EDIT", []string{req.ExposureHeaderID}, actor)
+		} else {
+			dmsjobs.FireDmsEvent(pool, "FX", "HEDGE_LINK", "POST_CREATE", []string{req.ExposureHeaderID}, actor)
+		}
 
 		payload := fxnotif.BuildExposureBulkActionPayload(ctx, pool, fxnotif.ExposureBulkActionInput{
 			ExposureIDs: []string{req.ExposureHeaderID}, Action: fxnotif.ActionLink, RequestedBy: req.UserID,

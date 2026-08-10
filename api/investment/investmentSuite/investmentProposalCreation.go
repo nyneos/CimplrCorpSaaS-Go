@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
@@ -266,6 +267,8 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 				fmt.Sprintf("INVESTMENT_PROPOSAL_CREATE/%s/%d", req.UserID, time.Now().UnixMilli()),
 				payload.ToMap(),
 			)
+			dmsjobs.FireDmsEvent(pool, "INVESTMENT_MF", "MF_PROPOSAL", "POST_CREATE", []string{proposalID}, userEmail)
+			dmsjobs.FireDmsEvent(pool, "INVESTMENT_MF", "MF_PORTFOLIO", "POST_CREATE", []string{proposalID}, userEmail)
 		}()
 
 		resp := CreateProposalResponse{Success: true, ProposalID: proposalID, TotalAmount: req.TotalAmount, AllocationCount: len(allocIDs)}
@@ -459,6 +462,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 		deletedActions := make([]string, 0)
 		rejectedActions := make([]string, 0)
 		approvedProposals := make([]string, 0)
+		editProposals := make([]string, 0)
 		deletedProposals := make([]string, 0)
 		rejectedProposals := make([]string, 0)
 
@@ -480,6 +484,9 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 				} else {
 					approvedActions = append(approvedActions, snap.actionID)
 					approvedProposals = append(approvedProposals, proposalID)
+					if snap.status == constants.StatusPendingEditApproval || strings.EqualFold(snap.actionType, constants.AuditActionEdit) {
+						editProposals = append(editProposals, proposalID)
+					}
 				}
 			} else {
 				rejectedActions = append(rejectedActions, snap.actionID)
@@ -586,6 +593,10 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 		// Fire notifications per outcome bucket (non-blocking)
 		if len(approvedProposals) > 0 {
 			ids := append([]string{}, approvedProposals...)
+			editSet := make(map[string]struct{}, len(editProposals))
+			for _, id := range editProposals {
+				editSet[id] = struct{}{}
+			}
 			uID := req.UserID
 			uEmail := userEmail
 			go func() {
@@ -596,6 +607,13 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 					fmt.Sprintf("INVESTMENT_PROPOSAL_APPROVE/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
 				)
+				for _, id := range ids {
+					trigger := "POST_APPROVE"
+					if _, isEdit := editSet[id]; isEdit {
+						trigger = "POST_EDIT"
+					}
+					dmsjobs.FireDmsEvent(pool, "INVESTMENT_MF", "MF_PROPOSAL", trigger, []string{id}, uEmail)
+				}
 			}()
 		}
 		if len(deletedProposals) > 0 {
@@ -610,6 +628,9 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 					fmt.Sprintf("INVESTMENT_PROPOSAL_DELETE/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
 				)
+				for _, id := range ids {
+					dmsjobs.FireDmsEvent(pool, "INVESTMENT_MF", "MF_PROPOSAL", "POST_DELETE", []string{id}, uEmail)
+				}
 			}()
 		}
 		if len(rejectedProposals) > 0 {
@@ -624,6 +645,9 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 					fmt.Sprintf("INVESTMENT_PROPOSAL_REJECT/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
 				)
+				for _, id := range ids {
+					dmsjobs.FireDmsEvent(pool, "INVESTMENT_MF", "MF_PROPOSAL", "POST_REJECT", []string{id}, uEmail)
+				}
 			}()
 		}
 

@@ -7,6 +7,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -505,6 +506,17 @@ func CancellationStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		if strings.EqualFold(requestedStatus, "Rejected") {
 			action = constants.AuditActionReject
 		}
+		if len(notifItems) > 0 {
+			bookingIDs := make([]string, 0, len(notifItems))
+			for _, item := range notifItems {
+				bookingIDs = append(bookingIDs, item.BookingID)
+			}
+			trig := "POST_APPROVE"
+			if strings.EqualFold(requestedStatus, "Rejected") {
+				trig = "POST_REJECT"
+			}
+			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_CANCELLATION", trig, bookingIDs, auditutil.Actor(req.UserID))
+		}
 		triggerCancelRollNotif(r.Context(), pool, routeForwardCancellationStatus, action, auditutil.Actor(req.UserID), requestedStatus, notifItems)
 		respondEnvelopeSuccess(w, "Forward cancellation request processed successfully", map[string]interface{}{
 			"message": "Forward Cancellation Request Processed Successfully",
@@ -762,6 +774,14 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 
 		processed := 0
 		notifItems := make([]fxnotification.CancelRollItem, 0, len(req.Items))
+		deleteApprovedBySub := map[string][]string{
+			"FORWARD_CANCELLATION": {},
+			"FORWARD_ROLLOVER":     {},
+		}
+		editApprovedBySub := map[string][]string{
+			"FORWARD_CANCELLATION": {},
+			"FORWARD_ROLLOVER":     {},
+		}
 		for _, item := range req.Items {
 			requestType := normalizeCancelRollType(item.RequestType)
 			bookingID := strings.TrimSpace(item.BookingID)
@@ -827,6 +847,11 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 						return
 					}
 					auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
+					subModule := "FORWARD_CANCELLATION"
+					if requestType == cancelRollTypeRollover {
+						subModule = "FORWARD_ROLLOVER"
+					}
+					deleteApprovedBySub[subModule] = append(deleteApprovedBySub[subModule], bookingID)
 				} else if strings.EqualFold(currentStatus, "Pending") {
 					if requestType == cancelRollTypeRollover {
 						if err := executeRolloverApproval(r.Context(), pool, req.UserID, bookingID, requestDate, req.Comment); err != nil {
@@ -839,6 +864,11 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 							return
 						}
 					}
+					subModule := "FORWARD_CANCELLATION"
+					if requestType == cancelRollTypeRollover {
+						subModule = "FORWARD_ROLLOVER"
+					}
+					editApprovedBySub[subModule] = append(editApprovedBySub[subModule], bookingID)
 				} else {
 					respondWithError(w, http.StatusBadRequest, "approve is only allowed for Pending or PENDING_DELETE_APPROVAL rows")
 					return
@@ -879,6 +909,28 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		triggerCancelRollNotif(r.Context(), pool, routeForwardCancelRollAction, action, auditutil.Actor(req.UserID), action, notifItems)
+		actor := auditutil.Actor(req.UserID)
+		if action == constants.AuditActionApprove {
+			for subModule, bookingIDs := range deleteApprovedBySub {
+				if len(bookingIDs) > 0 {
+					dmsjobs.FireDmsEvent(pool, "FX", subModule, "POST_DELETE", bookingIDs, actor)
+				}
+			}
+			for subModule, bookingIDs := range editApprovedBySub {
+				if len(bookingIDs) > 0 {
+					dmsjobs.FireDmsEvent(pool, "FX", subModule, "POST_EDIT", bookingIDs, actor)
+				}
+			}
+		}
+		if action == constants.AuditActionReject {
+			bookingIDs := make([]string, 0, len(notifItems))
+			for _, item := range notifItems {
+				bookingIDs = append(bookingIDs, item.BookingID)
+			}
+			if len(bookingIDs) > 0 {
+				dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_CANCEL_ROLL", "POST_REJECT", bookingIDs, actor)
+			}
+		}
 		respondEnvelopeSuccess(w, "Cancellation/rollover action processed successfully", map[string]interface{}{
 			"processed": processed,
 			"message":   "Cancellation/Rollover action processed successfully",
@@ -963,6 +1015,7 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		createdBookingIDs := make([]string, 0, len(req.BookingAmounts))
 		for bid, amtCancelled := range req.BookingAmounts {
 			// Save rollover request as pending, including new forward details
 			_, err := pool.Exec(r.Context(), `INSERT INTO forward_rollovers (
@@ -986,6 +1039,10 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: map[string]interface{}{"amount_rolled_over": amtCancelled, "rollover_date": req.CancellationDate, "new_forward": req.NewForward}})
+			createdBookingIDs = append(createdBookingIDs, bid)
+		}
+		if len(createdBookingIDs) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_ROLLOVER", "POST_CREATE", createdBookingIDs, auditutil.Actor(req.UserID))
 		}
 		respondEnvelopeSuccess(w, "Forward rollover request submitted for approval", nil)
 	}
@@ -1293,6 +1350,7 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		// Save cancellation request as pending
+		createdBookingIDs := make([]string, 0, len(req.BookingAmounts))
 		for bookingOrReferenceID, amtCancelled := range req.BookingAmounts {
 			bookingID, err := resolveForwardBookingID(r.Context(), pool, bookingOrReferenceID, buNames)
 			if err != nil {
@@ -1316,6 +1374,10 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bookingID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: req.CancellationReason, RequestedBy: auditutil.Actor(req.UserID), OldValues: nil, NewValues: map[string]interface{}{"amount_cancelled": amtCancelled, "cancellation_date": req.CancellationDate, "cancellation_rate": req.CancellationRate, "realized_gain_loss": req.RealizedGainLoss}})
+			createdBookingIDs = append(createdBookingIDs, bookingID)
+		}
+		if len(createdBookingIDs) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_CANCELLATION", "POST_CREATE", createdBookingIDs, auditutil.Actor(req.UserID))
 		}
 		respondEnvelopeSuccess(w, "Forward cancellation request submitted for approval", nil)
 	}
@@ -1504,6 +1566,17 @@ func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		action := constants.AuditActionApprove
 		if strings.EqualFold(requestedStatus, "Rejected") {
 			action = constants.AuditActionReject
+		}
+		if len(notifItems) > 0 {
+			bookingIDs := make([]string, 0, len(notifItems))
+			for _, item := range notifItems {
+				bookingIDs = append(bookingIDs, item.BookingID)
+			}
+			trig := "POST_APPROVE"
+			if strings.EqualFold(requestedStatus, "Rejected") {
+				trig = "POST_REJECT"
+			}
+			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_ROLLOVER", trig, bookingIDs, auditutil.Actor(req.UserID))
 		}
 		triggerCancelRollNotif(r.Context(), pool, routeForwardRolloverStatus, action, auditutil.Actor(req.UserID), requestedStatus, notifItems)
 		respondEnvelopeSuccess(w, "Forward rollover request processed successfully", map[string]interface{}{

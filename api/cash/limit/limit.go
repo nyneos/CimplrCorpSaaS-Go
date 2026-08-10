@@ -8,6 +8,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/jobs/dmsevent"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/validation"
 	"context"
@@ -210,6 +211,8 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
+
+		dmsevent.Fire(pgxPool, "CASH", "BANK_LIMIT", "POST_CREATE", []string{limitID}, requestedBy)
 
 		api.RespondWithResult(w, true, limitID)
 	}
@@ -515,6 +518,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(createdLimitIDs) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "BANK_LIMIT", "POST_CREATE", createdLimitIDs, requestedBy)
 			// Pass req.UserID (not display name) so the notification dispatcher can resolve
 			// the actor's entity via: SELECT business_unit_name FROM users WHERE id::text=$1
 			payload := BuildLimitNotifPayload(context.Background(), pgxPool, createdLimitIDs, "CREATE", req.UserID)
@@ -767,6 +771,8 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
+
+		dmsevent.Fire(pgxPool, "CASH", "BANK_LIMIT", "POST_EDIT", []string{req.LimitID}, requestedBy)
 
 		api.RespondWithResult(w, true, req.LimitID)
 		// Notify: limit updated with FULL record data
@@ -1219,6 +1225,11 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		dmsevent.Fire(pgxPool, "CASH", "BANK_LIMIT", "POST_APPROVE", req.LimitIDs, checkerBy)
+		if len(deleted) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "BANK_LIMIT", "POST_DELETE", deleted, checkerBy)
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"approved_count": len(actionIDs),
 			"deleted":        deleted,
@@ -1331,6 +1342,8 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "failed to reject: "+err.Error())
 			return
 		}
+
+		dmsevent.Fire(pgxPool, "CASH", "BANK_LIMIT", "POST_REJECT", req.LimitIDs, checkerBy)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"rejected_count": len(actionIDs),

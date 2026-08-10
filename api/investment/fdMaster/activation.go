@@ -16,6 +16,7 @@ import (
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/validation"
 
 	"github.com/jackc/pgx/v5"
@@ -1214,6 +1215,9 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}(fdID, rec.EntityID, userEmail, rec.PrincipalAmount)
 
+		// Seeded E2E rules use FD_MASTER (activation creates/approves fd_master rows).
+		dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_MASTER", "POST_CREATE", []string{fdID}, userEmail)
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"fd_id": fdID, "confirmation_id": req.ConfirmationID, "cashflow_count": len(cashflows), "requested_by": userEmail})
 	}
 }
@@ -1247,6 +1251,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		engineActed := 0
 		directActed := 0
 		var errors []string
+		var actedFDIDs []string
 
 		for _, rawID := range req.FDIDs {
 			// Resolve the real fd_id — caller may pass either an fd_id or a confirmation_id.
@@ -1263,6 +1268,8 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				).Scan(&resolvedFDID); lookupErr2 == nil {
 					fdID = resolvedFDID
 				}
+			} else {
+				fdID = resolvedFDID
 			}
 
 			approveRow, loadErr := loadFDMasterRow(ctx, pgxPool, fdID)
@@ -1311,6 +1318,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				engineActed++
+				actedFDIDs = append(actedFDIDs, fdID)
 			} else {
 				if actionRes.CancelledStale {
 					api.LogInfo("[FDMaster] Cancelled stale activation approval instance for fd=%s: %s", fdID, actionRes.Reason)
@@ -1360,6 +1368,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				directActed++
+				actedFDIDs = append(actedFDIDs, fdID)
 			}
 		}
 		totalActed := engineActed + directActed
@@ -1375,7 +1384,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
-		for _, fdID := range req.FDIDs {
+		for _, fdID := range actedFDIDs {
 			go func(id, uEmail string) {
 				defer func() {
 					if rec := recover(); rec != nil {
@@ -1387,6 +1396,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"event":       "FD_ACTIVATION_APPROVED",
 					"actor_email": uEmail,
 				})
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_MASTER", "POST_APPROVE", []string{id}, uEmail)
 			}(fdID, userEmail)
 		}
 		api.LogInfo("[FDMaster] BulkApproveActivation: engine=%d direct=%d errors=%d by=%s",
@@ -1533,6 +1543,7 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"event":       "FD_ACTIVATION_REJECTED",
 					"actor_email": uEmail,
 				})
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_MASTER", "POST_REJECT", []string{id}, uEmail)
 			}(fdID, userEmail)
 		}
 		api.LogInfo("[FDMaster] BulkRejectActivation: engine=%d direct=%d errors=%d by=%s",
@@ -2550,6 +2561,7 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						"event":       "FD_CASHFLOW_EDIT_APPROVED",
 						"actor_email": uEmail,
 					})
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_CASHFLOW", "POST_EDIT", []string{id}, uEmail)
 			}(cfID, userEmail)
 		}
 		api.LogInfo("[BulkApproveCashflow] approved=%d skipped=%d errors=%d by=%s", approved, skipped, len(errs), userEmail)
@@ -2771,6 +2783,7 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						"event":       "FD_CASHFLOW_EDIT_REJECTED",
 						"actor_email": uEmail,
 					})
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_CASHFLOW", "POST_REJECT", []string{id}, uEmail)
 			}(cfID, userEmail)
 		}
 		api.LogInfo("[BulkRejectCashflow] rejected=%d skipped=%d errors=%d by=%s", rejected, skipped, len(errs), userEmail)
@@ -2897,6 +2910,7 @@ func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						"event":       "FD_CASHFLOW_DELETE_APPROVED",
 						"actor_email": uEmail,
 					})
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_CASHFLOW", "POST_DELETE", []string{id}, uEmail)
 			}(cfID, userEmail)
 		}
 		api.LogInfo("[BulkDeleteCashflow] deleted=%d skipped=%d errors=%d by=%s", deleted, skipped, len(errs), userEmail)
@@ -3705,6 +3719,7 @@ func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"event":       "FD_CASHFLOW_EDIT_APPROVED",
 					"actor_email": uEmail,
 				})
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_CASHFLOW", "POST_EDIT", []string{cfID}, uEmail)
 		}(cashflowID, fdID, userEmail)
 		api.LogInfo("[CashflowApprove] audit=%s cf=%s fd=%s by=%s", req.AuditID, cashflowID, fdID, userEmail)
 	}
@@ -4181,6 +4196,7 @@ func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"event":       "FD_CASHFLOW_DELETE_APPROVED",
 					"actor_email": uEmail,
 				})
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_CASHFLOW", "POST_DELETE", []string{cfID}, uEmail)
 		}(cashflowID, fdID, userEmail)
 
 		api.LogInfo("[CashflowApproveDelete] audit=%s cf=%s fd=%s by=%s", req.AuditID, cashflowID, fdID, userEmail)

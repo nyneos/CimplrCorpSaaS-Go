@@ -55,7 +55,7 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		err = tx.QueryRow(r.Context(), `
 			SELECT rule_id::text, status, version_no
 			FROM dms_svc.generation_rule_version
-			WHERE version_id = $1::uuid`, req.VersionID,
+			WHERE version_id = $1::uuid AND is_deleted = false`, req.VersionID,
 		).Scan(&versionRuleID, &versionStatus, &versionNo)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "version not found", "DMS_VERSION_NOT_FOUND")
@@ -71,10 +71,11 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var prevVersionID *string
+		var masterStatus string
 		err = tx.QueryRow(r.Context(), `
-			SELECT current_version_id::text FROM dms_svc.generation_rule
+			SELECT current_version_id::text, status FROM dms_svc.generation_rule
 			WHERE rule_id = $1::uuid AND is_deleted = false`, req.RuleID,
-		).Scan(&prevVersionID)
+		).Scan(&prevVersionID, &masterStatus)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "rule not found", "DMS_RULE_NOT_FOUND")
 			return
@@ -84,14 +85,17 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 				"rule_id":            req.RuleID,
 				"current_version_id": req.VersionID,
 				"version_no":         versionNo,
+				"status":             masterStatus,
 				"unchanged":          true,
 			})
 			return
 		}
 
+		// Live version pick also sets master Active (pause/resume remains SET_STATUS).
 		if _, err := tx.Exec(r.Context(), `
 			UPDATE dms_svc.generation_rule
-			SET current_version_id = $1::uuid, last_modified_by = $2, last_modified_at = now()
+			SET current_version_id = $1::uuid, status = 'Active',
+			    last_modified_by = $2, last_modified_at = now()
 			WHERE rule_id = $3::uuid`,
 			req.VersionID, actor, req.RuleID,
 		); err != nil {
@@ -102,7 +106,7 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 
 		reason := strings.TrimSpace(req.Reason)
 		if reason == "" {
-			reason = "Activated approved version"
+			reason = "Activated approved version as live"
 		}
 		a := &auditRow{}
 		a.set("rule_id", req.RuleID)
@@ -114,6 +118,8 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		a.set("requested_ip", common.NullIfEmpty(ip))
 		a.set("checker_by", actor)
 		a.set("checker_comment", "Activated as current")
+		a.set("old_status", masterStatus)
+		a.set("new_status", "Active")
 		if err := a.exec(r.Context(), tx); err != nil {
 			api.LogErrorForResponse(w, "dms rule activate audit: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit activation", "DMS_RULE_ACTIVATE_FAILED")
@@ -130,6 +136,7 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			"previous_version_id": prevVersionID,
 			"current_version_id":  req.VersionID,
 			"version_no":          versionNo,
+			"status":              "Active",
 		})
 	}
 }

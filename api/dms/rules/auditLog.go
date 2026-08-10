@@ -48,8 +48,12 @@ func HandleAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 				old_name, new_name,
 				old_module_code, new_module_code,
 				old_sub_module_code, new_sub_module_code,
+				old_entity_id, new_entity_id,
+				old_entity_name, new_entity_name,
 				old_status, new_status,
-				old_is_deleted, new_is_deleted
+				old_is_deleted, new_is_deleted,
+				old_data_row_from, new_data_row_from,
+				old_data_row_to, new_data_row_to
 			FROM dms_svc.generation_rule_audit
 			WHERE rule_id = $1::uuid
 			ORDER BY GREATEST(

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -442,5 +443,8 @@ func UploadBankBalancesProcess(
 	committed = true
 
 	fmt.Printf("[BANK-BALANCE-UPLOAD] batch=%s committed s3_key=%s inserted=%d", batchID, s3Key, len(insertedIDs))
+	if len(insertedIDs) > 0 {
+		dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_BALANCE", "POST_UPLOAD", insertedIDs, userName)
+	}
 	return batchID, nil
 }

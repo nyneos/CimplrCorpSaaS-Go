@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -19,6 +20,10 @@ import (
 func isForwardPendingDeleteStatus(status string) bool {
 	normalized := strings.ToUpper(strings.TrimSpace(status))
 	return normalized == constants.FwdProcessingStatusPendingDeleteApproval || normalized == strings.ToUpper(constants.FwdProcessingStatusDeleteApproval)
+}
+
+func isForwardPendingEditStatus(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), constants.FwdProcessingStatusPendingEditApproval)
 }
 
 func normalizeForwardSystemTransactionID(value interface{}) string {
@@ -329,6 +334,25 @@ func BulkUpdateForwardBookingProcessingStatus(pool *pgxpool.Pool) http.HandlerFu
 			}
 		}
 		var updatedRows []map[string]interface{}
+		statusByID := map[string]string{}
+		if len(updateIds) > 0 {
+			statusRows, statusErr := pool.Query(r.Context(), `
+				SELECT system_transaction_id, COALESCE(processing_status, '')
+				FROM forward_bookings
+				WHERE system_transaction_id = ANY($1)
+			`, updateIds)
+			if statusErr != nil {
+				respondEnvelopeError(w, http.StatusInternalServerError, statusErr.Error())
+				return
+			}
+			for statusRows.Next() {
+				var id, processingStatus string
+				if scanErr := statusRows.Scan(&id, &processingStatus); scanErr == nil {
+					statusByID[id] = processingStatus
+				}
+			}
+			statusRows.Close()
+		}
 		if len(updateIds) > 0 {
 			// Only update those belonging to accessible business units
 			rows, err := pool.Query(r.Context(), `SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, updateIds)
@@ -424,6 +448,35 @@ func BulkUpdateForwardBookingProcessingStatus(pool *pgxpool.Pool) http.HandlerFu
 				action = "DELETE_REJECT"
 			}
 			triggerForwardBookingNotif(r.Context(), pool, routeForwardBulkUpdateStatus, action, actor, req.ProcessingStatus, notifIDs)
+			if req.ProcessingStatus == constants.FwdProcessingStatusApproved {
+				deleteApprovedIDs := collectBookingIDsFromRows(deletedRows)
+				if len(deleteApprovedIDs) > 0 {
+					dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_DELETE", deleteApprovedIDs, actor)
+				}
+			}
+			if statusIDs := collectBookingIDsFromRows(updatedRows); len(statusIDs) > 0 && req.ProcessingStatus == constants.FwdProcessingStatusApproved {
+				createApprovedIDs := make([]string, 0, len(statusIDs))
+				editApprovedIDs := make([]string, 0, len(statusIDs))
+				for _, id := range statusIDs {
+					if isForwardPendingEditStatus(statusByID[id]) {
+						editApprovedIDs = append(editApprovedIDs, id)
+					} else {
+						createApprovedIDs = append(createApprovedIDs, id)
+					}
+				}
+				if len(createApprovedIDs) > 0 {
+					dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_APPROVE", createApprovedIDs, actor)
+				}
+				if len(editApprovedIDs) > 0 {
+					dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_EDIT", editApprovedIDs, actor)
+				}
+			} else if statusIDs := collectBookingIDsFromRows(updatedRows); len(statusIDs) > 0 {
+				trig := "POST_APPROVE"
+				if req.ProcessingStatus == constants.FwdProcessingStatusRejected {
+					trig = "POST_REJECT"
+				}
+				dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", trig, statusIDs, actor)
+			}
 			respondEnvelopeSuccess(w, "Forward booking processing status updated successfully", map[string]interface{}{
 				"updated": updatedRows,
 				"deleted": deletedIds,

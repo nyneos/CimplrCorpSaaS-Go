@@ -8,6 +8,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	jobs "CimplrCorpSaas/internal/jobs/investment"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/logger"
 	"context"
 	"database/sql"
@@ -425,6 +426,7 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		go func() {
 			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, []string{confirmID}, constants.AuditActionCreate, userEmail)
 			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/create", confirmID, payload.ToMap())
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION_CONF", "POST_CREATE", []string{confirmID}, userEmail)
 		}()
 
 		api.RespondWithPayload(w, true, "", map[string]any{
@@ -594,6 +596,8 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error()})
 					return
 				}
+
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION_CONF", "POST_CREATE", []string{confirmID}, userEmail)
 
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess:  true,
@@ -1053,6 +1057,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 
 		var toApprove []string
 		var toApproveConfirmIDs []string
+		var editConfirmIDs []string
 		var toDeleteActionIDs []string
 		var deleteMasterIDs []string
 
@@ -1073,6 +1078,9 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
 				toApproveConfirmIDs = append(toApproveConfirmIDs, cid)
+				if ps == constants.StatusPendingEditApproval {
+					editConfirmIDs = append(editConfirmIDs, cid)
+				}
 			}
 		}
 
@@ -1273,15 +1281,30 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		}
 
 		if len(toApproveConfirmIDs) > 0 {
+			ids := append([]string{}, toApproveConfirmIDs...)
+			editSet := make(map[string]struct{}, len(editConfirmIDs))
+			for _, id := range editConfirmIDs {
+				editSet[id] = struct{}{}
+			}
 			go func() {
-				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, toApproveConfirmIDs, constants.AuditActionApprove, checkerBy)
-				catalog.TriggerNotification(ctx, pgxPool, redemptionConfirmationApprovePath, toApproveConfirmIDs[0], payload.ToMap())
+				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, ids, constants.AuditActionApprove, checkerBy)
+				catalog.TriggerNotification(ctx, pgxPool, redemptionConfirmationApprovePath, ids[0], payload.ToMap())
+				for _, id := range ids {
+					trigger := "POST_APPROVE"
+					if _, isEdit := editSet[id]; isEdit {
+						trigger = "POST_EDIT"
+					}
+					dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION_CONF", trigger, []string{id}, checkerBy)
+				}
 			}()
 		}
 		if len(deleteMasterIDs) > 0 {
 			go func() {
 				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, deleteMasterIDs, constants.AuditActionDelete, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, redemptionConfirmationApprovePath, deleteMasterIDs[0], payload.ToMap())
+				for _, id := range deleteMasterIDs {
+					dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION_CONF", "POST_DELETE", []string{id}, checkerBy)
+				}
 			}()
 		}
 		api.RespondWithPayload(w, true, "", response)
@@ -1402,6 +1425,9 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 			go func() {
 				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, req.RedemptionConfirmIDs, constants.AuditActionReject, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/reject", req.RedemptionConfirmIDs[0], payload.ToMap())
+				for _, id := range req.RedemptionConfirmIDs {
+					dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION_CONF", "POST_REJECT", []string{id}, checkerBy)
+				}
 			}()
 		}
 		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})

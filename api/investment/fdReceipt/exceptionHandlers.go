@@ -12,12 +12,19 @@ import (
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// EditVariance updates resolution fields when workflow is not CLOSED (audit trail preserved).
-// POST /investment/fd/exception/edit
+func init() {
+	approvalengine.RegisterPostFinalizeHook("FD_EXCEPTION_EDIT", func(ctx context.Context, pool *pgxpool.Pool, recordID, transactionType, finalStatus, actorEmail, comment string) {
+		if finalStatus == constants.StatusApproved {
+			dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_EXCEPTION", "POST_EDIT", []string{recordID}, actorEmail)
+		}
+	})
+}
+
 func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -413,6 +420,7 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/exception/approve", id, map[string]interface{}{
 					"record_id": id, "event": "FD_RECEIPT_EXCEPTION_APPROVED", "actor_email": u,
 				})
+				dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_EXCEPTION", "POST_APPROVE", []string{id}, u)
 			}(eid, userEmail)
 		}
 
@@ -737,6 +745,7 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 						"event":       "FD_EXCEPTION_REJECTED",
 						"actor_email": uEmail,
 					})
+				dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_EXCEPTION", "POST_REJECT", []string{id}, uEmail)
 			}(eid, userEmail)
 		}
 

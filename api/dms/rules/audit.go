@@ -37,13 +37,13 @@ func (a *auditRow) exec(ctx context.Context, tx pgx.Tx) error {
 func findPendingAudit(ctx context.Context, tx pgx.Tx, ruleID string) (ruleAuditRow, error) {
 	var row ruleAuditRow
 	err := tx.QueryRow(ctx, `
-		SELECT audit_id::text, action_type, version_id::text, new_name, new_module_code, new_sub_module_code
+		SELECT audit_id::text, action_type, version_id::text, new_name, new_module_code, new_sub_module_code, new_status
 		FROM dms_svc.generation_rule_audit
 		WHERE rule_id = $1::uuid AND processing_status = ANY($2::text[])
 		ORDER BY requested_at DESC
 		LIMIT 1
 		FOR UPDATE`, ruleID, common.PendingProcessingStatuses,
-	).Scan(&row.AuditID, &row.ActionType, &row.VersionID, &row.NewName, &row.NewModuleCode, &row.NewSubModuleCode)
+	).Scan(&row.AuditID, &row.ActionType, &row.VersionID, &row.NewName, &row.NewModuleCode, &row.NewSubModuleCode, &row.NewStatus)
 	return row, err
 }
 

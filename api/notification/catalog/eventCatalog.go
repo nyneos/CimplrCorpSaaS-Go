@@ -613,10 +613,27 @@ func BulkRejectEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // GetEventsApprovedActive returns active events with approved audit, filtered by caller's entity pool.
 // Admin users (is_admin_override) see all events regardless of entity.
+//
+// Optional body {module_code, sub_module_code, entity_include, entity_exclude}
+// is opt-in — omitted/empty body is unchanged for existing callers. When both
+// module_code+sub_module_code are set: empty entity_include = every
+// entity's event for that module/sub-module (Global-applicability policies
+// fire whichever entity actually breaches); non-empty = only those entities.
+// entity_exclude is ignored when isAdmin.
 func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		buNames, isAdmin := callerContext(ctx)
+
+		var scopeReq struct {
+			ModuleCode    string   `json:"module_code"`
+			SubModuleCode string   `json:"sub_module_code"`
+			EntityInclude []string `json:"entity_include"`
+			EntityExclude []string `json:"entity_exclude"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&scopeReq)
+		scopeReq.ModuleCode = strings.TrimSpace(scopeReq.ModuleCode)
+		scopeReq.SubModuleCode = strings.TrimSpace(scopeReq.SubModuleCode)
 
 		// Entity filter: match events whose entity_name is in the caller's accessible pool,
 		// OR whose entity_name is empty (global events visible to everyone).
@@ -647,6 +664,31 @@ func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			q = baseQ + ` AND (COALESCE(m.entity_name,'') = '' OR COALESCE(m.entity_name,'') = ANY($1::text[])) ORDER BY m.event_display_name`
 			args = []interface{}{buNames}
 		}
+
+		if scopeReq.ModuleCode != "" && scopeReq.SubModuleCode != "" {
+			// Strip the trailing "ORDER BY" so extra AND-clauses can be appended.
+			q = strings.TrimSuffix(q, ` ORDER BY m.event_display_name`)
+
+			args = append(args, scopeReq.ModuleCode, scopeReq.SubModuleCode)
+			q += fmt.Sprintf(` AND m.module_code = $%d AND m.sub_module_code = $%d`, len(args)-1, len(args))
+
+			if len(scopeReq.EntityInclude) > 0 {
+				args = append(args, scopeReq.EntityInclude)
+				q += fmt.Sprintf(` AND m.entity_name = ANY($%d::text[])`, len(args))
+			}
+			// EntityInclude empty (Global applicability) → no entity
+			// restriction here at all; every configured entity's event is a
+			// candidate so the picker can offer (and default-select) all of
+			// them, and whichever entity actually breaches at runtime fires.
+
+			if len(scopeReq.EntityExclude) > 0 && !isAdmin {
+				args = append(args, scopeReq.EntityExclude)
+				q += fmt.Sprintf(` AND NOT (m.entity_name = ANY($%d::text[]))`, len(args))
+			}
+
+			q += ` ORDER BY m.event_display_name`
+		}
+
 		var rows pgx.Rows
 		var err error
 		if len(args) > 0 {
@@ -681,7 +723,7 @@ func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, rows.Err().Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", out)
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
 	}
 }
 

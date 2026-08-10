@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -469,6 +470,8 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_BALANCE", "POST_CREATE", []string{balanceID}, requestedBy)
+
 		api.RespondWithResult(w, true, balanceID)
 	}
 }
@@ -637,6 +640,13 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
+		if len(req.BalanceIDs) > 0 {
+			dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_BALANCE", "POST_APPROVE", req.BalanceIDs, checkerBy)
+		}
+		if len(deleted) > 0 {
+			dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_BALANCE", "POST_DELETE", deleted, checkerBy)
+		}
+
 		// return structured JSON
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"approved_count": len(actionIDs), "deleted": deleted})
 	}
@@ -756,6 +766,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
+		dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_BALANCE", "POST_REJECT", req.BalanceIDs, checkerBy)
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rejected_count": len(actionIDs)})
 	}
 }
@@ -1530,6 +1541,8 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// clear tx rollback defer
 		tx = nil
+
+		dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_BALANCE", "POST_EDIT", []string{req.BalanceID}, requestedBy)
 
 		api.RespondWithResult(w, true, req.BalanceID)
 	}

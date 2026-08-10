@@ -9,8 +9,11 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
-	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	dashboardbuilder "CimplrCorpSaas/api/dash/dashboardBuilder"
+	"CimplrCorpSaas/api/domaincatalog"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/services/docsvc"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -25,20 +28,29 @@ type AdhocRequest struct {
 	SourceIDs          []string
 	TriggeredBy        string
 	MergeOverrides     map[string]string // optional preview/sample values layered on row
+	StoreS3            bool              // archive destination (default true)
+	StoreLocal         bool              // also/or write under dms_local_output
 	SendEmail          bool
+	PackageMode        string // FILES | ZIP (email attachments)
 	EmailTemplateID    string // DMS EMAIL-kind template for subject/body
 	EmailTo            []string
 	EmailCc            []string
 	EmailSubject       string
 	EmailBodyHTML      string
+	// RequireApproval stages dispatch for maker-checker (default true when any destination set).
+	// Docs are generated immediately; approval gates email send / DISPATCHED finalize.
+	RequireApproval *bool
 }
 
 // AdhocResult is returned after preview or generate.
 type AdhocResult struct {
-	RunID       string
-	HTMLPreview string
-	DocIDs      []string
-	Filenames   []string
+	RunID            string
+	RequestID        string // adhoc_dispatch_request when pending approval
+	HTMLPreview      string
+	DocIDs           []string
+	Filenames        []string
+	PendingApproval  bool
+	ProcessingStatus string
 }
 
 // PreviewInput drives PreviewMergedOrDraft — either an approved template id
@@ -88,12 +100,27 @@ func PreviewMergedHTML(ctx context.Context, pool *pgxpool.Pool, html string, mer
 	values := buildMergeValues(html, mergeFields, row, overrides)
 	out := substituteMergeFields(html, values)
 	var err error
-	out, err = expandTxnTablePlaceholders(ctx, pool, out, row, attachmentGenCtx{
+	poolRows := []map[string]any{}
+	if row != nil {
+		poolRows = []map[string]any{row}
+	}
+	genCtx := attachmentGenCtx{
 		AllowUnscopedBankAccount: true,
-	}, strings.ToUpper(format))
+		PoolRows:                 poolRows,
+	}
+	out, err = expandDataTablePlaceholders(ctx, pool, out, row, genCtx, strings.ToUpper(format))
 	if err != nil {
 		return "", err
 	}
+	out, err = expandTxnTablePlaceholders(ctx, pool, out, row, genCtx, strings.ToUpper(format))
+	if err != nil {
+		return "", err
+	}
+	out, err = expandChartPlaceholders(ctx, pool, out, row, genCtx)
+	if err != nil {
+		return "", err
+	}
+	out = expandKPIPlaceholders(out, genCtx.PoolRows)
 	return wrapHTMLDocument(out), nil
 }
 
@@ -149,6 +176,19 @@ func RunAdhocGeneration(ctx context.Context, pool *pgxpool.Pool, req AdhocReques
 	if len(sourceIDs) == 0 {
 		sourceIDs = []string{""} // single pass with overrides / empty row
 	}
+	if !req.StoreS3 && !req.StoreLocal && !req.SendEmail {
+		req.StoreS3 = true
+	}
+
+	if q, qErr := docsvc.NewFromEnv().QuotaCheck(ctx); qErr != nil {
+		return out, fmt.Errorf("document-service unavailable (generation blocked): %w", qErr)
+	} else if !q.Allowed {
+		code := q.ErrorCode
+		if code == "" {
+			code = "DMS_GENERATION_QUOTA_EXCEEDED"
+		}
+		return out, fmt.Errorf("%s: %s", code, q.Message)
+	}
 
 	var runID string
 	err := pool.QueryRow(ctx, `
@@ -168,44 +208,66 @@ func RunAdhocGeneration(ctx context.Context, pool *pgxpool.Pool, req AdhocReques
 				VALUES ($1::uuid, $2, $3)
 				ON CONFLICT (run_id, source_id) DO NOTHING`, runID, sid, i)
 		}
-		row, err := fetchAdhocSourceRow(ctx, pool, req.ModuleCode, req.SubModuleCode, sid)
+		row, sourceKey, idField, err := fetchAdhocSourceRowDetailed(ctx, pool, req.ModuleCode, req.SubModuleCode, sid)
 		if err != nil {
 			api.LogError("[DMS-ADHOC] fetch source=%s: %v", sid, err)
-			row = map[string]any{}
+			row = map[string]any{"source_id": sid}
 		}
-		if err := generateAdhocAttachment(ctx, pool, runID, tplID, format, row, req.MergeOverrides, &out); err != nil {
+		if err := generateAdhocAttachment(ctx, pool, runID, tplID, format, row, req.MergeOverrides, sourceKey, idField, sid, req.StoreS3, req.StoreLocal, &out); err != nil {
 			_ = finishRun(ctx, pool, runID, "FAILED", err.Error())
 			return out, err
 		}
 	}
 
+	_, _ = pool.Exec(ctx, `
+		UPDATE dms_svc.generation_run SET source_row_count = $2 WHERE run_id = $1::uuid`,
+		runID, len(sourceIDs))
+	incrementDocSvcQuotaForRun(ctx, pool, runID, req.TriggeredBy)
+
+	needApproval := true
+	if req.RequireApproval != nil {
+		needApproval = *req.RequireApproval
+	}
+
+	// Prepare email cover into generation_run even when pending — approve will dispatch.
 	if req.SendEmail && len(out.DocIDs) > 0 {
-		// Prefer explicit EMAIL cover template; fall back to subject/body overrides.
-		firstRow, _ := fetchAdhocSourceRow(ctx, pool, req.ModuleCode, req.SubModuleCode, sourceIDs[0])
-		if firstRow == nil {
-			firstRow = map[string]any{}
+		poolRows := make([]map[string]any, 0, len(sourceIDs))
+		for _, sid := range sourceIDs {
+			row, _ := fetchAdhocSourceRow(ctx, pool, req.ModuleCode, req.SubModuleCode, sid)
+			if row == nil {
+				row = map[string]any{}
+			}
+			for k, v := range req.MergeOverrides {
+				row[k] = v
+			}
+			poolRows = append(poolRows, row)
 		}
-		for k, v := range req.MergeOverrides {
-			firstRow[k] = v
+		firstRow := map[string]any{}
+		if len(poolRows) > 0 {
+			firstRow = poolRows[0]
 		}
 		emailTpl := strings.TrimSpace(req.EmailTemplateID)
+		genCtx := attachmentGenCtx{
+			AllowUnscopedBankAccount: true,
+			PoolRows:                 poolRows,
+		}
 		if emailTpl != "" {
-			if err := renderEmailCoverFromTemplate(ctx, pool, runID, emailTpl, firstRow); err != nil {
+			if err := renderEmailCoverFromTemplate(ctx, pool, runID, emailTpl, firstRow, genCtx); err != nil {
 				api.LogError("[DMS-ADHOC] email cover template=%s: %v", emailTpl, err)
-				_ = finishRun(ctx, pool, runID, "PARTIAL", "docs saved; email cover: "+err.Error())
-				return out, nil
+				_ = finishRun(ctx, pool, runID, "FAILED", "email cover: "+err.Error())
+				return out, fmt.Errorf("email cover: %w", err)
 			}
 		} else {
 			subj := strings.TrimSpace(req.EmailSubject)
 			body := strings.TrimSpace(req.EmailBodyHTML)
 			if subj != "" || body != "" {
+				body = expandKPIPlaceholders(body, poolRows)
 				_, _ = pool.Exec(ctx, `
 					UPDATE dms_svc.generation_run
 					SET email_subject = NULLIF($2,''), email_body_html = NULLIF($3,'')
 					WHERE run_id = $1::uuid`, runID, subj, body)
 			}
 		}
-		// Load rendered subject/body onto req for dispatch payload overrides.
 		var storedSubj, storedBody string
 		_ = pool.QueryRow(ctx, `
 			SELECT COALESCE(email_subject,''), COALESCE(email_body_html,'')
@@ -217,6 +279,22 @@ func RunAdhocGeneration(ctx context.Context, pool *pgxpool.Pool, req AdhocReques
 		if storedBody != "" {
 			req.EmailBodyHTML = storedBody
 		}
+	}
+
+	if needApproval {
+		reqID, err := insertAdhocDispatchRequest(ctx, pool, runID, req)
+		if err != nil {
+			_ = finishRun(ctx, pool, runID, "FAILED", err.Error())
+			return out, err
+		}
+		out.RequestID = reqID
+		out.PendingApproval = true
+		out.ProcessingStatus = "PENDING_APPROVAL"
+		_ = finishRun(ctx, pool, runID, "PENDING_APPROVAL", "")
+		return out, nil
+	}
+
+	if req.SendEmail && len(out.DocIDs) > 0 {
 		if err := dispatchAdhocEmail(ctx, pool, runID, req); err != nil {
 			api.LogError("[DMS-ADHOC] email dispatch run=%s: %v", runID, err)
 			_ = finishRun(ctx, pool, runID, "PARTIAL", "docs saved; email: "+err.Error())
@@ -224,11 +302,68 @@ func RunAdhocGeneration(ctx context.Context, pool *pgxpool.Pool, req AdhocReques
 		}
 	}
 
+	out.ProcessingStatus = "SUCCESS"
 	_ = finishRun(ctx, pool, runID, "SUCCESS", "")
 	return out, nil
 }
 
-func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, runID, tplID, format string, row map[string]any, overrides map[string]string, out *AdhocResult) error {
+func insertAdhocDispatchRequest(ctx context.Context, pool *pgxpool.Pool, runID string, req AdhocRequest) (string, error) {
+	pkg := strings.ToUpper(strings.TrimSpace(req.PackageMode))
+	if pkg != "ZIP" {
+		pkg = "FILES"
+	}
+	// text[] NOT NULL — pgx encodes nil slices as NULL (bypasses DEFAULT '{}').
+	emailTo := req.EmailTo
+	if emailTo == nil {
+		emailTo = []string{}
+	}
+	emailCc := req.EmailCc
+	if emailCc == nil {
+		emailCc = []string{}
+	}
+	var reqID string
+	err := pool.QueryRow(ctx, `
+		INSERT INTO dms_svc.adhoc_dispatch_request (
+			run_id, module_code, sub_module_code, document_template_id, output_format,
+			store_s3, store_local, send_email, package_mode, email_template_id,
+			email_to, email_cc, email_subject, email_body_html,
+			processing_status, requested_by
+		) VALUES (
+			$1::uuid, $2, $3, NULLIF($4,'')::uuid, $5,
+			$6, $7, $8, $9, NULLIF($10,'')::uuid,
+			$11, $12, COALESCE($13, ''), COALESCE($14, ''),
+			'PENDING_APPROVAL', $15
+		) RETURNING request_id::text`,
+		runID, req.ModuleCode, req.SubModuleCode, strings.TrimSpace(req.DocumentTemplateID), strings.ToUpper(req.OutputFormat),
+		req.StoreS3, req.StoreLocal, req.SendEmail, pkg, strings.TrimSpace(req.EmailTemplateID),
+		emailTo, emailCc, req.EmailSubject, req.EmailBodyHTML,
+		strings.TrimSpace(req.TriggeredBy),
+	).Scan(&reqID)
+	if err != nil {
+		return "", fmt.Errorf("insert adhoc_dispatch_request: %w", err)
+	}
+	_, _ = pool.Exec(ctx, `
+		INSERT INTO dms_svc.adhoc_dispatch_request_audit (
+			request_id, run_id, action_type, processing_status, reason, requested_by,
+			new_processing_status, new_send_email, new_store_s3, new_store_local,
+			new_output_format, new_package_mode, new_module_code, new_sub_module_code
+		) VALUES ($1::uuid, $2::uuid, 'CREATE', 'PENDING_APPROVAL', 'Adhoc generate staged for dispatch approval', $3,
+			'PENDING_APPROVAL', $4, $5, $6, $7, $8, $9, $10)`,
+		reqID, runID, req.TriggeredBy, req.SendEmail, req.StoreS3, req.StoreLocal,
+		strings.ToUpper(req.OutputFormat), pkg, req.ModuleCode, req.SubModuleCode)
+	return reqID, nil
+}
+
+func generateAdhocAttachment(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	runID, tplID, format string,
+	row map[string]any,
+	overrides map[string]string,
+	sourceKey, idField, sourceID string,
+	storeS3, storeLocal bool,
+	out *AdhocResult,
+) error {
 	tplVersionID, content, err := loadApprovedTemplateContent(ctx, pool, tplID)
 	if err != nil {
 		return err
@@ -239,36 +374,85 @@ func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, runID, tpl
 	}
 	values := buildMergeValues(content.HTML, mergeFields, row, overrides)
 	renderedHTML := substituteMergeFields(content.HTML, values)
-	renderedHTML, err = expandTxnTablePlaceholders(ctx, pool, renderedHTML, row, attachmentGenCtx{
+	poolRows := []map[string]any{}
+	if row != nil {
+		poolRows = []map[string]any{row}
+	}
+	var filters []dashboardbuilder.WidgetFilterRule
+	if strings.TrimSpace(idField) != "" && strings.TrimSpace(sourceID) != "" {
+		filters = append(filters, dashboardbuilder.WidgetFilterRule{
+			Field: strings.TrimSpace(idField), Type: "id", Op: "in",
+			Value: sourceID, Conjunction: "AND",
+		})
+	}
+	genCtx := attachmentGenCtx{
 		AllowUnscopedBankAccount: true,
-	}, format)
+		PoolRows:                 poolRows,
+		SourceKey:                sourceKey,
+		Filters:                  filters,
+	}
+	renderedHTML, err = expandDataTablePlaceholders(ctx, pool, renderedHTML, row, genCtx, format)
 	if err != nil {
 		return err
 	}
+	renderedHTML, err = expandTxnTablePlaceholders(ctx, pool, renderedHTML, row, genCtx, format)
+	if err != nil {
+		return err
+	}
+	renderedHTML, err = expandChartPlaceholders(ctx, pool, renderedHTML, row, genCtx)
+	if err != nil {
+		return err
+	}
+	renderedHTML = expandKPIPlaceholders(renderedHTML, genCtx.PoolRows)
 	if out.HTMLPreview == "" {
 		out.HTMLPreview = wrapHTMLDocument(renderedHTML)
 	}
 
-	file, err := renderMergedOutput(format, renderedHTML, values, content.SheetTokens, content.Kind)
+	file, err := renderAndStoreViaDocSvc(ctx, format, renderedHTML, values, content.SheetTokens, content.Kind, content.PageDesign)
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
 	}
 	sum := sha256.Sum256(file.Bytes)
 	checksum := hex.EncodeToString(sum[:])
-	s3Key := s3storage.BuildModuleS3Key("dms", "generated", checksum, file.Ext)
-	if err := s3storage.PutObjectToS3(ctx, s3Key, file.Bytes, file.ContentType); err != nil {
-		return err
-	}
 	tplName, _ := loadTemplateName(ctx, pool, tplID)
-	outName := buildDmsOutputFilename(outputNaming{Prefix: "Adhoc_" + sanitizeOutputName(tplName), AppendDatetime: true}, tplName, file.Ext, time.Now(), false)
+	outName := buildDmsOutputFilename(outputNaming{Prefix: "Adhoc_" + sanitizeOutputName(tplName), AppendDatetime: true}, tplName, file.Ext, time.Now(), false, "")
+
+	if !storeS3 && !storeLocal {
+		storeS3 = true
+	}
+
+	var localPath string
+	if storeLocal {
+		rel, _, err := WriteLocalDmsFile(runID, outName, file.Bytes)
+		if err != nil {
+			return fmt.Errorf("local store: %w", err)
+		}
+		localPath = rel
+	}
+
+	s3Key := ""
+	storageBackend := "MAIN_S3"
+	if storeS3 {
+		if file.StoredKey != "" {
+			s3Key = file.StoredKey
+			storageBackend = "DOCSVC_S3"
+		} else {
+			s3Key = s3storage.BuildModuleS3Key("dms", "generated", checksum, file.Ext)
+			if err := s3storage.PutObjectToS3(ctx, s3Key, file.Bytes, file.ContentType); err != nil {
+				return err
+			}
+		}
+	} else {
+		s3Key = LocalStorageKey(localPath)
+	}
 
 	var docID string
 	err = pool.QueryRow(ctx, `
 		INSERT INTO dms_svc.generated_document
-			(run_id, document_template_id, template_version_id, s3_key, file_format, file_size, checksum, status, output_filename)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, 'GENERATED', $8)
+			(run_id, document_template_id, template_version_id, s3_key, file_format, file_size, checksum, status, output_filename, local_path, storage_backend)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, 'GENERATED', $8, $9, $10)
 		RETURNING doc_id::text`,
-		runID, tplID, tplVersionID, s3Key, file.Format, len(file.Bytes), checksum, outName,
+		runID, tplID, tplVersionID, s3Key, file.Format, len(file.Bytes), checksum, outName, localPath, storageBackend,
 	).Scan(&docID)
 	if err != nil {
 		return err
@@ -278,63 +462,184 @@ func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, runID, tpl
 	return nil
 }
 
+// adhocSourceIDField maps sub-module → primary id column used by dashboard filters
+// (same vocabulary as seeded generation_rule_trigger.source_id_field).
+func adhocSourceIDField(subModuleCode string) string {
+	switch strings.TrimSpace(subModuleCode) {
+	case "BANK_STATEMENT":
+		return "bank_statement_id"
+	case "BANK_BALANCE":
+		return "balance_id"
+	case "BANK_LIMIT":
+		return "limit_id"
+	case "CASHFLOW_PROJECTION":
+		return "proposal_id"
+	case "FUND_PLANNING":
+		return "plan_id"
+	case "LIMIT_UTILIZATION":
+		return "utilization_id"
+	case "PAYABLE_RECEIVABLE":
+		return "transaction_id"
+	case "SWEEP_CONFIG":
+		return "sweep_id"
+	case "SWEEP_INITIATION", "SWEEP_EXECUTION":
+		return "initiation_id"
+	case "FD_BOOKING":
+		return "booking_id"
+	case "FD_CONFIRMATION":
+		return "confirmation_id"
+	case "FD_MASTER":
+		return "fd_id"
+	case "FD_ACCRUAL":
+		return "run_id"
+	case "FD_ACCRUAL_SCHED":
+		return "config_id"
+	case "FD_CASHFLOW":
+		return "cashflow_id"
+	case "FD_CLOSURE":
+		return "closure_initiate_id"
+	case "FD_EXCEPTION":
+		return "exception_id"
+	case "FD_RECEIPT":
+		return "receipt_id"
+	case "FD_TDS_REGISTER":
+		return "tds_id"
+	case "EXPOSURE_CREATION", "EXPOSURE_UPLOAD", "EXPOSURE_BUCKETING", "HEDGE_LINK":
+		return "exposure_header_id"
+	case "FORWARD_BOOKING":
+		return "system_transaction_id"
+	case "FORWARD_CANCELLATION", "FORWARD_ROLLOVER", "FORWARD_CANCEL_ROLL":
+		return "booking_id"
+	case "FORWARD_MTM":
+		return "mtm_id"
+	case "MF_ACCOUNTING":
+		return "activity_id"
+	case "MF_CONFIRMATION":
+		return "confirmation_id"
+	case "MF_REDEMPTION_CONF":
+		return "redemption_confirm_id"
+	case "MF_INITIATION":
+		return "initiation_id"
+	case "MF_ONBOARD":
+		return "batch_id"
+	case "MF_PORTFOLIO", "MF_PROPOSAL":
+		return "proposal_id"
+	case "MF_REDEMPTION":
+		return "redemption_id"
+	default:
+		return "source_id"
+	}
+}
+
 // FetchAdhocSourceRow loads one source row for preview/adhoc merge (exported for API).
 func FetchAdhocSourceRow(ctx context.Context, pool *pgxpool.Pool, moduleCode, subModuleCode, sourceID string) (map[string]any, error) {
-	return fetchAdhocSourceRow(ctx, pool, moduleCode, subModuleCode, sourceID)
+	row, _, _, err := fetchAdhocSourceRowDetailed(ctx, pool, moduleCode, subModuleCode, sourceID)
+	return row, err
 }
 
 func fetchAdhocSourceRow(ctx context.Context, pool *pgxpool.Pool, moduleCode, subModuleCode, sourceID string) (map[string]any, error) {
+	row, _, _, err := fetchAdhocSourceRowDetailed(ctx, pool, moduleCode, subModuleCode, sourceID)
+	return row, err
+}
+
+func fetchAdhocSourceRowDetailed(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	moduleCode, subModuleCode, sourceID string,
+) (row map[string]any, sourceKey, idField string, err error) {
+	_ = moduleCode
 	sourceID = strings.TrimSpace(sourceID)
+	idField = adhocSourceIDField(subModuleCode)
 	if sourceID == "" {
-		return map[string]any{}, nil
+		return map[string]any{}, "", idField, nil
 	}
-	if moduleCode == "CASH" && subModuleCode == "BANK_STATEMENT" {
-		rows, err := pool.Query(ctx, `
-			SELECT
-				COALESCE(s.bank_statement_id::text, '') AS bank_statement_id,
-				COALESCE(s.bank_statement_id::text, '') AS statement_id,
-				COALESCE(s.entity_id, '') AS entity_id,
-				COALESCE(e.entity_name, '') AS entity_name,
-				COALESCE(s.account_number, '') AS account_number,
-				COALESCE(mb.bank_name, '') AS bank_name,
-				COALESCE(mba.account_nickname, '') AS account_nickname,
-				s.statement_period_start,
-				s.statement_period_end,
-				s.opening_balance,
-				s.closing_balance,
-				s.uploaded_at,
-				COALESCE((
-					SELECT COUNT(*)::int FROM cimplrcorpsaas.bank_statement_transactions t
-					WHERE t.bank_statement_id = s.bank_statement_id
-				), 0) AS total_transactions
-			FROM cimplrcorpsaas.bank_statements s
-			LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
-			LEFT JOIN public.masterbankaccount mba
-				ON mba.account_number = s.account_number AND COALESCE(mba.is_deleted, false) = false
-			LEFT JOIN public.masterbank mb
-				ON mb.bank_id = mba.bank_id AND COALESCE(mb.is_deleted, false) = false
-			WHERE s.bank_statement_id::text = $1
-			  AND COALESCE(s.is_deleted, false) = false
-			LIMIT 1`, sourceID)
-		if err != nil {
-			return nil, err
+
+	sourceKey, aliasErr := domaincatalog.ResolveSubModuleAlias(ctx, pool, subModuleCode, "DASHBOARD")
+	if aliasErr != nil {
+		api.LogError("[DMS-ADHOC] dashboard alias sub=%s: %v", subModuleCode, aliasErr)
+		// Direct table fallback for FD booking (dashboard alias missing).
+		if row, ok := fetchAdhocFDBookingDirect(ctx, pool, sourceID); ok {
+			return row, "", idField, nil
 		}
-		defer rows.Close()
-		fds := rows.FieldDescriptions()
-		if !rows.Next() {
-			return map[string]any{"bank_statement_id": sourceID}, nil
-		}
-		vals, err := rows.Values()
-		if err != nil {
-			return nil, err
-		}
-		row := make(map[string]any, len(fds))
-		for i, fd := range fds {
-			row[string(fd.Name)] = vals[i]
-		}
-		return row, nil
+		return map[string]any{"source_id": sourceID, idField: sourceID}, "", idField, nil
 	}
-	return map[string]any{"source_id": sourceID}, nil
+
+	filters := []dashboardbuilder.WidgetFilterRule{{
+		Field: idField, Type: "id", Op: "in", Value: sourceID, Conjunction: "AND",
+	}}
+	rows, _, fetchErr := dashboardbuilder.FetchSourceData(ctx, pool, dashboardbuilder.DataRequest{
+		Source:                   sourceKey,
+		Filters:                  filters,
+		Limit:                    1,
+		AllowUnscopedBankAccount: true,
+	})
+	if fetchErr != nil {
+		if row, ok := fetchAdhocFDBookingDirect(ctx, pool, sourceID); ok {
+			return row, sourceKey, idField, nil
+		}
+		return nil, sourceKey, idField, fmt.Errorf("fetch %s row %s: %w", sourceKey, sourceID, fetchErr)
+	}
+	if len(rows) == 0 {
+		if row, ok := fetchAdhocFDBookingDirect(ctx, pool, sourceID); ok {
+			return row, sourceKey, idField, nil
+		}
+		api.LogError("[DMS-ADHOC] no row for source=%s field=%s key=%s", sourceID, idField, sourceKey)
+		return map[string]any{"source_id": sourceID, idField: sourceID}, sourceKey, idField, nil
+	}
+	row = rows[0]
+	if _, ok := row["source_id"]; !ok {
+		row["source_id"] = sourceID
+	}
+	if _, ok := row[idField]; !ok {
+		row[idField] = sourceID
+	}
+	return row, sourceKey, idField, nil
+}
+
+// fetchAdhocFDBookingDirect loads one FD booking when dashboard source is empty/unavailable.
+func fetchAdhocFDBookingDirect(ctx context.Context, pool *pgxpool.Pool, bookingID string) (map[string]any, bool) {
+	bookingID = strings.TrimSpace(bookingID)
+	if bookingID == "" || pool == nil {
+		return nil, false
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT
+			COALESCE(br.booking_id::text, '') AS booking_id,
+			COALESCE(br.entity_id::text, '') AS entity_id,
+			COALESCE(br.entity_name, '') AS entity_name,
+			COALESCE(br.bank_name, '') AS bank_name,
+			COALESCE(br.tenor_type, '') AS tenor_type,
+			COALESCE(br.interest_type_code, '') AS interest_type_code,
+			COALESCE(br.booking_status, '') AS booking_status,
+			COALESCE(br.principal_amount, 0) AS principal_amount,
+			COALESCE(br.interest_rate, 0) AS interest_rate,
+			COALESCE(br.tenure_days, 0) AS tenure_days,
+			COALESCE(br.tenure_months, 0) AS tenure_months,
+			COALESCE(br.tenure_years, 0) AS tenure_years,
+			br.value_date,
+			br.expected_maturity_date,
+			br.expected_start_date
+		FROM investment.fd_booking_request br
+		WHERE br.booking_id = $1 AND COALESCE(br.is_deleted, false) = false
+		LIMIT 1`, bookingID)
+	if err != nil {
+		return nil, false
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, false
+	}
+	fds := rows.FieldDescriptions()
+	vals, err := rows.Values()
+	if err != nil {
+		return nil, false
+	}
+	out := make(map[string]any, len(fds)+1)
+	for i, fd := range fds {
+		out[string(fd.Name)] = vals[i]
+	}
+	out["source_id"] = bookingID
+	return out, true
 }
 
 func dispatchAdhocEmail(ctx context.Context, pool *pgxpool.Pool, runID string, req AdhocRequest) error {
@@ -342,8 +647,8 @@ func dispatchAdhocEmail(ctx context.Context, pool *pgxpool.Pool, runID string, r
 }
 
 // renderEmailCoverFromTemplate merges an EMAIL-kind DMS template into the run's
-// email_subject / email_body_html (same path as rule email covers).
-func renderEmailCoverFromTemplate(ctx context.Context, pool *pgxpool.Pool, runID, templateID string, row map[string]any) error {
+// email_subject / email_body_html (full merge/expand path, same as rule covers).
+func renderEmailCoverFromTemplate(ctx context.Context, pool *pgxpool.Pool, runID, templateID string, row map[string]any, genCtx attachmentGenCtx) error {
 	verID, content, err := loadApprovedTemplateContent(ctx, pool, templateID)
 	if err != nil {
 		return err
@@ -355,21 +660,15 @@ func renderEmailCoverFromTemplate(ctx context.Context, pool *pgxpool.Pool, runID
 	if err != nil {
 		return err
 	}
-	values := buildMergeValues(content.HTML, mergeFields, row, nil)
-	// Also expose raw row keys for subject tokens.
-	if row != nil {
-		for k, raw := range row {
-			if _, exists := values[k]; !exists {
-				values[k] = formatFieldValue(raw)
-			}
-		}
-	}
 	subject := strings.TrimSpace(content.EmailMeta.Subject)
 	if subject == "" {
 		subject = "Document attached"
 	}
+	body, values, err := mergeTemplateHTML(ctx, pool, content.HTML, mergeFields, row, genCtx, "HTML")
+	if err != nil {
+		return fmt.Errorf("merge EMAIL template %s: %w", templateID, err)
+	}
 	subject = substituteMustache(subject, values)
-	body := substituteMergeFields(content.HTML, values)
 	if strings.TrimSpace(body) == "" {
 		return fmt.Errorf("EMAIL template %s produced empty body", templateID)
 	}
@@ -418,6 +717,7 @@ func DispatchAdhocWithRecipients(ctx context.Context, pool *pgxpool.Pool, runID 
 	if strings.TrimSpace(req.EmailBodyHTML) != "" {
 		payload["EmailBodyHTML"] = req.EmailBodyHTML
 	}
+	enrichDispatchPayload(ctx, pool, runID, payload)
 	notifcatalog.TriggerNotificationForTemplatesWithAttachments(
 		ctx, pool, dmsDocumentGeneratedRoute, corr, payload, nil, atts,
 	)

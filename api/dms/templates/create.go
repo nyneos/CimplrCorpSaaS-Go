@@ -7,6 +7,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/dms/common"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -48,6 +49,10 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if (req.EntityID == "") != (req.EntityName == "") {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "entity_id and entity_name must both be set or both empty", "VALIDATION_ERROR")
+			return
+		}
+		scope := ctxutil.FromContext(r.Context())
+		if !common.RequireEntityAccess(w, scope, req.EntityID) {
 			return
 		}
 		if len(req.ContentJSON) == 0 {

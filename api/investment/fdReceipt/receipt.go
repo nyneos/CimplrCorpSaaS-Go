@@ -17,6 +17,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -642,6 +643,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				"actor_email": uEmail,
 				"amount":      gross,
 			})
+			dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_RECEIPT", "POST_CREATE", []string{rID}, uEmail)
 		}(receiptID, req.FdID, userEmail, req.GrossInterestReceived)
 
 		fields := map[string]interface{}{
@@ -1243,6 +1245,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 						"event":       "FD_RECEIPT_APPROVED",
 						"actor_email": uEmail,
 					})
+					dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_RECEIPT", "POST_APPROVE", []string{id}, uEmail)
 				}(rID, userEmail)
 			}
 			return
@@ -1395,6 +1398,22 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 					"event":       "FD_RECEIPT_APPROVED",
 					"actor_email": uEmail,
 				})
+				trigger := "POST_APPROVE"
+				var actionType string
+				if qerr := pool.QueryRow(context.Background(), `
+					SELECT COALESCE(action_type,'')
+					FROM investment.fd_interest_receipt_audit
+					WHERE receipt_id=$1 AND processing_status IN ('APPROVED','DELETED')
+					ORDER BY COALESCE(checker_at, requested_at) DESC NULLS LAST
+					LIMIT 1`, id).Scan(&actionType); qerr == nil {
+					switch strings.ToUpper(strings.TrimSpace(actionType)) {
+					case "EDIT":
+						trigger = "POST_EDIT"
+					case "DELETE":
+						trigger = "POST_DELETE"
+					}
+				}
+				dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_RECEIPT", trigger, []string{id}, uEmail)
 			}(rID, userEmail)
 		}
 	}
@@ -1479,6 +1498,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 						"event":       "FD_RECEIPT_REJECTED",
 						"actor_email": uEmail,
 					})
+					dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_RECEIPT", "POST_REJECT", []string{id}, uEmail)
 				}(rID, userEmail)
 			}
 			return
@@ -1559,6 +1579,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 					"event":       "FD_RECEIPT_REJECTED",
 					"actor_email": uEmail,
 				})
+				dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_RECEIPT", "POST_REJECT", []string{id}, uEmail)
 			}(rID, userEmail)
 		}
 	}

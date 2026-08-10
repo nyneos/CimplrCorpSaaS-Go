@@ -57,9 +57,6 @@ func HandleListDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		req.RunID = strings.TrimSpace(req.RunID)
 		req.ModuleCode = strings.TrimSpace(req.ModuleCode)
 		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
-		if req.Limit <= 0 || req.Limit > 500 {
-			req.Limit = 100
-		}
 
 		query := `
 			SELECT gd.doc_id::text, gd.run_id::text, COALESCE(gr.rule_id::text, ''),
@@ -97,8 +94,11 @@ func HandleListDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			n := strconv.Itoa(len(args))
 			query += " AND COALESCE(r.sub_module_code, t.sub_module_code) = $" + n
 		}
-		args = append(args, req.Limit)
-		query += " ORDER BY gd.created_at DESC LIMIT $" + strconv.Itoa(len(args))
+		query += " ORDER BY gd.created_at DESC"
+		if req.Limit > 0 {
+			args = append(args, req.Limit)
+			query += " LIMIT $" + strconv.Itoa(len(args))
+		}
 
 		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {

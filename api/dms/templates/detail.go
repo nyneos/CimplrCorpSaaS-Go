@@ -8,6 +8,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/dms/common"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -64,6 +65,14 @@ func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "template not found", "NOT_FOUND")
 			return
 		}
+		scope := ctxutil.FromContext(r.Context())
+		entityID := ""
+		if d.EntityID != nil {
+			entityID = *d.EntityID
+		}
+		if !common.RequireEntityAccess(w, scope, entityID) {
+			return
+		}
 		d.CurrentVersionID = currentVersionID
 		d.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 		d.LastModifiedAt = lastModifiedAt.UTC().Format(time.RFC3339)
@@ -72,7 +81,7 @@ func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT version_id::text, version_no, status, source, COALESCE(created_by,''),
 			       created_at, approved_by, approved_at, source_file_name
 			FROM dms_svc.template_version
-			WHERE template_id = $1::uuid
+			WHERE template_id = $1::uuid AND is_deleted = false
 			ORDER BY version_no DESC`, req.TemplateID)
 		if err != nil {
 			api.LogErrorForResponse(w, "dms template detail versions: %v", err)

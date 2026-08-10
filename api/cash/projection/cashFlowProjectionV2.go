@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/jobs/dmsevent"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -400,6 +401,8 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 		committed = true
 
+		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_REJECT", req.ProposalIDs, checkerBy)
+
 		elapsed := time.Since(start)
 		logger.LogInfo("[BulkRejectCashFlowProposalActionsV2] Rejected %d proposals in %v", len(actionIDs), elapsed)
 		api.RespondWithResult(w, true, fmt.Sprintf("Rejected %d proposals in %v", len(actionIDs), elapsed))
@@ -590,6 +593,11 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 			return
 		}
 		committed = true
+
+		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_APPROVE", req.ProposalIDs, checkerBy)
+		if len(deleteProposalIDs) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_DELETE", deleteProposalIDs, checkerBy)
+		}
 
 		elapsed := time.Since(start)
 		logger.LogInfo("[BulkApproveCashFlowProposalActionsV2] Approved %d proposals (%d deleted) in %v",
@@ -825,6 +833,8 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_CREATE", []string{proposalID}, createdBy)
 
 		// Notify: FULL proposal data for rich templates
 		capturedProposalID := proposalID
@@ -1601,6 +1611,8 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_EDIT", []string{req.ProposalID}, requestedBy)
 
 		elapsed := time.Since(start)
 		logger.LogInfo("[UpdateCashFlowProposalV2] Updated proposal %s with %d items in %v", req.ProposalID, updated, elapsed)

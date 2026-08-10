@@ -57,7 +57,7 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		err = tx.QueryRow(r.Context(), `
 			SELECT template_id::text, status, version_no
 			FROM dms_svc.template_version
-			WHERE version_id = $1::uuid`, req.VersionID,
+			WHERE version_id = $1::uuid AND is_deleted = false`, req.VersionID,
 		).Scan(&versionTemplateID, &versionStatus, &versionNo)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "version not found", "DMS_VERSION_NOT_FOUND")
@@ -73,27 +73,32 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var prevVersionID *string
+		var masterStatus string
 		err = tx.QueryRow(r.Context(), `
-			SELECT current_version_id::text FROM dms_svc.template
+			SELECT current_version_id::text, status FROM dms_svc.template
 			WHERE template_id = $1::uuid AND is_deleted = false`, req.TemplateID,
-		).Scan(&prevVersionID)
+		).Scan(&prevVersionID, &masterStatus)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "template not found", "DMS_TEMPLATE_NOT_FOUND")
 			return
 		}
 		if prevVersionID != nil && *prevVersionID == req.VersionID {
 			api.RespondEnvelopeSuccess(w, "Version already current", map[string]interface{}{
-				"template_id":         req.TemplateID,
-				"current_version_id":  req.VersionID,
-				"version_no":          versionNo,
-				"unchanged":           true,
+				"template_id":        req.TemplateID,
+				"current_version_id": req.VersionID,
+				"version_no":         versionNo,
+				"status":             masterStatus,
+				"unchanged":          true,
 			})
 			return
 		}
 
+		// Switching live version also marks the master Active (entity on/off still
+		// uses SET_STATUS separately; live version pick resumes the entity).
 		if _, err := tx.Exec(r.Context(), `
 			UPDATE dms_svc.template
-			SET current_version_id = $1::uuid, last_modified_by = $2, last_modified_at = now()
+			SET current_version_id = $1::uuid, status = 'Active',
+			    last_modified_by = $2, last_modified_at = now()
 			WHERE template_id = $3::uuid`,
 			req.VersionID, actor, req.TemplateID,
 		); err != nil {
@@ -104,7 +109,7 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 
 		reason := strings.TrimSpace(req.Reason)
 		if reason == "" {
-			reason = "Activated approved version"
+			reason = "Activated approved version as live"
 		}
 		a := &auditRow{}
 		a.set("template_id", req.TemplateID)
@@ -116,6 +121,8 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		a.set("requested_ip", common.NullIfEmpty(ip))
 		a.set("checker_by", actor)
 		a.set("checker_comment", "Activated as current")
+		a.set("old_status", masterStatus)
+		a.set("new_status", "Active")
 		if err := a.exec(r.Context(), tx); err != nil {
 			api.LogErrorForResponse(w, "dms template activate audit: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit activation", "DMS_TEMPLATE_ACTIVATE_FAILED")
@@ -128,10 +135,11 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Version activated", map[string]interface{}{
-			"template_id":            req.TemplateID,
-			"previous_version_id":    prevVersionID,
-			"current_version_id":     req.VersionID,
-			"version_no":             versionNo,
+			"template_id":         req.TemplateID,
+			"previous_version_id": prevVersionID,
+			"current_version_id":  req.VersionID,
+			"version_no":          versionNo,
+			"status":              "Active",
 		})
 	}
 }

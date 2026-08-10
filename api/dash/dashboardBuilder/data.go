@@ -28,6 +28,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
 
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -161,6 +163,10 @@ var dataSources = map[string]dataSourceFn{
 	"investmentProposalMeta": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryInvestmentProposalMeta(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
+	// DMS E2E: unique DASHBOARD alias for MF_PORTFOLIO (same underlying rows).
+	"investmentPortfolioMeta": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryInvestmentProposalMeta(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
 	"investmentInitiationAll": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryInvestmentInitiationAll(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
@@ -213,6 +219,10 @@ var dataSources = map[string]dataSourceFn{
 		return queryCashSweepConfig(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 	"cashSweepInitiation": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryCashSweepInitiation(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	// DMS E2E: unique DASHBOARD alias for SWEEP_EXECUTION (same underlying rows).
+	"cashSweepExecution": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryCashSweepInitiation(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 	"cashProjectionList": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
@@ -307,6 +317,10 @@ var dataSources = map[string]dataSourceFn{
 	},
 	// ── FX Module ──────────────────────────────────────────────────────────────
 	"fxExposureHeadersLineItems": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFXExposureHeadersLineItems(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	// DMS E2E: unique DASHBOARD alias for EXPOSURE_UPLOAD (same underlying rows).
+	"fxExposureUploadBatch": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFXExposureHeadersLineItems(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 	"fxExposureBucketing": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
@@ -515,6 +529,24 @@ func normaliseValue(v any) any {
 		return t.Format("2006-01-02")
 	case [16]byte: // UUID
 		return fmt.Sprintf("%x-%x-%x-%x-%x", t[0:4], t[4:6], t[6:8], t[8:10], t[10:16])
+	case pgtype.Numeric:
+		if !t.Valid {
+			return nil
+		}
+		f, err := t.Float64Value()
+		if err != nil || !f.Valid {
+			return t.Int.String()
+		}
+		return f.Float64
+	case *pgtype.Numeric:
+		if t == nil || !t.Valid {
+			return nil
+		}
+		f, err := t.Float64Value()
+		if err != nil || !f.Valid {
+			return t.Int.String()
+		}
+		return f.Float64
 	default:
 		return v
 	}

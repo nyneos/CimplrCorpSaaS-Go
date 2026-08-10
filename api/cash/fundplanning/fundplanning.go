@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/jobs/dmsevent"
 	"CimplrCorpSaas/internal/validation"
 
 	"github.com/google/uuid"
@@ -1136,6 +1137,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 				return
 			}
+			dmsevent.Fire(pgxPool, "CASH", "FUND_PLANNING", "POST_CREATE", []string{planID}, userEmail)
 		} else {
 			// Transaction will be rolled back by defer
 		}
@@ -1706,6 +1708,8 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		dmsevent.Fire(pgxPool, "CASH", "FUND_PLANNING", "POST_APPROVE", []string{req.PlanID}, userEmail)
+
 		result := map[string]interface{}{
 			"plan_id":          req.PlanID,
 			"groups_processed": len(groupIDs),
@@ -1837,6 +1841,8 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
+
+		dmsevent.Fire(pgxPool, "CASH", "FUND_PLANNING", "POST_REJECT", []string{req.PlanID}, userEmail)
 
 		result := map[string]interface{}{
 			"plan_id":          req.PlanID,

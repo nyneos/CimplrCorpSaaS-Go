@@ -9,11 +9,14 @@
 //   - DOCX — OOXML zip from HTML paragraphs
 //   - XLSX — excelize workbook (merge fields + body, or sheetTokens for SPREADSHEET)
 //
-// Merge-field substitution is scalar against the FIRST row returned for the
-// rule's data source. Templates may also include
-// `<div data-dms-txn-table="cashBankStatementTransactions" …>` placeholders;
-// those are expanded into an HTML table of child rows (ParentID = statement)
-// before PDF/DOCX/XLSX render.
+// Merge-field substitution is scalar against the FIRST row (FIRST_ROW), each
+// row separately (PER_ROW), or each row as a page in one file (PER_PAGE_IN_ONE_DOC).
+// Templates may also include:
+//
+//	`<div data-dms-table data-source="pool" data-columns="…" data-labels="…">`
+//	for a simple header+data table of filtered rows (any dashboard source), and
+//	legacy `<div data-dms-txn-table="cashBankStatementTransactions">` for bank
+//	statement child lines.
 package dmsjobs
 
 import (
@@ -33,6 +36,7 @@ import (
 	dashboardbuilder "CimplrCorpSaas/api/dash/dashboardBuilder"
 	"CimplrCorpSaas/api/domaincatalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/services/docsvc"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -58,6 +62,9 @@ type ruleVersionConfig struct {
 	TimeWindowUnit  *string
 	CustomStart     *string
 	CustomEnd       *string
+	RowExpandMode   string // FIRST_ROW | PER_ROW | PER_PAGE_IN_ONE_DOC
+	DataRowFrom     int    // 1-based inclusive
+	DataRowTo       int    // 1-based inclusive
 }
 
 type ruleFilter struct {
@@ -81,6 +88,37 @@ type ruleAttachment struct {
 // that succeeds). Returns the run_id even on failure, so the caller can point
 // the user at the run's error_detail.
 func RunGeneration(ctx context.Context, pool *pgxpool.Pool, ruleID, triggerType, triggeredBy string) (runID string, err error) {
+	return runGeneration(ctx, pool, ruleID, triggerType, triggeredBy, "", nil)
+}
+
+// RunGenerationForSourceIDs executes an approved rule for explicit source rows
+// (selected rows / ON_CREATE / ON_APPROVE) instead of the whole time-window set.
+func RunGenerationForSourceIDs(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	ruleID, triggerType, triggeredBy, sourceIDField string,
+	sourceIDs []string,
+) (runID string, err error) {
+	return runGeneration(ctx, pool, ruleID, triggerType, triggeredBy, sourceIDField, sourceIDs)
+}
+
+func runGeneration(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	ruleID, triggerType, triggeredBy, sourceIDField string,
+	sourceIDs []string,
+) (runID string, err error) {
+	// Document-Service gate: hard-stop + durable quota (client cannot bypass).
+	if q, qErr := docsvc.NewFromEnv().QuotaCheck(ctx); qErr != nil {
+		return "", fmt.Errorf("document-service unavailable (generation blocked): %w", qErr)
+	} else if !q.Allowed {
+		code := q.ErrorCode
+		if code == "" {
+			code = "DMS_GENERATION_QUOTA_EXCEEDED"
+		}
+		return "", fmt.Errorf("%s: %s", code, q.Message)
+	}
+
 	rule, err := loadRuleHeader(ctx, pool, ruleID)
 	if err != nil {
 		return "", fmt.Errorf("load rule: %w", err)
@@ -101,6 +139,16 @@ func RunGeneration(ctx context.Context, pool *pgxpool.Pool, ruleID, triggerType,
 	runID, err = insertRun(ctx, pool, rule.RuleID, version.VersionID, triggerType, triggeredBy, windowStart, windowEnd)
 	if err != nil {
 		return "", fmt.Errorf("insert generation_run: %w", err)
+	}
+	for i, sourceID := range sourceIDs {
+		sourceID = strings.TrimSpace(sourceID)
+		if sourceID == "" {
+			continue
+		}
+		_, _ = pool.Exec(ctx, `
+			INSERT INTO dms_svc.generation_run_source_row (run_id, source_id, sort_order)
+			VALUES ($1::uuid, $2, $3)
+			ON CONFLICT (run_id, source_id) DO NOTHING`, runID, sourceID, i)
 	}
 
 	filters, err := loadFilters(ctx, pool, version.VersionID)
@@ -123,12 +171,21 @@ func RunGeneration(ctx context.Context, pool *pgxpool.Pool, ruleID, triggerType,
 	dashFilters := make([]dashboardbuilder.WidgetFilterRule, 0, len(filters)+1)
 	if rule.EntityID != "" {
 		dashFilters = append(dashFilters, dashboardbuilder.WidgetFilterRule{
-			Field: "entity_id", Type: "text", Op: "eq", Value: rule.EntityID, Conjunction: "AND",
+			Field: "entity_id", Type: "text", Op: "=", Value: rule.EntityID, Conjunction: "AND",
 		})
 	}
 	for _, f := range filters {
 		dashFilters = append(dashFilters, dashboardbuilder.WidgetFilterRule{
-			Field: f.Field, Type: f.FieldType, Op: f.Op, Value: f.Value, Value2: f.Value2, Conjunction: f.Conjunction,
+			Field: f.Field, Type: f.FieldType, Op: normalizeDmsFilterOp(f.Op), Value: f.Value, Value2: f.Value2, Conjunction: f.Conjunction,
+		})
+	}
+	if strings.TrimSpace(sourceIDField) != "" && len(sourceIDs) > 0 {
+		dashFilters = append(dashFilters, dashboardbuilder.WidgetFilterRule{
+			Field:       strings.TrimSpace(sourceIDField),
+			Type:        "id",
+			Op:          "in",
+			Value:       strings.Join(sourceIDs, ","),
+			Conjunction: "AND",
 		})
 	}
 	var entityIDs []string
@@ -151,11 +208,15 @@ func RunGeneration(ctx context.Context, pool *pgxpool.Pool, ruleID, triggerType,
 		api.LogError("[DMS] loadOutputNaming run rule=%s: %v — falling back to rule name", rule.RuleID, err)
 		naming = outputNaming{Prefix: rule.Name, AppendDatetime: true}
 	}
+	rowFrom, rowTo := normalizeDataRowRange(version.DataRowFrom, version.DataRowTo)
+	fetchLimit := rowTo - rowFrom + 1
+	fetchOffset := rowFrom - 1
 	rows, _, err := dashboardbuilder.FetchSourceData(ctx, pool, dashboardbuilder.DataRequest{
 		Source:                   sourceKey,
 		EntityIDs:                entityIDs,
 		Filters:                  dashFilters,
-		Limit:                    500,
+		Limit:                    fetchLimit,
+		Offset:                   fetchOffset,
 		AsOfDate:                 asOf,
 		AsOnDate:                 asOn,
 		BankAccountScope:         bankScope,
@@ -164,27 +225,69 @@ func RunGeneration(ctx context.Context, pool *pgxpool.Pool, ruleID, triggerType,
 	if err != nil {
 		return runID, finishRunFailed(ctx, pool, runID, fmt.Errorf("fetch data source %q: %w", sourceKey, err))
 	}
+	_, _ = pool.Exec(ctx, `
+		UPDATE dms_svc.generation_run SET source_row_count = $2 WHERE run_id = $1::uuid`,
+		runID, len(rows))
 
 	var firstRow map[string]any
 	if len(rows) > 0 {
 		firstRow = rows[0]
 	}
 
+	rowsToMerge := rows
+	expandMode := strings.ToUpper(strings.TrimSpace(version.RowExpandMode))
+	switch expandMode {
+	case "PER_ROW", "PER_PAGE_IN_ONE_DOC":
+		if len(rowsToMerge) == 0 {
+			rowsToMerge = []map[string]any{nil}
+		}
+	default:
+		// FIRST_ROW (default): one doc set from the first dashboard row only.
+		// Pool rows are still kept on genCtx so data-dms-table can list all matches.
+		if len(rows) > 0 {
+			rowsToMerge = []map[string]any{rows[0]}
+		} else {
+			rowsToMerge = []map[string]any{nil}
+		}
+	}
+
 	succeeded, failed := 0, 0
 	var errDetails []string
-	multiDoc := len(attachments) > 1
+	multiDoc := len(attachments) > 1 || (expandMode == "PER_ROW" && len(rowsToMerge) > 1)
 	genCtx := attachmentGenCtx{
 		EntityIDs:                entityIDs,
 		BankAccountScope:         bankScope,
 		AllowUnscopedBankAccount: len(bankScope) == 0,
+		PoolRows:                 rows,
+		SourceKey:                sourceKey,
+		Filters:                  dashFilters,
+		AsOfDate:                 asOf,
+		AsOnDate:                 asOn,
+		DataRowFrom:              rowFrom,
+		DataRowTo:                rowTo,
+		RuleVersionID:            version.VersionID,
 	}
-	for _, a := range attachments {
-		if err := generateOneAttachment(ctx, pool, runID, a, firstRow, naming, multiDoc, genCtx); err != nil {
-			failed++
-			errDetails = append(errDetails, fmt.Sprintf("%s: %v", a.DocumentTemplateID, err))
-			continue
+
+	if expandMode == "PER_PAGE_IN_ONE_DOC" {
+		for _, a := range attachments {
+			if err := generatePagedAttachment(ctx, pool, runID, a, rowsToMerge, naming, multiDoc, genCtx); err != nil {
+				failed++
+				errDetails = append(errDetails, fmt.Sprintf("%s[paged]: %v", a.DocumentTemplateID, err))
+				continue
+			}
+			succeeded++
 		}
-		succeeded++
+	} else {
+		for ri, mergeRow := range rowsToMerge {
+			for _, a := range attachments {
+				if err := generateOneAttachment(ctx, pool, runID, a, mergeRow, naming, multiDoc, genCtx); err != nil {
+					failed++
+					errDetails = append(errDetails, fmt.Sprintf("%s[row%d]: %v", a.DocumentTemplateID, ri, err))
+					continue
+				}
+				succeeded++
+			}
+		}
 	}
 
 	// Real email cover (DMS EMAIL template) — not the system "run completed" notify.
@@ -192,7 +295,7 @@ func RunGeneration(ctx context.Context, pool *pgxpool.Pool, ruleID, triggerType,
 	if emailDestErr != nil {
 		api.LogError("[DMS] ruleWantsEmailDispatch run=%s: %v", runID, emailDestErr)
 	} else if wantEmail {
-		if err := renderAndStoreEmailCover(ctx, pool, runID, rule.ModuleCode, rule.SubModuleCode, firstRow); err != nil {
+		if err := renderAndStoreEmailCover(ctx, pool, runID, rule.ModuleCode, rule.SubModuleCode, firstRow, genCtx); err != nil {
 			api.LogError("[DMS] email cover render run=%s: %v — dispatch will use notification fallback body", runID, err)
 		}
 	}
@@ -209,19 +312,70 @@ func RunGeneration(ctx context.Context, pool *pgxpool.Pool, ruleID, triggerType,
 	if status == "FAILED" {
 		return runID, fmt.Errorf("all attachments failed: %s", strings.Join(errDetails, "; "))
 	}
-	// Phase 4 — queue emails for GENERATED docs.
+	// Phase 4 — queue emails for GENERATED docs (notification after successful storage).
 	if err := DispatchRun(ctx, pool, runID); err != nil {
 		// Leave docs as GENERATED so StartDispatchWorker can retry.
 		api.LogError("[DMS] DispatchRun after generation run=%s: %v", runID, err)
 		return runID, fmt.Errorf("generation succeeded (run_id=%s) but dispatch failed: %w", runID, err)
 	}
+
+	incrementDocSvcQuotaForRun(ctx, pool, runID, triggeredBy)
 	return runID, nil
 }
 
-type attachmentGenCtx struct {
-	EntityIDs                []string
-	BankAccountScope         []dashboardbuilder.BankAccountScopePair
-	AllowUnscopedBankAccount bool
+// normalizeDmsFilterOp preserves rules created by the original editor (eq/gte)
+// while using Dashboard Builder's canonical operator vocabulary.
+func normalizeDmsFilterOp(op string) string {
+	switch strings.ToLower(strings.TrimSpace(op)) {
+	case "eq":
+		return "="
+	case "neq":
+		return "!="
+	case "gt":
+		return ">"
+	case "gte":
+		return ">="
+	case "lt":
+		return "<"
+	case "lte":
+		return "<="
+	default:
+		return strings.TrimSpace(op)
+	}
+}
+
+func mergeTemplateHTML(ctx context.Context, pool *pgxpool.Pool, contentHTML string, mergeFields map[string]string, row map[string]any, genCtx attachmentGenCtx, format string) (string, map[string]string, error) {
+	values := make(map[string]string, len(mergeFields)+8)
+	for fieldKey, fieldCode := range mergeFields {
+		var raw any
+		if row != nil {
+			raw = row[fieldCode]
+		}
+		values[fieldKey] = formatFieldValue(raw)
+	}
+	for _, key := range extractDmsFieldKeys(contentHTML) {
+		if _, ok := values[key]; ok {
+			continue
+		}
+		if row != nil {
+			values[key] = formatFieldValue(row[key])
+		}
+	}
+	renderedHTML := substituteMergeFields(contentHTML, values)
+	renderedHTML, err := expandDataTablePlaceholders(ctx, pool, renderedHTML, row, genCtx, format)
+	if err != nil {
+		return "", nil, fmt.Errorf("expand data tables: %w", err)
+	}
+	renderedHTML, err = expandTxnTablePlaceholders(ctx, pool, renderedHTML, row, genCtx, format)
+	if err != nil {
+		return "", nil, fmt.Errorf("expand txn tables: %w", err)
+	}
+	renderedHTML, err = expandChartPlaceholders(ctx, pool, renderedHTML, row, genCtx)
+	if err != nil {
+		return "", nil, fmt.Errorf("expand charts: %w", err)
+	}
+	renderedHTML = expandKPIPlaceholders(renderedHTML, genCtx.PoolRows)
+	return renderedHTML, values, nil
 }
 
 func generateOneAttachment(ctx context.Context, pool *pgxpool.Pool, runID string, a ruleAttachment, row map[string]any, naming outputNaming, multiDoc bool, genCtx attachmentGenCtx) error {
@@ -239,51 +393,124 @@ func generateOneAttachment(ctx context.Context, pool *pgxpool.Pool, runID string
 		return fmt.Errorf("load merge fields: %w", err)
 	}
 
-	values := make(map[string]string, len(mergeFields))
-	for fieldKey, fieldCode := range mergeFields {
-		var raw any
-		if row != nil {
-			raw = row[fieldCode]
-		}
-		values[fieldKey] = formatFieldValue(raw)
-	}
-	// Also bind any data-dms-field keys present in HTML directly from the row
-	// (covers catalog gaps like bank_name / entity_name until fields are seeded).
-	for _, key := range extractDmsFieldKeys(content.HTML) {
-		if _, ok := values[key]; ok {
-			continue
-		}
-		if row != nil {
-			values[key] = formatFieldValue(row[key])
-		}
-	}
-	renderedHTML := substituteMergeFields(content.HTML, values)
-	renderedHTML, err = expandTxnTablePlaceholders(ctx, pool, renderedHTML, row, genCtx, format)
+	renderedHTML, values, err := mergeTemplateHTML(ctx, pool, content.HTML, mergeFields, row, genCtx, format)
 	if err != nil {
-		return fmt.Errorf("expand txn tables: %w", err)
+		return err
 	}
 
-	file, err := renderMergedOutput(format, renderedHTML, values, content.SheetTokens, content.Kind)
+	file, err := renderAndStoreViaDocSvc(ctx, format, renderedHTML, values, content.SheetTokens, content.Kind, content.PageDesign)
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
 	}
+	return storeGeneratedDocument(ctx, pool, runID, a, tplVersionID, naming, multiDoc, row, file, genCtx.RuleVersionID)
+}
 
+// generatePagedAttachment renders one file where each source row becomes a page.
+func generatePagedAttachment(ctx context.Context, pool *pgxpool.Pool, runID string, a ruleAttachment, rows []map[string]any, naming outputNaming, multiDoc bool, genCtx attachmentGenCtx) error {
+	format := strings.ToUpper(strings.TrimSpace(a.OutputFormat))
+	if format == "" {
+		format = "HTML"
+	}
+	tplVersionID, content, err := loadApprovedTemplateContent(ctx, pool, a.DocumentTemplateID)
+	if err != nil {
+		return fmt.Errorf("load template content: %w", err)
+	}
+	mergeFields, err := loadMergeFields(ctx, pool, tplVersionID)
+	if err != nil {
+		return fmt.Errorf("load merge fields: %w", err)
+	}
+	if len(rows) == 0 {
+		rows = []map[string]any{nil}
+	}
+	var pages []string
+	var values map[string]string
+	for i, row := range rows {
+		pageHTML, pageValues, err := mergeTemplateHTML(ctx, pool, content.HTML, mergeFields, row, genCtx, format)
+		if err != nil {
+			return err
+		}
+		pages = append(pages, pageHTML)
+		if i == 0 {
+			values = pageValues
+		}
+	}
+	combined := strings.Join(pages, `<div data-dms-page-break="true" class="dms-page-break"></div>`)
+	file, err := renderMergedOutputViaDocSvc(ctx, format, combined, values, content.SheetTokens, content.Kind, content.PageDesign)
+	if err != nil {
+		return fmt.Errorf("render %s: %w", format, err)
+	}
+	return storeGeneratedDocument(ctx, pool, runID, a, tplVersionID, naming, multiDoc, rows[0], file, genCtx.RuleVersionID)
+}
+
+func storeGeneratedDocument(ctx context.Context, pool *pgxpool.Pool, runID string, a ruleAttachment, tplVersionID string, naming outputNaming, multiDoc bool, row map[string]any, file renderedFile, versionID string) error {
 	sum := sha256.Sum256(file.Bytes)
 	checksum := hex.EncodeToString(sum[:])
-	s3Key := s3storage.BuildModuleS3Key("dms", "generated", checksum, file.Ext)
-	if err := s3storage.PutObjectToS3(ctx, s3Key, file.Bytes, file.ContentType); err != nil {
-		return fmt.Errorf("s3 upload: %w", err)
-	}
 
 	tplName, _ := loadTemplateName(ctx, pool, a.DocumentTemplateID)
-	outName := buildDmsOutputFilename(naming, tplName, file.Ext, time.Now(), multiDoc)
+	outName := buildDmsOutputFilename(naming, tplName, file.Ext, time.Now(), multiDoc, rowOutputSuffix(row))
 
-	_, err = pool.Exec(ctx, `
+	wantLocal, _ := versionHasDestinationType(ctx, pool, versionID, "LOCAL")
+	wantS3, _ := versionHasDestinationType(ctx, pool, versionID, "S3_ARCHIVE")
+	wantInApp, _ := versionHasDestinationType(ctx, pool, versionID, "IN_APP")
+	// Legacy / default: no destinations → S3. Email-only still needs an object for attachments.
+	if !wantLocal && !wantS3 && !wantInApp {
+		wantS3 = true
+	}
+
+	var localPath string
+	if wantLocal {
+		rel, _, err := WriteLocalDmsFile(runID, outName, file.Bytes)
+		if err != nil {
+			return fmt.Errorf("local store: %w", err)
+		}
+		localPath = rel
+	}
+
+	s3Key := ""
+	storageBackend := "MAIN_S3"
+	if wantS3 || wantInApp || !wantLocal {
+		if file.StoredKey != "" {
+			// Document-Service already uploaded this to its own bucket.
+			s3Key = file.StoredKey
+			storageBackend = "DOCSVC_S3"
+		} else {
+			s3Key = s3storage.BuildModuleS3Key("dms", "generated", checksum, file.Ext)
+			if err := s3storage.PutObjectToS3(ctx, s3Key, file.Bytes, file.ContentType); err != nil {
+				return fmt.Errorf("s3 upload: %w", err)
+			}
+		}
+	} else {
+		s3Key = LocalStorageKey(localPath)
+	}
+
+	_, err := pool.Exec(ctx, `
 		INSERT INTO dms_svc.generated_document
-			(run_id, document_template_id, template_version_id, s3_key, file_format, file_size, checksum, status, output_filename)
-		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, 'GENERATED', $8)`,
-		runID, a.DocumentTemplateID, tplVersionID, s3Key, file.Format, len(file.Bytes), checksum, outName)
+			(run_id, document_template_id, template_version_id, s3_key, file_format, file_size, checksum, status, output_filename, local_path, storage_backend)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, 'GENERATED', $8, $9, $10)`,
+		runID, a.DocumentTemplateID, tplVersionID, s3Key, file.Format, len(file.Bytes), checksum, outName, localPath, storageBackend)
 	return err
+}
+
+func versionHasDestinationType(ctx context.Context, pool *pgxpool.Pool, versionID, destType string) (bool, error) {
+	versionID = strings.TrimSpace(versionID)
+	if versionID == "" || pool == nil {
+		return false, nil
+	}
+	var n int
+	err := pool.QueryRow(ctx, `
+		SELECT COUNT(*)::int
+		FROM dms_svc.generation_rule_destination
+		WHERE version_id = $1::uuid
+		  AND is_enabled = true
+		  AND COALESCE(is_deleted, false) = false
+		  AND destination_type = $2`, versionID, destType).Scan(&n)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") {
+			return false, nil
+		}
+		return false, err
+	}
+	return n > 0, nil
 }
 
 type outputNaming struct {
@@ -296,7 +523,7 @@ func loadOutputNaming(ctx context.Context, pool *pgxpool.Pool, versionID, ruleNa
 	rows, err := pool.Query(ctx, `
 		SELECT COALESCE(output_name_prefix,''), append_datetime, destination_type
 		FROM dms_svc.generation_rule_destination
-		WHERE version_id = $1::uuid AND is_enabled = true
+		WHERE version_id = $1::uuid AND is_enabled = true AND COALESCE(is_deleted, false) = false
 		ORDER BY CASE destination_type
 			WHEN 'EMAIL' THEN 0
 			WHEN 'S3_ARCHIVE' THEN 1
@@ -369,7 +596,7 @@ func loadTemplateName(ctx context.Context, pool *pgxpool.Pool, templateID string
 //
 // When the rule has multiple document templates, a short template slug is
 // appended so files stay distinct. Single-template rules keep the clean prefix.
-func buildDmsOutputFilename(n outputNaming, templateName, fileExt string, at time.Time, multiDoc bool) string {
+func buildDmsOutputFilename(n outputNaming, templateName, fileExt string, at time.Time, multiDoc bool, rowSuffix string) string {
 	ext := strings.ToLower(strings.TrimSpace(fileExt))
 	if ext == "" {
 		ext = "bin"
@@ -393,10 +620,35 @@ func buildDmsOutputFilename(n outputNaming, templateName, fileExt string, at tim
 			base = base + "_" + tplSlug
 		}
 	}
+	if s := sanitizeOutputName(rowSuffix); s != "" {
+		if len(s) > 32 {
+			s = s[:32]
+		}
+		base = base + "_" + s
+	}
 	if n.AppendDatetime {
 		base = base + "_" + at.Format("20060102_150405")
 	}
 	return base + "." + ext
+}
+
+// rowOutputSuffix picks a stable id from the merge row so PER_ROW outputs
+// don't collide when generated in the same second.
+func rowOutputSuffix(row map[string]any) string {
+	if row == nil {
+		return ""
+	}
+	for _, k := range []string{
+		"account_number", "bank_statement_id", "fd_booking_id", "fd_id",
+		"booking_id", "id", "entity_id",
+	} {
+		v := strings.TrimSpace(formatFieldValue(row[k]))
+		if v == "" || v == "-" || strings.EqualFold(v, "null") {
+			continue
+		}
+		return v
+	}
+	return ""
 }
 
 func sanitizeOutputName(s string) string {
@@ -489,6 +741,9 @@ func expandTxnTablePlaceholders(ctx context.Context, pool *pgxpool.Pool, html st
 			Source:                   source,
 			EntityIDs:                genCtx.EntityIDs,
 			ParentID:                 parentID,
+			Filters:                  genCtx.Filters,
+			AsOfDate:                 genCtx.AsOfDate,
+			AsOnDate:                 genCtx.AsOnDate,
 			Limit:                    limit,
 			BankAccountScope:         genCtx.BankAccountScope,
 			AllowUnscopedBankAccount: genCtx.AllowUnscopedBankAccount,
@@ -609,9 +864,9 @@ func substituteMustache(s string, values map[string]string) string {
 }
 
 // renderAndStoreEmailCover finds an Active DMS EMAIL-kind template for the
-// rule's module/sub-module, merges data into subject+HTML, and stores it on
-// the generation_run so DispatchRun can put the real email on the outbox.
-func renderAndStoreEmailCover(ctx context.Context, pool *pgxpool.Pool, runID, moduleCode, subModuleCode string, row map[string]any) error {
+// rule's module/sub-module, merges + expands data (tables/charts/KPI), and
+// stores subject+HTML on generation_run for DispatchRun.
+func renderAndStoreEmailCover(ctx context.Context, pool *pgxpool.Pool, runID, moduleCode, subModuleCode string, row map[string]any, genCtx attachmentGenCtx) error {
 	tplID, err := findEmailCoverTemplate(ctx, pool, moduleCode, subModuleCode)
 	if err != nil {
 		return err
@@ -630,31 +885,15 @@ func renderAndStoreEmailCover(ctx context.Context, pool *pgxpool.Pool, runID, mo
 	if err != nil {
 		return err
 	}
-	values := make(map[string]string, len(mergeFields)+8)
-	for fieldKey, fieldCode := range mergeFields {
-		var raw any
-		if row != nil {
-			raw = row[fieldCode]
-			if raw == nil {
-				raw = row[fieldKey]
-			}
-		}
-		values[fieldKey] = formatFieldValue(raw)
-	}
-	// Also expose raw row keys for subject tokens like {{account_number}}.
-	if row != nil {
-		for k, raw := range row {
-			if _, exists := values[k]; !exists {
-				values[k] = formatFieldValue(raw)
-			}
-		}
-	}
 	subject := strings.TrimSpace(content.EmailMeta.Subject)
 	if subject == "" {
 		subject = "Document attached"
 	}
+	body, values, err := mergeTemplateHTML(ctx, pool, content.HTML, mergeFields, row, genCtx, "HTML")
+	if err != nil {
+		return fmt.Errorf("merge EMAIL template %s: %w", tplID, err)
+	}
 	subject = substituteMustache(subject, values)
-	body := substituteMergeFields(content.HTML, values)
 	if strings.TrimSpace(body) == "" {
 		return fmt.Errorf("EMAIL template %s produced empty body", tplID)
 	}
@@ -702,9 +941,9 @@ func formatFieldValue(v any) string {
 		}
 		return t.Format("2006-01-02")
 	case float64:
-		return strconv.FormatFloat(t, 'f', -1, 64)
+		return formatNumericDisplay(t)
 	case float32:
-		return strconv.FormatFloat(float64(t), 'f', -1, 32)
+		return formatNumericDisplay(float64(t))
 	case int:
 		return strconv.Itoa(t)
 	case int32:
@@ -725,13 +964,24 @@ func formatFieldValue(v any) string {
 			// Fall back to Int/Exp string if Float64 fails
 			return t.Int.String()
 		}
-		return strconv.FormatFloat(f.Float64, 'f', -1, 64)
+		return formatNumericDisplay(f.Float64)
 	default:
 		if s, ok := v.(fmt.Stringer); ok {
 			return s.String()
 		}
 		return fmt.Sprintf("%v", t)
 	}
+}
+
+// formatNumericDisplay trims float noise (e.g. 66798.31999999999 → 66798.32).
+func formatNumericDisplay(v float64) string {
+	if v == float64(int64(v)) {
+		return strconv.FormatInt(int64(v), 10)
+	}
+	s := strconv.FormatFloat(v, 'f', 6, 64)
+	s = strings.TrimRight(s, "0")
+	s = strings.TrimRight(s, ".")
+	return s
 }
 
 func wrapHTMLDocument(body string) string {
@@ -766,9 +1016,14 @@ func loadRuleVersion(ctx context.Context, pool *pgxpool.Pool, versionID string) 
 	var v ruleVersionConfig
 	err := pool.QueryRow(ctx, `
 		SELECT version_id::text, time_window_type, time_window_value, time_window_unit,
-		       custom_start::text, custom_end::text
+		       custom_start::text, custom_end::text, COALESCE(row_expand_mode, 'FIRST_ROW'),
+		       COALESCE(data_row_from, 1), COALESCE(data_row_to, 500)
 		FROM dms_svc.generation_rule_version WHERE version_id = $1::uuid`, versionID,
-	).Scan(&v.VersionID, &v.TimeWindowType, &v.TimeWindowValue, &v.TimeWindowUnit, &v.CustomStart, &v.CustomEnd)
+	).Scan(&v.VersionID, &v.TimeWindowType, &v.TimeWindowValue, &v.TimeWindowUnit, &v.CustomStart, &v.CustomEnd, &v.RowExpandMode,
+		&v.DataRowFrom, &v.DataRowTo)
+	if err == nil {
+		v.DataRowFrom, v.DataRowTo = normalizeDataRowRange(v.DataRowFrom, v.DataRowTo)
+	}
 	return v, err
 }
 
@@ -816,12 +1071,34 @@ type templateContent struct {
 	Kind        string         `json:"kind"`
 	SheetTokens []string       `json:"sheetTokens"`
 	EmailMeta   emailMetaJSON  `json:"emailMeta"`
+	PageDesign  pageDesignJSON `json:"pageDesign"`
 }
 
 type emailMetaJSON struct {
 	Subject   string `json:"subject"`
 	Preheader string `json:"preheader"`
 	ReplyTo   string `json:"replyTo"`
+}
+
+// pageDesignJSON is PDF chrome stored alongside TipTap html in content_json
+// (same documented last-resort envelope as emailMeta / sheetTokens).
+type pageDesignJSON struct {
+	HeaderText        string  `json:"headerText"`
+	FooterText        string  `json:"footerText"`
+	WatermarkText     string  `json:"watermarkText"`
+	WatermarkDataURL  string  `json:"watermarkDataUrl"`
+	WatermarkAngle    float64 `json:"watermarkAngle"` // degrees; default -45
+	LetterheadDataURL string  `json:"letterheadDataUrl"`
+	LogoDataURL       string  `json:"logoDataUrl"`
+	FooterLogoDataURL string  `json:"footerLogoDataUrl"`
+	BackgroundColor   string  `json:"backgroundColor"`
+	LogoAlign         string  `json:"logoAlign"`   // left | center | right
+	PageSize          string  `json:"pageSize"`    // A4 | A3 | Letter | Legal
+	Orientation       string  `json:"orientation"` // portrait | landscape
+	MarginTop         float64 `json:"marginTop"`
+	MarginRight       float64 `json:"marginRight"`
+	MarginBottom      float64 `json:"marginBottom"`
+	MarginLeft        float64 `json:"marginLeft"`
 }
 
 // loadApprovedTemplateContent returns the current approved version's id and
@@ -840,11 +1117,16 @@ func loadApprovedTemplateContent(ctx context.Context, pool *pgxpool.Pool, templa
 		return "", content, fmt.Errorf("template %s has no approved, active version", templateID)
 	}
 	var contentRaw []byte
+	var verStatus string
+	var verDeleted bool
 	if err := pool.QueryRow(ctx, `
-		SELECT content_json FROM dms_svc.template_version WHERE version_id = $1::uuid`,
+		SELECT content_json, status, is_deleted FROM dms_svc.template_version WHERE version_id = $1::uuid`,
 		*currentVersionID,
-	).Scan(&contentRaw); err != nil {
+	).Scan(&contentRaw, &verStatus, &verDeleted); err != nil {
 		return "", content, err
+	}
+	if verDeleted || verStatus != "APPROVED" {
+		return "", content, fmt.Errorf("template %s current version is not usable (deleted or not approved)", templateID)
 	}
 	if err := json.Unmarshal(contentRaw, &content); err != nil {
 		return "", content, fmt.Errorf("template content_json: %w", err)

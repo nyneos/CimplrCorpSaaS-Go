@@ -8,6 +8,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/dms/common"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -35,6 +36,10 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 		req.ModuleCode = strings.TrimSpace(req.ModuleCode)
 		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
 		req.EntityID = strings.TrimSpace(req.EntityID)
+		scope := ctxutil.FromContext(r.Context())
+		if req.EntityID != "" && !common.RequireEntityAccess(w, scope, req.EntityID) {
+			return
+		}
 
 		query := `
 			SELECT t.template_id::text, t.name, t.description, t.template_type, t.module_code, t.sub_module_code,
@@ -61,6 +66,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, req.EntityID)
 			query += " AND (t.entity_id IS NULL OR t.entity_id = $" + strconv.Itoa(len(args)) + ")"
 		}
+		query, args = common.AppendEntityScopeFilter(query, args, "t.entity_id", scope)
 		if req.PendingOnly {
 			query += ` AND t.processing_status = ANY('{PENDING_APPROVAL,PENDING_EDIT_APPROVAL,PENDING_DELETE_APPROVAL}')`
 		}

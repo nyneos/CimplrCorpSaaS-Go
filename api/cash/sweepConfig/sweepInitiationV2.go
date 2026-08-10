@@ -8,6 +8,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/jobs/dmsevent"
 	"CimplrCorpSaas/internal/validation"
 	"context"
 	"database/sql"
@@ -346,6 +347,8 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
+			dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_CREATE", []string{initiationID}, initiatedBy)
+
 			// autoCreated = true (sweep was auto-created)
 
 			api.RespondWithPayload(w, true, "Sweep auto-created and initiation created successfully, pending approval", map[string]interface{}{
@@ -522,6 +525,8 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "failed to create audit entry: "+err.Error())
 			return
 		}
+
+		dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_CREATE", []string{initiationID}, initiatedBy)
 
 		api.RespondWithPayload(w, true, "Sweep initiation created successfully, pending approval", map[string]interface{}{
 			"initiation_id":     initiationID,
@@ -1213,6 +1218,11 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
+		dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_APPROVE", approvedIDs, checkerName)
+		if len(deleteIDs) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_DELETE", deleteIDs, checkerName)
+		}
+
 		api.RespondWithPayload(w, true, "Initiations approved successfully", map[string]interface{}{
 			"approved_initiation_ids": approvedIDs,
 			"total_approved":          len(approvedIDs),
@@ -1360,6 +1370,8 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_REJECT", rejectedIDs, checkerName)
 
 		api.RespondWithPayload(w, true, "Initiations rejected successfully", map[string]interface{}{
 			"rejected_initiation_ids": rejectedIDs,
@@ -1928,6 +1940,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(createdInitiationIDs) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_CREATE", createdInitiationIDs, initiatedBy)
 			notifyCtx := context.WithoutCancel(ctx)
 			payload := BuildSweepInitiationNotifPayload(notifyCtx, pgxPool, createdInitiationIDs, "CREATE", capturedUser)
 			go catalog.TriggerNotification(
@@ -2773,6 +2786,8 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
+
+		dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_EDIT", []string{req.InitiationID}, requestedBy)
 
 		api.RespondWithPayload(w, true, "Initiation and sweep config updated successfully", map[string]interface{}{
 			"initiation_id":       req.InitiationID,

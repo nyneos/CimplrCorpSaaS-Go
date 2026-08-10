@@ -218,9 +218,6 @@ func validateRuleFields(ruleType string, rf ruleFields) error {
 		}
 		hasPercentOf := false
 		for i, row := range rf.SlabRows {
-			if strings.TrimSpace(row.Action) == "" {
-				return fmt.Errorf("slabs: row %d action is required", i+1)
-			}
 			if !validSlabAction(row.Action) {
 				return fmt.Errorf("slabs: row %d invalid action %q", i+1, row.Action)
 			}
@@ -327,7 +324,7 @@ func validOperator(op string) bool {
 
 func validSlabAction(action string) bool {
 	switch strings.TrimSpace(action) {
-	case "AutoApprove", "SoftWarning", "TriggerApproval", "HardBlock":
+	case "", "AutoApprove", "SoftWarning", "TriggerApproval", "HardBlock":
 		return true
 	default:
 		return false

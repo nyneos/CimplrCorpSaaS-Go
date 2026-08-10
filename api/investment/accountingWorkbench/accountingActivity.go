@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -704,6 +705,8 @@ func CreateActivitySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_ACCOUNTING", "POST_CREATE", []string{activityID}, userEmail)
+
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"activity_id": activityID,
 			"requested":   userEmail,
@@ -799,6 +802,8 @@ func CreateActivityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"success": false, "error": constants.ErrCommitFailedCapitalized + err.Error()})
 				continue
 			}
+
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_ACCOUNTING", "POST_CREATE", []string{activityID}, userEmail)
 
 			results = append(results, map[string]interface{}{
 				"success":     true,
@@ -1014,6 +1019,7 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var toApprove []string
 		var toApproveActivityIDs []string
+		var editActivityIDs []string
 		var toDeleteActionIDs []string
 		var deleteActivityIDs []string
 
@@ -1034,6 +1040,9 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
 				toApproveActivityIDs = append(toApproveActivityIDs, actid)
+				if ps == constants.StatusPendingEditApproval {
+					editActivityIDs = append(editActivityIDs, actid)
+				}
 			}
 		}
 
@@ -1186,6 +1195,21 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		editSet := make(map[string]struct{}, len(editActivityIDs))
+		for _, id := range editActivityIDs {
+			editSet[id] = struct{}{}
+		}
+		for _, actID := range toApproveActivityIDs {
+			trigger := "POST_APPROVE"
+			if _, isEdit := editSet[actID]; isEdit {
+				trigger = "POST_EDIT"
+			}
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_ACCOUNTING", trigger, []string{actID}, checkerBy)
+		}
+		for _, actID := range deleteActivityIDs {
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_ACCOUNTING", "POST_DELETE", []string{actID}, checkerBy)
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"approved_action_ids":  toApprove,
 			"deleted_activity_ids": deleteActivityIDs,
@@ -1237,6 +1261,7 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		actionIDs := []string{}
+		rejectedActivityIDs := []string{}
 		cannotReject := []string{}
 		found := map[string]bool{}
 		for rows.Next() {
@@ -1249,6 +1274,7 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cannotReject = append(cannotReject, actid)
 			} else {
 				actionIDs = append(actionIDs, aid)
+				rejectedActivityIDs = append(rejectedActivityIDs, actid)
 			}
 		}
 
@@ -1282,6 +1308,10 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
+		}
+
+		for _, actID := range rejectedActivityIDs {
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_ACCOUNTING", "POST_REJECT", []string{actID}, checkerBy)
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})

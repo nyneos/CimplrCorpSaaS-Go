@@ -14,6 +14,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 
@@ -218,6 +219,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			notifcatalog.TriggerNotification(bg, pgxPool, "/investment/fd/accrual/schedule/create", cfgID, map[string]interface{}{
 				"record_id": cfgID, "event": "FD_ACCRUAL_SCHEDULE_CREATED", "actor_email": email, "entity_id": entID,
 			})
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_ACCRUAL_SCHED", "POST_CREATE", []string{cfgID}, email)
 			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
 				EntityCode:       entID,
@@ -771,6 +773,29 @@ func ApproveScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						"event":       "FD_ACCRUAL_SCHEDULE_APPROVED",
 						"actor_email": uEmail,
 					})
+				trigger := "POST_APPROVE"
+				var actionType string
+				if qerr := pgxPool.QueryRow(context.Background(), `
+					SELECT COALESCE(action_type,'')
+					FROM investment.fd_accrual_schedule_config_audit
+					WHERE config_id=$1 AND processing_status IN ('APPROVED','DELETED')
+					ORDER BY COALESCE(checker_at, requested_at) DESC NULLS LAST
+					LIMIT 1`, cfgID).Scan(&actionType); qerr == nil {
+					if strings.EqualFold(strings.TrimSpace(actionType), "EDIT") {
+						trigger = "POST_EDIT"
+					}
+				}
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_ACCRUAL_SCHED", trigger, []string{cfgID}, uEmail)
+			}(id, userEmail)
+		}
+		for _, id := range deleted {
+			go func(cfgID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDAccrual] ApproveScheduleConfig delete notification panic for %s: %v", cfgID, rec)
+					}
+				}()
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_ACCRUAL_SCHED", "POST_DELETE", []string{cfgID}, uEmail)
 			}(id, userEmail)
 		}
 		api.LogInfo("[FDAccrual] ApproveScheduleConfig: approved=%d deleted=%d by=%s", len(approved), len(deleted), userEmail)
@@ -895,6 +920,7 @@ func RejectScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						"event":       "FD_ACCRUAL_SCHEDULE_REJECTED",
 						"actor_email": uEmail,
 					})
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_ACCRUAL_SCHED", "POST_REJECT", []string{cfgID}, uEmail)
 			}(id, userEmail)
 		}
 		api.LogInfo("[FDAccrual] RejectScheduleConfig: count=%d errors=%d by=%s", len(rejected), len(errors), userEmail)

@@ -19,6 +19,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/jobs/dmsevent"
 	"CimplrCorpSaas/internal/validation"
 
 	"github.com/google/uuid"
@@ -554,6 +555,7 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		batchIDs := make([]string, 0)
+		uploadedIDs := make([]string, 0)
 		for txType, files := range r.MultipartForm.File {
 			txTypeUpper := strings.ToUpper(txType)
 			for _, fileHeader := range files {
@@ -630,6 +632,7 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					rows.Close()
 					if len(payableIDs) > 0 {
+						uploadedIDs = append(uploadedIDs, payableIDs...)
 						_, auditErr := pgxPool.Exec(ctx, `
 							INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
 							SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
@@ -660,6 +663,7 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					rows.Close()
 					if len(receivableIDs) > 0 {
+						uploadedIDs = append(uploadedIDs, receivableIDs...)
 						_, auditErr := pgxPool.Exec(ctx, `
 							INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
 							SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
@@ -674,6 +678,9 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 			}
+		}
+		if len(uploadedIDs) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "PAYABLE_RECEIVABLE", "POST_UPLOAD", uploadedIDs, userName)
 		}
 		api.RespondEnvelopeSuccess(w, "All transactions uploaded and processed", nil)
 	}
@@ -1364,6 +1371,10 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
+		if rejectedIDs := append(append([]string{}, payIDs...), recIDs...); len(rejectedIDs) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "PAYABLE_RECEIVABLE", "POST_REJECT", rejectedIDs, checkerBy)
+		}
+
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rejected_count": len(payActionIDs) + len(recActionIDs)})
 	}
 }
@@ -1410,6 +1421,8 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		recActionIDs := make([]string, 0, len(recIDs))
 		payDeleteActionIDs := make([]string, 0)
 		recDeleteActionIDs := make([]string, 0)
+		payDeleteTxnIDs := make([]string, 0)
+		recDeleteTxnIDs := make([]string, 0)
 		payEditActionIDs := make([]string, 0)
 		recEditActionIDs := make([]string, 0)
 		for _, pid := range payIDs {
@@ -1435,6 +1448,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			payActionIDs = append(payActionIDs, aid)
 			if atype == constants.AuditActionDelete && status == constants.StatusPendingDeleteApproval {
 				payDeleteActionIDs = append(payDeleteActionIDs, aid)
+				payDeleteTxnIDs = append(payDeleteTxnIDs, pid)
 			} else if atype == constants.AuditActionEdit {
 				payEditActionIDs = append(payEditActionIDs, aid)
 			}
@@ -1462,6 +1476,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			recActionIDs = append(recActionIDs, aid)
 			if atype == constants.AuditActionDelete && status == constants.StatusPendingDeleteApproval {
 				recDeleteActionIDs = append(recDeleteActionIDs, aid)
+				recDeleteTxnIDs = append(recDeleteTxnIDs, rid)
 			} else if atype == constants.AuditActionEdit {
 				recEditActionIDs = append(recEditActionIDs, aid)
 			}
@@ -1634,6 +1649,13 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
+		if approvedIDs := append(append([]string{}, payIDs...), recIDs...); len(approvedIDs) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "PAYABLE_RECEIVABLE", "POST_APPROVE", approvedIDs, checkerBy)
+		}
+		if deletedIDs := append(append([]string{}, payDeleteTxnIDs...), recDeleteTxnIDs...); len(deletedIDs) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "PAYABLE_RECEIVABLE", "POST_DELETE", deletedIDs, checkerBy)
+		}
+
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"approved_count": len(payActionIDs) + len(recActionIDs)})
 	}
 }
@@ -1805,6 +1827,10 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		if createdIDs := append(append([]string{}, createdPayables...), createdReceivables...); len(createdIDs) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "PAYABLE_RECEIVABLE", "POST_CREATE", createdIDs, userName)
+		}
 
 		resp := map[string]interface{}{}
 		if len(createdPayables) > 0 {
@@ -2127,6 +2153,8 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		dmsevent.Fire(pgxPool, "CASH", "PAYABLE_RECEIVABLE", "POST_EDIT", []string{req.ID}, userName)
 
 		api.RespondWithPayload(w, true, "", map[string]string{"id": id, "action_id": actionID})
 	}

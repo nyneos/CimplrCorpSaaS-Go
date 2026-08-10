@@ -8,6 +8,7 @@ import (
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/logger"
 	"archive/zip"
 	"bytes"
@@ -3020,6 +3021,10 @@ RETURNING bank_statement_id
 		"ungrouped_transaction_percent":   ungroupedPct,
 		"file_storage_key":                uploadS3Key.String,
 		"file_storage_url":                s3URL,
+	}
+	// Shared by single-file upload, ZIP members, and any other V2 callers.
+	if strings.TrimSpace(bankStatementID) != "" {
+		dmsjobs.FireDmsEvent(pool, "CASH", "BANK_STATEMENT", "POST_UPLOAD", []string{bankStatementID}, uploadedBy)
 	}
 	return result, nil
 }

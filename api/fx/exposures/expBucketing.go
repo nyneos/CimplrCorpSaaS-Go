@@ -9,6 +9,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/logger"
 	"encoding/json"
 	"errors"
@@ -701,18 +702,22 @@ func ApproveBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		toDelete := []string{}
-		toApprove := []string{}
+		toCreateApprove := []string{}
+		toEditApprove := []string{}
 		for statusRows.Next() {
 			var id, status string
 			if err := statusRows.Scan(&id, &status); err == nil {
 				if strings.EqualFold(status, constants.StatusPendingDeleteApproval) {
 					toDelete = append(toDelete, id)
+				} else if strings.EqualFold(status, constants.StatusPendingEditApproval) {
+					toEditApprove = append(toEditApprove, id)
 				} else {
-					toApprove = append(toApprove, id)
+					toCreateApprove = append(toCreateApprove, id)
 				}
 			}
 		}
 		statusRows.Close()
+		toApprove := append(append([]string{}, toCreateApprove...), toEditApprove...)
 
 		for _, id := range req.ExposureHeaderIds {
 			bucketingRow, err := loadExposureBucketingRow(ctx, pool, id)
@@ -819,21 +824,39 @@ func ApproveBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: updatedBy, Comment: req.Comments})
 		}
 
+		approvedIDSet := map[string]struct{}{}
+		for _, rowMap := range approved {
+			if id, ok := rowMap["exposure_header_id"]; ok {
+				approvedIDSet[fmt.Sprint(id)] = struct{}{}
+			}
+		}
+		createApprovedIDs := filterBucketingHeaderIDs(toCreateApprove, approvedIDSet)
+		editApprovedIDs := filterBucketingHeaderIDs(toEditApprove, approvedIDSet)
+		if len(createApprovedIDs) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_BUCKETING", "POST_APPROVE", createApprovedIDs, updatedBy)
+		}
+		if len(editApprovedIDs) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_BUCKETING", "POST_EDIT", editApprovedIDs, updatedBy)
+		}
+		if len(deleted) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_BUCKETING", "POST_DELETE", deleted, updatedBy)
+		}
+
 		respondWithSuccess(w, http.StatusOK, "Exposure bucketing rows approved successfully", map[string]interface{}{
 			"Approved": approved,
 			"deleted":  deleted,
 		})
 
-		approvedIDs := make([]string, 0, len(approved))
+		notifApprovedIDs := make([]string, 0, len(approved))
 		for _, rowMap := range approved {
 			if id, ok := rowMap["exposure_header_id"]; ok {
-				approvedIDs = append(approvedIDs, fmt.Sprint(id))
+				notifApprovedIDs = append(notifApprovedIDs, fmt.Sprint(id))
 			}
 		}
 		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
 			SourceRoute: fxnotif.SourceRouteBucketingApprove, Action: fxnotif.ActionApprove, UserID: req.UserID, RequestedBy: updatedBy, CheckerComment: req.Comments,
 			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
-				"approved": approvedIDs,
+				"approved": notifApprovedIDs,
 				"deleted":  deleted,
 			},
 		})
@@ -922,16 +945,20 @@ func RejectBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposureBucketing, ParentColumn: "exposure_header_id", ParentID: fmt.Sprint(id), Status: constants.StatusRejected, CheckerBy: updatedBy, Comment: req.Comments})
 			}
 		}
-		respondWithSuccess(w, http.StatusOK, "Exposure bucketing rows rejected successfully", map[string]interface{}{
-			"Rejected": rejected,
-		})
-
 		rejectedIDs := make([]string, 0, len(rejected))
 		for _, rowMap := range rejected {
 			if id, ok := rowMap["exposure_header_id"]; ok {
 				rejectedIDs = append(rejectedIDs, fmt.Sprint(id))
 			}
 		}
+		if len(rejectedIDs) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_BUCKETING", "POST_REJECT", rejectedIDs, updatedBy)
+		}
+
+		respondWithSuccess(w, http.StatusOK, "Exposure bucketing rows rejected successfully", map[string]interface{}{
+			"Rejected": rejected,
+		})
+
 		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
 			SourceRoute: fxnotif.SourceRouteBucketingReject, Action: fxnotif.ActionReject, UserID: req.UserID, RequestedBy: updatedBy, CheckerComment: req.Comments,
 			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
@@ -939,4 +966,17 @@ func RejectBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			},
 		})
 	}
+}
+
+func filterBucketingHeaderIDs(candidates []string, approved map[string]struct{}) []string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(candidates))
+	for _, id := range candidates {
+		if _, ok := approved[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out
 }

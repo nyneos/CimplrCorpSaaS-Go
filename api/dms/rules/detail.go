@@ -7,6 +7,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/dms/common"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -60,6 +61,14 @@ func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "rule not found", "NOT_FOUND")
 			return
 		}
+		scope := ctxutil.FromContext(r.Context())
+		entityID := ""
+		if d.EntityID != nil {
+			entityID = *d.EntityID
+		}
+		if !common.RequireEntityAccess(w, scope, entityID) {
+			return
+		}
 		d.CurrentVersionID = currentVersionID
 		d.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 		d.LastModifiedAt = lastModifiedAt.UTC().Format(time.RFC3339)
@@ -67,9 +76,13 @@ func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		versionRows, err := tx.Query(r.Context(), `
 			SELECT version_id::text, version_no, status, time_window_type, time_window_value, time_window_unit,
 			       custom_start::text, custom_end::text, schedule_type, cron_expr,
+			       COALESCE(row_expand_mode, 'FIRST_ROW'),
+			       COALESCE(data_row_from, 1), COALESCE(data_row_to, 500),
+			       COALESCE(repeat_kind,'MANUAL'), schedule_time::text,
+			       schedule_weekday, schedule_month_day, COALESCE(schedule_timezone,'Asia/Kolkata'),
 			       COALESCE(created_by,''), created_at, approved_by, approved_at
 			FROM dms_svc.generation_rule_version
-			WHERE rule_id = $1::uuid
+			WHERE rule_id = $1::uuid AND is_deleted = false
 			ORDER BY version_no DESC`, req.RuleID)
 		if err != nil {
 			api.LogErrorForResponse(w, "dms rule detail versions: %v", err)
@@ -82,7 +95,9 @@ func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			var vCreatedAt time.Time
 			var vApprovedAt *time.Time
 			if err := versionRows.Scan(&v.VersionID, &v.VersionNo, &v.Status, &v.TimeWindowType, &v.TimeWindowValue, &v.TimeWindowUnit,
-				&v.CustomStart, &v.CustomEnd, &v.ScheduleType, &v.CronExpr,
+				&v.CustomStart, &v.CustomEnd, &v.ScheduleType, &v.CronExpr, &v.RowExpandMode,
+				&v.DataRowFrom, &v.DataRowTo,
+				&v.RepeatKind, &v.ScheduleTime, &v.ScheduleWeekday, &v.ScheduleMonthDay, &v.ScheduleTimezone,
 				&v.CreatedBy, &vCreatedAt, &v.ApprovedBy, &vApprovedAt); err != nil {
 				continue
 			}
@@ -113,6 +128,14 @@ func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
 					d.CustomEnd = v.CustomEnd
 					d.ScheduleType = v.ScheduleType
 					d.CronExpr = v.CronExpr
+					d.RepeatKind = v.RepeatKind
+					d.ScheduleTime = v.ScheduleTime
+					d.ScheduleWeekday = v.ScheduleWeekday
+					d.ScheduleMonthDay = v.ScheduleMonthDay
+					d.ScheduleTimezone = v.ScheduleTimezone
+					d.RowExpandMode = v.RowExpandMode
+					d.DataRowFrom = v.DataRowFrom
+					d.DataRowTo = v.DataRowTo
 					break
 				}
 			}
@@ -124,6 +147,7 @@ func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				d.EmailRecipients = children.EmailRecipients
 				d.BankAccountScope = children.BankAccountScope
 				d.NotificationTemplateIDs = children.NotificationTemplateIDs
+				d.Triggers = children.Triggers
 			}
 		}
 

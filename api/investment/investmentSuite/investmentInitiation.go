@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/validation"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"bufio"
 	"bytes"
 	"context"
@@ -221,6 +222,7 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				fmt.Sprintf("INVESTMENT_INITIATION_CREATE/%s/%d", uID, time.Now().UnixMilli()),
 				pl.ToMap(),
 			)
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_INITIATION", "POST_CREATE", []string{iID}, uEmail)
 		}(initiationID, req.UserID, userEmail)
 
 		response := map[string]any{
@@ -377,6 +379,8 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 				continue
 			}
+
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_INITIATION", "POST_CREATE", []string{initiationID}, userEmail)
 
 			result := map[string]interface{}{
 				constants.ValueSuccess: true,
@@ -865,6 +869,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var toApprove []string            // action_ids to approve
 		var toApproveInitiations []string // initiation_ids corresponding to actions being approved
+		var editInitiationIDs []string
 		var toDeleteActionIDs []string
 		var deleteMasterIDs []string
 
@@ -885,6 +890,9 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
 				toApproveInitiations = append(toApproveInitiations, iid)
+				if ps == constants.StatusPendingEditApproval {
+					editInitiationIDs = append(editInitiationIDs, iid)
+				}
 			}
 		}
 
@@ -941,6 +949,10 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(toApproveInitiations) > 0 {
 			ids := append([]string{}, toApproveInitiations...)
+			editSet := make(map[string]struct{}, len(editInitiationIDs))
+			for _, id := range editInitiationIDs {
+				editSet[id] = struct{}{}
+			}
 			uID := req.UserID
 			uEmail := checkerBy
 			go func() {
@@ -951,6 +963,13 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					fmt.Sprintf("INVESTMENT_INITIATION_APPROVE/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
 				)
+				for _, id := range ids {
+					trigger := "POST_APPROVE"
+					if _, isEdit := editSet[id]; isEdit {
+						trigger = "POST_EDIT"
+					}
+					dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_INITIATION", trigger, []string{id}, uEmail)
+				}
 			}()
 		}
 		if len(deleteMasterIDs) > 0 {
@@ -965,6 +984,9 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					fmt.Sprintf("INVESTMENT_INITIATION_DELETE/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
 				)
+				for _, id := range ids {
+					dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_INITIATION", "POST_DELETE", []string{id}, uEmail)
+				}
 			}()
 		}
 
@@ -1093,6 +1115,9 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				fmt.Sprintf("INVESTMENT_INITIATION_REJECT/%s/%d", uID, time.Now().UnixMilli()),
 				pl.ToMap(),
 			)
+			for _, id := range ids {
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_INITIATION", "POST_REJECT", []string{id}, uEmail)
+			}
 		}(append([]string{}, req.InitiationIDs...), req.UserID, checkerBy)
 
 		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})

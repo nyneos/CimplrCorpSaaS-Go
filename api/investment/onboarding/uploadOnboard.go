@@ -26,6 +26,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/validation"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -1479,7 +1480,10 @@ WHERE ts.total_units > 0;
 		batchIDCopy := batchID
 		userEmailCopy := userEmail
 		poolRef := pgxPool
-		go BuildOnboardUploadNotifPayload(context.Background(), poolRef, batchIDCopy, userEmailCopy)
+		go func() {
+			BuildOnboardUploadNotifPayload(context.Background(), poolRef, batchIDCopy, userEmailCopy)
+			dmsjobs.FireDmsEvent(poolRef, "INVESTMENT_MF", "MF_ONBOARD", "POST_UPLOAD", []string{batchIDCopy}, userEmailCopy)
+		}()
 
 		logger.LogInfo("[bulk] final counts: %+v", counts)
 		logger.LogInfo("[bulk] enriched counts: %+v", enrichedCounts)

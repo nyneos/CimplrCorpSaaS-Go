@@ -8,6 +8,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/jobs/dmsevent"
 	"CimplrCorpSaas/internal/logger"
 	"bytes"
 	"context"
@@ -147,6 +148,8 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
+
+		dmsevent.Fire(pgxPool, "CASH", "LIMIT_UTILIZATION", "POST_CREATE", []string{utilizationID}, requestedBy)
 
 		api.RespondWithResult(w, true, utilizationID)
 	}
@@ -339,6 +342,7 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(createdUtilizationIDs) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "LIMIT_UTILIZATION", "POST_CREATE", createdUtilizationIDs, requestedBy)
 			payload := BuildUtilizationNotifPayload(context.Background(), pgxPool, createdUtilizationIDs, "CREATE", capturedUser)
 			go catalog.TriggerNotification(
 				context.Background(), pgxPool,
@@ -530,6 +534,8 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
+
+		dmsevent.Fire(pgxPool, "CASH", "LIMIT_UTILIZATION", "POST_EDIT", []string{req.UtilizationID}, requestedBy)
 
 		api.RespondWithResult(w, true, req.UtilizationID)
 		// Notify: utilization updated with FULL record data
@@ -1291,6 +1297,11 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		dmsevent.Fire(pgxPool, "CASH", "LIMIT_UTILIZATION", "POST_APPROVE", req.UtilizationIDs, checkerBy)
+		if len(deleted) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "LIMIT_UTILIZATION", "POST_DELETE", deleted, checkerBy)
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"approved_count": len(actionIDs),
 			"deleted":        deleted,
@@ -1402,6 +1413,8 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "failed to reject: "+err.Error())
 			return
 		}
+
+		dmsevent.Fire(pgxPool, "CASH", "LIMIT_UTILIZATION", "POST_REJECT", req.UtilizationIDs, checkerBy)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"rejected_count": len(actionIDs),

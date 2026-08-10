@@ -34,6 +34,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"CimplrCorpSaas/internal/logger"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 )
 
 var ErrExposureFileAlreadyUploaded = errors.New("exposure file already uploaded")
@@ -986,16 +987,20 @@ func RejectMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 				auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: parentID, ActionType: "REJECT", Status: constants.StatusRejected, Reason: rejectionComment, RequestedBy: rejectedBy, OldValues: oldValuesByID[parentID], NewValues: rowMap})
 			}
 		}
-		respondWithSuccess(w, http.StatusOK, "Exposures rejected successfully", map[string]interface{}{
-			"rejected": rejected,
-		})
-
 		rejectedIDs := make([]string, 0, len(rejected))
 		for _, row := range rejected {
 			if id, ok := row["exposure_header_id"]; ok {
 				rejectedIDs = append(rejectedIDs, fmt.Sprint(id))
 			}
 		}
+		if len(rejectedIDs) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_CREATION", "POST_REJECT", rejectedIDs, rejectedBy)
+		}
+
+		respondWithSuccess(w, http.StatusOK, "Exposures rejected successfully", map[string]interface{}{
+			"rejected": rejected,
+		})
+
 		fxnotif.NotifyExposureBulkAction(ctx, pool, fxnotif.BulkActionNotifyInput{
 			SourceRoute: fxnotif.SourceRouteLegacyRejectMultiple, Action: fxnotif.ActionReject, UserID: req.UserID, RequestedBy: rejectedBy, CheckerComment: rejectionComment,
 			ExposureIDs: req.ExposureHeaderIds, ResultBuckets: map[string][]string{
@@ -1103,18 +1108,22 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		toDelete := []string{}
-		toApprove := []string{}
+		toCreateApprove := []string{}
+		toEditApprove := []string{}
 		skipped := []string{}
 		for _, h := range headers {
 			status := strings.ToLower(h.ApprovalStatus)
 			if status == "pending_delete_approval" || strings.Contains(status, "delete-approval") {
 				toDelete = append(toDelete, h.ExposureHeaderId)
-			} else if status == "pending" || status == "rejected" || status == "pending_approval" || status == "pending_edit_approval" {
-				toApprove = append(toApprove, h.ExposureHeaderId)
+			} else if status == "pending_edit_approval" {
+				toEditApprove = append(toEditApprove, h.ExposureHeaderId)
+			} else if status == "pending" || status == "rejected" || status == "pending_approval" {
+				toCreateApprove = append(toCreateApprove, h.ExposureHeaderId)
 			} else if status == "approved" {
 				skipped = append(skipped, h.ExposureHeaderId)
 			}
 		}
+		toApprove := append(append([]string{}, toCreateApprove...), toEditApprove...)
 		results := map[string]interface{}{
 			"deleted":  []map[string]interface{}{},
 			"approved": []map[string]interface{}{},
@@ -1319,6 +1328,34 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			id := fmt.Sprint(row["exposure_header_id"])
 			// Update the existing pending audit row in place instead of creating a new APPROVE row.
 			auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
+		}
+
+		approvedIDSet := map[string]struct{}{}
+		if approvedList, ok := results["approved"].([]map[string]interface{}); ok {
+			for _, row := range approvedList {
+				if id, ok := row["exposure_header_id"]; ok {
+					approvedIDSet[fmt.Sprint(id)] = struct{}{}
+				}
+			}
+		}
+		createApprovedIDs := filterExposureHeaderIDs(toCreateApprove, approvedIDSet)
+		editApprovedIDs := filterExposureHeaderIDs(toEditApprove, approvedIDSet)
+		if len(createApprovedIDs) > 0 {
+			fireExposureDmsEvents(pool, ctx, "POST_APPROVE", createApprovedIDs, approvedBy)
+		}
+		if len(editApprovedIDs) > 0 {
+			fireExposureDmsEvents(pool, ctx, "POST_EDIT", editApprovedIDs, approvedBy)
+		}
+		if deletedRows, ok := results["deleted"].([]map[string]interface{}); ok && len(deletedRows) > 0 {
+			deletedDmsIDs := make([]string, 0, len(deletedRows))
+			for _, row := range deletedRows {
+				if id, ok := row["exposure_header_id"]; ok {
+					deletedDmsIDs = append(deletedDmsIDs, fmt.Sprint(id))
+				}
+			}
+			if len(deletedDmsIDs) > 0 {
+				fireExposureDmsEvents(pool, ctx, "POST_DELETE", deletedDmsIDs, approvedBy)
+			}
 		}
 
 		respondWithSuccess(w, http.StatusOK, "Exposures approved successfully", map[string]interface{}{
@@ -2329,6 +2366,17 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 						NewValues:    newValues,
 					})
 				}
+				if len(createdExposureIDs) > 0 {
+					// Creation rules + upload-scoped companion (POST_UPLOAD / POST_CREATE).
+					dmsjobs.FireDmsEvent(
+						pool, "FX", "EXPOSURE_CREATION", "POST_CREATE",
+						createdExposureIDs, uploadedBy,
+					)
+					dmsjobs.FireDmsEvent(
+						pool, "FX", "EXPOSURE_UPLOAD", "POST_UPLOAD",
+						createdExposureIDs, uploadedBy,
+					)
+				}
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: success,
 					"filename":             filename,
@@ -2376,6 +2424,53 @@ func fxExposureS3Region() string {
 		return r
 	}
 	return "ap-south-1"
+}
+
+func filterExposureHeaderIDs(candidates []string, approved map[string]struct{}) []string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(candidates))
+	for _, id := range candidates {
+		if _, ok := approved[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func exposureHeaderIDsWithUploadKey(ctx context.Context, pool *pgxpool.Pool, ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT exposure_header_id::text
+		FROM exposure_headers
+		WHERE exposure_header_id = ANY($1::uuid[])
+		  AND COALESCE(TRIM(upload_s3_key), '') <> ''
+	`, ids)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := make([]string, 0, len(ids))
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr == nil && strings.TrimSpace(id) != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func fireExposureDmsEvents(pool *pgxpool.Pool, ctx context.Context, trigger string, exposureHeaderIDs []string, actor string) {
+	if len(exposureHeaderIDs) == 0 {
+		return
+	}
+	dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_CREATION", trigger, exposureHeaderIDs, actor)
+	if uploadIDs := exposureHeaderIDsWithUploadKey(ctx, pool, exposureHeaderIDs); len(uploadIDs) > 0 {
+		dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_UPLOAD", trigger, uploadIDs, actor)
+	}
 }
 
 func fxExposureS3PresignExpiry() time.Duration {

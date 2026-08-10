@@ -8,6 +8,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/jobs/dmsevent"
 	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
@@ -169,6 +170,8 @@ func CreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "failed to create audit action: "+err.Error())
 			return
 		}
+
+		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_CREATE", []string{sweepID}, requestedBy)
 
 		api.RespondWithResult(w, true, sweepID)
 	}
@@ -350,6 +353,8 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_CREATE", createdIDs, requestedBy)
 
 		api.RespondWithPayload(w, true, fmt.Sprintf("created %d sweep configurations", len(createdIDs)), map[string]interface{}{
 			"sweep_ids": createdIDs,
@@ -650,6 +655,8 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_EDIT", []string{req.SweepID}, requestedBy)
 
 		// Notify: pass FULL sweep config data for rich templates
 		capturedSweepID := req.SweepID
@@ -1111,6 +1118,11 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
+		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_APPROVE", req.SweepIDs, checkerBy)
+		if len(deleted) > 0 {
+			dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_DELETE", deleted, checkerBy)
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"approved_count": len(actionIDs), "deleted": deleted})
 		// Notify: FULL sweep config data for rich templates
 		capturedIDs := req.SweepIDs
@@ -1233,6 +1245,8 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_REJECT", req.SweepIDs, checkerBy)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"rejected_count": len(actionIDs)})
 		// Notify: FULL sweep config data for rich templates

@@ -20,6 +20,7 @@ import (
 	"CimplrCorpSaas/api/investment/uploadutil"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -2206,10 +2207,25 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, crID := range req.ClosureRequestIDs {
 			go func(id, uEmail string) {
 				defer func() { recover() }() //nolint:errcheck
-				notifcatalog.TriggerNotification(context.Background(), pool,
-					"/investment/fd/closure/bulk-approve", id, map[string]interface{}{
-						"record_id": id, "event": "FD_CLOSURE_APPROVED", "actor_email": uEmail,
-					})
+				notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/closure/bulk-approve", id, map[string]interface{}{
+					"record_id": id, "event": "FD_CLOSURE_APPROVED", "actor_email": uEmail,
+				})
+				trigger := "POST_APPROVE"
+				var actionType string
+				if qerr := pool.QueryRow(context.Background(), `
+					SELECT COALESCE(action_type,'')
+					FROM investment.fd_audit_closure_request
+					WHERE closure_request_id=$1 AND processing_status IN ('APPROVED','DELETED')
+					ORDER BY COALESCE(checker_at, created_at) DESC NULLS LAST
+					LIMIT 1`, id).Scan(&actionType); qerr == nil {
+					switch strings.ToUpper(strings.TrimSpace(actionType)) {
+					case "EDIT":
+						trigger = "POST_EDIT"
+					case "DELETE":
+						trigger = "POST_DELETE"
+					}
+				}
+				dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_CLOSURE", trigger, []string{id}, uEmail)
 			}(crID, userEmail)
 		}
 
@@ -2334,6 +2350,7 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 					"/investment/fd/closure/bulk-reject", id, map[string]interface{}{
 						"record_id": id, "event": "FD_CLOSURE_REJECTED", "actor_email": uEmail,
 					})
+				dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_CLOSURE", "POST_REJECT", []string{id}, uEmail)
 			}(crID, userEmail)
 		}
 
@@ -3522,6 +3539,7 @@ func init() {
 						`UPDATE investment.fd_master
 						 SET closure_request_id=NULL, updated_at=NOW()
 						 WHERE closure_request_id=$1`, recordID)
+					dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_CLOSURE", "POST_DELETE", []string{recordID}, actorEmail)
 				}
 				api.LogInfo("[FDClosure] postFinalizeHook: closureID=%s type=%s status=%s by=%s", recordID, t, finalStatus, actorEmail)
 				return

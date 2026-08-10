@@ -11,6 +11,7 @@ import (
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/validation"
 	"context"
 	"database/sql"
@@ -639,6 +640,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"amount":      amount,
 				})
 		}(confirmationID, req.BookingID, entityID, userEmail, req.ConfirmedPrincipalAmount)
+
+		dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_CONFIRMATION", "POST_CREATE", []string{confirmationID}, userEmail)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"confirmation_id":     confirmationID,
@@ -2340,6 +2343,22 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"event":       "FD_CONFIRMATION_APPROVED",
 					"actor_email": uEmail,
 				})
+				trigger := "POST_APPROVE"
+				var actionType string
+				if qerr := pgxPool.QueryRow(context.Background(), `
+					SELECT COALESCE(action_type,'')
+					FROM investment.fd_audit_confirmation
+					WHERE confirmation_id=$1 AND processing_status IN ('APPROVED','DELETED')
+					ORDER BY COALESCE(checker_at, requested_at) DESC NULLS LAST
+					LIMIT 1`, id).Scan(&actionType); qerr == nil {
+					switch strings.ToUpper(strings.TrimSpace(actionType)) {
+					case "EDIT":
+						trigger = "POST_EDIT"
+					case "DELETE":
+						trigger = "POST_DELETE"
+					}
+				}
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_CONFIRMATION", trigger, []string{id}, uEmail)
 			}(cID, userEmail)
 		}
 		api.LogInfo("[FDConfirmation] BulkApproveConfirmation: engine=%d direct=%d errors=%d by=%s",
@@ -2492,6 +2511,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"event":       "FD_CONFIRMATION_REJECTED",
 					"actor_email": uEmail,
 				})
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_CONFIRMATION", "POST_REJECT", []string{id}, uEmail)
 			}(cID, userEmail)
 		}
 		api.LogInfo("[FDConfirmation] BulkRejectConfirmation: engine=%d direct=%d errors=%d by=%s",

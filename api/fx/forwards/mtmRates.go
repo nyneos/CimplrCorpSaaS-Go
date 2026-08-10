@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api/fx/auditutil"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"bytes"
 	"context"
 	"database/sql"
@@ -573,6 +574,9 @@ func processUploadMTMFiles(ctx context.Context, pool *pgxpool.Pool, r *http.Requ
 			}
 		}
 		triggerMTMNotif(ctx, pool, routeForwardUploadMTM, "UPLOAD", uploadedBy, constants.StatusPendingApproval, insertedMTMIDs)
+		if len(insertedMTMIDs) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_MTM", "POST_CREATE", insertedMTMIDs, uploadedBy)
+		}
 	}
 
 	return results, nil
@@ -1051,6 +1055,7 @@ func BulkUpdateMTMProcessingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 
 		deletePendingIDs := make([]string, 0)
 		regularPendingIDs := make([]string, 0)
+		editPendingIDs := make([]string, 0)
 		for rows.Next() {
 			var mtmID, entity, approvalStatus string
 			if scanErr := rows.Scan(&mtmID, &entity, &approvalStatus); scanErr != nil {
@@ -1063,7 +1068,9 @@ func BulkUpdateMTMProcessingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			switch normalizedStatus {
 			case constants.StatusPendingDeleteApproval:
 				deletePendingIDs = append(deletePendingIDs, mtmID)
-			case "PENDING", constants.StatusPendingApproval, constants.StatusPendingEditApproval:
+			case constants.StatusPendingEditApproval:
+				editPendingIDs = append(editPendingIDs, mtmID)
+			case "PENDING", constants.StatusPendingApproval:
 				regularPendingIDs = append(regularPendingIDs, mtmID)
 			}
 		}
@@ -1164,6 +1171,39 @@ func BulkUpdateMTMProcessingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		if len(editPendingIDs) > 0 {
+			setClauses := []string{}
+			switch req.ProcessingStatus {
+			case "Approved":
+				setClauses = append(setClauses, "status = 'Approved'")
+				if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
+					setClauses = append(setClauses, "processing_status = 'APPROVED'")
+				}
+			case "Rejected":
+				setClauses = append(setClauses, "status = 'Rejected'")
+				if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
+					setClauses = append(setClauses, "processing_status = 'REJECTED'")
+				}
+			}
+			resultRows, updateErr := pool.Query(r.Context(), fmt.Sprintf(`
+				UPDATE forward_mtm
+				SET %s
+				WHERE mtm_id = ANY($1)
+				  AND COALESCE(is_deleted, false) = false
+				RETURNING *
+			`, strings.Join(setClauses, ", ")), editPendingIDs)
+			if updateErr != nil {
+				respondWithError(w, http.StatusInternalServerError, "failed to update mtm edit approval status")
+				return
+			}
+			updated = append(updated, collectMTMRows(resultRows)...)
+			resultRows.Close()
+
+			for _, id := range editPendingIDs {
+				auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardMTM, ParentColumn: "mtm_id", ParentID: id, Status: strings.ToUpper(req.ProcessingStatus), CheckerBy: checker, Comment: decisionComment})
+			}
+		}
+
 		if len(updated) == 0 {
 			respondWithError(w, http.StatusNotFound, "No matching pending MTM rows found")
 			return
@@ -1178,6 +1218,36 @@ func BulkUpdateMTMProcessingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		triggerMTMNotif(r.Context(), pool, routeForwardMTMUpdateStatus, action, checker, req.ProcessingStatus, updatedIDs)
+		if req.ProcessingStatus == "Approved" {
+			deleteApprovedIDs := make([]string, 0)
+			editApprovedIDs := make([]string, 0)
+			createApprovedIDs := make([]string, 0)
+			for _, row := range updated {
+				id := strings.TrimSpace(fmt.Sprint(row["mtm_id"]))
+				if id == "" || id == "<nil>" {
+					continue
+				}
+				switch {
+				case containsString(deletePendingIDs, id):
+					deleteApprovedIDs = append(deleteApprovedIDs, id)
+				case containsString(editPendingIDs, id):
+					editApprovedIDs = append(editApprovedIDs, id)
+				case containsString(regularPendingIDs, id):
+					createApprovedIDs = append(createApprovedIDs, id)
+				}
+			}
+			if len(createApprovedIDs) > 0 {
+				dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_MTM", "POST_APPROVE", createApprovedIDs, checker)
+			}
+			if len(editApprovedIDs) > 0 {
+				dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_MTM", "POST_EDIT", editApprovedIDs, checker)
+			}
+			if len(deleteApprovedIDs) > 0 {
+				dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_MTM", "POST_DELETE", deleteApprovedIDs, checker)
+			}
+		} else if len(updatedIDs) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_MTM", "POST_REJECT", updatedIDs, checker)
+		}
 		respondEnvelopeSuccess(w, "MTM processing status updated successfully", map[string]interface{}{
 			"updated": updated,
 		})

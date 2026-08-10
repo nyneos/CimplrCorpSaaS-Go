@@ -56,6 +56,8 @@ var sourceCurrencyConfig = map[string]currencyNormConfig{
 			"total_open_amount":     {},
 			"total_original_amount": {},
 			"line_item_amount":      {},
+			"hedged_amount":         {},
+			"unhedged_amount":       {},
 		},
 	},
 	"fxExposureBucketing": {

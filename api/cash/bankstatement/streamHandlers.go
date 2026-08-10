@@ -35,6 +35,7 @@ import (
 
 	"CimplrCorpSaas/internal/bindref"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/logger"
 )
 
@@ -1735,6 +1736,12 @@ func CommitHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		api.RespondEnvelopeSuccess(w, msg, data)
+
+		// PDF/commit persists the statement row — fire DMS POST_UPLOAD (rules also
+		// cover POST_CREATE; only one event here to avoid double generation).
+		if pool != nil && strings.TrimSpace(bankStatementID) != "" {
+			dmsjobs.FireDmsEvent(pool, "CASH", "BANK_STATEMENT", "POST_UPLOAD", []string{bankStatementID}, requestedBy)
+		}
 
 		// Fire rich notification for the commit event (PDF path).
 		// For CSV/XLS the V2 handler fires its own notification via UploadBankStatementV2Handler.

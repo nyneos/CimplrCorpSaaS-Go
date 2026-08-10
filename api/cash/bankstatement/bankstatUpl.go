@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/api/constants"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -1905,6 +1906,8 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_STATEMENT", "POST_EDIT", []string{req.BankStatementID}, requestedBy)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"bankstatementid": req.BankStatementID})
 	}

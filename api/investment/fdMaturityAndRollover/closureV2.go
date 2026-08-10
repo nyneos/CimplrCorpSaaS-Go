@@ -11,6 +11,7 @@ import (
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -26,6 +27,35 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func fireFDClosureDmsEvent(pool *pgxpool.Pool, trigger, actor string, initiateIDs []string) {
+	dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_CLOSURE", trigger, initiateIDs, actor)
+}
+
+func lookupClosureInitiateIDsFromConfirms(ctx context.Context, pool *pgxpool.Pool, confirmIDs []string) []string {
+	if len(confirmIDs) == 0 {
+		return nil
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT DISTINCT closure_initiate_id
+		FROM cimplr.fd_closure_confirm
+		WHERE closure_confirm_id = ANY($1::text[])
+		  AND COALESCE(is_deleted,false)=false
+		  AND COALESCE(closure_initiate_id,'') <> ''`, confirmIDs)
+	if err != nil {
+		api.LogError("[FDClosure] lookup closure_initiate_id: %v", err)
+		return nil
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil && strings.TrimSpace(id) != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
 
 const (
 	cimplrClosureModule = "FIXED_DEPOSIT"
@@ -538,6 +568,7 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			route := fmt.Sprintf("/investment/fd/closure/initiate/%s/create", strings.ToLower(cType))
 			payload := fdNotifications.BuildCimplrClosureInitiateNotifPayload(context.Background(), pool, []string{id}, "CREATE", email).ToMap()
 			notifcatalog.TriggerNotification(context.Background(), pool, route, id, payload)
+			fireFDClosureDmsEvent(pool, "POST_CREATE", email, []string{id})
 		}(closureInitiateID, req.ClosureType, userEmail)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -883,6 +914,27 @@ func CimplrInitiateApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		results = append(policyResults, results...)
 		ok, errStr := summarizeCimplrBatchResults(results)
 		go triggerClosureBulkNotif(context.Background(), pool, ids, constants.QuerryClosureInitiate, "initiate", "approve", userEmail)
+		go func(actor string, initiateIDs []string) {
+			bgCtx := context.Background()
+			for _, iid := range initiateIDs {
+				trigger := "POST_APPROVE"
+				var actionType string
+				if qerr := pool.QueryRow(bgCtx, `
+					SELECT COALESCE(action_type,'')
+					FROM cimplr.fd_closure_initiate_audit
+					WHERE closure_initiate_id=$1 AND processing_status IN ('APPROVED','DELETED')
+					ORDER BY COALESCE(checker_at, requested_at) DESC NULLS LAST
+					LIMIT 1`, iid).Scan(&actionType); qerr == nil {
+					switch strings.ToUpper(strings.TrimSpace(actionType)) {
+					case "EDIT":
+						trigger = "POST_EDIT"
+					case "DELETE":
+						trigger = "POST_DELETE"
+					}
+				}
+				fireFDClosureDmsEvent(pool, trigger, actor, []string{iid})
+			}
+		}(userEmail, ids)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
 	}
 }
@@ -927,6 +979,7 @@ func CimplrInitiateReject(pool *pgxpool.Pool) http.HandlerFunc {
 		results = append(policyResults, results...)
 		ok, errStr := summarizeCimplrBatchResults(results)
 		go triggerClosureBulkNotif(context.Background(), pool, ids, constants.QuerryClosureInitiate, "initiate", "reject", userEmail)
+		go fireFDClosureDmsEvent(pool, "POST_REJECT", userEmail, ids)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
 	}
 }
@@ -1144,6 +1197,9 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			route := fmt.Sprintf("/investment/fd/closure/confirm/%s/create", strings.ToLower(cType))
 			payload := fdNotifications.BuildCimplrClosureConfirmNotifPayload(context.Background(), pool, []string{id}, "CREATE", email).ToMap()
 			notifcatalog.TriggerNotification(context.Background(), pool, route, id, payload)
+			if initID := strings.TrimSpace(req.ClosureInitiateID); initID != "" {
+				fireFDClosureDmsEvent(pool, "POST_CREATE", email, []string{initID})
+			}
 		}(closureConfirmID, closureType, userEmail)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -1365,7 +1421,8 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			route := closurePrematureCreatePath
 			payload := fdNotifications.BuildCimplrClosureConfirmNotifPayload(context.Background(), pool, []string{id}, "CREATE", email).ToMap()
 			notifcatalog.TriggerNotification(context.Background(), pool, route, id, payload)
-		}(closureConfirmID, userEmail)
+			fireFDClosureDmsEvent(pool, "POST_CREATE", email, []string{id})
+		}(closureInitiateID, userEmail)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"closure_initiate_id":  closureInitiateID,
@@ -1786,6 +1843,27 @@ func CimplrConfirmApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		results = append(policyResults, results...)
 		ok, errStr := summarizeCimplrBatchResults(results)
 		go triggerClosureBulkNotif(context.Background(), pool, ids, constants.QuerryAuditClosureConfirm, "confirm", "approve", userEmail)
+		go func(actor string, confirmIDs []string) {
+			bgCtx := context.Background()
+			for _, cid := range confirmIDs {
+				trigger := "POST_APPROVE"
+				var actionType string
+				if qerr := pool.QueryRow(bgCtx, `
+					SELECT COALESCE(action_type,'')
+					FROM cimplr.fd_closure_confirm_audit
+					WHERE closure_confirm_id=$1 AND processing_status IN ('APPROVED','DELETED')
+					ORDER BY COALESCE(checker_at, requested_at) DESC NULLS LAST
+					LIMIT 1`, cid).Scan(&actionType); qerr == nil {
+					switch strings.ToUpper(strings.TrimSpace(actionType)) {
+					case "EDIT":
+						trigger = "POST_EDIT"
+					case "DELETE":
+						trigger = "POST_DELETE"
+					}
+				}
+				fireFDClosureDmsEvent(pool, trigger, actor, lookupClosureInitiateIDsFromConfirms(bgCtx, pool, []string{cid}))
+			}
+		}(userEmail, ids)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
 	}
 }
@@ -1830,6 +1908,9 @@ func CimplrConfirmReject(pool *pgxpool.Pool) http.HandlerFunc {
 		results = append(policyResults, results...)
 		ok, errStr := summarizeCimplrBatchResults(results)
 		go triggerClosureBulkNotif(context.Background(), pool, ids, constants.QuerryAuditClosureConfirm, "confirm", "reject", userEmail)
+		go func(actor string, confirmIDs []string) {
+			fireFDClosureDmsEvent(pool, "POST_REJECT", actor, lookupClosureInitiateIDsFromConfirms(context.Background(), pool, confirmIDs))
+		}(userEmail, ids)
 		api.RespondWithPayload(w, ok, errStr, map[string]interface{}{"results": results})
 	}
 }

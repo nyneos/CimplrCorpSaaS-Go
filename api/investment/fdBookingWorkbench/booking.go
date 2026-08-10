@@ -7,6 +7,7 @@ import (
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
@@ -368,6 +369,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"UserID":      uEmail,
 				"amount":      amount,
 			})
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_BOOKING", "POST_CREATE", []string{bID}, uEmail)
 		}(bookingID, req.EntityID, userEmail, req.PrincipalAmount)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -1656,6 +1658,22 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"user_id":     uID,
 					"actor_email": uEmail,
 				})
+				trigger := "POST_APPROVE"
+				var actionType string
+				if qerr := pgxPool.QueryRow(context.Background(), `
+					SELECT COALESCE(action_type,'')
+					FROM investment.fd_audit_booking_request
+					WHERE booking_id=$1 AND processing_status IN ('APPROVED','DELETED')
+					ORDER BY COALESCE(checker_at, requested_at) DESC NULLS LAST
+					LIMIT 1`, id).Scan(&actionType); qerr == nil {
+					switch strings.ToUpper(strings.TrimSpace(actionType)) {
+					case "EDIT":
+						trigger = "POST_EDIT"
+					case "DELETE":
+						trigger = "POST_DELETE"
+					}
+				}
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_BOOKING", trigger, []string{id}, uEmail)
 			}(bID, userEmail, userID)
 		}
 		api.LogInfo("[FDBooking] BulkApproveBooking: engine=%d direct=%d errors=%d by=%s",
@@ -1784,6 +1802,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"user_id":     uID,
 					"actor_email": uEmail,
 				})
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_BOOKING", "POST_REJECT", []string{id}, uEmail)
 			}(bID, userEmail, userID)
 		}
 		api.LogInfo("[FDBooking] BulkRejectBooking: engine=%d direct=%d errors=%d by=%s",

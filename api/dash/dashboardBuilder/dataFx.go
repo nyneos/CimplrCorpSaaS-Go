@@ -27,7 +27,25 @@ func queryFXExposureHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, en
 			h.document_date,
 			COALESCE(h.approval_status, '') AS approval_status,
 			COALESCE(h.total_original_amount, 0) AS total_original_amount,
-			COALESCE(h.total_open_amount, 0) AS total_open_amount,
+			COALESCE((
+				SELECT SUM(ehl.hedged_amount)
+				FROM public.exposure_hedge_links ehl
+				WHERE ehl.exposure_header_id = h.exposure_header_id
+				  AND COALESCE(ehl.is_active, true) = true
+			), 0) AS hedged_amount,
+			GREATEST(
+				COALESCE(h.total_open_amount, 0) - COALESCE((
+					SELECT SUM(ehl.hedged_amount)
+					FROM public.exposure_hedge_links ehl
+					WHERE ehl.exposure_header_id = h.exposure_header_id
+					  AND COALESCE(ehl.is_active, true) = true
+				), 0),
+				0
+			) AS unhedged_amount,
+			h.value_date,
+			COALESCE(h.status, '') AS status,
+			COALESCE(l.product_id, '') AS product_id,
+			COALESCE(l.quantity, 0) AS quantity,
 			COALESCE(l.line_item_amount, 0) AS line_item_amount,
 			COALESCE(h.amount_in_local_currency, 0) AS amount_in_local_currency
 		FROM public.exposure_headers h

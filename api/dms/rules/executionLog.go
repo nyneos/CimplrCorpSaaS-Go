@@ -64,9 +64,6 @@ func HandleListExecutionLog(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.Status == "" {
 			req.Status = "ALL"
 		}
-		if req.Limit <= 0 || req.Limit > 500 {
-			req.Limit = 100
-		}
 		if req.Offset < 0 {
 			req.Offset = 0
 		}
@@ -143,9 +140,12 @@ func HandleListExecutionLog(pool *pgxpool.Pool) http.HandlerFunc {
 				" OR LOWER(gr.trigger_type) LIKE $" + n + ")"
 		}
 
-		args = append(args, req.Limit, req.Offset)
-		query += " ORDER BY gr.started_at DESC LIMIT $" + strconv.Itoa(len(args)-1) +
-			" OFFSET $" + strconv.Itoa(len(args))
+		query += " ORDER BY gr.started_at DESC"
+		if req.Limit > 0 {
+			args = append(args, req.Limit, req.Offset)
+			query += " LIMIT $" + strconv.Itoa(len(args)-1) +
+				" OFFSET $" + strconv.Itoa(len(args))
+		}
 
 		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {

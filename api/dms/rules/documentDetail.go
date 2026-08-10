@@ -34,6 +34,8 @@ type documentDetailResp struct {
 	TemplateName       string         `json:"template_name"`
 	S3Key              string         `json:"s3_key"`
 	FileFormat         string         `json:"file_format"`
+	OutputFilename     string         `json:"output_filename"`
+	LocalPath          string         `json:"local_path"`
 	FileSize           *int64         `json:"file_size"`
 	Status             string         `json:"status"`
 	CreatedAt          string         `json:"created_at"`
@@ -74,7 +76,8 @@ func HandleDocumentDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT gd.doc_id::text, gd.run_id::text, COALESCE(gr.rule_id::text, ''),
 			       COALESCE(r.name, CASE WHEN gr.trigger_type = 'ADHOC' THEN 'Ad-hoc' ELSE '' END),
 			       gd.document_template_id::text, COALESCE(t.name, ''),
-			       gd.s3_key, gd.file_format, gd.file_size, gd.status, gd.created_at,
+			       gd.s3_key, gd.file_format, COALESCE(gd.output_filename, ''), COALESCE(gd.local_path, ''),
+			       gd.file_size, gd.status, gd.created_at,
 			       gr.status, gr.trigger_type, COALESCE(gr.triggered_by, ''),
 			       gr.started_at, gr.finished_at, COALESCE(gr.error_detail, ''),
 			       gr.window_start, gr.window_end
@@ -86,7 +89,8 @@ func HandleDocumentDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(
 			&out.DocID, &out.RunID, &out.RuleID, &out.RuleName,
 			&out.DocumentTemplateID, &out.TemplateName,
-			&out.S3Key, &out.FileFormat, &fileSize, &out.Status, &createdAt,
+			&out.S3Key, &out.FileFormat, &out.OutputFilename, &out.LocalPath,
+			&fileSize, &out.Status, &createdAt,
 			&out.RunStatus, &out.TriggerType, &out.TriggeredBy,
 			&runStarted, &runFinished, &out.ErrorDetail,
 			&windowStart, &windowEnd,

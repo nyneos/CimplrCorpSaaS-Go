@@ -7,6 +7,7 @@ import (
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/validation"
 	"context"
 	"database/sql"
@@ -362,6 +363,7 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		go func() {
 			payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, []string{redemptionID}, constants.AuditActionCreate, userEmail)
 			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/create", correlationID, payload.ToMap())
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION", "POST_CREATE", []string{redemptionID}, userEmail)
 		}()
 
 		api.RespondWithPayload(w, true, "", map[string]any{
@@ -621,6 +623,8 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error()})
 				continue
 			}
+
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION", "POST_CREATE", []string{redemptionID}, userEmail)
 
 			results = append(results, map[string]interface{}{
 				constants.ValueSuccess: true,
@@ -1059,6 +1063,8 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		var toApprove []string
+		var toApproveRedemptionIDs []string
+		var editRedemptionIDs []string
 		var toDeleteActionIDs []string
 		var deleteMasterIDs []string
 
@@ -1078,6 +1084,10 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
+				toApproveRedemptionIDs = append(toApproveRedemptionIDs, rid)
+				if ps == constants.StatusPendingEditApproval {
+					editRedemptionIDs = append(editRedemptionIDs, rid)
+				}
 			}
 		}
 
@@ -1224,16 +1234,30 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(toApprove) > 0 {
-			approvedRedemptionIDs := req.RedemptionIDs
+			ids := append([]string{}, toApproveRedemptionIDs...)
+			editSet := make(map[string]struct{}, len(editRedemptionIDs))
+			for _, id := range editRedemptionIDs {
+				editSet[id] = struct{}{}
+			}
 			go func() {
-				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, approvedRedemptionIDs, constants.AuditActionApprove, checkerBy)
-				catalog.TriggerNotification(ctx, pgxPool, redemptionInitiationApprovePath, approvedRedemptionIDs[0], payload.ToMap())
+				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, ids, constants.AuditActionApprove, checkerBy)
+				catalog.TriggerNotification(ctx, pgxPool, redemptionInitiationApprovePath, ids[0], payload.ToMap())
+				for _, id := range ids {
+					trigger := "POST_APPROVE"
+					if _, isEdit := editSet[id]; isEdit {
+						trigger = "POST_EDIT"
+					}
+					dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION", trigger, []string{id}, checkerBy)
+				}
 			}()
 		}
 		if len(deleteMasterIDs) > 0 {
 			go func() {
 				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, deleteMasterIDs, constants.AuditActionDelete, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, redemptionInitiationApprovePath, deleteMasterIDs[0], payload.ToMap())
+				for _, id := range deleteMasterIDs {
+					dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION", "POST_DELETE", []string{id}, checkerBy)
+				}
 			}()
 		}
 		api.RespondWithPayload(w, true, "", map[string]any{
@@ -1445,6 +1469,9 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			go func() {
 				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, req.RedemptionIDs, constants.AuditActionReject, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/reject", req.RedemptionIDs[0], payload.ToMap())
+				for _, id := range req.RedemptionIDs {
+					dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION", "POST_REJECT", []string{id}, checkerBy)
+				}
 			}()
 		}
 		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})

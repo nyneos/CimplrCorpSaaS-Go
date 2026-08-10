@@ -11,6 +11,7 @@ import (
 	dmsgenerate "CimplrCorpSaas/api/dms/generate"
 	dmsrules "CimplrCorpSaas/api/dms/rules"
 	dmstemplates "CimplrCorpSaas/api/dms/templates"
+	dmscontrol "CimplrCorpSaas/api/dms/control"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/internal/dbutil"
 	"CimplrCorpSaas/internal/observability"
@@ -67,6 +68,7 @@ func NewDmsServer(pool *pgxpool.Pool, port string) (*http.Server, *pgxpool.Pool,
 	dmstemplates.RegisterRoutes(mux, pool, chain)
 	dmsrules.RegisterRoutes(mux, pool, chain)
 	dmsgenerate.RegisterRoutes(mux, pool, chain)
+	dmscontrol.RegisterRoutes(mux, chain)
 
 	mux.Handle("/dms/metrics", observability.MetricsHandler(serviceName))
 

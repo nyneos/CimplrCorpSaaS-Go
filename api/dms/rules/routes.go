@@ -19,6 +19,7 @@ func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, chain func(http.Hand
 	mux.Handle("/dms/rules/versions/list", chain(HandleListVersions(pool)))
 	mux.Handle("/dms/rules/versions/create", chain(HandleCreateVersion(pool)))
 	mux.Handle("/dms/rules/versions/activate", chain(HandleActivateVersion(pool)))
+	mux.Handle("/dms/rules/versions/delete", chain(HandleDeleteVersion(pool)))
 	mux.Handle("/dms/rules/run", chain(HandleRun(pool)))
 	mux.Handle("/dms/rules/documents/list", chain(HandleListDocuments(pool)))
 	mux.Handle("/dms/rules/documents/detail", chain(HandleDocumentDetail(pool)))

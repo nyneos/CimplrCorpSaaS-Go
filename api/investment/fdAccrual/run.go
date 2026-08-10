@@ -16,6 +16,7 @@ import (
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -304,6 +305,14 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"body":     map[string]string{"run_id": runID},
 			},
 		})
+		go func(rID, uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDAccrual] CreateAccrualRun DMS goroutine panic for run %s: %v", rID, rec)
+				}
+			}()
+			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_ACCRUAL", "POST_CREATE", []string{rID}, uEmail)
+		}(runID, userEmail)
 		api.LogInfo("[FDAccrual] CreateAccrualRun: run_id=%s mode=%s entity=%s period=%s→%s",
 			runID, req.RunMode, req.EntityID, req.AccrualPeriodStart, req.AccrualPeriodEnd)
 	}
@@ -1422,6 +1431,7 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"event":       "FD_ACCRUAL_RUN_APPROVED",
 					"actor_email": uEmail,
 				})
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_ACCRUAL", "POST_APPROVE", []string{id}, uEmail)
 			}(runID, userEmail)
 		}
 		api.LogInfo("[FDAccrual] BulkApproveAccrualRun: %d runs processed by %s", len(req.RunIDs), userEmail)
@@ -1545,6 +1555,7 @@ func BulkRejectAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						api.LogError("[FDAccrual] BulkRejectAccrualRun notification goroutine panic for run %s: %v", id, rec)
 					}
 				}()
+				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_ACCRUAL", "POST_REJECT", []string{id}, uEmail)
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/accrual/run/bulk-reject", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_ACCRUAL_RUN_REJECTED",

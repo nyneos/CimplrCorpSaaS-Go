@@ -10,6 +10,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/runtime"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/validation"
 	"archive/zip"
 	"bytes"
@@ -1123,6 +1124,7 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					})
 					continue
 				}
+				dmsjobs.FireDmsEvent(pool, "CASH", "BANK_STATEMENT", "POST_DELETE", []string{bsid}, actorName)
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
 					"success":           true,
@@ -1400,6 +1402,8 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 					continue
 				}
 
+				dmsjobs.FireDmsEvent(pool, "CASH", "BANK_STATEMENT", "POST_APPROVE", []string{bsid}, actorName)
+
 				capturedID := bsid
 				capturedUser := body.UserID
 				payload := BuildBankStatementNotifPayload(context.Background(), pool, []string{capturedID}, "APPROVE", capturedUser)
@@ -1569,6 +1573,7 @@ func RejectBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				"success":           true,
 				"message":           "Bank statement rejected",
 			})
+			dmsjobs.FireDmsEvent(pool, "CASH", "BANK_STATEMENT", "POST_REJECT", []string{bsid}, body.UserID)
 		}
 		overallSuccess := len(results) > 0
 		for _, result := range results {
@@ -2069,6 +2074,8 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 
 		apictx.RespondEnvelopeSuccess(w, msg, result)
 
+		// DMS POST_UPLOAD is fired inside UploadBankStatementV2WithCategorization
+		// (covers single-file and ZIP paths). Notification stays here for the HTTP route.
 		if pgxPool != nil {
 			capturedResult := result
 			capturedUser := r.FormValue("user_id")

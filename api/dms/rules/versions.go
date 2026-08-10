@@ -12,20 +12,29 @@ import (
 )
 
 type createVersionReq struct {
-	RuleID                   string          `json:"rule_id"`
-	TimeWindowType           string          `json:"time_window_type"`
-	TimeWindowValue          *int            `json:"time_window_value"`
-	TimeWindowUnit           string          `json:"time_window_unit"`
-	CustomStart              string          `json:"custom_start"`
-	CustomEnd                string          `json:"custom_end"`
-	ScheduleType             string          `json:"schedule_type"`
-	CronExpr                 string          `json:"cron_expr"`
+	RuleID                  string                `json:"rule_id"`
+	TimeWindowType          string                `json:"time_window_type"`
+	TimeWindowValue         *int                  `json:"time_window_value"`
+	TimeWindowUnit          string                `json:"time_window_unit"`
+	CustomStart             string                `json:"custom_start"`
+	CustomEnd               string                `json:"custom_end"`
+	ScheduleType            string                `json:"schedule_type"`
+	CronExpr                string                `json:"cron_expr"`
+	RepeatKind              string                `json:"repeat_kind"`
+	ScheduleTime            string                `json:"schedule_time"`
+	ScheduleWeekday         *int                  `json:"schedule_weekday"`
+	ScheduleMonthDay        *int                  `json:"schedule_month_day"`
+	ScheduleTimezone        string                `json:"schedule_timezone"`
+	RowExpandMode           string                `json:"row_expand_mode"`
+	DataRowFrom             *int                  `json:"data_row_from"`
+	DataRowTo               *int                  `json:"data_row_to"`
 	Filters                 []filterReq           `json:"filters"`
 	Attachments             []attachmentReq       `json:"attachments"`
 	Destinations            []destinationReq      `json:"destinations"`
 	EmailRecipients         []emailRecipientReq   `json:"email_recipients"`
 	BankAccountScope        []bankAccountScopeReq `json:"bank_account_scope"`
 	NotificationTemplateIDs []string              `json:"notification_template_ids"`
+	Triggers                []triggerReq          `json:"triggers"`
 	Reason                  string                `json:"reason"`
 	ActorID                 string                `json:"actor_id"`
 }
@@ -47,6 +56,30 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		req.ScheduleType = strings.TrimSpace(strings.ToUpper(req.ScheduleType))
 		if req.ScheduleType == "" {
 			req.ScheduleType = "MANUAL"
+		}
+		req.RepeatKind = strings.TrimSpace(strings.ToUpper(req.RepeatKind))
+		if req.RepeatKind == "" {
+			if req.ScheduleType == "MANUAL" {
+				req.RepeatKind = "MANUAL"
+			} else {
+				req.RepeatKind = "CUSTOM"
+			}
+		}
+		if req.ScheduleTimezone == "" {
+			req.ScheduleTimezone = "Asia/Kolkata"
+		}
+		req.RowExpandMode = strings.TrimSpace(strings.ToUpper(req.RowExpandMode))
+		if req.RowExpandMode == "" {
+			req.RowExpandMode = "FIRST_ROW"
+		}
+		if req.RowExpandMode != "FIRST_ROW" && req.RowExpandMode != "PER_ROW" && req.RowExpandMode != "PER_PAGE_IN_ONE_DOC" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "row_expand_mode must be FIRST_ROW, PER_ROW, or PER_PAGE_IN_ONE_DOC", "VALIDATION_ERROR")
+			return
+		}
+		rowFrom, rowTo, ok := normalizeDataRowRangePtr(req.DataRowFrom, req.DataRowTo)
+		if !ok {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "data_row_from/to must be 1–2000 with from ≤ to", "VALIDATION_ERROR")
+			return
 		}
 		if req.RuleID == "" || req.TimeWindowType == "" {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "rule_id and time_window_type are required", "VALIDATION_ERROR")
@@ -85,18 +118,26 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		if err := tx.QueryRow(r.Context(), `
 			INSERT INTO dms_svc.generation_rule_version
 				(rule_id, version_no, time_window_type, time_window_value, time_window_unit,
-				 custom_start, custom_end, schedule_type, cron_expr, status, created_by)
-			VALUES ($1::uuid, $2, $3, $4, NULLIF($5,''), NULLIF($6,'')::date, NULLIF($7,'')::date, $8, NULLIF($9,''), 'PENDING_APPROVAL', $10)
+				 custom_start, custom_end, schedule_type, cron_expr, row_expand_mode,
+				 data_row_from, data_row_to,
+				 repeat_kind, schedule_time, schedule_weekday, schedule_month_day, schedule_timezone,
+				 status, created_by)
+			VALUES ($1::uuid, $2, $3, $4, NULLIF($5,''), NULLIF($6,'')::date, NULLIF($7,'')::date,
+			        $8, NULLIF($9,''), $10, $11, $12, $13, NULLIF($14,'')::time, $15, $16, $17,
+			        'PENDING_APPROVAL', $18)
 			RETURNING version_id::text`,
 			req.RuleID, nextVersionNo, req.TimeWindowType, req.TimeWindowValue, req.TimeWindowUnit,
-			req.CustomStart, req.CustomEnd, req.ScheduleType, req.CronExpr, actor,
+			req.CustomStart, req.CustomEnd, req.ScheduleType, req.CronExpr, req.RowExpandMode,
+			rowFrom, rowTo,
+			req.RepeatKind, req.ScheduleTime, req.ScheduleWeekday, req.ScheduleMonthDay,
+			req.ScheduleTimezone, actor,
 		).Scan(&versionID); err != nil {
 			api.LogErrorForResponse(w, "dms rule version insert: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create rule version", "DMS_RULE_VERSION_FAILED")
 			return
 		}
 
-		if err := insertVersionChildren(r.Context(), tx, versionID, actor, req.Filters, req.Attachments, req.Destinations, req.EmailRecipients, req.BankAccountScope, req.NotificationTemplateIDs); err != nil {
+		if err := insertVersionChildren(r.Context(), tx, req.RuleID, versionID, actor, "CREATE_VERSION", req.Filters, req.Attachments, req.Destinations, req.EmailRecipients, req.BankAccountScope, req.NotificationTemplateIDs, req.Triggers); err != nil {
 			api.LogErrorForResponse(w, "dms rule version children: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach filters/documents/destinations/notification templates (unknown id?)", "DMS_RULE_VERSION_FAILED")
 			return
@@ -118,6 +159,21 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		a.set("reason", common.NullIfEmpty(req.Reason))
 		a.set("requested_by", actor)
 		a.set("requested_ip", common.NullIfEmpty(ip))
+		var oldFrom, oldTo *int
+		_ = tx.QueryRow(r.Context(), `
+			SELECT v.data_row_from, v.data_row_to
+			FROM dms_svc.generation_rule r
+			JOIN dms_svc.generation_rule_version v ON v.version_id = r.current_version_id
+			WHERE r.rule_id = $1::uuid`, req.RuleID,
+		).Scan(&oldFrom, &oldTo)
+		if oldFrom != nil {
+			a.set("old_data_row_from", *oldFrom)
+		}
+		if oldTo != nil {
+			a.set("old_data_row_to", *oldTo)
+		}
+		a.set("new_data_row_from", rowFrom)
+		a.set("new_data_row_to", rowTo)
 		if err := a.exec(r.Context(), tx); err != nil {
 			api.LogErrorForResponse(w, "dms rule version audit: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit rule version", "DMS_RULE_VERSION_FAILED")
@@ -169,9 +225,11 @@ func HandleListVersions(pool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pool.Query(r.Context(), `
 			SELECT version_id::text, version_no, status, time_window_type, time_window_value, time_window_unit,
 			       custom_start::text, custom_end::text, schedule_type, cron_expr,
+			       COALESCE(row_expand_mode, 'FIRST_ROW'),
+			       COALESCE(data_row_from, 1), COALESCE(data_row_to, 500),
 			       COALESCE(created_by,''), created_at, approved_by, approved_at
 			FROM dms_svc.generation_rule_version
-			WHERE rule_id = $1::uuid
+			WHERE rule_id = $1::uuid AND is_deleted = false
 			ORDER BY version_no DESC`, req.RuleID)
 		if err != nil {
 			api.LogErrorForResponse(w, "dms rule versions list: %v", err)
@@ -186,7 +244,8 @@ func HandleListVersions(pool *pgxpool.Pool) http.HandlerFunc {
 			var createdAt time.Time
 			var approvedAt *time.Time
 			if err := rows.Scan(&v.VersionID, &v.VersionNo, &v.Status, &v.TimeWindowType, &v.TimeWindowValue, &v.TimeWindowUnit,
-				&v.CustomStart, &v.CustomEnd, &v.ScheduleType, &v.CronExpr,
+				&v.CustomStart, &v.CustomEnd, &v.ScheduleType, &v.CronExpr, &v.RowExpandMode,
+				&v.DataRowFrom, &v.DataRowTo,
 				&v.CreatedBy, &createdAt, &v.ApprovedBy, &approvedAt); err != nil {
 				continue
 			}

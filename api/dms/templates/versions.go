@@ -155,7 +155,7 @@ func HandleListVersions(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT version_id::text, version_no, status, source, COALESCE(created_by,''),
 			       created_at, approved_by, approved_at, source_file_name
 			FROM dms_svc.template_version
-			WHERE template_id = $1::uuid
+			WHERE template_id = $1::uuid AND is_deleted = false
 			ORDER BY version_no DESC`, req.TemplateID)
 		if err != nil {
 			api.LogErrorForResponse(w, "dms template versions list: %v", err)

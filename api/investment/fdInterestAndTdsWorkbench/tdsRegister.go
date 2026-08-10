@@ -13,6 +13,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -301,6 +302,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				"record_id": id, "event": "FD_TDS_REGISTER_CREATED", "actor_email": uEmail,
 				"fd_id": fID, "entity_id": eID,
 			})
+			dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_TDS_REGISTER", "POST_CREATE", []string{id}, uEmail)
 		}(tdsID, userEmail, req.FDID, req.EntityID, tdsCreateMatrixID)
 	}
 }
@@ -768,6 +770,7 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 					"event":       "FD_TDS_REGISTER_APPROVED",
 					"actor_email": uEmail,
 				})
+			dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_TDS_REGISTER", "POST_APPROVE", []string{tID}, uEmail)
 		}(req.TDSID, userEmail)
 
 		api.RespondEnvelopeSuccessCompat(w, "TDS entry approved successfully", map[string]interface{}{
@@ -1089,6 +1092,22 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 						"event":       "FD_TDS_REGISTER_APPROVED",
 						"actor_email": uEmail,
 					})
+				trigger := "POST_APPROVE"
+				var actionType string
+				if qerr := pool.QueryRow(context.Background(), `
+					SELECT COALESCE(action_type,'')
+					FROM investment.fd_tds_receipt_audit
+					WHERE tds_id=$1 AND processing_status IN ('APPROVED','DELETED')
+					ORDER BY COALESCE(checker_at, requested_at) DESC NULLS LAST
+					LIMIT 1`, tID).Scan(&actionType); qerr == nil {
+					switch strings.ToUpper(strings.TrimSpace(actionType)) {
+					case "EDIT":
+						trigger = "POST_EDIT"
+					case "DELETE":
+						trigger = "POST_DELETE"
+					}
+				}
+				dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_TDS_REGISTER", trigger, []string{tID}, uEmail)
 			}(tdsID, userEmail)
 		}
 	}
@@ -1189,6 +1208,7 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 						"event":       "FD_TDS_REGISTER_REJECTED",
 						"actor_email": uEmail,
 					})
+				dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_TDS_REGISTER", "POST_REJECT", []string{tID}, uEmail)
 			}(tdsID, userEmail)
 		}
 	}
@@ -1293,6 +1313,7 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 					"event":       "FD_TDS_REGISTER_REJECTED",
 					"actor_email": uEmail,
 				})
+			dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_TDS_REGISTER", "POST_REJECT", []string{tID}, uEmail)
 		}(req.TDSID, userEmail)
 
 		api.RespondEnvelopeSuccessCompat(w, "TDS entry rejected", map[string]interface{}{
@@ -1504,6 +1525,7 @@ func BulkDeleteTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 						"event":       "FD_TDS_REGISTER_DELETE_SUBMITTED",
 						"actor_email": uEmail,
 					})
+				dmsjobs.FireDmsEvent(pool, "INVESTMENT_FD", "FD_TDS_REGISTER", "POST_DELETE", []string{tID}, uEmail)
 			}(tdsID, userEmail)
 		}
 	}

@@ -65,6 +65,26 @@ func DispatchRun(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 	if err != nil {
 		return err
 	}
+	var runZip *generatedPackage
+	wantsZip, err := ruleWantsZipPackage(ctx, pool, versionID)
+	if err != nil {
+		return fmt.Errorf("check ZIP destinations: %w", err)
+	}
+	if wantsZip {
+		pkg, zipErr := ensureRunZip(ctx, pool, runID, ruleName, docs)
+		if zipErr != nil {
+			return zipErr
+		}
+		runZip = &pkg
+	}
+
+	// Channel-level delivery log (S3 / EMAIL / SFTP / …) — same idea as
+	// email_svc.transformation_result_deliveries. EMAIL still also writes
+	// generated_document_dispatch for per-recipient outbox tracking.
+	if err := recordChannelDeliveries(ctx, pool, runID, versionID, docs, wantEmail, runZip); err != nil {
+		api.LogError("[DMS-DISPATCH] recordChannelDeliveries run=%s: %v", runID, err)
+	}
+
 	if !wantEmail {
 		api.LogInfo("[DMS-DISPATCH] run=%s destinations exclude EMAIL — archive/Sent Box only", runID)
 		docIDs := make([]string, 0, len(docs))
@@ -89,104 +109,47 @@ func DispatchRun(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 	atts := make([]notifcatalog.AttachmentRef, 0, len(docs))
 	for _, d := range docs {
 		atts = append(atts, notifcatalog.AttachmentRef{
-			S3Key:       d.S3Key,
-			Filename:    filenameForDoc(d, ruleName),
-			ContentType: contentTypeForFormat(d.FileFormat),
+			S3Key:          d.S3Key,
+			Filename:       filenameForDoc(d, ruleName),
+			ContentType:    contentTypeForFormat(d.FileFormat),
+			StorageBackend: d.StorageBackend,
 		})
 	}
-
-	corr := "DMS-RUN-" + runID
-	payload := map[string]interface{}{
-		"RuleID":             ruleID,
-		"RuleName":           ruleName,
-		"RunID":              runID,
-		"ModuleCode":         moduleCode,
-		"SubModuleCode":      subModuleCode,
-		"DocCount":           len(docs),
-		"UserID":             triggeredBy,
-		"actor_user_id":      triggeredBy,
-		"DeferDeliveryNudge": true, // apply cover + attachments, then nudge below
-	}
-	if emailSubject != nil && strings.TrimSpace(*emailSubject) != "" {
-		payload["EmailSubject"] = strings.TrimSpace(*emailSubject)
-	}
-	if emailBody != nil && strings.TrimSpace(*emailBody) != "" {
-		payload["EmailBodyHTML"] = *emailBody
+	var zipAtts []notifcatalog.AttachmentRef
+	if runZip != nil {
+		zipAtts = []notifcatalog.AttachmentRef{{
+			S3Key:          runZip.S3Key,
+			Filename:       runZip.OutputFilename,
+			ContentType:    "application/zip",
+			StorageBackend: runZip.StorageBackend,
+		}}
 	}
 
-	toEmails, ccEmails, recipErr := loadRuleEmailRecipients(ctx, pool, versionID)
-	if recipErr != nil {
-		api.LogError("[DMS-DISPATCH] loadRuleEmailRecipients run=%s: %v", runID, recipErr)
-	}
-	if len(toEmails) > 0 {
-		payload["RecipientEmails"] = toEmails
-	} else if email := resolveActorEmail(ctx, pool, triggeredBy); email != "" {
-		// Fallback recipient when the linked template has no template_recipient rows
-		// and the rule has no explicit To list.
-		payload["RecipientEmail"] = email
-		payload["RecipientName"] = triggeredBy
-	}
-	if len(ccEmails) > 0 {
-		payload["RecipientCcEmails"] = ccEmails
-	}
-
-	outboxes, err := loadOutboxByCorrelation(ctx, pool, corr)
+	emailDestinations, err := loadEmailDestinations(ctx, pool, versionID)
 	if err != nil {
-		return fmt.Errorf("load outbox for correlation %s: %w", corr, err)
-	}
-	if len(outboxes) == 0 {
-		notifcatalog.TriggerNotificationForTemplatesWithAttachments(
-			ctx, pool, dmsDocumentGeneratedRoute, corr, payload, tplIDs, atts,
-		)
-		outboxes, err = loadOutboxByCorrelation(ctx, pool, corr)
-		if err != nil {
-			return fmt.Errorf("load outbox for correlation %s: %w", corr, err)
-		}
-	}
-	if len(outboxes) == 0 {
-		return fmt.Errorf("no outbox rows created for correlation %s — check DMS event/templates/recipients", corr)
-	}
-
-	if len(ccEmails) > 0 {
-		ccJoined := strings.Join(ccEmails, ", ")
-		if _, err := pool.Exec(ctx, `
-			UPDATE notification_svc.outbox
-			   SET cc_emails = $2
-			 WHERE correlation_id = $1
-			   AND processing_status IN ('PENDING', 'QUEUED', 'PROCESSING')`,
-			corr, ccJoined); err != nil {
-			return fmt.Errorf("apply Cc recipients to outbox: %w", err)
-		}
-		api.LogInfo("[DMS-DISPATCH] run=%s applied Cc=%q to %d outbox row(s)", runID, ccJoined, len(outboxes))
-	}
-
-	// Prefer the real DMS EMAIL cover (merged at generation) over the
-	// notification-catalog system body (belt-and-suspenders if payload override missed).
-	if emailSubject != nil && strings.TrimSpace(*emailSubject) != "" &&
-		emailBody != nil && strings.TrimSpace(*emailBody) != "" {
-		if _, err := pool.Exec(ctx, `
-			UPDATE notification_svc.outbox
-			   SET rendered_subject = $2, rendered_body = $3
-			 WHERE correlation_id = $1
-			   AND processing_status IN ('PENDING', 'QUEUED', 'PROCESSING')`,
-			corr, strings.TrimSpace(*emailSubject), *emailBody); err != nil {
-			return fmt.Errorf("apply DMS email cover to outbox: %w", err)
-		}
-		api.LogInfo("[DMS-DISPATCH] run=%s applied DMS EMAIL cover subject=%q", runID, strings.TrimSpace(*emailSubject))
-	}
-
-	if len(atts) > 0 {
-		attachmentCount, err := countOutboxAttachments(ctx, pool, corr)
-		if err != nil {
-			return fmt.Errorf("verify outbox attachments for correlation %s: %w", corr, err)
-		}
-		if attachmentCount == 0 {
-			return fmt.Errorf("no outbox attachments created for correlation %s", corr)
-		}
-	}
-
-	if err := insertDispatchRows(ctx, pool, docs, outboxes); err != nil {
 		return err
+	}
+	if len(emailDestinations) == 0 {
+		emailDestinations = []emailDestinationConfig{{}} // legacy version
+	}
+	totalOutboxes := 0
+	for _, destination := range emailDestinations {
+		if err := validateEmailAttachmentPlan(runID, destination.PackageMode, docs, runZip); err != nil {
+			return fmt.Errorf("email destination %s: %w", destination.DestinationID, err)
+		}
+		destinationAtts := atts
+		if destination.PackageMode == "ZIP" {
+			destinationAtts = zipAtts
+		}
+		outboxes, dispatchErr := dispatchOneEmailDestination(
+			ctx, pool, runID, ruleID, ruleName, moduleCode, subModuleCode,
+			versionID, destination.DestinationID, triggeredBy, emailSubject, emailBody,
+			tplIDs, docs, destinationAtts,
+		)
+		if dispatchErr != nil {
+			return dispatchErr
+		}
+		totalOutboxes += len(outboxes)
 	}
 
 	docIDs := make([]string, 0, len(docs))
@@ -200,11 +163,146 @@ func DispatchRun(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 	if err != nil {
 		return fmt.Errorf("mark docs DISPATCHED: %w", err)
 	}
-	api.LogInfo("[DMS-DISPATCH] run=%s queued %d doc(s) to %d recipient outbox row(s)", runID, len(docs), len(outboxes))
+	logDispatchCostEstimate(runID, docs, len(emailDestinations), totalOutboxes, runZip)
+	api.LogInfo("[DMS-DISPATCH] run=%s queued %d doc(s) to %d recipient outbox row(s)", runID, len(docs), totalOutboxes)
 
 	// Delivery was deferred so cover + attachments are committed first.
 	dinojobs.NudgeDeliveryAfterEnqueue(ctx, pool)
 	return nil
+}
+
+type emailDestinationConfig struct {
+	DestinationID string
+	PackageMode   string
+}
+
+func loadEmailDestinations(ctx context.Context, pool *pgxpool.Pool, versionID string) ([]emailDestinationConfig, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT destination_id::text, COALESCE(package_mode, 'FILES')
+		FROM dms_svc.generation_rule_destination
+		WHERE version_id = $1::uuid
+		  AND destination_type = 'EMAIL'
+		  AND is_enabled = true
+		  AND is_deleted = false
+		ORDER BY sort_order`, versionID)
+	if err != nil {
+		return nil, fmt.Errorf("load EMAIL destinations: %w", err)
+	}
+	defer rows.Close()
+	var out []emailDestinationConfig
+	for rows.Next() {
+		var destination emailDestinationConfig
+		if err := rows.Scan(&destination.DestinationID, &destination.PackageMode); err != nil {
+			return nil, err
+		}
+		out = append(out, destination)
+	}
+	return out, rows.Err()
+}
+
+func dispatchOneEmailDestination(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	runID, ruleID, ruleName, moduleCode, subModuleCode string,
+	versionID, destinationID, triggeredBy string,
+	emailSubject, emailBody *string,
+	tplIDs []string,
+	docs []generatedDoc,
+	atts []notifcatalog.AttachmentRef,
+) ([]outboxRecipient, error) {
+	corr := "DMS-RUN-" + runID
+	if destinationID != "" {
+		shortID := destinationID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		corr += "-EMAIL-" + shortID
+	}
+	payload := map[string]interface{}{
+		"RuleID":             ruleID,
+		"RuleName":           ruleName,
+		"RunID":              runID,
+		"ModuleCode":         moduleCode,
+		"SubModuleCode":      subModuleCode,
+		"DestinationID":      destinationID,
+		"DocCount":           len(docs),
+		"UserID":             triggeredBy,
+		"actor_user_id":      triggeredBy,
+		"DeferDeliveryNudge": true,
+	}
+	if emailSubject != nil && strings.TrimSpace(*emailSubject) != "" {
+		payload["EmailSubject"] = strings.TrimSpace(*emailSubject)
+	}
+	if emailBody != nil && strings.TrimSpace(*emailBody) != "" {
+		payload["EmailBodyHTML"] = *emailBody
+	}
+
+	toEmails, ccEmails, recipErr := loadRuleEmailRecipients(ctx, pool, versionID, destinationID)
+	if recipErr != nil {
+		return nil, recipErr
+	}
+	if len(toEmails) > 0 {
+		payload["RecipientEmails"] = toEmails
+	} else if email := resolveActorEmail(ctx, pool, triggeredBy); email != "" {
+		payload["RecipientEmail"] = email
+		payload["RecipientName"] = triggeredBy
+	}
+	if len(ccEmails) > 0 {
+		payload["RecipientCcEmails"] = ccEmails
+	}
+	enrichDispatchPayload(ctx, pool, runID, payload)
+
+	outboxes, err := loadOutboxByCorrelation(ctx, pool, corr)
+	if err != nil {
+		return nil, fmt.Errorf("load outbox for correlation %s: %w", corr, err)
+	}
+	if len(outboxes) == 0 {
+		notifcatalog.TriggerNotificationForTemplatesWithAttachments(
+			ctx, pool, dmsDocumentGeneratedRoute, corr, payload, tplIDs, atts,
+		)
+		outboxes, err = loadOutboxByCorrelation(ctx, pool, corr)
+		if err != nil {
+			return nil, fmt.Errorf("load outbox for correlation %s: %w", corr, err)
+		}
+	}
+	if len(outboxes) == 0 {
+		return nil, fmt.Errorf("no outbox rows created for EMAIL destination %s", destinationID)
+	}
+
+	if len(ccEmails) > 0 {
+		if _, err := pool.Exec(ctx, `
+			UPDATE notification_svc.outbox
+			SET cc_emails = $2
+			WHERE correlation_id = $1
+			  AND processing_status IN ('PENDING', 'QUEUED', 'PROCESSING')`,
+			corr, strings.Join(ccEmails, ", ")); err != nil {
+			return nil, fmt.Errorf("apply Cc recipients: %w", err)
+		}
+	}
+	if emailSubject != nil && strings.TrimSpace(*emailSubject) != "" &&
+		emailBody != nil && strings.TrimSpace(*emailBody) != "" {
+		if _, err := pool.Exec(ctx, `
+			UPDATE notification_svc.outbox
+			SET rendered_subject = $2, rendered_body = $3
+			WHERE correlation_id = $1
+			  AND processing_status IN ('PENDING', 'QUEUED', 'PROCESSING')`,
+			corr, strings.TrimSpace(*emailSubject), *emailBody); err != nil {
+			return nil, fmt.Errorf("apply DMS email cover: %w", err)
+		}
+	}
+	if len(atts) > 0 {
+		count, err := countOutboxAttachments(ctx, pool, corr)
+		if err != nil {
+			return nil, fmt.Errorf("verify outbox attachments: %w", err)
+		}
+		if count == 0 {
+			return nil, fmt.Errorf("no outbox attachments created for %s", corr)
+		}
+	}
+	if err := insertDispatchRows(ctx, pool, docs, outboxes); err != nil {
+		return nil, err
+	}
+	return outboxes, nil
 }
 
 // StartDispatchWorker polls for GENERATED documents whose run finished, and
@@ -293,6 +391,8 @@ type generatedDoc struct {
 	FileFormat     string
 	Checksum       string
 	OutputFilename string
+	FileSize       int64
+	StorageBackend string
 }
 
 type outboxRecipient struct {
@@ -302,7 +402,8 @@ type outboxRecipient struct {
 
 func loadGeneratedDocs(ctx context.Context, pool *pgxpool.Pool, runID string) ([]generatedDoc, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT doc_id::text, s3_key, file_format, COALESCE(checksum, ''), COALESCE(output_filename, '')
+		SELECT doc_id::text, s3_key, file_format, COALESCE(checksum, ''), COALESCE(output_filename, ''),
+		       COALESCE(file_size, 0), storage_backend
 		FROM dms_svc.generated_document
 		WHERE run_id = $1::uuid AND status = 'GENERATED'
 		ORDER BY created_at`, runID)
@@ -313,7 +414,7 @@ func loadGeneratedDocs(ctx context.Context, pool *pgxpool.Pool, runID string) ([
 	var out []generatedDoc
 	for rows.Next() {
 		var d generatedDoc
-		if err := rows.Scan(&d.DocID, &d.S3Key, &d.FileFormat, &d.Checksum, &d.OutputFilename); err != nil {
+		if err := rows.Scan(&d.DocID, &d.S3Key, &d.FileFormat, &d.Checksum, &d.OutputFilename, &d.FileSize, &d.StorageBackend); err != nil {
 			continue
 		}
 		out = append(out, d)
@@ -321,12 +422,18 @@ func loadGeneratedDocs(ctx context.Context, pool *pgxpool.Pool, runID string) ([
 	return out, rows.Err()
 }
 
-func loadRuleEmailRecipients(ctx context.Context, pool *pgxpool.Pool, versionID string) (toEmails, ccEmails []string, err error) {
+func loadRuleEmailRecipients(ctx context.Context, pool *pgxpool.Pool, versionID, destinationID string) (toEmails, ccEmails []string, err error) {
+	// Match recipients for this EMAIL destination, plus version-level rows
+	// (destination_id IS NULL) from seeds / older writes that never linked the FK.
 	rows, err := pool.Query(ctx, `
 		SELECT address_role, email
 		FROM dms_svc.generation_rule_email_recipient
 		WHERE version_id = $1::uuid
-		ORDER BY address_role, sort_order, email`, versionID)
+		  AND (
+		    destination_id IS NULL
+		    OR ($2 <> '' AND destination_id = $2::uuid)
+		  )
+		ORDER BY address_role, sort_order, email`, versionID, destinationID)
 	if err != nil {
 		if strings.Contains(err.Error(), "does not exist") {
 			return nil, nil, nil
@@ -386,8 +493,8 @@ func ruleWantsEmailDispatch(ctx context.Context, pool *pgxpool.Pool, versionID s
 	var emailN, totalN int
 	if err := pool.QueryRow(ctx, `
 		SELECT
-			COUNT(*) FILTER (WHERE is_enabled AND destination_type = 'EMAIL'),
-			COUNT(*)
+			COUNT(*) FILTER (WHERE is_enabled AND NOT is_deleted AND destination_type = 'EMAIL'),
+			COUNT(*) FILTER (WHERE NOT is_deleted)
 		FROM dms_svc.generation_rule_destination
 		WHERE version_id = $1::uuid`, versionID,
 	).Scan(&emailN, &totalN); err != nil {
@@ -401,6 +508,131 @@ func ruleWantsEmailDispatch(ctx context.Context, pool *pgxpool.Pool, versionID s
 		return true, nil
 	}
 	return emailN > 0, nil
+}
+
+type destChannel struct {
+	DestinationID   string
+	DestinationType string
+	PackageMode     string
+	SftpHost        string
+	SftpFolder      string
+	APIURL          string
+	TargetURI       string
+}
+
+func loadEnabledDestChannels(ctx context.Context, pool *pgxpool.Pool, versionID string) ([]destChannel, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT destination_id::text, destination_type,
+		       COALESCE(package_mode,'FILES'),
+		       COALESCE(sftp_host,''), COALESCE(sftp_folder,''),
+		       COALESCE(api_url,''), COALESCE(target_uri,'')
+		FROM dms_svc.generation_rule_destination
+		WHERE version_id = $1::uuid AND is_enabled = true AND is_deleted = false
+		ORDER BY sort_order`, versionID)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	var out []destChannel
+	for rows.Next() {
+		var d destChannel
+		if err := rows.Scan(&d.DestinationID, &d.DestinationType, &d.PackageMode, &d.SftpHost, &d.SftpFolder, &d.APIURL, &d.TargetURI); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// recordChannelDeliveries writes one generated_document_delivery row per
+// (doc × enabled destination). SFTP/WEBHOOK/SHAREPOINT stay PENDING until a
+// delivery worker ships them; S3/IN_APP/EMAIL are SUCCESS at queue time.
+func recordChannelDeliveries(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	runID, versionID string,
+	docs []generatedDoc,
+	wantEmail bool,
+	runZip *generatedPackage,
+) error {
+	channels, err := loadEnabledDestChannels(ctx, pool, versionID)
+	if err != nil {
+		return err
+	}
+	if len(channels) == 0 {
+		// Legacy: treat as S3 + optional EMAIL.
+		channels = []destChannel{{DestinationType: "S3_ARCHIVE"}}
+		if wantEmail {
+			channels = append(channels, destChannel{DestinationType: "EMAIL"})
+		}
+	}
+	for _, doc := range docs {
+		for _, ch := range channels {
+			status := "SUCCESS"
+			loc := doc.S3Key
+			detail := ""
+			switch strings.ToUpper(ch.DestinationType) {
+			case "S3_ARCHIVE", "IN_APP":
+				status = "SUCCESS"
+				loc = doc.S3Key
+			case "LOCAL":
+				status = "SUCCESS"
+				loc = doc.S3Key
+				if strings.HasPrefix(doc.S3Key, "local:") {
+					loc = strings.TrimPrefix(doc.S3Key, "local:")
+				}
+				detail = "stored under DMS local output folder"
+			case "EMAIL":
+				if !wantEmail {
+					continue
+				}
+				status = "SUCCESS"
+				loc = "outbox:" + runID
+			case "SFTP":
+				status = "PENDING"
+				loc = strings.TrimSpace(ch.SftpHost)
+				if ch.SftpFolder != "" {
+					loc = loc + ":" + ch.SftpFolder
+				}
+				detail = "SFTP config stored — delivery worker not yet shipping files"
+			case "WEBHOOK":
+				status = "PENDING"
+				loc = ch.APIURL
+				detail = "WEBHOOK config stored — delivery worker not yet calling API"
+			case "SHAREPOINT":
+				status = "PENDING"
+				loc = ch.TargetURI
+				detail = "SHAREPOINT config stored — delivery worker not yet syncing"
+			default:
+				status = "SKIPPED"
+				detail = "unknown destination type"
+			}
+			if ch.PackageMode == "ZIP" && runZip != nil {
+				loc = runZip.S3Key
+			}
+			destID := strings.TrimSpace(ch.DestinationID)
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO dms_svc.generated_document_delivery
+					(doc_id, run_id, destination_id, destination_type, output_location, output_filename,
+					 status, error_detail, finished_at)
+				VALUES ($1::uuid, $2::uuid,
+				        CASE WHEN $3 = '' THEN NULL ELSE $3::uuid END,
+				        $4, $5, $6, $7::text, NULLIF($8,''),
+				        CASE WHEN $7::text IN ('SUCCESS','FAILED','SKIPPED') THEN now() ELSE NULL END)`,
+				doc.DocID, runID, destID, ch.DestinationType, loc, filenameForDoc(doc, ""),
+				status, detail); err != nil {
+				// Table may not exist on older DBs — don't fail the email path.
+				if strings.Contains(err.Error(), "does not exist") {
+					return nil
+				}
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func loadOutboxByCorrelation(ctx context.Context, pool *pgxpool.Pool, corr string) ([]outboxRecipient, error) {

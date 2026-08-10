@@ -102,10 +102,11 @@ func applyApproval(ctx context.Context, tx pgx.Tx, templateID, actor, ip, checke
 				name = COALESCE($1, name),
 				module_code = COALESCE($2, module_code),
 				sub_module_code = COALESCE($3, sub_module_code),
+				status = COALESCE($4, status),
 				processing_status = 'APPROVED',
-				last_modified_by = $4, last_modified_at = now()
-			WHERE template_id = $5::uuid`,
-			pa.NewName, pa.NewModuleCode, pa.NewSubModuleCode, actor, templateID); err != nil {
+				last_modified_by = $5, last_modified_at = now()
+			WHERE template_id = $6::uuid`,
+			pa.NewName, pa.NewModuleCode, pa.NewSubModuleCode, pa.NewStatus, actor, templateID); err != nil {
 			return err
 		}
 	case "DELETE":

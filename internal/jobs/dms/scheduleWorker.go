@@ -7,6 +7,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/internal/config"
+	"CimplrCorpSaas/internal/services/docsvc"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/robfig/cron/v3"
@@ -85,6 +86,15 @@ func pollScheduledRules(ctx context.Context, pool *pgxpool.Pool, parser cron.Par
 			continue
 		}
 
+		if docsvc.QueueEnabled() {
+			jobID, err := EnqueueRuleGeneration(ctx, pool, rule.RuleID, "SCHEDULED", scheduleTriggeredBy, "", nil)
+			if err != nil {
+				api.LogError("[DMS-SCHEDULE] rule=%s tick=%s enqueue: %v", rule.RuleID, tick.Format(time.RFC3339), err)
+				continue
+			}
+			api.LogInfo("[DMS-SCHEDULE] rule=%s tick=%s job=%s queued", rule.RuleID, tick.Format(time.RFC3339), jobID)
+			continue
+		}
 		runID, err := RunGeneration(ctx, pool, rule.RuleID, "SCHEDULED", scheduleTriggeredBy)
 		if err != nil {
 			api.LogError("[DMS-SCHEDULE] rule=%s tick=%s run=%s: %v", rule.RuleID, tick.Format(time.RFC3339), runID, err)

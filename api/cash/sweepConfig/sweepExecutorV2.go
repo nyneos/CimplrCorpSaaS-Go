@@ -9,6 +9,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
+	"CimplrCorpSaas/internal/jobs/dmsevent"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1117,6 +1118,8 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "Sweep execution failed: "+err.Error())
 			return
 		}
+
+		dmsevent.Fire(pgxPool, "CASH", "SWEEP_EXECUTION", "POST_APPROVE", []string{initiationID}, requestedBy)
 
 		api.RespondWithPayload(w, true, "Sweep executed successfully", result)
 		// Notify: pass FULL execution context for rich templates

@@ -46,3 +46,4 @@ test.txt
 # core.ignorecase=true on macOS makes it case-insensitive, so it silently
 # swallowed real sources like api/policyengine/policy/testInputs.go.
 /test_*.go
+dms_local_output/

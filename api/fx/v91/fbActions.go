@@ -15,6 +15,7 @@ import (
 	fxnotif "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/api/policyengine/common"
 	policyruntime "CimplrCorpSaas/api/policyengine/runtime"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
 	"CimplrCorpSaas/api/constants"
 
@@ -318,6 +319,10 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			drows.Close()
 		}
 
+		if len(approvedIDs) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", v91ExposurePolicySubModule(r), "POST_APPROVE", approvedIDs, approver)
+		}
+
 		resp := map[string]interface{}{"approved": approvedIDs, "deleted": deletedIDs}
 		respondEnvelopeSuccess(w, "Exposures approved successfully", resp)
 
@@ -398,6 +403,10 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusRejected, CheckerBy: rejector, Comment: req.Comment})
 			}
 		}
+		if len(updated) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", v91ExposurePolicySubModule(r), "POST_REJECT", updated, rejector)
+		}
+
 		respondEnvelopeSuccess(w, "Exposures rejected successfully", map[string]interface{}{
 			"rejected": updated,
 		})

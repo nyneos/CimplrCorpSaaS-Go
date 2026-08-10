@@ -128,6 +128,11 @@ type AttachmentRef struct {
 	S3Key       string
 	Filename    string
 	ContentType string
+	// StorageBackend is "MAIN_S3" (default, Main's own S3 credentials) or
+	// "DOCSVC_S3" (Document-Service's own bucket — see
+	// dms_svc.generated_document.storage_backend) — tells the outbox worker
+	// which credentials to fetch the object with.
+	StorageBackend string
 }
 
 // TriggerNotificationForTemplatesWithAttachments is TriggerNotificationForTemplates
@@ -1526,7 +1531,11 @@ func insertOutboxAttachments(
 		if ct == "" {
 			ct = "application/octet-stream"
 		}
-		clean = append(clean, AttachmentRef{S3Key: key, Filename: filename, ContentType: ct})
+		backend := strings.TrimSpace(a.StorageBackend)
+		if backend == "" {
+			backend = "MAIN_S3"
+		}
+		clean = append(clean, AttachmentRef{S3Key: key, Filename: filename, ContentType: ct, StorageBackend: backend})
 	}
 	if len(clean) == 0 {
 		return nil
@@ -1547,9 +1556,9 @@ func insertOutboxAttachments(
 		}
 		seenOutbox[outboxID] = true
 		for i, a := range clean {
-			vals = append(vals, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d)", pos, pos+1, pos+2, pos+3, pos+4))
-			args = append(args, outboxID, a.S3Key, a.Filename, a.ContentType, i)
-			pos += 5
+			vals = append(vals, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d)", pos, pos+1, pos+2, pos+3, pos+4, pos+5))
+			args = append(args, outboxID, a.S3Key, a.Filename, a.ContentType, i, a.StorageBackend)
+			pos += 6
 		}
 	}
 	if len(vals) == 0 {
@@ -1557,7 +1566,7 @@ func insertOutboxAttachments(
 	}
 	q := fmt.Sprintf(`
 		INSERT INTO notification_svc.outbox_attachment
-			(outbox_id, s3_key, filename, content_type, sort_order)
+			(outbox_id, s3_key, filename, content_type, sort_order, storage_backend)
 		VALUES %s`, strings.Join(vals, ","))
 	_, err := pool.Exec(ctx, q, args...)
 	if err != nil {

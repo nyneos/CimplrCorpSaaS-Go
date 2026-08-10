@@ -82,13 +82,21 @@ func HandleDashboardSchema(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM domain_catalog.sub_module s
 			WHERE s.is_deleted = false AND s.sub_module_code = $1`, sm).Scan(&label, &dashKey)
 
+		// Canonical source is domain_catalog.field. Prefer DASHBOARD alias_key when
+		// present so dashboard widgets and DMS rule filters stay aligned with the
+		// same keys the generation worker reads from FetchSourceData.
 		rows, err := pool.Query(r.Context(), `
-			SELECT a.alias_key, f.label, f.data_type
-			FROM domain_catalog.field_alias a
-			JOIN domain_catalog.field f ON f.field_id = a.field_id
-			WHERE a.is_deleted = false AND f.is_deleted = false
-			  AND f.sub_module_code = $1 AND a.consumer_system = 'DASHBOARD'
-			ORDER BY a.sort_order, a.alias_key`, sm)
+			SELECT f.field_code,
+			       COALESCE(NULLIF(a.alias_key, ''), f.field_code) AS dash_key,
+			       f.label, f.data_type,
+			       COALESCE(a.sort_order, f.sort_order, 0) AS sort_order
+			FROM domain_catalog.field f
+			LEFT JOIN domain_catalog.field_alias a
+			  ON a.field_id = f.field_id
+			 AND a.is_deleted = false
+			 AND a.consumer_system = 'DASHBOARD'
+			WHERE f.is_deleted = false AND f.sub_module_code = $1
+			ORDER BY COALESCE(a.sort_order, f.sort_order, 0), f.field_code`, sm)
 		if err != nil {
 			api.LogErrorForResponse(w, "dashboard-schema: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to load dashboard schema", "CATALOG_DASH_SCHEMA_FAILED")
@@ -103,13 +111,22 @@ func HandleDashboardSchema(pool *pgxpool.Pool) http.HandlerFunc {
 			CategoricalFields: make([]dashField, 0),
 			NumericFields:     make([]dashField, 0),
 		}
+		seen := make(map[string]struct{})
 		for rows.Next() {
-			var key, lbl, dt string
-			if err := rows.Scan(&key, &lbl, &dt); err != nil {
+			var fieldCode, key, lbl, dt string
+			var sortOrder int
+			if err := rows.Scan(&fieldCode, &key, &lbl, &dt, &sortOrder); err != nil {
 				continue
 			}
+			if key == "" {
+				key = fieldCode
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
 			f := dashField{Key: key, Label: lbl, DataType: dt}
-			if dt == "number" {
+			if dt == "number" || strings.EqualFold(dt, "numeric") || strings.EqualFold(dt, "decimal") {
 				f.Kind = "numeric"
 				out.NumericFields = append(out.NumericFields, f)
 			} else {
