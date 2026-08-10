@@ -63,20 +63,32 @@ func queueMaxConcurrent() int {
 	return 2
 }
 
-func insertGenerationJob(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	kind, ruleID, versionID, triggerType, triggeredBy, moduleCode, subModuleCode, sourceIDField, requestID string,
-	sourceIDs []string,
-	priority int,
-) (jobID string, err error) {
+// generationJobInsert is one new dms_svc.generation_job row: what to generate
+// (kind + rule/version + optional source ids), who asked for it, and how it is
+// prioritised. Priority <= 0 means "derive from trigger type / kind".
+type generationJobInsert struct {
+	Kind          string
+	RuleID        string
+	VersionID     string
+	TriggerType   string
+	TriggeredBy   string
+	ModuleCode    string
+	SubModuleCode string
+	SourceIDField string
+	RequestID     string
+	SourceIDs     []string
+	Priority      int
+}
+
+func insertGenerationJob(ctx context.Context, pool *pgxpool.Pool, j generationJobInsert) (jobID string, err error) {
+	priority := j.Priority
 	if priority <= 0 {
 		priority = 100
-		if strings.EqualFold(triggerType, "MANUAL") || kind == "ADHOC" {
+		if strings.EqualFold(j.TriggerType, "MANUAL") || j.Kind == "ADHOC" {
 			priority = 50
 		}
 	}
-	csv := strings.Join(sourceIDs, ",")
+	csv := strings.Join(j.SourceIDs, ",")
 	err = pool.QueryRow(ctx, `
 		INSERT INTO dms_svc.generation_job (
 		  job_kind, rule_id, version_id, trigger_type, triggered_by,
@@ -88,9 +100,9 @@ func insertGenerationJob(
 		  $10, 'PENDING', now(), $11, $12
 		)
 		RETURNING job_id::text`,
-		kind, ruleID, versionID, triggerType, triggeredBy,
-		moduleCode, subModuleCode, sourceIDField, csv,
-		priority, queueMaxAttempts(), requestID,
+		j.Kind, j.RuleID, j.VersionID, j.TriggerType, j.TriggeredBy,
+		j.ModuleCode, j.SubModuleCode, j.SourceIDField, csv,
+		priority, queueMaxAttempts(), j.RequestID,
 	).Scan(&jobID)
 	return jobID, err
 }

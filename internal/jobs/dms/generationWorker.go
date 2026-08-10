@@ -136,7 +136,14 @@ func runGeneration(
 		return "", fmt.Errorf("compute time window: %w", err)
 	}
 
-	runID, err = insertRun(ctx, pool, rule.RuleID, version.VersionID, triggerType, triggeredBy, windowStart, windowEnd)
+	runID, err = insertRun(ctx, pool, runInsert{
+		RuleID:      rule.RuleID,
+		VersionID:   version.VersionID,
+		TriggerType: triggerType,
+		TriggeredBy: triggeredBy,
+		WindowStart: windowStart,
+		WindowEnd:   windowEnd,
+	})
 	if err != nil {
 		return "", fmt.Errorf("insert generation_run: %w", err)
 	}
@@ -268,9 +275,13 @@ func runGeneration(
 		RuleVersionID:            version.VersionID,
 	}
 
+	newAttachmentJob := func(a ruleAttachment) attachmentJob {
+		return attachmentJob{RunID: runID, Attachment: a, Naming: naming, MultiDoc: multiDoc, GenCtx: genCtx}
+	}
+
 	if expandMode == "PER_PAGE_IN_ONE_DOC" {
 		for _, a := range attachments {
-			if err := generatePagedAttachment(ctx, pool, runID, a, rowsToMerge, naming, multiDoc, genCtx); err != nil {
+			if err := generatePagedAttachment(ctx, pool, newAttachmentJob(a), rowsToMerge); err != nil {
 				failed++
 				errDetails = append(errDetails, fmt.Sprintf("%s[paged]: %v", a.DocumentTemplateID, err))
 				continue
@@ -280,7 +291,7 @@ func runGeneration(
 	} else {
 		for ri, mergeRow := range rowsToMerge {
 			for _, a := range attachments {
-				if err := generateOneAttachment(ctx, pool, runID, a, mergeRow, naming, multiDoc, genCtx); err != nil {
+				if err := generateOneAttachment(ctx, pool, newAttachmentJob(a), mergeRow); err != nil {
 					failed++
 					errDetails = append(errDetails, fmt.Sprintf("%s[row%d]: %v", a.DocumentTemplateID, ri, err))
 					continue
@@ -378,7 +389,20 @@ func mergeTemplateHTML(ctx context.Context, pool *pgxpool.Pool, contentHTML stri
 	return renderedHTML, values, nil
 }
 
-func generateOneAttachment(ctx context.Context, pool *pgxpool.Pool, runID string, a ruleAttachment, row map[string]any, naming outputNaming, multiDoc bool, genCtx attachmentGenCtx) error {
+// attachmentJob is one attachment of one run to render: the run it belongs to,
+// the rule's attachment definition, the output naming, whether this run emits
+// multiple documents, and the shared generation context. The source row(s) stay
+// a separate argument since one-per-row and paged rendering differ only there.
+type attachmentJob struct {
+	RunID      string
+	Attachment ruleAttachment
+	Naming     outputNaming
+	MultiDoc   bool
+	GenCtx     attachmentGenCtx
+}
+
+func generateOneAttachment(ctx context.Context, pool *pgxpool.Pool, job attachmentJob, row map[string]any) error {
+	a := job.Attachment
 	format := strings.ToUpper(strings.TrimSpace(a.OutputFormat))
 	if format == "" {
 		format = "HTML"
@@ -393,7 +417,7 @@ func generateOneAttachment(ctx context.Context, pool *pgxpool.Pool, runID string
 		return fmt.Errorf("load merge fields: %w", err)
 	}
 
-	renderedHTML, values, err := mergeTemplateHTML(ctx, pool, content.HTML, mergeFields, row, genCtx, format)
+	renderedHTML, values, err := mergeTemplateHTML(ctx, pool, content.HTML, mergeFields, row, job.GenCtx, format)
 	if err != nil {
 		return err
 	}
@@ -402,11 +426,21 @@ func generateOneAttachment(ctx context.Context, pool *pgxpool.Pool, runID string
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
 	}
-	return storeGeneratedDocument(ctx, pool, runID, a, tplVersionID, naming, multiDoc, row, file, genCtx.RuleVersionID)
+	return storeGeneratedDocument(ctx, pool, storeDocumentParams{
+		RunID:             job.RunID,
+		Attachment:        a,
+		TemplateVersionID: tplVersionID,
+		Naming:            job.Naming,
+		MultiDoc:          job.MultiDoc,
+		Row:               row,
+		File:              file,
+		RuleVersionID:     job.GenCtx.RuleVersionID,
+	})
 }
 
 // generatePagedAttachment renders one file where each source row becomes a page.
-func generatePagedAttachment(ctx context.Context, pool *pgxpool.Pool, runID string, a ruleAttachment, rows []map[string]any, naming outputNaming, multiDoc bool, genCtx attachmentGenCtx) error {
+func generatePagedAttachment(ctx context.Context, pool *pgxpool.Pool, job attachmentJob, rows []map[string]any) error {
+	a := job.Attachment
 	format := strings.ToUpper(strings.TrimSpace(a.OutputFormat))
 	if format == "" {
 		format = "HTML"
@@ -425,7 +459,7 @@ func generatePagedAttachment(ctx context.Context, pool *pgxpool.Pool, runID stri
 	var pages []string
 	var values map[string]string
 	for i, row := range rows {
-		pageHTML, pageValues, err := mergeTemplateHTML(ctx, pool, content.HTML, mergeFields, row, genCtx, format)
+		pageHTML, pageValues, err := mergeTemplateHTML(ctx, pool, content.HTML, mergeFields, row, job.GenCtx, format)
 		if err != nil {
 			return err
 		}
@@ -439,19 +473,44 @@ func generatePagedAttachment(ctx context.Context, pool *pgxpool.Pool, runID stri
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
 	}
-	return storeGeneratedDocument(ctx, pool, runID, a, tplVersionID, naming, multiDoc, rows[0], file, genCtx.RuleVersionID)
+	return storeGeneratedDocument(ctx, pool, storeDocumentParams{
+		RunID:             job.RunID,
+		Attachment:        a,
+		TemplateVersionID: tplVersionID,
+		Naming:            job.Naming,
+		MultiDoc:          job.MultiDoc,
+		Row:               rows[0],
+		File:              file,
+		RuleVersionID:     job.GenCtx.RuleVersionID,
+	})
 }
 
-func storeGeneratedDocument(ctx context.Context, pool *pgxpool.Pool, runID string, a ruleAttachment, tplVersionID string, naming outputNaming, multiDoc bool, row map[string]any, file renderedFile, versionID string) error {
+// storeDocumentParams is one rendered file to persist for a run: which run and
+// attachment produced it, the template version it came from, how to name it,
+// the source row it was merged from, and the rule version whose destinations
+// decide local / S3 / in-app storage.
+type storeDocumentParams struct {
+	RunID             string
+	Attachment        ruleAttachment
+	TemplateVersionID string
+	Naming            outputNaming
+	MultiDoc          bool
+	Row               map[string]any
+	File              renderedFile
+	RuleVersionID     string
+}
+
+func storeGeneratedDocument(ctx context.Context, pool *pgxpool.Pool, p storeDocumentParams) error {
+	runID, a, tplVersionID, file := p.RunID, p.Attachment, p.TemplateVersionID, p.File
 	sum := sha256.Sum256(file.Bytes)
 	checksum := hex.EncodeToString(sum[:])
 
 	tplName, _ := loadTemplateName(ctx, pool, a.DocumentTemplateID)
-	outName := buildDmsOutputFilename(naming, tplName, file.Ext, time.Now(), multiDoc, rowOutputSuffix(row))
+	outName := buildDmsOutputFilename(p.Naming, tplName, file.Ext, time.Now(), p.MultiDoc, rowOutputSuffix(p.Row))
 
-	wantLocal, _ := versionHasDestinationType(ctx, pool, versionID, "LOCAL")
-	wantS3, _ := versionHasDestinationType(ctx, pool, versionID, "S3_ARCHIVE")
-	wantInApp, _ := versionHasDestinationType(ctx, pool, versionID, "IN_APP")
+	wantLocal, _ := versionHasDestinationType(ctx, pool, p.RuleVersionID, "LOCAL")
+	wantS3, _ := versionHasDestinationType(ctx, pool, p.RuleVersionID, "S3_ARCHIVE")
+	wantInApp, _ := versionHasDestinationType(ctx, pool, p.RuleVersionID, "IN_APP")
 	// Legacy / default: no destinations → S3. Email-only still needs an object for attachments.
 	if !wantLocal && !wantS3 && !wantInApp {
 		wantS3 = true
@@ -934,12 +993,12 @@ func formatFieldValue(v any) string {
 	}
 	switch t := v.(type) {
 	case time.Time:
-		return t.Format("2006-01-02")
+		return t.Format(time.DateOnly)
 	case *time.Time:
 		if t == nil {
 			return ""
 		}
-		return t.Format("2006-01-02")
+		return t.Format(time.DateOnly)
 	case float64:
 		return formatNumericDisplay(t)
 	case float32:
@@ -1175,7 +1234,7 @@ func computeWindow(v ruleVersionConfig) (start, end *string, err error) {
 		return v.CustomStart, v.CustomEnd, nil
 	case "ROLLING", "FIXED":
 		now := time.Now().UTC()
-		endStr := now.Format("2006-01-02")
+		endStr := now.Format(time.DateOnly)
 		if v.TimeWindowValue == nil || v.TimeWindowUnit == nil {
 			return nil, &endStr, nil
 		}
@@ -1192,7 +1251,7 @@ func computeWindow(v ruleVersionConfig) (start, end *string, err error) {
 		default:
 			return nil, nil, fmt.Errorf("unknown time_window_unit %q", *v.TimeWindowUnit)
 		}
-		startStr := startTime.Format("2006-01-02")
+		startStr := startTime.Format(time.DateOnly)
 		return &startStr, &endStr, nil
 	default:
 		return nil, nil, fmt.Errorf("unknown time_window_type %q", v.TimeWindowType)
@@ -1201,13 +1260,24 @@ func computeWindow(v ruleVersionConfig) (start, end *string, err error) {
 
 // ─── generation_run lifecycle ────────────────────────────────────────────────
 
-func insertRun(ctx context.Context, pool *pgxpool.Pool, ruleID, versionID, triggerType, triggeredBy string, windowStart, windowEnd *string) (string, error) {
+// runInsert is one new dms_svc.generation_run row: the rule version being run,
+// who/what triggered it, and the resolved reporting window.
+type runInsert struct {
+	RuleID      string
+	VersionID   string
+	TriggerType string
+	TriggeredBy string
+	WindowStart *string
+	WindowEnd   *string
+}
+
+func insertRun(ctx context.Context, pool *pgxpool.Pool, r runInsert) (string, error) {
 	var runID string
 	err := pool.QueryRow(ctx, `
 		INSERT INTO dms_svc.generation_run (rule_id, version_id, trigger_type, triggered_by, window_start, window_end)
 		VALUES ($1::uuid, $2::uuid, $3, $4, $5::date, $6::date)
 		RETURNING run_id::text`,
-		ruleID, versionID, triggerType, triggeredBy, windowStart, windowEnd,
+		r.RuleID, r.VersionID, r.TriggerType, r.TriggeredBy, r.WindowStart, r.WindowEnd,
 	).Scan(&runID)
 	return runID, err
 }

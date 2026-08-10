@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errFailedActivateVersion = "failed to activate version"
+
 type activateVersionReq struct {
 	TemplateID string `json:"template_id"`
 	VersionID  string `json:"version_id"`
@@ -42,7 +44,7 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(r.Context())
 		if err != nil {
 			api.LogErrorForResponse(w, "dms template activate begin: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to activate version", "DMS_TEMPLATE_ACTIVATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedActivateVersion, "DMS_TEMPLATE_ACTIVATE_FAILED")
 			return
 		}
 		defer tx.Rollback(r.Context())
@@ -103,7 +105,7 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			req.VersionID, actor, req.TemplateID,
 		); err != nil {
 			api.LogErrorForResponse(w, "dms template activate update: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to activate version", "DMS_TEMPLATE_ACTIVATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedActivateVersion, "DMS_TEMPLATE_ACTIVATE_FAILED")
 			return
 		}
 
@@ -131,7 +133,7 @@ func HandleActivateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(r.Context()); err != nil {
 			api.LogErrorForResponse(w, "dms template activate commit: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to activate version", "DMS_TEMPLATE_ACTIVATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedActivateVersion, "DMS_TEMPLATE_ACTIVATE_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Version activated", map[string]interface{}{

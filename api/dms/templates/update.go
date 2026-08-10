@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errFailedUpdateTemplate = "failed to update template"
+
 type updateReq struct {
 	TemplateID    string `json:"template_id"`
 	Name          string `json:"name"`
@@ -53,7 +55,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(r.Context())
 		if err != nil {
 			api.LogErrorForResponse(w, "dms template update begin: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update template", "DMS_TEMPLATE_UPDATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUpdateTemplate, "DMS_TEMPLATE_UPDATE_FAILED")
 			return
 		}
 		defer tx.Rollback(r.Context())
@@ -153,7 +155,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			UPDATE dms_svc.template SET processing_status = 'PENDING_EDIT_APPROVAL'
 			WHERE template_id = $1::uuid`, req.TemplateID); err != nil {
 			api.LogErrorForResponse(w, "dms template update flag: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update template", "DMS_TEMPLATE_UPDATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUpdateTemplate, "DMS_TEMPLATE_UPDATE_FAILED")
 			return
 		}
 
@@ -180,7 +182,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(r.Context()); err != nil {
 			api.LogErrorForResponse(w, "dms template update commit: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update template", "DMS_TEMPLATE_UPDATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUpdateTemplate, "DMS_TEMPLATE_UPDATE_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Template edit submitted for approval", map[string]interface{}{"template_id": req.TemplateID})

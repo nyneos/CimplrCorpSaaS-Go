@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errFailedCreateRuleVersion = "failed to create rule version"
+
 type createVersionReq struct {
 	RuleID                  string                `json:"rule_id"`
 	TimeWindowType          string                `json:"time_window_type"`
@@ -94,7 +96,7 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(r.Context())
 		if err != nil {
 			api.LogErrorForResponse(w, "dms rule version create begin: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create rule version", "DMS_RULE_VERSION_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateRuleVersion, "DMS_RULE_VERSION_FAILED")
 			return
 		}
 		defer tx.Rollback(r.Context())
@@ -110,7 +112,7 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE rule_id = $1::uuid`, req.RuleID,
 		).Scan(&nextVersionNo); err != nil {
 			api.LogErrorForResponse(w, "dms rule version seq: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create rule version", "DMS_RULE_VERSION_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateRuleVersion, "DMS_RULE_VERSION_FAILED")
 			return
 		}
 
@@ -133,11 +135,23 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			req.ScheduleTimezone, actor,
 		).Scan(&versionID); err != nil {
 			api.LogErrorForResponse(w, "dms rule version insert: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create rule version", "DMS_RULE_VERSION_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateRuleVersion, "DMS_RULE_VERSION_FAILED")
 			return
 		}
 
-		if err := insertVersionChildren(r.Context(), tx, req.RuleID, versionID, actor, "CREATE_VERSION", req.Filters, req.Attachments, req.Destinations, req.EmailRecipients, req.BankAccountScope, req.NotificationTemplateIDs, req.Triggers); err != nil {
+		if err := insertVersionChildren(r.Context(), tx, insertVersionChildrenParams{
+			RuleID:                  req.RuleID,
+			VersionID:               versionID,
+			Actor:                   actor,
+			ActionType:              "CREATE_VERSION",
+			Filters:                 req.Filters,
+			Attachments:             req.Attachments,
+			Destinations:            req.Destinations,
+			EmailRecipients:         req.EmailRecipients,
+			BankAccountScope:        req.BankAccountScope,
+			NotificationTemplateIDs: req.NotificationTemplateIDs,
+			Triggers:                req.Triggers,
+		}); err != nil {
 			api.LogErrorForResponse(w, "dms rule version children: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach filters/documents/destinations/notification templates (unknown id?)", "DMS_RULE_VERSION_FAILED")
 			return
@@ -147,7 +161,7 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			UPDATE dms_svc.generation_rule SET processing_status = 'PENDING_EDIT_APPROVAL'
 			WHERE rule_id = $1::uuid`, req.RuleID); err != nil {
 			api.LogErrorForResponse(w, "dms rule version flag: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create rule version", "DMS_RULE_VERSION_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateRuleVersion, "DMS_RULE_VERSION_FAILED")
 			return
 		}
 
@@ -182,7 +196,7 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(r.Context()); err != nil {
 			api.LogErrorForResponse(w, "dms rule version commit: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create rule version", "DMS_RULE_VERSION_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateRuleVersion, "DMS_RULE_VERSION_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Rule version submitted for approval", map[string]interface{}{

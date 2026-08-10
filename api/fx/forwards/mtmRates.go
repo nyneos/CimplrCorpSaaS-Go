@@ -36,6 +36,12 @@ var ErrMTMFileAlreadyUploaded = errors.New("mtm file already uploaded")
 
 const duplicateMTMUploadMessage = "This MTM file was already uploaded earlier. Please upload a different file."
 
+const (
+	sqlCondProcessingStatusApproved = "processing_status = 'APPROVED'"
+	sqlCondStatusRejected           = "status = 'Rejected'"
+	sqlCondProcessingStatusRejected = "processing_status = 'REJECTED'"
+)
+
 func forwardMTMHasIsDeletedColumn(ctx context.Context, pool *pgxpool.Pool) bool {
 	return forwardMTMHasColumn(ctx, pool, "is_deleted")
 }
@@ -1098,7 +1104,7 @@ func BulkUpdateMTMProcessingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 					"status = 'Deleted'",
 				}
 				if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
-					setClauses = append(setClauses, "processing_status = 'APPROVED'")
+					setClauses = append(setClauses, sqlCondProcessingStatusApproved)
 				}
 				resultRows, updateErr := pool.Query(r.Context(), fmt.Sprintf(`
 					UPDATE forward_mtm
@@ -1114,9 +1120,9 @@ func BulkUpdateMTMProcessingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 				updated = append(updated, collectMTMRows(resultRows)...)
 				resultRows.Close()
 			} else {
-				setClauses := []string{"status = 'Rejected'"}
+				setClauses := []string{sqlCondStatusRejected}
 				if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
-					setClauses = append(setClauses, "processing_status = 'REJECTED'")
+					setClauses = append(setClauses, sqlCondProcessingStatusRejected)
 				}
 				resultRows, updateErr := pool.Query(r.Context(), fmt.Sprintf(`
 					UPDATE forward_mtm
@@ -1144,12 +1150,12 @@ func BulkUpdateMTMProcessingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			case "Approved":
 				setClauses = append(setClauses, "status = 'Approved'")
 				if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
-					setClauses = append(setClauses, "processing_status = 'APPROVED'")
+					setClauses = append(setClauses, sqlCondProcessingStatusApproved)
 				}
 			case "Rejected":
-				setClauses = append(setClauses, "status = 'Rejected'")
+				setClauses = append(setClauses, sqlCondStatusRejected)
 				if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
-					setClauses = append(setClauses, "processing_status = 'REJECTED'")
+					setClauses = append(setClauses, sqlCondProcessingStatusRejected)
 				}
 			}
 			resultRows, updateErr := pool.Query(r.Context(), fmt.Sprintf(`
@@ -1177,12 +1183,12 @@ func BulkUpdateMTMProcessingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			case "Approved":
 				setClauses = append(setClauses, "status = 'Approved'")
 				if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
-					setClauses = append(setClauses, "processing_status = 'APPROVED'")
+					setClauses = append(setClauses, sqlCondProcessingStatusApproved)
 				}
 			case "Rejected":
-				setClauses = append(setClauses, "status = 'Rejected'")
+				setClauses = append(setClauses, sqlCondStatusRejected)
 				if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
-					setClauses = append(setClauses, "processing_status = 'REJECTED'")
+					setClauses = append(setClauses, sqlCondProcessingStatusRejected)
 				}
 			}
 			resultRows, updateErr := pool.Query(r.Context(), fmt.Sprintf(`

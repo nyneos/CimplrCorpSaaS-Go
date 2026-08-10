@@ -2917,6 +2917,19 @@ func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// cashflowEditEngineParams groups parameters for the EditCashflowLineItem
+// approval-engine goroutine so it does not need to accept them individually.
+type cashflowEditEngineParams struct {
+	AuditID    string
+	CashflowID string
+	FDID       string
+	EntityID   string
+	UserID     string
+	Email      string
+	MatrixID   string
+	Amount     float64
+}
+
 // ─── EditCashflowLineItem ─────────────────────────────────────────────────────
 // POST /investment/fd/master/cashflow/edit
 // Maker-checker edit of individual cashflow schedule line items.
@@ -3260,46 +3273,55 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Spawn approval engine goroutine ──────────────────────────────────
 		if auditID != "" {
-			go func(auditID, cashflowID, fdID, entityID, userID, email, matrixID string, amount float64) {
+			go func(p cashflowEditEngineParams) {
 				defer func() {
 					if rec := recover(); rec != nil {
-						api.LogError("[CashflowEdit] engine goroutine panic for audit %s: %v", auditID, rec)
+						api.LogError("[CashflowEdit] engine goroutine panic for audit %s: %v", p.AuditID, rec)
 					}
 				}()
 				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer bgCancel()
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode:       "FIXED_DEPOSIT",
-					EntityCode:       entityID,
+					EntityCode:       p.EntityID,
 					TransactionType:  "FD_CASHFLOW_EDIT",
-					MatrixID:         matrixID,
-					RecordID:         auditID,
+					MatrixID:         p.MatrixID,
+					RecordID:         p.AuditID,
 					RecordTable:      constants.QuerryAuditCashflowSchedule,
 					AuditTable:       constants.QuerryAuditCashflowSchedule,
 					AuditIDColumn:    "audit_id",
 					ActionType:       constants.AuditActionEdit,
-					Amount:           amount,
-					SubmittedBy:      userID,
-					SubmittedByEmail: email,
+					Amount:           p.Amount,
+					SubmittedBy:      p.UserID,
+					SubmittedByEmail: p.Email,
 				})
 				if err != nil {
-					api.LogError("[CashflowEdit] CreateInstance failed audit=%s: %v", auditID, err)
+					api.LogError("[CashflowEdit] CreateInstance failed audit=%s: %v", p.AuditID, err)
 					return
 				}
 				if instID != "" {
 					_, _ = pgxPool.Exec(bgCtx,
 						`UPDATE investment.fd_audit_cashflow_schedule
 						 SET processing_status='PENDING_EDIT_APPROVAL'
-						 WHERE audit_id=$1`, auditID)
-					api.LogInfo("[CashflowEdit] Engine instance %s created for audit %s", instID, auditID)
+						 WHERE audit_id=$1`, p.AuditID)
+					api.LogInfo("[CashflowEdit] Engine instance %s created for audit %s", instID, p.AuditID)
 				} else {
 					// No matrix configured — auto-approve immediately
-					api.LogInfo("[CashflowEdit] No matrix for FD_CASHFLOW_EDIT — auto-approving audit %s", auditID)
-					if applyErr := applyApprovedCashflowEdit(bgCtx, pgxPool, auditID, "system"); applyErr != nil {
-						api.LogError("[CashflowEdit] Auto-approve apply failed audit=%s: %v", auditID, applyErr)
+					api.LogInfo("[CashflowEdit] No matrix for FD_CASHFLOW_EDIT — auto-approving audit %s", p.AuditID)
+					if applyErr := applyApprovedCashflowEdit(bgCtx, pgxPool, p.AuditID, "system"); applyErr != nil {
+						api.LogError("[CashflowEdit] Auto-approve apply failed audit=%s: %v", p.AuditID, applyErr)
 					}
 				}
-			}(auditID, req.CashflowID, req.FDID, entityID, req.UserID, userEmail, cashflowEditMatrixID, principalAmount)
+			}(cashflowEditEngineParams{
+				AuditID:    auditID,
+				CashflowID: req.CashflowID,
+				FDID:       req.FDID,
+				EntityID:   entityID,
+				UserID:     req.UserID,
+				Email:      userEmail,
+				MatrixID:   cashflowEditMatrixID,
+				Amount:     principalAmount,
+			})
 		}
 
 		go func(cfID, fdID, eID, uEmail string) {
@@ -3830,6 +3852,19 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// cashflowDeleteEngineParams groups parameters for the DeleteCashflowLineItem
+// approval-engine goroutine so it does not need to accept them individually.
+type cashflowDeleteEngineParams struct {
+	AuditID    string
+	CashflowID string
+	FDID       string
+	EntityID   string
+	UserID     string
+	UserEmail  string
+	MatrixID   string
+	Amount     float64
+}
+
 // ─── DeleteCashflowLineItem ───────────────────────────────────────────────────
 // POST /investment/fd/master/cashflow/delete
 // Soft-deletes a cashflow row (sets is_deleted=true) with maker-checker audit.
@@ -4008,40 +4043,49 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&cfPrincipal)
 
 		if auditID != "" {
-			go func(aID, cfID, fdID, eID, uID, uEmail, matrixID string, amount float64) {
+			go func(p cashflowDeleteEngineParams) {
 				defer func() {
 					if rec := recover(); rec != nil {
-						api.LogError("[FDMaster] DeleteCashflowLineItem engine panic for %s: %v", cfID, rec)
+						api.LogError("[FDMaster] DeleteCashflowLineItem engine panic for %s: %v", p.CashflowID, rec)
 					}
 				}()
 				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer bgCancel()
-				if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", aID, uEmail); err != nil {
-					api.LogError("[FDMaster] DeleteCashflowLineItem CancelPendingInstances failed audit=%s: %v", aID, err)
+				if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", p.AuditID, p.UserEmail); err != nil {
+					api.LogError("[FDMaster] DeleteCashflowLineItem CancelPendingInstances failed audit=%s: %v", p.AuditID, err)
 					return
 				}
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode:       "FIXED_DEPOSIT",
-					EntityCode:       eID,
+					EntityCode:       p.EntityID,
 					TransactionType:  "FD_CASHFLOW_DELETE",
-					MatrixID:         matrixID,
-					RecordID:         aID,
+					MatrixID:         p.MatrixID,
+					RecordID:         p.AuditID,
 					RecordTable:      constants.QuerryAuditCashflowSchedule,
 					AuditTable:       constants.QuerryAuditCashflowSchedule,
 					AuditIDColumn:    "audit_id",
 					ActionType:       "DELETE",
-					Amount:           amount,
-					SubmittedBy:      uID,
-					SubmittedByEmail: uEmail,
+					Amount:           p.Amount,
+					SubmittedBy:      p.UserID,
+					SubmittedByEmail: p.UserEmail,
 				})
 				if err != nil {
-					api.LogError("[FDMaster] DeleteCashflowLineItem CreateInstance failed audit=%s: %v", aID, err)
+					api.LogError("[FDMaster] DeleteCashflowLineItem CreateInstance failed audit=%s: %v", p.AuditID, err)
 					return
 				}
 				if instID != "" {
-					api.LogInfo("[FDMaster] DeleteCashflowLineItem engine instance %s for audit %s", instID, aID)
+					api.LogInfo("[FDMaster] DeleteCashflowLineItem engine instance %s for audit %s", instID, p.AuditID)
 				}
-			}(auditID, req.CashflowID, req.FDID, deleteCFRow.EntityID, req.UserID, userEmail, cashflowDeleteMatrixID, cfPrincipal)
+			}(cashflowDeleteEngineParams{
+				AuditID:    auditID,
+				CashflowID: req.CashflowID,
+				FDID:       req.FDID,
+				EntityID:   deleteCFRow.EntityID,
+				UserID:     req.UserID,
+				UserEmail:  userEmail,
+				MatrixID:   cashflowDeleteMatrixID,
+				Amount:     cfPrincipal,
+			})
 		}
 
 		go func(cfID, fdID, eID, uEmail string) {

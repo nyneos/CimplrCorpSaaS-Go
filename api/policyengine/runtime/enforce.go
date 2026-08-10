@@ -13,6 +13,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	msgBlockedByPolicy   = "Blocked by policy"
+	errPolicyCheckFailed = "policy check failed"
+)
+
 // EnforceInput is the shared PRE_* hook for business handlers
 // (mirror of notifcatalog.TriggerNotification, but before mutation).
 type EnforceInput struct {
@@ -34,8 +39,8 @@ type EnforceInput struct {
 	RequireVariables bool
 	// DefaultBlockMessage used when HardBlock has no policy message.
 	DefaultBlockMessage string
-	BusinessRecordID   string
-	BusinessRecordType string
+	BusinessRecordID    string
+	BusinessRecordType  string
 }
 
 // EnforceOutcome is returned by EnforceDetailed / EnforceInlineDetailed so
@@ -57,9 +62,9 @@ func Enforce(ctx context.Context, w http.ResponseWriter, r *http.Request, pool *
 	status := http.StatusUnprocessableEntity
 	msg := out.Message
 	if msg == "" {
-		msg = "Blocked by policy"
+		msg = msgBlockedByPolicy
 	}
-	if strings.HasPrefix(msg, "policy check failed") {
+	if strings.HasPrefix(msg, errPolicyCheckFailed) {
 		status = http.StatusBadGateway
 		api.RespondEnvelopeError(w, status, msg, "POLICY_SERVICE_ERROR")
 		return false
@@ -80,9 +85,9 @@ func EnforceWithMatrix(ctx context.Context, w http.ResponseWriter, r *http.Reque
 	status := http.StatusUnprocessableEntity
 	msg := out.Message
 	if msg == "" {
-		msg = "Blocked by policy"
+		msg = msgBlockedByPolicy
 	}
-	if strings.HasPrefix(msg, "policy check failed") {
+	if strings.HasPrefix(msg, errPolicyCheckFailed) {
 		api.RespondEnvelopeError(w, http.StatusBadGateway, msg, "POLICY_SERVICE_ERROR")
 		return false, ""
 	}
@@ -97,9 +102,9 @@ func WriteBlockResponse(w http.ResponseWriter, out EnforceOutcome, recordID stri
 	}
 	msg := out.Message
 	if msg == "" {
-		msg = "Blocked by policy"
+		msg = msgBlockedByPolicy
 	}
-	if strings.HasPrefix(msg, "policy check failed") {
+	if strings.HasPrefix(msg, errPolicyCheckFailed) {
 		api.RespondEnvelopeError(w, http.StatusBadGateway, msg, "POLICY_SERVICE_ERROR")
 		return false
 	}

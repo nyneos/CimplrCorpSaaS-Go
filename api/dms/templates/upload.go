@@ -17,6 +17,8 @@ import (
 
 const maxTemplateUploadBytes = 25 << 20 // 25 MB
 
+const errFailedUploadTemplate = "failed to upload template"
+
 // HandleUpload registers an externally authored file (e.g. .docx) as a
 // template version. content_json stays the '{}' default for these rows —
 // there is no Tiptap body to parse, so the version is upload-only and not
@@ -66,7 +68,7 @@ func HandleUpload(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(r.Context())
 		if err != nil {
 			api.LogErrorForResponse(w, "dms template upload begin: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upload template", "DMS_TEMPLATE_UPLOAD_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUploadTemplate, "DMS_TEMPLATE_UPLOAD_FAILED")
 			return
 		}
 		defer tx.Rollback(r.Context())
@@ -112,7 +114,7 @@ func HandleUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE template_id = $1::uuid`, templateID,
 		).Scan(&nextVersionNo); err != nil {
 			api.LogErrorForResponse(w, "dms template upload seq: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upload template", "DMS_TEMPLATE_UPLOAD_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUploadTemplate, "DMS_TEMPLATE_UPLOAD_FAILED")
 			return
 		}
 
@@ -126,7 +128,7 @@ func HandleUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			templateID, nextVersionNo, actor, s3Key, safeName, contentType,
 		).Scan(&versionID); err != nil {
 			api.LogErrorForResponse(w, "dms template upload version: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upload template", "DMS_TEMPLATE_UPLOAD_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUploadTemplate, "DMS_TEMPLATE_UPLOAD_FAILED")
 			return
 		}
 
@@ -134,7 +136,7 @@ func HandleUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			UPDATE dms_svc.template SET processing_status = 'PENDING_EDIT_APPROVAL'
 			WHERE template_id = $1::uuid AND processing_status <> 'PENDING_APPROVAL'`, templateID); err != nil {
 			api.LogErrorForResponse(w, "dms template upload flag: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upload template", "DMS_TEMPLATE_UPLOAD_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUploadTemplate, "DMS_TEMPLATE_UPLOAD_FAILED")
 			return
 		}
 
@@ -159,7 +161,7 @@ func HandleUpload(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(r.Context()); err != nil {
 			api.LogErrorForResponse(w, "dms template upload commit: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to upload template", "DMS_TEMPLATE_UPLOAD_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUploadTemplate, "DMS_TEMPLATE_UPLOAD_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Template file uploaded and submitted for approval", map[string]interface{}{

@@ -97,14 +97,16 @@ func recordBusinessDmsAudits(
 				continue
 			}
 			// Try payable then receivable — only one should match.
-			if tryInsertBusinessAudit(ctx, pool,
-				"public.auditactionpayable", "payable_id", "actiontype",
-				id, status, reason, actor) {
+			if tryInsertBusinessAudit(ctx, pool, businessAuditInsert{
+				Table: "public.auditactionpayable", ParentCol: "payable_id", ActionCol: "actiontype",
+				ParentID: id, Status: status, Reason: reason, Actor: actor,
+			}) {
 				continue
 			}
-			_ = tryInsertBusinessAudit(ctx, pool,
-				"public.auditactionreceivable", "receivable_id", "actiontype",
-				id, status, reason, actor)
+			_ = tryInsertBusinessAudit(ctx, pool, businessAuditInsert{
+				Table: "public.auditactionreceivable", ParentCol: "receivable_id", ActionCol: "actiontype",
+				ParentID: id, Status: status, Reason: reason, Actor: actor,
+			})
 		}
 		return
 	}
@@ -123,30 +125,42 @@ func recordBusinessDmsAudits(
 		if id == "" {
 			continue
 		}
-		_ = tryInsertBusinessAudit(ctx, pool, tgt.Table, tgt.ParentCol, actionCol, id, status, reason, actor)
+		_ = tryInsertBusinessAudit(ctx, pool, businessAuditInsert{
+			Table: tgt.Table, ParentCol: tgt.ParentCol, ActionCol: actionCol,
+			ParentID: id, Status: status, Reason: reason, Actor: actor,
+		})
 	}
 }
 
-func tryInsertBusinessAudit(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	table, parentCol, actionCol, parentID, status, reason, actor string,
-) bool {
+// businessAuditInsert describes one DMS_TRIGGER row to append to a module's
+// auditaction* / fd_audit_* table: where it goes (table + column names) and
+// what it says (parent id, status, reason, actor).
+type businessAuditInsert struct {
+	Table     string
+	ParentCol string
+	ActionCol string
+	ParentID  string
+	Status    string
+	Reason    string
+	Actor     string
+}
+
+func tryInsertBusinessAudit(ctx context.Context, pool *pgxpool.Pool, in businessAuditInsert) bool {
 	// Minimal columns shared across most auditaction* / fd_audit_* tables.
 	q := fmt.Sprintf(`
 		INSERT INTO %s (%s, %s, processing_status, reason, requested_by, requested_at)
 		VALUES ($1, 'DMS_TRIGGER', $2, $3, $4, now())`,
-		table, parentCol, actionCol)
-	_, err := pool.Exec(ctx, q, parentID, status, reason, actor)
+		in.Table, in.ParentCol, in.ActionCol)
+	_, err := pool.Exec(ctx, q, in.ParentID, in.Status, in.Reason, in.Actor)
 	if err != nil {
 		// Fallback without reason (some tables may lack it).
 		q2 := fmt.Sprintf(`
 			INSERT INTO %s (%s, %s, processing_status, requested_by, requested_at)
 			VALUES ($1, 'DMS_TRIGGER', $2, $3, now())`,
-			table, parentCol, actionCol)
-		if _, err2 := pool.Exec(ctx, q2, parentID, status, actor); err2 != nil {
+			in.Table, in.ParentCol, in.ActionCol)
+		if _, err2 := pool.Exec(ctx, q2, in.ParentID, in.Status, in.Actor); err2 != nil {
 			api.LogError("[DMS-EVENT] business audit insert table=%s parent=%s: %v (fallback: %v)",
-				table, parentID, err, err2)
+				in.Table, in.ParentID, err, err2)
 			return false
 		}
 	}

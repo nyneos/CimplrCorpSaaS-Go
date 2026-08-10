@@ -14,7 +14,9 @@ type FireFunc func(
 )
 
 // Fire is set by dmsjobs init to dmsjobs.FireDmsEvent. Default is a silent no-op.
-var Fire FireFunc = func(*pgxpool.Pool, string, string, string, []string, string) {}
+var Fire FireFunc = func(*pgxpool.Pool, string, string, string, []string, string) {
+	// Intentional no-op: real implementation is wired in by dmsjobs.init via SetFire.
+}
 
 // SetFire registers the real FireDmsEvent implementation. Called once from dmsjobs.
 func SetFire(fn FireFunc) {

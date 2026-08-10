@@ -18,21 +18,39 @@ var allowedDestinationTypes = map[string]struct{}{
 	"LOCAL":      {},
 }
 
+// insertVersionChildrenParams groups the child-record bundle for a rule
+// version insert, keeping insertVersionChildren's parameter count within
+// SonarQube's limit.
+type insertVersionChildrenParams struct {
+	RuleID                  string
+	VersionID               string
+	Actor                   string
+	ActionType              string
+	Filters                 []filterReq
+	Attachments             []attachmentReq
+	Destinations            []destinationReq
+	EmailRecipients         []emailRecipientReq
+	BankAccountScope        []bankAccountScopeReq
+	NotificationTemplateIDs []string
+	Triggers                []triggerReq
+}
+
 // insertVersionChildren attaches filters, document attachments, destinations,
 // email recipients, bank/account scope, and notification-template links.
 // Also appends destination + email-recipient audit rows (old_/new_ pairs).
-func insertVersionChildren(
-	ctx context.Context,
-	tx pgx.Tx,
-	ruleID, versionID, actor, actionType string,
-	filters []filterReq,
-	attachments []attachmentReq,
-	destinations []destinationReq,
-	emailRecipients []emailRecipientReq,
-	bankAccountScope []bankAccountScopeReq,
-	notificationTemplateIDs []string,
-	triggers []triggerReq,
-) error {
+func insertVersionChildren(ctx context.Context, tx pgx.Tx, p insertVersionChildrenParams) error {
+	ruleID := p.RuleID
+	versionID := p.VersionID
+	actor := p.Actor
+	actionType := p.ActionType
+	filters := p.Filters
+	attachments := p.Attachments
+	destinations := p.Destinations
+	emailRecipients := p.EmailRecipients
+	bankAccountScope := p.BankAccountScope
+	notificationTemplateIDs := p.NotificationTemplateIDs
+	triggers := p.Triggers
+
 	if actionType == "" {
 		actionType = "CREATE"
 	}

@@ -15,25 +15,27 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errProposalIDsRequired = "proposal_ids is required"
+
 type hedgingProposalLineInput struct {
-	BusinessUnit           string      `json:"business_unit"`
-	Currency               string      `json:"currency"`
-	ExposureType           string      `json:"exposure_type"`
-	ContributingHeaderIDs  interface{} `json:"contributing_header_ids"`
-	HedgeMonth1            float64     `json:"hedge_month1"`
-	HedgeMonth2            float64     `json:"hedge_month2"`
-	HedgeMonth3            float64     `json:"hedge_month3"`
-	HedgeMonth4            float64     `json:"hedge_month4"`
-	HedgeMonth4to6         float64     `json:"hedge_month4to6"`
-	HedgeMonth6plus        float64     `json:"hedge_month6plus"`
-	OldHedgeMonth1         float64     `json:"old_hedge_month1"`
-	OldHedgeMonth2         float64     `json:"old_hedge_month2"`
-	OldHedgeMonth3         float64     `json:"old_hedge_month3"`
-	OldHedgeMonth4         float64     `json:"old_hedge_month4"`
-	OldHedgeMonth4to6      float64     `json:"old_hedge_month4to6"`
-	OldHedgeMonth6plus     float64     `json:"old_hedge_month6plus"`
-	Status                 string      `json:"status"`
-	Comments               *string     `json:"comments"`
+	BusinessUnit          string      `json:"business_unit"`
+	Currency              string      `json:"currency"`
+	ExposureType          string      `json:"exposure_type"`
+	ContributingHeaderIDs interface{} `json:"contributing_header_ids"`
+	HedgeMonth1           float64     `json:"hedge_month1"`
+	HedgeMonth2           float64     `json:"hedge_month2"`
+	HedgeMonth3           float64     `json:"hedge_month3"`
+	HedgeMonth4           float64     `json:"hedge_month4"`
+	HedgeMonth4to6        float64     `json:"hedge_month4to6"`
+	HedgeMonth6plus       float64     `json:"hedge_month6plus"`
+	OldHedgeMonth1        float64     `json:"old_hedge_month1"`
+	OldHedgeMonth2        float64     `json:"old_hedge_month2"`
+	OldHedgeMonth3        float64     `json:"old_hedge_month3"`
+	OldHedgeMonth4        float64     `json:"old_hedge_month4"`
+	OldHedgeMonth4to6     float64     `json:"old_hedge_month4to6"`
+	OldHedgeMonth6plus    float64     `json:"old_hedge_month6plus"`
+	Status                string      `json:"status"`
+	Comments              *string     `json:"comments"`
 }
 
 func normalizeHeaderIDs(raw interface{}) []string {
@@ -159,12 +161,12 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
-			UserID         string                     `json:"user_id"`
-			ProposalID     string                     `json:"proposal_id"`
-			ProposalName   string                     `json:"proposal_name"`
-			Comments       string                     `json:"comments"`
-			Submit         bool                       `json:"submit"`
-			Proposals      []hedgingProposalLineInput `json:"proposals"`
+			UserID       string                     `json:"user_id"`
+			ProposalID   string                     `json:"proposal_id"`
+			ProposalName string                     `json:"proposal_name"`
+			Comments     string                     `json:"comments"`
+			Submit       bool                       `json:"submit"`
+			Proposals    []hedgingProposalLineInput `json:"proposals"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
@@ -516,7 +518,7 @@ func ApproveHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ProposalIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "proposal_ids is required")
+			respondWithError(w, http.StatusBadRequest, errProposalIDsRequired)
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
@@ -543,7 +545,7 @@ func RejectHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ProposalIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "proposal_ids is required")
+			respondWithError(w, http.StatusBadRequest, errProposalIDsRequired)
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
@@ -570,7 +572,7 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ProposalIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "proposal_ids is required")
+			respondWithError(w, http.StatusBadRequest, errProposalIDsRequired)
 			return
 		}
 		actor := auditutil.Actor(req.UserID)

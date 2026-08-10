@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errFailedUpdateRule = "failed to update rule"
+
 type updateReq struct {
 	RuleID        string `json:"rule_id"`
 	Name          string `json:"name"`
@@ -52,7 +54,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(r.Context())
 		if err != nil {
 			api.LogErrorForResponse(w, "dms rule update begin: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update rule", "DMS_RULE_UPDATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUpdateRule, "DMS_RULE_UPDATE_FAILED")
 			return
 		}
 		defer tx.Rollback(r.Context())
@@ -151,7 +153,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			UPDATE dms_svc.generation_rule SET processing_status = 'PENDING_EDIT_APPROVAL'
 			WHERE rule_id = $1::uuid`, req.RuleID); err != nil {
 			api.LogErrorForResponse(w, "dms rule update flag: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update rule", "DMS_RULE_UPDATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUpdateRule, "DMS_RULE_UPDATE_FAILED")
 			return
 		}
 
@@ -178,7 +180,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(r.Context()); err != nil {
 			api.LogErrorForResponse(w, "dms rule update commit: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to update rule", "DMS_RULE_UPDATE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUpdateRule, "DMS_RULE_UPDATE_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Rule edit submitted for approval", map[string]interface{}{"rule_id": req.RuleID})

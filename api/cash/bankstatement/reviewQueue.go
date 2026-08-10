@@ -353,8 +353,13 @@ func ReviewActionHandler(pool *pgxpool.Pool) http.Handler {
 				sourceRef = "ai_assisted_confirm"
 			}
 
-			if !enforceSmartCatReview(ctx, w, r, pool, req.TransactionID, catToConfirm,
-				common.TriggerPreApprove, req.UserID, "Review confirm blocked by policy") {
+			if !enforceSmartCatReview(ctx, w, r, pool, smartCatReviewPolicyParams{
+				TxnID:        req.TransactionID,
+				CategoryID:   catToConfirm,
+				EventCode:    common.TriggerPreApprove,
+				Actor:        req.UserID,
+				BlockMessage: "Review confirm blocked by policy",
+			}) {
 				return
 			}
 
@@ -417,8 +422,13 @@ func ReviewActionHandler(pool *pgxpool.Pool) http.Handler {
 			if dismissedCat != nil {
 				dismissedCatID = *dismissedCat
 			}
-			if !enforceSmartCatReview(ctx, w, r, pool, req.TransactionID, dismissedCatID,
-				common.TriggerPreReject, req.UserID, "Review dismiss blocked by policy") {
+			if !enforceSmartCatReview(ctx, w, r, pool, smartCatReviewPolicyParams{
+				TxnID:        req.TransactionID,
+				CategoryID:   dismissedCatID,
+				EventCode:    common.TriggerPreReject,
+				Actor:        req.UserID,
+				BlockMessage: "Review dismiss blocked by policy",
+			}) {
 				return
 			}
 			_, opErr = pool.Exec(ctx, `

@@ -20,6 +20,11 @@ import (
 
 const dmsDocumentGeneratedRoute = "dms/document-generated"
 
+// errFragDoesNotExist is the Postgres error fragment ("relation … does not
+// exist") used to detect an optional table that is missing on older DBs, so the
+// caller can degrade gracefully instead of failing the run.
+const errFragDoesNotExist = "does not exist"
+
 // DispatchRun queues notification emails for every GENERATED document in a
 // successful/partial run, attaching the S3 objects, writing
 // generated_document_dispatch rows, and flipping docs to DISPATCHED once
@@ -141,11 +146,21 @@ func DispatchRun(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 		if destination.PackageMode == "ZIP" {
 			destinationAtts = zipAtts
 		}
-		outboxes, dispatchErr := dispatchOneEmailDestination(
-			ctx, pool, runID, ruleID, ruleName, moduleCode, subModuleCode,
-			versionID, destination.DestinationID, triggeredBy, emailSubject, emailBody,
-			tplIDs, docs, destinationAtts,
-		)
+		outboxes, dispatchErr := dispatchOneEmailDestination(ctx, pool, emailDispatchParams{
+			RunID:         runID,
+			RuleID:        ruleID,
+			RuleName:      ruleName,
+			ModuleCode:    moduleCode,
+			SubModuleCode: subModuleCode,
+			VersionID:     versionID,
+			DestinationID: destination.DestinationID,
+			TriggeredBy:   triggeredBy,
+			EmailSubject:  emailSubject,
+			EmailBody:     emailBody,
+			TemplateIDs:   tplIDs,
+			Docs:          docs,
+			Attachments:   destinationAtts,
+		})
 		if dispatchErr != nil {
 			return dispatchErr
 		}
@@ -200,57 +215,67 @@ func loadEmailDestinations(ctx context.Context, pool *pgxpool.Pool, versionID st
 	return out, rows.Err()
 }
 
-func dispatchOneEmailDestination(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	runID, ruleID, ruleName, moduleCode, subModuleCode string,
-	versionID, destinationID, triggeredBy string,
-	emailSubject, emailBody *string,
-	tplIDs []string,
-	docs []generatedDoc,
-	atts []notifcatalog.AttachmentRef,
-) ([]outboxRecipient, error) {
-	corr := "DMS-RUN-" + runID
-	if destinationID != "" {
-		shortID := destinationID
+// emailDispatchParams carries everything dispatchOneEmailDestination needs for
+// one EMAIL destination of a run: run/rule identity, the destination being
+// dispatched, the optional email cover, and the templates/docs/attachments.
+type emailDispatchParams struct {
+	RunID         string
+	RuleID        string
+	RuleName      string
+	ModuleCode    string
+	SubModuleCode string
+	VersionID     string
+	DestinationID string
+	TriggeredBy   string
+	EmailSubject  *string
+	EmailBody     *string
+	TemplateIDs   []string
+	Docs          []generatedDoc
+	Attachments   []notifcatalog.AttachmentRef
+}
+
+func dispatchOneEmailDestination(ctx context.Context, pool *pgxpool.Pool, p emailDispatchParams) ([]outboxRecipient, error) {
+	corr := "DMS-RUN-" + p.RunID
+	if p.DestinationID != "" {
+		shortID := p.DestinationID
 		if len(shortID) > 8 {
 			shortID = shortID[:8]
 		}
 		corr += "-EMAIL-" + shortID
 	}
 	payload := map[string]interface{}{
-		"RuleID":             ruleID,
-		"RuleName":           ruleName,
-		"RunID":              runID,
-		"ModuleCode":         moduleCode,
-		"SubModuleCode":      subModuleCode,
-		"DestinationID":      destinationID,
-		"DocCount":           len(docs),
-		"UserID":             triggeredBy,
-		"actor_user_id":      triggeredBy,
+		"RuleID":             p.RuleID,
+		"RuleName":           p.RuleName,
+		"RunID":              p.RunID,
+		"ModuleCode":         p.ModuleCode,
+		"SubModuleCode":      p.SubModuleCode,
+		"DestinationID":      p.DestinationID,
+		"DocCount":           len(p.Docs),
+		"UserID":             p.TriggeredBy,
+		"actor_user_id":      p.TriggeredBy,
 		"DeferDeliveryNudge": true,
 	}
-	if emailSubject != nil && strings.TrimSpace(*emailSubject) != "" {
-		payload["EmailSubject"] = strings.TrimSpace(*emailSubject)
+	if p.EmailSubject != nil && strings.TrimSpace(*p.EmailSubject) != "" {
+		payload["EmailSubject"] = strings.TrimSpace(*p.EmailSubject)
 	}
-	if emailBody != nil && strings.TrimSpace(*emailBody) != "" {
-		payload["EmailBodyHTML"] = *emailBody
+	if p.EmailBody != nil && strings.TrimSpace(*p.EmailBody) != "" {
+		payload["EmailBodyHTML"] = *p.EmailBody
 	}
 
-	toEmails, ccEmails, recipErr := loadRuleEmailRecipients(ctx, pool, versionID, destinationID)
+	toEmails, ccEmails, recipErr := loadRuleEmailRecipients(ctx, pool, p.VersionID, p.DestinationID)
 	if recipErr != nil {
 		return nil, recipErr
 	}
 	if len(toEmails) > 0 {
 		payload["RecipientEmails"] = toEmails
-	} else if email := resolveActorEmail(ctx, pool, triggeredBy); email != "" {
+	} else if email := resolveActorEmail(ctx, pool, p.TriggeredBy); email != "" {
 		payload["RecipientEmail"] = email
-		payload["RecipientName"] = triggeredBy
+		payload["RecipientName"] = p.TriggeredBy
 	}
 	if len(ccEmails) > 0 {
 		payload["RecipientCcEmails"] = ccEmails
 	}
-	enrichDispatchPayload(ctx, pool, runID, payload)
+	enrichDispatchPayload(ctx, pool, p.RunID, payload)
 
 	outboxes, err := loadOutboxByCorrelation(ctx, pool, corr)
 	if err != nil {
@@ -258,7 +283,7 @@ func dispatchOneEmailDestination(
 	}
 	if len(outboxes) == 0 {
 		notifcatalog.TriggerNotificationForTemplatesWithAttachments(
-			ctx, pool, dmsDocumentGeneratedRoute, corr, payload, tplIDs, atts,
+			ctx, pool, dmsDocumentGeneratedRoute, corr, payload, p.TemplateIDs, p.Attachments,
 		)
 		outboxes, err = loadOutboxByCorrelation(ctx, pool, corr)
 		if err != nil {
@@ -266,7 +291,7 @@ func dispatchOneEmailDestination(
 		}
 	}
 	if len(outboxes) == 0 {
-		return nil, fmt.Errorf("no outbox rows created for EMAIL destination %s", destinationID)
+		return nil, fmt.Errorf("no outbox rows created for EMAIL destination %s", p.DestinationID)
 	}
 
 	if len(ccEmails) > 0 {
@@ -279,18 +304,18 @@ func dispatchOneEmailDestination(
 			return nil, fmt.Errorf("apply Cc recipients: %w", err)
 		}
 	}
-	if emailSubject != nil && strings.TrimSpace(*emailSubject) != "" &&
-		emailBody != nil && strings.TrimSpace(*emailBody) != "" {
+	if p.EmailSubject != nil && strings.TrimSpace(*p.EmailSubject) != "" &&
+		p.EmailBody != nil && strings.TrimSpace(*p.EmailBody) != "" {
 		if _, err := pool.Exec(ctx, `
 			UPDATE notification_svc.outbox
 			SET rendered_subject = $2, rendered_body = $3
 			WHERE correlation_id = $1
 			  AND processing_status IN ('PENDING', 'QUEUED', 'PROCESSING')`,
-			corr, strings.TrimSpace(*emailSubject), *emailBody); err != nil {
+			corr, strings.TrimSpace(*p.EmailSubject), *p.EmailBody); err != nil {
 			return nil, fmt.Errorf("apply DMS email cover: %w", err)
 		}
 	}
-	if len(atts) > 0 {
+	if len(p.Attachments) > 0 {
 		count, err := countOutboxAttachments(ctx, pool, corr)
 		if err != nil {
 			return nil, fmt.Errorf("verify outbox attachments: %w", err)
@@ -299,7 +324,7 @@ func dispatchOneEmailDestination(
 			return nil, fmt.Errorf("no outbox attachments created for %s", corr)
 		}
 	}
-	if err := insertDispatchRows(ctx, pool, docs, outboxes); err != nil {
+	if err := insertDispatchRows(ctx, pool, p.Docs, outboxes); err != nil {
 		return nil, err
 	}
 	return outboxes, nil
@@ -435,7 +460,7 @@ func loadRuleEmailRecipients(ctx context.Context, pool *pgxpool.Pool, versionID,
 		  )
 		ORDER BY address_role, sort_order, email`, versionID, destinationID)
 	if err != nil {
-		if strings.Contains(err.Error(), "does not exist") {
+		if strings.Contains(err.Error(), errFragDoesNotExist) {
 			return nil, nil, nil
 		}
 		return nil, nil, fmt.Errorf("load email recipients: %w", err)
@@ -499,7 +524,7 @@ func ruleWantsEmailDispatch(ctx context.Context, pool *pgxpool.Pool, versionID s
 		WHERE version_id = $1::uuid`, versionID,
 	).Scan(&emailN, &totalN); err != nil {
 		// Table may not exist yet on older DBs — fall back to email.
-		if strings.Contains(err.Error(), "does not exist") {
+		if strings.Contains(err.Error(), errFragDoesNotExist) {
 			return true, nil
 		}
 		return false, err
@@ -530,7 +555,7 @@ func loadEnabledDestChannels(ctx context.Context, pool *pgxpool.Pool, versionID 
 		WHERE version_id = $1::uuid AND is_enabled = true AND is_deleted = false
 		ORDER BY sort_order`, versionID)
 	if err != nil {
-		if strings.Contains(err.Error(), "does not exist") {
+		if strings.Contains(err.Error(), errFragDoesNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -625,7 +650,7 @@ func recordChannelDeliveries(
 				doc.DocID, runID, destID, ch.DestinationType, loc, filenameForDoc(doc, ""),
 				status, detail); err != nil {
 				// Table may not exist on older DBs — don't fail the email path.
-				if strings.Contains(err.Error(), "does not exist") {
+				if strings.Contains(err.Error(), errFragDoesNotExist) {
 					return nil
 				}
 				return err

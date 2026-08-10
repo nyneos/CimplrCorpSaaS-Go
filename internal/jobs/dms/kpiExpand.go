@@ -7,6 +7,10 @@ import (
 	"strings"
 )
 
+// colorKPIDarkGreen is the default KPI card accent — the soft system dark green
+// used both as the fallback accent and as the normalized replacement for loud accents.
+const colorKPIDarkGreen = "#0b3d2e"
+
 var kpiDivRe = regexp.MustCompile(`(?is)<div\b([^>]*)\bdata-dms-kpi(?:=["']([^"']*)["'])?([^>]*)>.*?</div>`)
 
 // expandKPIPlaceholders replaces data-dms-kpi slots with a styled KPI card grid
@@ -36,7 +40,7 @@ func expandKPIPlaceholders(html string, poolRows []map[string]any) string {
 		}
 		accent := strings.TrimSpace(attrFromBlob(attrs, "data-accent"))
 		if accent == "" {
-			accent = "#0b3d2e"
+			accent = colorKPIDarkGreen
 		}
 		val := computeKPI(poolRows, op, measure)
 		// Soft system-green KPI tiles (not loud rainbow blocks).
@@ -120,12 +124,12 @@ func normalizeKPIAccent(accent string) string {
 	a := strings.ToLower(strings.TrimSpace(accent))
 	switch a {
 	case "", "#1d4ed8", "#2563eb", "#3b82f6", "#0000ff", "blue":
-		return "#0b3d2e"
+		return colorKPIDarkGreen
 	case "#ea580c", "#f97316", "#fb923c", "orange":
 		return "#0f766e"
 	default:
 		if a == "" {
-			return "#0b3d2e"
+			return colorKPIDarkGreen
 		}
 		return accent
 	}

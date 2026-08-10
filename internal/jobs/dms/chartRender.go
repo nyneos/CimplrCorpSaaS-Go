@@ -15,6 +15,10 @@ import (
 	"github.com/wcharczuk/go-chart/v2/drawing"
 )
 
+// msgNoData is the placeholder caption rendered into an empty chart PNG
+// when there is nothing to plot.
+const msgNoData = "No data"
+
 type chartSeriesPoint struct {
 	Label string
 	Value float64
@@ -149,7 +153,7 @@ func lookupRowField(row map[string]any, key string) any {
 
 func renderChartPNG(chartType string, series []chartSeriesPoint) ([]byte, error) {
 	if len(series) == 0 {
-		return renderEmptyChartPNG("No data")
+		return renderEmptyChartPNG(msgNoData)
 	}
 	switch strings.ToLower(strings.TrimSpace(chartType)) {
 	case "pie", "donut", "radial_bar":
@@ -257,7 +261,7 @@ func chartYRange(series []chartSeriesPoint) *chart.ContinuousRange {
 
 func renderBarChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	if chartSeriesAllZero(series) {
-		return renderEmptyChartPNG("No data")
+		return renderEmptyChartPNG(msgNoData)
 	}
 	palette := chartBrandPalette()
 	bars := make([]chart.Value, 0, len(series))
@@ -310,7 +314,7 @@ func renderBarChartPNG(series []chartSeriesPoint) ([]byte, error) {
 
 func renderLineChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	if len(series) == 0 || chartSeriesAllZero(series) {
-		return renderEmptyChartPNG("No data")
+		return renderEmptyChartPNG(msgNoData)
 	}
 	// go-chart ContinuousSeries needs a non-zero X span (≥2 points); single-point
 	// series used to fail with "zero x-range delta" and kill BANK_BALANCE renders.
@@ -417,7 +421,7 @@ func renderPieChartPNG(series []chartSeriesPoint) ([]byte, error) {
 func renderGaugeChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	// Gauge = primary value vs max of series (or sum). Drawn as a slim bar + label.
 	if len(series) == 0 {
-		return renderEmptyChartPNG("No data")
+		return renderEmptyChartPNG(msgNoData)
 	}
 	val := series[0].Value
 	maxV := series[0].Value

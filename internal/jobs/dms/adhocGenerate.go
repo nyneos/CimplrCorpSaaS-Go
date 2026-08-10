@@ -213,7 +213,19 @@ func RunAdhocGeneration(ctx context.Context, pool *pgxpool.Pool, req AdhocReques
 			api.LogError("[DMS-ADHOC] fetch source=%s: %v", sid, err)
 			row = map[string]any{"source_id": sid}
 		}
-		if err := generateAdhocAttachment(ctx, pool, runID, tplID, format, row, req.MergeOverrides, sourceKey, idField, sid, req.StoreS3, req.StoreLocal, &out); err != nil {
+		if err := generateAdhocAttachment(ctx, pool, adhocAttachmentParams{
+			RunID:      runID,
+			TemplateID: tplID,
+			Format:     format,
+			Row:        row,
+			Overrides:  req.MergeOverrides,
+			SourceKey:  sourceKey,
+			IDField:    idField,
+			SourceID:   sid,
+			StoreS3:    req.StoreS3,
+			StoreLocal: req.StoreLocal,
+			Out:        &out,
+		}); err != nil {
 			_ = finishRun(ctx, pool, runID, "FAILED", err.Error())
 			return out, err
 		}
@@ -233,7 +245,7 @@ func RunAdhocGeneration(ctx context.Context, pool *pgxpool.Pool, req AdhocReques
 	if req.SendEmail && len(out.DocIDs) > 0 {
 		poolRows := make([]map[string]any, 0, len(sourceIDs))
 		for _, sid := range sourceIDs {
-			row, _ := fetchAdhocSourceRow(ctx, pool, req.ModuleCode, req.SubModuleCode, sid)
+			row, _ := FetchAdhocSourceRow(ctx, pool, req.ModuleCode, req.SubModuleCode, sid)
 			if row == nil {
 				row = map[string]any{}
 			}
@@ -354,16 +366,31 @@ func insertAdhocDispatchRequest(ctx context.Context, pool *pgxpool.Pool, runID s
 	return reqID, nil
 }
 
-func generateAdhocAttachment(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	runID, tplID, format string,
-	row map[string]any,
-	overrides map[string]string,
-	sourceKey, idField, sourceID string,
-	storeS3, storeLocal bool,
-	out *AdhocResult,
-) error {
+// adhocAttachmentParams is one adhoc attachment to render and store: the run it
+// belongs to, the template/format, the source row it merges (plus the dashboard
+// source key / id field used to expand tables and charts), and where to store it.
+// Out accumulates the doc ids, filenames and first HTML preview across sources.
+type adhocAttachmentParams struct {
+	RunID      string
+	TemplateID string
+	Format     string
+	Row        map[string]any
+	Overrides  map[string]string
+	SourceKey  string
+	IDField    string
+	SourceID   string
+	StoreS3    bool
+	StoreLocal bool
+	Out        *AdhocResult
+}
+
+func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, p adhocAttachmentParams) error {
+	runID, tplID, format := p.RunID, p.TemplateID, p.Format
+	row, overrides := p.Row, p.Overrides
+	sourceKey, idField, sourceID := p.SourceKey, p.IDField, p.SourceID
+	storeS3, storeLocal := p.StoreS3, p.StoreLocal
+	out := p.Out
+
 	tplVersionID, content, err := loadApprovedTemplateContent(ctx, pool, tplID)
 	if err != nil {
 		return err
@@ -462,82 +489,64 @@ func generateAdhocAttachment(
 	return nil
 }
 
-// adhocSourceIDField maps sub-module → primary id column used by dashboard filters
-// (same vocabulary as seeded generation_rule_trigger.source_id_field).
+// adhocSourceIDFieldBySub maps sub-module → primary id column used by dashboard
+// filters (same vocabulary as seeded generation_rule_trigger.source_id_field).
+// Lookup table rather than a long switch — same shape as businessAuditBySub.
+var adhocSourceIDFieldBySub = map[string]string{
+	// CASH
+	"BANK_STATEMENT":      "bank_statement_id",
+	"BANK_BALANCE":        "balance_id",
+	"BANK_LIMIT":          "limit_id",
+	"CASHFLOW_PROJECTION": "proposal_id",
+	"FUND_PLANNING":       "plan_id",
+	"LIMIT_UTILIZATION":   "utilization_id",
+	"PAYABLE_RECEIVABLE":  "transaction_id",
+	"SWEEP_CONFIG":        "sweep_id",
+	"SWEEP_INITIATION":    "initiation_id",
+	"SWEEP_EXECUTION":     "initiation_id",
+	// FD
+	"FD_BOOKING":       "booking_id",
+	"FD_CONFIRMATION":  "confirmation_id",
+	"FD_MASTER":        "fd_id",
+	"FD_ACCRUAL":       "run_id",
+	"FD_ACCRUAL_SCHED": "config_id",
+	"FD_CASHFLOW":      "cashflow_id",
+	"FD_CLOSURE":       "closure_initiate_id",
+	"FD_EXCEPTION":     "exception_id",
+	"FD_RECEIPT":       "receipt_id",
+	"FD_TDS_REGISTER":  "tds_id",
+	// FX
+	"EXPOSURE_CREATION":    "exposure_header_id",
+	"EXPOSURE_UPLOAD":      "exposure_header_id",
+	"EXPOSURE_BUCKETING":   "exposure_header_id",
+	"HEDGE_LINK":           "exposure_header_id",
+	"FORWARD_BOOKING":      "system_transaction_id",
+	"FORWARD_CANCELLATION": "booking_id",
+	"FORWARD_ROLLOVER":     "booking_id",
+	"FORWARD_CANCEL_ROLL":  "booking_id",
+	"FORWARD_MTM":          "mtm_id",
+	// MF
+	"MF_ACCOUNTING":      "activity_id",
+	"MF_CONFIRMATION":    "confirmation_id",
+	"MF_REDEMPTION_CONF": "redemption_confirm_id",
+	"MF_INITIATION":      "initiation_id",
+	"MF_ONBOARD":         "batch_id",
+	"MF_PORTFOLIO":       "proposal_id",
+	"MF_PROPOSAL":        "proposal_id",
+	"MF_REDEMPTION":      "redemption_id",
+}
+
+// adhocSourceIDField returns the primary id column for a sub-module, falling
+// back to the generic "source_id" for anything not in the table above.
 func adhocSourceIDField(subModuleCode string) string {
-	switch strings.TrimSpace(subModuleCode) {
-	case "BANK_STATEMENT":
-		return "bank_statement_id"
-	case "BANK_BALANCE":
-		return "balance_id"
-	case "BANK_LIMIT":
-		return "limit_id"
-	case "CASHFLOW_PROJECTION":
-		return "proposal_id"
-	case "FUND_PLANNING":
-		return "plan_id"
-	case "LIMIT_UTILIZATION":
-		return "utilization_id"
-	case "PAYABLE_RECEIVABLE":
-		return "transaction_id"
-	case "SWEEP_CONFIG":
-		return "sweep_id"
-	case "SWEEP_INITIATION", "SWEEP_EXECUTION":
-		return "initiation_id"
-	case "FD_BOOKING":
-		return "booking_id"
-	case "FD_CONFIRMATION":
-		return "confirmation_id"
-	case "FD_MASTER":
-		return "fd_id"
-	case "FD_ACCRUAL":
-		return "run_id"
-	case "FD_ACCRUAL_SCHED":
-		return "config_id"
-	case "FD_CASHFLOW":
-		return "cashflow_id"
-	case "FD_CLOSURE":
-		return "closure_initiate_id"
-	case "FD_EXCEPTION":
-		return "exception_id"
-	case "FD_RECEIPT":
-		return "receipt_id"
-	case "FD_TDS_REGISTER":
-		return "tds_id"
-	case "EXPOSURE_CREATION", "EXPOSURE_UPLOAD", "EXPOSURE_BUCKETING", "HEDGE_LINK":
-		return "exposure_header_id"
-	case "FORWARD_BOOKING":
-		return "system_transaction_id"
-	case "FORWARD_CANCELLATION", "FORWARD_ROLLOVER", "FORWARD_CANCEL_ROLL":
-		return "booking_id"
-	case "FORWARD_MTM":
-		return "mtm_id"
-	case "MF_ACCOUNTING":
-		return "activity_id"
-	case "MF_CONFIRMATION":
-		return "confirmation_id"
-	case "MF_REDEMPTION_CONF":
-		return "redemption_confirm_id"
-	case "MF_INITIATION":
-		return "initiation_id"
-	case "MF_ONBOARD":
-		return "batch_id"
-	case "MF_PORTFOLIO", "MF_PROPOSAL":
-		return "proposal_id"
-	case "MF_REDEMPTION":
-		return "redemption_id"
-	default:
-		return "source_id"
+	if field, ok := adhocSourceIDFieldBySub[strings.TrimSpace(subModuleCode)]; ok {
+		return field
 	}
+	return "source_id"
 }
 
 // FetchAdhocSourceRow loads one source row for preview/adhoc merge (exported for API).
 func FetchAdhocSourceRow(ctx context.Context, pool *pgxpool.Pool, moduleCode, subModuleCode, sourceID string) (map[string]any, error) {
-	row, _, _, err := fetchAdhocSourceRowDetailed(ctx, pool, moduleCode, subModuleCode, sourceID)
-	return row, err
-}
-
-func fetchAdhocSourceRow(ctx context.Context, pool *pgxpool.Pool, moduleCode, subModuleCode, sourceID string) (map[string]any, error) {
 	row, _, _, err := fetchAdhocSourceRowDetailed(ctx, pool, moduleCode, subModuleCode, sourceID)
 	return row, err
 }

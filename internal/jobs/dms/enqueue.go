@@ -50,11 +50,18 @@ func EnqueueRuleGeneration(
 		kind = "RULE_SOURCE_IDS"
 	}
 	reqID := fmt.Sprintf("%s:%s:%d", rule.RuleID, triggerType, time.Now().UnixNano())
-	jobID, err = insertGenerationJob(
-		ctx, pool, kind, rule.RuleID, rule.CurrentVersionID,
-		triggerType, triggeredBy, rule.ModuleCode, rule.SubModuleCode,
-		sourceIDField, reqID, sourceIDs, 0,
-	)
+	jobID, err = insertGenerationJob(ctx, pool, generationJobInsert{
+		Kind:          kind,
+		RuleID:        rule.RuleID,
+		VersionID:     rule.CurrentVersionID,
+		TriggerType:   triggerType,
+		TriggeredBy:   triggeredBy,
+		ModuleCode:    rule.ModuleCode,
+		SubModuleCode: rule.SubModuleCode,
+		SourceIDField: sourceIDField,
+		RequestID:     reqID,
+		SourceIDs:     sourceIDs,
+	})
 	if err != nil {
 		return "", fmt.Errorf("enqueue job: %w", err)
 	}

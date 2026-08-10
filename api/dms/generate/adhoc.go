@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errInvalidRequestBody = "invalid request body"
+
 type adhocReq struct {
 	DocumentTemplateID string            `json:"document_template_id"`
 	OutputFormat       string            `json:"output_format"`
@@ -40,7 +42,7 @@ func HandleAdhoc(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req adhocReq
 		if err := common.DecodeJSON(r, &req); err != nil {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")
 			return
 		}
 		tplID := strings.TrimSpace(req.DocumentTemplateID)
@@ -87,13 +89,13 @@ func HandleAdhoc(pool *pgxpool.Pool) http.HandlerFunc {
 			msg = "Documents generated — pending dispatch approval (email / finalize)"
 		}
 		api.RespondEnvelopeSuccess(w, msg, map[string]interface{}{
-			"run_id":             result.RunID,
-			"request_id":         result.RequestID,
-			"doc_ids":            result.DocIDs,
-			"filenames":          result.Filenames,
-			"html_preview":       result.HTMLPreview,
-			"pending_approval":   result.PendingApproval,
-			"processing_status":  result.ProcessingStatus,
+			"run_id":            result.RunID,
+			"request_id":        result.RequestID,
+			"doc_ids":           result.DocIDs,
+			"filenames":         result.Filenames,
+			"html_preview":      result.HTMLPreview,
+			"pending_approval":  result.PendingApproval,
+			"processing_status": result.ProcessingStatus,
 		})
 	}
 }
@@ -112,7 +114,7 @@ func HandleAdhocApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req adhocDecisionReq
 		if err := common.DecodeJSON(r, &req); err != nil {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")
 			return
 		}
 		if strings.TrimSpace(req.RequestID) == "" {
@@ -139,7 +141,7 @@ func HandleAdhocReject(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var req adhocDecisionReq
 		if err := common.DecodeJSON(r, &req); err != nil {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")
 			return
 		}
 		if strings.TrimSpace(req.RequestID) == "" {

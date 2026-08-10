@@ -150,7 +150,19 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := insertVersionChildren(r.Context(), tx, ruleID, versionID, actor, "CREATE", req.Filters, req.Attachments, req.Destinations, req.EmailRecipients, req.BankAccountScope, req.NotificationTemplateIDs, req.Triggers); err != nil {
+		if err := insertVersionChildren(r.Context(), tx, insertVersionChildrenParams{
+			RuleID:                  ruleID,
+			VersionID:               versionID,
+			Actor:                   actor,
+			ActionType:              "CREATE",
+			Filters:                 req.Filters,
+			Attachments:             req.Attachments,
+			Destinations:            req.Destinations,
+			EmailRecipients:         req.EmailRecipients,
+			BankAccountScope:        req.BankAccountScope,
+			NotificationTemplateIDs: req.NotificationTemplateIDs,
+			Triggers:                req.Triggers,
+		}); err != nil {
 			api.LogErrorForResponse(w, "dms rule create children: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach filters/documents/destinations/recipients/scope/notification templates (unknown id?)", "DMS_RULE_CREATE_FAILED")
 			return

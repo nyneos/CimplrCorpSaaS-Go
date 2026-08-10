@@ -49,23 +49,34 @@ func buildSmartCatReviewPolicyFields(row smartCatReviewRow) map[string]interface
 	}
 }
 
-func enforceSmartCatReview(ctx context.Context, w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, txnID int64, categoryID, eventCode, actor, blockMessage string) bool {
-	row, err := loadSmartCatReviewRow(ctx, pool, txnID, categoryID)
+// smartCatReviewPolicyParams groups the review-action-specific inputs for
+// enforceSmartCatReview so the function itself only needs the shared
+// infra parameters (ctx, w, r, pool) plus this one struct.
+type smartCatReviewPolicyParams struct {
+	TxnID        int64
+	CategoryID   string
+	EventCode    string
+	Actor        string
+	BlockMessage string
+}
+
+func enforceSmartCatReview(ctx context.Context, w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, params smartCatReviewPolicyParams) bool {
+	row, err := loadSmartCatReviewRow(ctx, pool, params.TxnID, params.CategoryID)
 	if err != nil {
 		writeErrJSON(w, "policy check failed — could not load transaction", http.StatusInternalServerError)
 		return false
 	}
 	return runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
-		EventCode:           eventCode,
+		EventCode:           params.EventCode,
 		ModuleCode:          common.ModuleCash,
 		SubModule:           "SMART_CATEGORIZATION",
 		EntityCode:          row.EntityID,
-		ActorUserID:         actor,
+		ActorUserID:         params.Actor,
 		HandlerName:         "ReviewActionHandler",
 		APIPath:             smartCatReviewAPIPath,
-		BusinessRecordID:    strconv.FormatInt(txnID, 10),
+		BusinessRecordID:    strconv.FormatInt(params.TxnID, 10),
 		BusinessRecordType:  "BANK_STATEMENT_TRANSACTION",
 		Fields:              buildSmartCatReviewPolicyFields(row),
-		DefaultBlockMessage: blockMessage,
+		DefaultBlockMessage: params.BlockMessage,
 	})
 }

@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errFailedDeleteVersion = "failed to delete version"
+
 type deleteVersionReq struct {
 	RuleID    string `json:"rule_id"`
 	VersionID string `json:"version_id"`
@@ -39,7 +41,7 @@ func HandleDeleteVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(r.Context())
 		if err != nil {
 			api.LogErrorForResponse(w, "dms rule version delete begin: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to delete version", "DMS_RULE_VERSION_DELETE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedDeleteVersion, "DMS_RULE_VERSION_DELETE_FAILED")
 			return
 		}
 		defer tx.Rollback(r.Context())
@@ -93,7 +95,7 @@ func HandleDeleteVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			UPDATE dms_svc.generation_rule_version SET is_deleted = true
 			WHERE version_id = $1::uuid`, req.VersionID); err != nil {
 			api.LogErrorForResponse(w, "dms rule version soft-delete: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to delete version", "DMS_RULE_VERSION_DELETE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedDeleteVersion, "DMS_RULE_VERSION_DELETE_FAILED")
 			return
 		}
 
@@ -119,7 +121,7 @@ func HandleDeleteVersion(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(r.Context()); err != nil {
 			api.LogErrorForResponse(w, "dms rule version delete commit: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to delete version", "DMS_RULE_VERSION_DELETE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedDeleteVersion, "DMS_RULE_VERSION_DELETE_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Rule version deleted", map[string]interface{}{

@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errFailedCreateTemplateVersion = "failed to create template version"
+
 type createVersionReq struct {
 	TemplateID        string                `json:"template_id"`
 	ContentJSON       json.RawMessage       `json:"content_json"`
@@ -49,7 +51,7 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(r.Context())
 		if err != nil {
 			api.LogErrorForResponse(w, "dms template version create begin: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create template version", "DMS_TEMPLATE_VERSION_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateTemplateVersion, "DMS_TEMPLATE_VERSION_FAILED")
 			return
 		}
 		defer tx.Rollback(r.Context())
@@ -65,7 +67,7 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE template_id = $1::uuid`, req.TemplateID,
 		).Scan(&nextVersionNo); err != nil {
 			api.LogErrorForResponse(w, "dms template version seq: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create template version", "DMS_TEMPLATE_VERSION_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateTemplateVersion, "DMS_TEMPLATE_VERSION_FAILED")
 			return
 		}
 
@@ -77,7 +79,7 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			req.TemplateID, nextVersionNo, string(req.ContentJSON), actor,
 		).Scan(&versionID); err != nil {
 			api.LogErrorForResponse(w, "dms template version insert: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create template version", "DMS_TEMPLATE_VERSION_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateTemplateVersion, "DMS_TEMPLATE_VERSION_FAILED")
 			return
 		}
 
@@ -91,7 +93,7 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			UPDATE dms_svc.template SET processing_status = 'PENDING_EDIT_APPROVAL'
 			WHERE template_id = $1::uuid`, req.TemplateID); err != nil {
 			api.LogErrorForResponse(w, "dms template version flag: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create template version", "DMS_TEMPLATE_VERSION_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateTemplateVersion, "DMS_TEMPLATE_VERSION_FAILED")
 			return
 		}
 
@@ -111,7 +113,7 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(r.Context()); err != nil {
 			api.LogErrorForResponse(w, "dms template version commit: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to create template version", "DMS_TEMPLATE_VERSION_FAILED")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateTemplateVersion, "DMS_TEMPLATE_VERSION_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Template version submitted for approval", map[string]interface{}{
