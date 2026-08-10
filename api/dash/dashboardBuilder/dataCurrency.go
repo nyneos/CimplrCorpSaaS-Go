@@ -58,6 +58,19 @@ var sourceCurrencyConfig = map[string]currencyNormConfig{
 			"line_item_amount":      {},
 		},
 	},
+	"fxExposureBucketing": {
+		currencyField: "currency",
+		amountFields: map[string]struct{}{
+			"total_open_amount":     {},
+			"total_original_amount": {},
+			"month_1":               {},
+			"month_2":               {},
+			"month_3":               {},
+			"month_4":               {},
+			"month_4_6":             {},
+			"month_6plus":           {},
+		},
+	},
 	"fxMtmManagement": {
 		currencyPairField: "currency_pair",
 		amountFields: map[string]struct{}{

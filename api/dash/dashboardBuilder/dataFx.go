@@ -8,38 +8,33 @@ import (
 )
 
 // ── Exposure Headers & Line Items ──────────────────────────────────────────
+// Same row set as /fx/exposures/headers-line-items (queryHeadersLineItems):
+// entity scope + exposure_creation_status = Approved + not deleted.
+// Fields aligned with FX All Exposure Request table + expand/edit config.
 func queryFXExposureHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "h", "entity")
 
 	q := fmt.Sprintf(`
-		WITH latest_audit AS (
-			SELECT DISTINCT ON (exposure_header_id)
-				exposure_header_id,
-				processing_status,
-				requested_at,
-				checker_at
-			FROM public.auditactionexposure
-			ORDER BY exposure_header_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
-		)
 		SELECT
 			COALESCE(h.exposure_header_id::text, '') AS exposure_header_id,
-			COALESCE(l.line_item_id::text, '') AS line_item_id,
-			COALESCE(h.entity, '') AS entity_id,
-			COALESCE(h.currency, '') AS currency,
+			COALESCE(h.document_id, '') AS document_id,
 			COALESCE(h.exposure_type, '') AS exposure_type,
-			COALESCE(h.total_open_amount, 0) AS total_open_amount,
+			COALESCE(h.entity, '') AS entity,
+			COALESCE(h.counterparty_code, '') AS counterparty_code,
+			COALESCE(h.counterparty_name, '') AS counterparty_name,
+			COALESCE(h.exposure_category, '') AS exposure_category,
+			COALESCE(h.currency, '') AS currency,
+			h.document_date,
+			COALESCE(h.approval_status, '') AS approval_status,
 			COALESCE(h.total_original_amount, 0) AS total_original_amount,
-			h.value_date,
-			COALESCE(h.status, '') AS status,
-			COALESCE(l.product_id, '') AS product_id,
-			COALESCE(l.quantity, 0) AS quantity,
+			COALESCE(h.total_open_amount, 0) AS total_open_amount,
 			COALESCE(l.line_item_amount, 0) AS line_item_amount,
-			COALESCE(a.processing_status, '') AS processing_status
+			COALESCE(h.amount_in_local_currency, 0) AS amount_in_local_currency
 		FROM public.exposure_headers h
 		LEFT JOIN public.exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
-		LEFT JOIN latest_audit a ON a.exposure_header_id = h.exposure_header_id::text
-		WHERE COALESCE(h.is_deleted, false) = false %s
-		ORDER BY h.value_date DESC NULLS LAST
+		WHERE h.exposure_creation_status = 'Approved'
+		  AND h.is_deleted IS NOT TRUE %s
+		ORDER BY h.document_id, l.line_number NULLS FIRST
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
@@ -47,35 +42,41 @@ func queryFXExposureHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, en
 }
 
 // ── Exposure Bucketing ─────────────────────────────────────────────────────
+// Same row set as /fx/exposures/get-bucketing:
+// approved headers + not deleted + entity scope + join line items.
+// Fields aligned with ExposureBucketing table columns.
 func queryFXExposureBucketing(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "h", "entity")
 
 	q := fmt.Sprintf(`
-		WITH latest_audit AS (
-			SELECT DISTINCT ON (exposure_header_id)
-				exposure_header_id,
-				processing_status,
-				requested_at,
-				checker_at
-			FROM public.auditactionexposurebucketing
-			ORDER BY exposure_header_id, GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
-		)
 		SELECT
-			COALESCE(b.exposure_header_id::text, '') AS exposure_header_id,
-			COALESCE(h.entity, '') AS entity_id,
+			COALESCE(h.exposure_header_id::text, '') AS exposure_header_id,
+			COALESCE(h.document_id, '') AS document_id,
+			COALESCE(h.exposure_type, '') AS exposure_type,
+			COALESCE(h.entity, '') AS entity,
+			COALESCE(h.counterparty_name, '') AS counterparty_name,
+			COALESCE(h.counterparty_code, '') AS counterparty_code,
+			COALESCE(h.company_code, '') AS company_code,
+			COALESCE(h.gl_account, '') AS gl_account,
+			COALESCE(l.line_item_id::text, '') AS line_item_id,
+			COALESCE(h.currency, '') AS currency,
+			h.document_date,
+			COALESCE(b.status_bucketing, '') AS status_bucketing,
+			COALESCE(h.total_original_amount, 0) AS total_original_amount,
+			COALESCE(h.total_open_amount, 0) AS total_open_amount,
+			COALESCE(h.amount_in_local_currency, 0) AS amount_in_local_currency,
 			COALESCE(b.month_1, 0) AS month_1,
 			COALESCE(b.month_2, 0) AS month_2,
 			COALESCE(b.month_3, 0) AS month_3,
 			COALESCE(b.month_4, 0) AS month_4,
 			COALESCE(b.month_4_6, 0) AS month_4_6,
-			COALESCE(b.month_6plus, 0) AS month_6plus,
-			COALESCE(b.status_bucketing, '') AS status,
-			COALESCE(a.processing_status, '') AS processing_status
-		FROM public.exposure_bucketing b
-		JOIN public.exposure_headers h ON b.exposure_header_id = h.exposure_header_id
-		LEFT JOIN latest_audit a ON a.exposure_header_id = b.exposure_header_id::text
-		WHERE COALESCE(h.is_deleted, false) = false %s
-		ORDER BY b.exposure_header_id
+			COALESCE(b.month_6plus, 0) AS month_6plus
+		FROM public.exposure_headers h
+		JOIN public.exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
+		LEFT JOIN public.exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id
+		WHERE (h.approval_status = 'approved' OR h.approval_status = 'Approved')
+		  AND COALESCE(h.is_deleted, false) = false %s
+		ORDER BY h.document_id, l.line_number NULLS FIRST
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
