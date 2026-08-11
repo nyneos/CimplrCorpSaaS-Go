@@ -14,7 +14,8 @@ import (
 const (
 	routeForwardManualEntry         = "/fx/forwards/manual-entry"
 	routeForwardUploadMulti         = "/fx/forwards/upload-multi"
-	routeForwardBulkUpdateStatus    = "/fx/forwards/bulk-update-processing-status"
+	routeForwardBulkApprove         = "/fx/forwards/bulk-approve"
+	routeForwardBulkReject          = "/fx/forwards/bulk-reject"
 	routeForwardBulkDelete          = "/fx/forwards/bulk-delete"
 	routeForwardUpdateFields        = "/fx/forwards/update-fields"
 	routeForwardManualConfirmation  = "/fx/forwards/manual-confirmation-entry"

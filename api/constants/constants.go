@@ -366,20 +366,25 @@ const (
 	AuditActionReject  = "REJECT"
 )
 
-// Forward booking processing_status values
+// Forward booking processing_status values (set only after confirmation).
 const (
-	FwdProcessingStatusPending               = "pending"
-	FwdProcessingStatusApproved              = "Approved"
-	FwdProcessingStatusRejected              = "Rejected"
-	FwdProcessingStatusDeleteApproval        = "Delete-approval"
+	FwdProcessingStatusPendingApproval       = StatusPendingApproval // PENDING_APPROVAL
+	FwdProcessingStatusApproved              = StatusApproved        // APPROVED
+	FwdProcessingStatusRejected              = StatusRejected        // REJECTED
 	FwdProcessingStatusPendingDeleteApproval = StatusPendingDeleteApproval
 	FwdProcessingStatusPendingEditApproval   = StatusPendingEditApproval
+	// Legacy aliases still present in older rows / SQL checks.
+	FwdProcessingStatusPending        = FwdProcessingStatusPendingApproval
+	FwdProcessingStatusDeleteApproval = "Delete-approval"
 )
 
-// Forward booking status values
+// Forward booking status values (lifecycle).
 const (
-	FwdStatusConfirmed           = "Confirmed"
-	FwdStatusPendingConfirmation = "Pending Confirmation"
+	FwdStatusDraft                     = "DRAFT"
+	FwdStatusPendingConfirmation       = "PENDING_CONFIRMATION"
+	FwdStatusConfirmed                 = "CONFIRMED"
+	FwdStatusPendingConfirmationLegacy = "Pending Confirmation"
+	FwdStatusConfirmedLegacy           = "Confirmed"
 )
 
 // Forward booking audit action types

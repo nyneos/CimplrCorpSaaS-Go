@@ -56,8 +56,30 @@ func HedgeLinksDetails(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		rows, err := pool.Query(ctx, `SELECT l.*, h.document_id, f.internal_reference_id FROM exposure_hedge_links l LEFT JOIN exposure_headers h ON l.exposure_header_id = h.exposure_header_id LEFT JOIN forward_bookings f ON l.booking_id = f.system_transaction_id WHERE h.entity = ANY($1) AND l.is_active = TRUE`, buNames)
+		rows, err := pool.Query(ctx, `
+			SELECT
+				l.exposure_header_id::text AS exposure_header_id,
+				l.booking_id::text AS booking_id,
+				COALESCE(l.hedged_amount, 0) AS hedged_amount,
+				l.link_date,
+				COALESCE(l.is_active, false) AS is_active,
+				COALESCE(h.document_id, '') AS document_id,
+				COALESCE(f.internal_reference_id, '') AS internal_reference_id,
+				COALESCE((
+					SELECT a.processing_status
+					FROM public.auditactionhedgelink a
+					WHERE a.exposure_header_id = l.exposure_header_id::text
+					  AND a.booking_id = l.booking_id::text
+					ORDER BY a.requested_at DESC NULLS LAST
+					LIMIT 1
+				), CASE WHEN COALESCE(l.is_active, false) THEN 'APPROVED' ELSE 'PENDING_APPROVAL' END) AS processing_status
+			FROM exposure_hedge_links l
+			LEFT JOIN exposure_headers h ON l.exposure_header_id = h.exposure_header_id
+			LEFT JOIN forward_bookings f ON l.booking_id = f.system_transaction_id
+			WHERE h.entity = ANY($1)
+		`, buNames)
 		if err != nil {
+			logger.LogError("hedge-links-details query failed: %v", err)
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch hedge links details")
 			return
 		}
@@ -117,7 +139,7 @@ func ExpFwdLinkingBookings(pool *pgxpool.Pool) http.HandlerFunc {
 		bookRows, err := pool.Query(ctx, `
 			SELECT system_transaction_id, entity_level_0, order_type, currency_pair, maturity_date, booking_amount, counterparty, total_rate, value_local_currency
 			FROM forward_bookings
-			WHERE (processing_status = 'approved' OR processing_status = 'Approved')
+			WHERE (UPPER(COALESCE(processing_status, '')) = 'APPROVED')
 			  AND COALESCE(is_deleted, false) = false
 		`)
 		if err != nil {
@@ -164,7 +186,11 @@ func ExpFwdLinkingBookings(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		hedgeMap := map[interface{}]float64{}
 		if len(bookingIds) > 0 {
-			hedgeRows, err := pool.Query(ctx, `SELECT booking_id, SUM(hedged_amount) AS linked_amount FROM exposure_hedge_links WHERE booking_id = ANY($1) GROUP BY booking_id`, bookingIds)
+			hedgeRows, err := pool.Query(ctx, `
+				SELECT booking_id::text, SUM(hedged_amount) AS linked_amount
+				FROM exposure_hedge_links
+				WHERE booking_id = ANY($1::uuid[])
+				GROUP BY booking_id`, bookingIds)
 			if err == nil {
 				for hedgeRows.Next() {
 					var bookingId interface{}
@@ -360,7 +386,11 @@ func ExpFwdLinking(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		hedgeMap := map[string]float64{}
 		if len(headerIds) > 0 {
-			hedgeRows, err := pool.Query(ctx, `SELECT exposure_header_id, SUM(hedged_amount) AS hedge_amount FROM exposure_hedge_links WHERE exposure_header_id = ANY($1) GROUP BY exposure_header_id`, headerIds)
+			hedgeRows, err := pool.Query(ctx, `
+				SELECT exposure_header_id::text, SUM(hedged_amount) AS hedge_amount
+				FROM exposure_hedge_links
+				WHERE exposure_header_id = ANY($1::uuid[])
+				GROUP BY exposure_header_id`, headerIds)
 			if err == nil {
 				for hedgeRows.Next() {
 					var exposureHeaderId interface{}
@@ -516,12 +546,12 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 				SELECT 1 FROM exposure_hedge_links
 				WHERE exposure_header_id = $1 AND booking_id = $2
 			)`, req.ExposureHeaderID, req.BookingID).Scan(&linkExisted)
-		// Upsert exposure_hedge_links
+		// Upsert exposure_hedge_links as pending until All Linkage approve
 		upsertQuery := `
 			INSERT INTO exposure_hedge_links (exposure_header_id, booking_id, hedged_amount, is_active)
-			VALUES ($1, $2, $3, true)
+			VALUES ($1, $2, $3, false)
 			ON CONFLICT (exposure_header_id, booking_id)
-			DO UPDATE SET hedged_amount = EXCLUDED.hedged_amount, is_active = true
+			DO UPDATE SET hedged_amount = EXCLUDED.hedged_amount, is_active = false
 			RETURNING exposure_header_id, booking_id, hedged_amount, is_active`
 		var link struct {
 			ExposureHeaderID string
@@ -544,18 +574,16 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 			"booking_id":         link.BookingID,
 			"hedged_amount":      link.HedgedAmount,
 			"is_active":          link.IsActive,
+			"processing_status":  "PENDING_APPROVAL",
 		}
-		// Log to forward_booking_ledger
-		ledgerQuery := `INSERT INTO forward_booking_ledger (booking_id, action_type, action_id, action_date, amount_changed, running_open_amount, user_id) VALUES ($1, 'UTILIZATION', $2, CURRENT_DATE, $3, $4, $5)`
-		_, _ = pool.Exec(ctx, ledgerQuery, req.BookingID, req.ExposureHeaderID, req.HedgedAmount, newOpenAmount, req.UserID)
 		if _, auditErr := pool.Exec(ctx, `
 			INSERT INTO public.auditactionhedgelink
 				(exposure_header_id, booking_id, actiontype, processing_status, requested_by, requested_at, requested_ip, new_values, change_summary)
-			VALUES ($1, $2, 'LINK', 'COMPLETED', $3, now(), $4, $5, $5)
+			VALUES ($1, $2, 'LINK', 'PENDING_APPROVAL', $3, now(), $4, $5, $5)
 		`, req.ExposureHeaderID, req.BookingID, auditutil.Actor(req.UserID), auditutil.NullIfBlank(api.ClientIPFromRequest(r)), auditutil.JSONValue(linkMap)); auditErr != nil {
 			logger.LogError("fx hedge link audit failed exposure=%s booking=%s: %v", req.ExposureHeaderID, req.BookingID, auditErr)
 		}
-		respondWithSuccess(w, http.StatusOK, "Exposure hedge link saved successfully", map[string]interface{}{
+		respondWithSuccess(w, http.StatusOK, "Exposure hedge link submitted for approval", map[string]interface{}{
 			"link": linkMap,
 		})
 
@@ -574,6 +602,129 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 		payloadMap["BookingID"] = req.BookingID
 		payloadMap["HedgedAmount"] = req.HedgedAmount
 		fxnotif.TriggerFX(context.WithoutCancel(ctx), pool, fxnotif.SourceRouteLinkExposureHedge, fxnotif.CorrelationID("FXLINK", req.ExposureHeaderID), payloadMap)
+	}
+}
+
+type hedgeLinkPair struct {
+	ExposureHeaderID string `json:"exposure_header_id"`
+	BookingID        string `json:"booking_id"`
+}
+
+// ApproveHedgeLinks activates pending links and posts utilization ledger rows.
+func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req struct {
+			UserID          string          `json:"user_id"`
+			Links           []hedgeLinkPair `json:"links"`
+			ApprovalComment string          `json:"approval_comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.Links) == 0 {
+			respondWithError(w, http.StatusBadRequest, "user_id and links are required")
+			return
+		}
+
+		approved := 0
+		for _, link := range req.Links {
+			expID := strings.TrimSpace(link.ExposureHeaderID)
+			bookID := strings.TrimSpace(link.BookingID)
+			if expID == "" || bookID == "" {
+				continue
+			}
+			var hedged float64
+			err := pool.QueryRow(ctx, `
+				UPDATE exposure_hedge_links
+				   SET is_active = true
+				 WHERE exposure_header_id = $1 AND booking_id = $2
+				 RETURNING hedged_amount
+			`, expID, bookID).Scan(&hedged)
+			if err != nil {
+				logger.LogError("approve hedge link failed exposure=%s booking=%s: %v", expID, bookID, err)
+				continue
+			}
+
+			var bookingAmount float64
+			_ = pool.QueryRow(ctx, "SELECT Booking_Amount FROM forward_bookings WHERE system_transaction_id = $1 AND COALESCE(is_deleted, false) = false", bookID).Scan(&bookingAmount)
+			var totalUtilized float64
+			_ = pool.QueryRow(ctx, `SELECT COALESCE(SUM(amount_changed), 0) FROM forward_booking_ledger WHERE booking_id = $1 AND action_type IN ('UTILIZATION', 'CANCELLATION', 'ROLLOVER')`, bookID).Scan(&totalUtilized)
+			newOpenAmount := math.Abs(math.Abs(bookingAmount) - math.Abs(totalUtilized) - math.Abs(hedged))
+			_, _ = pool.Exec(ctx, `INSERT INTO forward_booking_ledger (booking_id, action_type, action_id, action_date, amount_changed, running_open_amount, user_id) VALUES ($1, 'UTILIZATION', $2, CURRENT_DATE, $3, $4, $5)`, bookID, expID, hedged, newOpenAmount, req.UserID)
+
+			linkMap := map[string]interface{}{
+				"exposure_header_id": expID,
+				"booking_id":         bookID,
+				"hedged_amount":      hedged,
+				"is_active":          true,
+				"processing_status":  "APPROVED",
+			}
+			if _, auditErr := pool.Exec(ctx, `
+				INSERT INTO public.auditactionhedgelink
+					(exposure_header_id, booking_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip, new_values, change_summary)
+				VALUES ($1, $2, 'EDIT', 'APPROVED', $3, $4, now(), $5, $6, $6)
+			`, expID, bookID, strings.TrimSpace(req.ApprovalComment), auditutil.Actor(req.UserID), auditutil.NullIfBlank(api.ClientIPFromRequest(r)), auditutil.JSONValue(linkMap)); auditErr != nil {
+				logger.LogError("approve hedge link audit failed exposure=%s booking=%s: %v", expID, bookID, auditErr)
+			}
+			approved++
+		}
+
+		respondWithSuccess(w, http.StatusOK, "Hedge links approved successfully", map[string]interface{}{
+			"approved": approved,
+		})
+	}
+}
+
+// RejectHedgeLinks deactivates selected links.
+func RejectHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req struct {
+			UserID           string          `json:"user_id"`
+			Links            []hedgeLinkPair `json:"links"`
+			RejectionComment string          `json:"rejection_comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.Links) == 0 {
+			respondWithError(w, http.StatusBadRequest, "user_id and links are required")
+			return
+		}
+
+		rejected := 0
+		for _, link := range req.Links {
+			expID := strings.TrimSpace(link.ExposureHeaderID)
+			bookID := strings.TrimSpace(link.BookingID)
+			if expID == "" || bookID == "" {
+				continue
+			}
+			var hedged float64
+			err := pool.QueryRow(ctx, `
+				UPDATE exposure_hedge_links
+				   SET is_active = false
+				 WHERE exposure_header_id = $1 AND booking_id = $2
+				 RETURNING hedged_amount
+			`, expID, bookID).Scan(&hedged)
+			if err != nil {
+				logger.LogError("reject hedge link failed exposure=%s booking=%s: %v", expID, bookID, err)
+				continue
+			}
+			linkMap := map[string]interface{}{
+				"exposure_header_id": expID,
+				"booking_id":         bookID,
+				"hedged_amount":      hedged,
+				"is_active":          false,
+				"processing_status":  "REJECTED",
+			}
+			if _, auditErr := pool.Exec(ctx, `
+				INSERT INTO public.auditactionhedgelink
+					(exposure_header_id, booking_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip, new_values, change_summary)
+				VALUES ($1, $2, 'UNLINK', 'REJECTED', $3, $4, now(), $5, $6, $6)
+			`, expID, bookID, strings.TrimSpace(req.RejectionComment), auditutil.Actor(req.UserID), auditutil.NullIfBlank(api.ClientIPFromRequest(r)), auditutil.JSONValue(linkMap)); auditErr != nil {
+				logger.LogError("reject hedge link audit failed exposure=%s booking=%s: %v", expID, bookID, auditErr)
+			}
+			rejected++
+		}
+
+		respondWithSuccess(w, http.StatusOK, "Hedge links rejected successfully", map[string]interface{}{
+			"rejected": rejected,
+		})
 	}
 }
 

@@ -336,7 +336,7 @@ func executeRolloverApproval(ctx context.Context, pool *pgxpool.Pool, userID, bo
 	err = pool.QueryRow(ctx, `INSERT INTO forward_bookings (
 			internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, status, processing_status
 		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,NULL,$8,NULL,NULL,$9,$10,$11,NULL,$12,NULL,$13,$14,NULL,NULL,$15,$16,$17,$18,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'Pending Confirmation','pending'
+			$1,$2,$3,$4,$5,$6,$7,NULL,$8,NULL,NULL,$9,$10,$11,NULL,$12,NULL,$13,$14,NULL,NULL,$15,$16,$17,$18,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'DRAFT',NULL
 		) RETURNING system_transaction_id`,
 		randomRef, entityLevel0, entityLevel1Val, entityLevel2Val, entityLevel3Val, localCurrency, orderType, counterparty, cancellationDate, cancellationDate, newMaturityDate, fxPair, localCurrency, amount, spotRate, premiumDiscount, marginRate, netRate,
 	).Scan(&newBookingID)
@@ -1081,8 +1081,8 @@ func GetForwardBookingList(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM forward_bookings
 			WHERE entity_level_0 = ANY($1)
 				AND COALESCE(is_deleted, false) = false
-				AND status NOT IN ('Cancelled', 'Pending Confirmation')
-				AND processing_status = 'Approved'
+				AND status NOT IN ('Cancelled', 'Pending Confirmation', 'PENDING_CONFIRMATION', 'DRAFT')
+				AND UPPER(COALESCE(processing_status, '')) IN ('APPROVED')
 		`
 		rows, err := pool.Query(r.Context(), query, buNames)
 		if err != nil {
@@ -1544,7 +1544,7 @@ func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			err = pool.QueryRow(r.Context(), `INSERT INTO forward_bookings (
 					internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, status, processing_status
 				) VALUES (
-					$1,$2,$3,$4,$5,$6,$7,NULL,$8,NULL,NULL,$9,$10,$11,NULL,$12,NULL,$13,$14,NULL,NULL,$15,$16,$17,$18,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'Pending Confirmation','pending'
+					$1,$2,$3,$4,$5,$6,$7,NULL,$8,NULL,NULL,$9,$10,$11,NULL,$12,NULL,$13,$14,NULL,NULL,$15,$16,$17,$18,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'DRAFT',NULL
 				) RETURNING system_transaction_id`,
 				randomRef, entityLevel0, entityLevel1Val, entityLevel2Val, entityLevel3Val, localCurrency, orderType, counterparty, cancellationDate, cancellationDate, newMaturityDate, fxPair, localCurrency, amount, spotRate, premiumDiscount, marginRate, netRate,
 			).Scan(&newBookingID)

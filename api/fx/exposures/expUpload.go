@@ -263,24 +263,30 @@ func parseDBValue(col string, val interface{}) interface{} {
 	return val
 }
 
+// Columns needed by All Exposure Request + Pending Exposure Request tables
+// (list, expand/edit sections, download buttons, approve/reject metadata).
+// Intentionally omits bulky JSON blobs and unused audit/SAP detail columns.
 const headersLineItemsSelectSQL = `
 			SELECT
-				h.exposure_header_id, h.company_code, h.entity, h.entity1, h.entity2, h.entity3,
-				h.exposure_type, h.document_id, h.document_date, h.counterparty_type,
-				h.counterparty_code, h.counterparty_name, h.currency,
-				h.total_original_amount, h.total_open_amount, h.value_date,
-				h.status, h.is_active, h.created_at, h.updated_at,
-				h.approval_status, h.approval_comment, h.approved_by,
-				h.delete_comment, h.requested_by, h.rejection_comment,
-				h.approved_at, h.rejected_by, h.rejected_at,
-				h.amount_in_local_currency, h.posting_date, h.text,
-				h.gl_account, h.reference, h.additional_header_details,
-				h.exposure_category, h.exposure_creation_status, h.batch_id,
-				h.upload_s3_key, h.file_hash,
-				l.line_item_id, l.line_number, l.product_id, l.product_description,
-				l.quantity, l.unit_of_measure, l.unit_price, l.line_item_amount,
-				l.plant_code, l.delivery_date, l.payment_terms, l.inco_terms,
-				l.additional_line_details, l.created_at AS line_created_at
+				h.exposure_header_id,
+				h.document_id,
+				h.exposure_type,
+				h.entity,
+				h.company_code,
+				h.counterparty_code,
+				h.counterparty_name,
+				h.exposure_category,
+				h.currency,
+				h.document_date,
+				h.approval_status,
+				h.total_original_amount,
+				h.total_open_amount,
+				h.amount_in_local_currency,
+				h.gl_account,
+				h.upload_s3_key,
+				l.line_item_id,
+				l.line_number,
+				l.line_item_amount
 			FROM exposure_headers h
 			LEFT JOIN exposure_line_items l ON l.exposure_header_id = h.exposure_header_id
 `

@@ -805,6 +805,16 @@ func normalizeMTMRowValue(v interface{}) interface{} {
 			return f.Float64
 		}
 		return nil
+	case [16]byte:
+		// pgx scans UUID columns as [16]byte; stringify so JSON/fmt is a UUID, not a byte dump.
+		return uuid.UUID(t).String()
+	case pgtype.UUID:
+		if !t.Valid {
+			return nil
+		}
+		return uuid.UUID(t.Bytes).String()
+	case uuid.UUID:
+		return t.String()
 	default:
 		return v
 	}

@@ -180,11 +180,20 @@ func RegisterFXRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool.P
 	mux.Handle("/fx/exposures/expfwd-linking-bookings", midFX(exposures.ExpFwdLinkingBookings(pgxPool)))
 	mux.Handle("/fx/exposures/expfwd-linking", midFX(exposures.ExpFwdLinking(pgxPool)))
 	mux.Handle("/fx/exposures/link-exposure-hedge", midFX(exposures.LinkExposureHedge(pgxPool)))
+	mux.Handle("/fx/exposures/approve-hedge-links", midFX(exposures.ApproveHedgeLinks(pgxPool)))
+	mux.Handle("/fx/exposures/reject-hedge-links", midFX(exposures.RejectHedgeLinks(pgxPool)))
 	mux.Handle("/fx/exposures/hedge-link/audit", midFX(NewFXAuditHandler(pgxPool, fxHedgeLinkAuditConfig())))
 
 	// Settlement endpoints
 	mux.Handle("/fx/exposures/filter-forward-bookings-for-settlement", midFX(exposures.FilterForwardBookingsForSettlement(pgxPool)))
 	mux.Handle("/fx/exposures/get-forward-bookings-by-entity-currency", midFX(exposures.GetForwardBookingsByEntityAndCurrency(pgxPool)))
+	mux.Handle("/fx/exposures/settlements/list", midFX(exposures.ListExposureSettlementDocuments(pgxPool)))
+	mux.Handle("/fx/exposures/settlements/get", midFX(exposures.GetExposureSettlementDocument(pgxPool)))
+	mux.Handle("/fx/exposures/settlements/save", midFX(exposures.SaveExposureSettlementDocument(pgxPool)))
+	mux.Handle("/fx/exposures/settlements/approve", midFX(exposures.ApproveExposureSettlementDocuments(pgxPool)))
+	mux.Handle("/fx/exposures/settlements/reject", midFX(exposures.RejectExposureSettlementDocuments(pgxPool)))
+	mux.Handle("/fx/exposures/settlements/delete", midFX(exposures.DeleteExposureSettlementDocuments(pgxPool)))
+	mux.Handle("/fx/exposures/settlements/document-audit", midFX(NewFXAuditHandler(pgxPool, fxExposureSettlementAuditConfig())))
 
 	/*-------------     forward    ;)      --------------------*/
 	/*mtm upload */
@@ -225,7 +234,8 @@ func RegisterFXRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool.P
 	mux.Handle("/fx/forwards/entity-relevant-list", midFX(forwards.GetEntityRelevantForwardBookings(pgxPool)))
 	mux.Handle("/fx/forwards/update-fields", midFX(forwards.UpdateForwardBookingFields(pgxPool)))
 	// mux.Handle("/fx/forwards/update-processing-status", midFX(forwards.UpdateForwardBookingProcessingStatus(db)))
-	mux.Handle("/fx/forwards/bulk-update-processing-status", midFX(forwards.BulkUpdateForwardBookingProcessingStatus(pgxPool)))
+	mux.Handle("/fx/forwards/bulk-approve", midFX(forwards.BulkApproveForwardBookings(pgxPool)))
+	mux.Handle("/fx/forwards/bulk-reject", midFX(forwards.BulkRejectForwardBookings(pgxPool)))
 	mux.Handle("/fx/forwards/bulk-delete", midFX(forwards.BulkDeleteForwardBookings(pgxPool)))
 	mux.Handle("/fx/forwards/manual-confirmation-entry", midFX(forwards.AddForwardConfirmationManualEntry(pgxPool)))
 	mux.Handle("/fx/forwards/upload-multi", midFX(forwards.UploadForwardBookingsMulti(pgxPool)))
@@ -294,7 +304,8 @@ func RegisterFXRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool.P
 	// mux.Handle("/fx/forwards/entity-relevant-list",  middlewares.PreValidationMiddleware(pgxPool)(forwards.GetEntityRelevantForwardBookings(db)))
 	// mux.Handle("/fx/forwards/update-fields",  middlewares.PreValidationMiddleware(pgxPool)(forwards.UpdateForwardBookingFields(db)))
 	// // mux.Handle("/fx/forwards/update-processing-status",  middlewares.PreValidationMiddleware(pgxPool)(forwards.UpdateForwardBookingProcessingStatus(db)))
-	// mux.Handle("/fx/forwards/bulk-update-processing-status",  middlewares.PreValidationMiddleware(pgxPool)(forwards.BulkUpdateForwardBookingProcessingStatus(db)))
+	// mux.Handle("/fx/forwards/bulk-approve",  middlewares.PreValidationMiddleware(pgxPool)(forwards.BulkApproveForwardBookings(db)))
+	// mux.Handle("/fx/forwards/bulk-reject",  middlewares.PreValidationMiddleware(pgxPool)(forwards.BulkRejectForwardBookings(db)))
 	// mux.Handle("/fx/forwards/bulk-delete",  middlewares.PreValidationMiddleware(pgxPool)(forwards.BulkDeleteForwardBookings(db)))
 	// mux.Handle("/fx/forwards/manual-confirmation-entry",  middlewares.PreValidationMiddleware(pgxPool)(forwards.AddForwardConfirmationManualEntry(db)))
 	// mux.Handle("/fx/forwards/upload-multi",  middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadForwardBookingsMulti(db)))

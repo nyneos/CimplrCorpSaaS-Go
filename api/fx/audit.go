@@ -98,7 +98,121 @@ func NewFXAuditHandler(pool *pgxpool.Pool, cfg fxAuditConfig) http.HandlerFunc {
 	}
 }
 
+func queryExposureSettlementAudit(r *http.Request, pool *pgxpool.Pool, parentWhere string, args []interface{}, extraWhere string) ([]map[string]interface{}, error) {
+	query := fmt.Sprintf(`
+		SELECT row_to_json(t)
+		FROM (
+			SELECT
+				action_id,
+				settlement_id,
+				actiontype,
+				processing_status,
+				reason,
+				requested_by,
+				requested_at,
+				requested_ip,
+				checker_by,
+				checker_at,
+				checker_ip,
+				checker_comment,
+				settlement_method,
+				old_settlement_method,
+				old_entity,
+				old_currency,
+				old_settlement_date,
+				old_total_open_amount,
+				old_total_settled_amount,
+				old_processing_status,
+				old_comments,
+				old_exposure_header_ids,
+				old_line_count,
+				old_linked_hedge_amount,
+				old_additional_fwd_amount,
+				old_cash_amount,
+				old_new_exposure_type,
+				old_new_maturity_date,
+				old_new_quantity,
+				old_new_price,
+				old_new_amount,
+				old_new_exposure_header_id,
+				old_partial_amount
+			FROM public.auditactionexposuresettlement
+			WHERE %s%s
+			ORDER BY requested_at ASC, action_id ASC
+		) t
+	`, parentWhere, extraWhere)
+
+	rows, err := pool.Query(r.Context(), query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	payload := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var row map[string]interface{}
+		if err := json.Unmarshal(raw, &row); err != nil {
+			continue
+		}
+		actionID := normalizeFXAuditID(row["action_id"])
+		entry := map[string]interface{}{
+			"audit_id":          actionID,
+			"action_id":         actionID,
+			"entity_id":         strings.TrimSpace(fmt.Sprint(row["settlement_id"])),
+			"settlement_id":     strings.TrimSpace(fmt.Sprint(row["settlement_id"])),
+			"action_type":       row["actiontype"],
+			"processing_status": row["processing_status"],
+			"requested_by":      row["requested_by"],
+			"requested_at":      row["requested_at"],
+			"requested_ip":      row["requested_ip"],
+			"checker_by":        row["checker_by"],
+			"checker_at":        row["checker_at"],
+			"checker_ip":        row["checker_ip"],
+			"checker_comment":   row["checker_comment"],
+			"reason":            row["reason"],
+			"source":            "FX_EXPOSURE_SETTLEMENT",
+			"id_column":         "action_id",
+			"settlement_method": row["settlement_method"],
+		}
+		for _, key := range []string{
+			"old_settlement_method",
+			"old_entity",
+			"old_currency",
+			"old_settlement_date",
+			"old_total_open_amount",
+			"old_total_settled_amount",
+			"old_processing_status",
+			"old_comments",
+			"old_exposure_header_ids",
+			"old_line_count",
+			"old_linked_hedge_amount",
+			"old_additional_fwd_amount",
+			"old_cash_amount",
+			"old_new_exposure_type",
+			"old_new_maturity_date",
+			"old_new_quantity",
+			"old_new_price",
+			"old_new_amount",
+			"old_new_exposure_header_id",
+			"old_partial_amount",
+		} {
+			if v, ok := row[key]; ok && v != nil {
+				entry[key] = v
+			}
+		}
+		payload = append(payload, entry)
+	}
+	return payload, rows.Err()
+}
+
 func queryFXActionAudit(r *http.Request, pool *pgxpool.Pool, cfg fxAuditConfig, parentWhere string, args []interface{}, extraWhere string) ([]map[string]interface{}, error) {
+	if cfg.Source == "FX_EXPOSURE_SETTLEMENT" {
+		return queryExposureSettlementAudit(r, pool, parentWhere, args, extraWhere)
+	}
 	attempts := []fxAuditQueryAttempt{
 		{
 			query: fmt.Sprintf(`
@@ -713,6 +827,10 @@ func fxHedgeProposalAuditConfig() fxAuditConfig {
 
 func fxHedgeProposalDocumentAuditConfig() fxAuditConfig {
 	return fxAuditConfig{ActionTable: auditutil.TableHedgeProposalDocument, ActionParentCol: "proposal_id", Source: "FX_HEDGE_PROPOSAL_DOCUMENT"}
+}
+
+func fxExposureSettlementAuditConfig() fxAuditConfig {
+	return fxAuditConfig{ActionTable: auditutil.TableExposureSettlement, ActionParentCol: "settlement_id", Source: "FX_EXPOSURE_SETTLEMENT"}
 }
 
 func fxHedgeLinkAuditConfig() fxAuditConfig {

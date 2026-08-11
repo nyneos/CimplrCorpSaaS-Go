@@ -10,6 +10,7 @@ import (
 	fdAccrual "CimplrCorpSaas/api/investment/fdAccrual"
 	fdBooking "CimplrCorpSaas/api/investment/fdBookingWorkbench"
 	fdInterestWorkbench "CimplrCorpSaas/api/investment/fdInterestAndTdsWorkbench"
+	fdRateNegotiation "CimplrCorpSaas/api/investment/fdRateNegotiation"
 	fdMaster "CimplrCorpSaas/api/investment/fdMaster"
 	fdMaturityAndRollover "CimplrCorpSaas/api/investment/fdMaturityAndRollover"
 	fdReceipt "CimplrCorpSaas/api/investment/fdReceipt"
@@ -420,6 +421,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 
 	// FD Booking Workbench (booking + confirmation)
 	fdBooking.RegisterFDBookingRoutes(mux, pool)
+	fdRateNegotiation.RegisterFDRateNegotiationRoutes(mux, pool)
 	fdMaster.RegisterFDMasterRoutes(mux, pool)
 	fdAccrual.RegisterFDAccrualRoutes(mux, pool)
 	fdReceipt.RegisterFDReceiptRoutes(mux, pool)

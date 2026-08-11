@@ -23,6 +23,7 @@ const (
 	TableExposureBucketing   = "public.auditactionexposurebucketing"
 	TableHedgeProposal         = "public.auditactionhedgeproposal"
 	TableHedgeProposalDocument = "public.auditactionhedgingproposaldocument"
+	TableExposureSettlement    = "public.auditactionexposuresettlement"
 	TableHedgeLink             = "public.auditactionhedgelink"
 	TableForwardBooking      = "public.auditactionforwardbooking"
 	TableForwardDownloads    = "public.auditactionforwardbookingdownloads"

@@ -369,7 +369,8 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			Remarks:                     req.Remarks,
 			Narration:                   req.Narration,
 			TransactionTimestamp:        req.TransactionTimestamp,
-			ProcessingStatus:            "pending",
+			Status:                      constants.FwdStatusDraft,
+			ProcessingStatus:            "", // processing_status starts after confirmation submit
 		}
 		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
@@ -385,10 +386,10 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		query := `INSERT INTO forward_bookings (
-		       internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status
+		       internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, status, processing_status
 	       ) VALUES (
-		       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34
-	       ) RETURNING internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status`
+		       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35
+	       ) RETURNING internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, status, processing_status`
 		// helper to pass numeric values as strings (preserves precision for Postgres numeric)
 		numOrNil := func(n json.Number) interface{} {
 			if n == "" {
@@ -431,10 +432,11 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			req.Remarks,
 			req.Narration,
 			req.TransactionTimestamp,
-			"pending",
+			constants.FwdStatusDraft,
+			nil, // no processing_status until confirmation is submitted
 		}
 		row := pool.QueryRow(r.Context(), query, values...)
-		cols := []string{"internal_reference_id", "entity_level_0", "entity_level_1", "entity_level_2", "entity_level_3", "local_currency", "order_type", "transaction_type", "counterparty", "mode_of_delivery", "delivery_period", "add_date", "settlement_date", "maturity_date", "delivery_date", "currency_pair", "base_currency", "quote_currency", "booking_amount", "value_type", "actual_value_base_currency", "spot_rate", "forward_points", "bank_margin", "total_rate", "value_quote_currency", "intervening_rate_quote_to_local", "value_local_currency", "internal_dealer", "counterparty_dealer", "remarks", "narration", "transaction_timestamp", "processing_status"}
+		cols := []string{"internal_reference_id", "entity_level_0", "entity_level_1", "entity_level_2", "entity_level_3", "local_currency", "order_type", "transaction_type", "counterparty", "mode_of_delivery", "delivery_period", "add_date", "settlement_date", "maturity_date", "delivery_date", "currency_pair", "base_currency", "quote_currency", "booking_amount", "value_type", "actual_value_base_currency", "spot_rate", "forward_points", "bank_margin", "total_rate", "value_quote_currency", "intervening_rate_quote_to_local", "value_local_currency", "internal_dealer", "counterparty_dealer", "remarks", "narration", "transaction_timestamp", "status", "processing_status"}
 		vals := make([]interface{}, len(cols))
 		valPtrs := make([]interface{}, len(cols))
 		for i := range vals {
@@ -800,12 +802,12 @@ func processUploadForwardBookings(ctx context.Context, pool *pgxpool.Pool, r *ht
 		errorRows := []map[string]interface{}{}
 		for i, row := range rows {
 			query := `INSERT INTO forward_bookings (
-				internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status, upload_s3_key
+				internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, status, processing_status, upload_s3_key
 			) VALUES (
-				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35
+				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36
 			)`
 			values := []interface{}{
-				row["internal_reference_id"], row["entity_level_0"], row["entity_level_1"], row["entity_level_2"], row["entity_level_3"], row["local_currency"], row["order_type"], row["transaction_type"], row["counterparty"], row["mode_of_delivery"], row["delivery_period"], row["add_date"], row["settlement_date"], row["maturity_date"], row["delivery_date"], row["currency_pair"], row["base_currency"], row["quote_currency"], row["booking_amount"], row["value_type"], row["actual_value_base_currency"], row["spot_rate"], row["forward_points"], row["bank_margin"], row["total_rate"], row["value_quote_currency"], row["intervening_rate_quote_to_local"], row["value_local_currency"], row["internal_dealer"], row["counterparty_dealer"], row["remarks"], row["narration"], row["transaction_timestamp"], "pending", uploadS3Key,
+				row["internal_reference_id"], row["entity_level_0"], row["entity_level_1"], row["entity_level_2"], row["entity_level_3"], row["local_currency"], row["order_type"], row["transaction_type"], row["counterparty"], row["mode_of_delivery"], row["delivery_period"], row["add_date"], row["settlement_date"], row["maturity_date"], row["delivery_date"], row["currency_pair"], row["base_currency"], row["quote_currency"], row["booking_amount"], row["value_type"], row["actual_value_base_currency"], row["spot_rate"], row["forward_points"], row["bank_margin"], row["total_rate"], row["value_quote_currency"], row["intervening_rate_quote_to_local"], row["value_local_currency"], row["internal_dealer"], row["counterparty_dealer"], row["remarks"], row["narration"], row["transaction_timestamp"], constants.FwdStatusDraft, nil, uploadS3Key,
 			}
 			_, err := tx.Exec(ctx, query, values...)
 			if err != nil {
@@ -920,7 +922,7 @@ func UploadForwardConfirmationsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if updated, ok := result["updated"].(int); ok && updated > 0 {
-				triggerForwardConfirmationNotif(ctx, pool, routeForwardUploadConfirmations, "UPLOAD", uploadedBy, "pending", fetchBookingIDsByConfirmationUploadKey(ctx, pool, s3Key))
+				triggerForwardConfirmationNotif(ctx, pool, routeForwardUploadConfirmations, "UPLOAD", uploadedBy, constants.FwdProcessingStatusPendingApproval, fetchBookingIDsByConfirmationUploadKey(ctx, pool, s3Key))
 			}
 		}
 		respondEnvelopeSuccess(w, "Forward confirmations uploaded successfully", map[string]interface{}{
@@ -1098,20 +1100,27 @@ func processUploadForwardConfirmations(ctx context.Context, pool *pgxpool.Pool, 
 		errorRows := []map[string]interface{}{}
 		for i, row := range rows {
 			updateQuery := `UPDATE forward_bookings SET
-				status = 'Confirmed',
-				bank_transaction_id = $1,
-				swift_unique_id = $2,
-				bank_confirmation_date = $3,
-				processing_status = 'pending',
+				status = $1,
+				bank_transaction_id = $2,
+				swift_unique_id = $3,
+				bank_confirmation_date = $4,
+				processing_status = $5,
 				confirmation_upload_s3_key = $6
-			WHERE internal_reference_id = $4 AND status = 'Pending Confirmation' AND entity_level_0 = $5`
+			WHERE internal_reference_id = $7
+			  AND entity_level_0 = $8
+			  AND (
+			    UPPER(COALESCE(status, '')) = 'DRAFT'
+			    OR status = 'Pending Confirmation'
+			  )`
 			updateValues := []interface{}{
+				constants.FwdStatusPendingConfirmation,
 				row["bank_transaction_id"],
 				row["swift_unique_id"],
 				row["bank_confirmation_date"],
+				constants.FwdProcessingStatusPendingApproval,
+				uploadS3Key,
 				row["internal_reference_id"],
 				row["entity_level_0"],
-				uploadS3Key,
 			}
 			res, err := tx.Exec(ctx, updateQuery, updateValues...)
 			if err != nil {
@@ -1814,7 +1823,8 @@ func processUploadBankForwardBookings(ctx context.Context, pool *pgxpool.Pool, r
 				booking["order_type"] = getStringOrDefault(booking["order_type"], r["order_type"])
 				booking["booking_amount"] = getStringOrDefault(booking["booking_amount"], r["booking_amount"])
 				booking["total_rate"] = getStringOrDefault(booking["total_rate"], r["total_rate"])
-				booking["processing_status"] = "pending"
+				booking["processing_status"] = nil
+				booking["status"] = constants.FwdStatusDraft
 				booking["upload_s3_key"] = uploadS3Key
 				for bk := range booking {
 					legacyCol := strings.ToLower(strings.TrimSpace(bk))

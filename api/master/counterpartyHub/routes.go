@@ -64,7 +64,8 @@ func RegisterCounterpartyHubRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
 	// mux.Handle("/master/v2/counterparty-hub/counterparty/approved-active", pre(GetCounterpartyMasterApprovedActive(pool)))
 	// mux.Handle("/master/v2/counterparty-hub/counterparty/detail", pre(GetCounterpartyMasterDetail(pool)))
 
-	// Bank Master
+	// Bank Master – approved-active used by FD Rate Request multi-bank picker
+	mux.Handle("/master/v2/counterparty-hub/bank/approved-active", midCash(http.HandlerFunc(GetBankApprovedActive(pool))))
 	// mux.Handle("/master/v2/counterparty-hub/bank/create", pre(CreateBank(pool)))
 	// mux.Handle("/master/v2/counterparty-hub/bank/create-bulk", pre(CreateBankBulk(pool)))
 	// mux.Handle("/master/v2/counterparty-hub/bank/update", pre(UpdateBank(pool)))
@@ -73,7 +74,6 @@ func RegisterCounterpartyHubRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
 	// mux.Handle("/master/v2/counterparty-hub/bank/bulk-delete", pre(BulkDeleteBank(pool)))
 	// mux.Handle("/master/v2/counterparty-hub/bank/all", pre(GetBankAll(pool)))
 	// mux.Handle("/master/v2/counterparty-hub/bank/audit-history", pre(GetBankAuditHistory(pool)))
-	// mux.Handle("/master/v2/counterparty-hub/bank/approved-active", pre(GetBankApprovedActive(pool)))
 	// mux.Handle("/master/v2/counterparty-hub/bank/detail", pre(GetBankDetail(pool)))
 
 	// Exchange Master

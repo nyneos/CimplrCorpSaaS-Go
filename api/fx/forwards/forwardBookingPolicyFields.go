@@ -19,7 +19,7 @@ import (
 //     untouched deliberately — rebuilding it through forwardBookingRow would
 //     be a lateral move, not a fix, and risks losing a column
 //     FetchRowSnapshotPGX exposes that the typed struct doesn't.
-//   - BulkUpdateForwardBookingProcessingStatus (approve/reject, ID only):
+//   - BulkApproveForwardBookings / BulkRejectForwardBookings (ID only):
 //     2 fields (system_transaction_id, processing_status).
 //   - UploadForwardBookingsMulti (pre-parse batch upload gate): file_count
 //     only — deliberately left thin, same precedent as EXPOSURE_UPLOAD.
@@ -124,7 +124,7 @@ func buildForwardBookingPolicyFields(row forwardBookingRow) map[string]interface
 }
 
 // loadForwardBookingRow fetches the full canonical row by
-// system_transaction_id — used by BulkUpdateForwardBookingProcessingStatus,
+// system_transaction_id — used by BulkApproveForwardBookings / BulkRejectForwardBookings,
 // which only ever receives an id per item, never the business data itself.
 func loadForwardBookingRow(ctx context.Context, pool *pgxpool.Pool, systemTransactionID string) (forwardBookingRow, error) {
 	var row forwardBookingRow
