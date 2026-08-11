@@ -2,8 +2,6 @@ package control
 
 import (
 	"net/http"
-	"os"
-	"strings"
 
 	"CimplrCorpSaas/api"
 	dmscommon "CimplrCorpSaas/api/dms/common"
@@ -18,8 +16,7 @@ func HandleServiceHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dmsEnabled := strings.TrimSpace(strings.ToLower(os.Getenv("DMS_ENABLED")))
-	if dmsEnabled != "true" && dmsEnabled != "1" && dmsEnabled != "yes" && dmsEnabled != "on" {
+	if !dmscommon.IsDMSEnabled() {
 		api.RespondEnvelopeSuccess(w, "document service health", map[string]interface{}{
 			"available": false,
 			"message":   "DMS is disabled at application level (DMS_ENABLED is not set to true)",

@@ -10,6 +10,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	dashboardbuilder "CimplrCorpSaas/api/dash/dashboardBuilder"
+	dmscommon "CimplrCorpSaas/api/dms/common"
 	"CimplrCorpSaas/api/domaincatalog"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
@@ -178,6 +179,10 @@ func RunAdhocGeneration(ctx context.Context, pool *pgxpool.Pool, req AdhocReques
 	}
 	if !req.StoreS3 && !req.StoreLocal && !req.SendEmail {
 		req.StoreS3 = true
+	}
+
+	if !dmscommon.IsDMSEnabled() {
+		return out, fmt.Errorf("DMS_DISABLED: DMS is disabled at application level")
 	}
 
 	if q, qErr := docsvc.NewFromEnv().QuotaCheck(ctx); qErr != nil {

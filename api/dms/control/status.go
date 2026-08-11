@@ -2,7 +2,6 @@ package control
 
 import (
 	"net/http"
-	"os"
 	"strings"
 
 	"CimplrCorpSaas/api"
@@ -10,19 +9,21 @@ import (
 	"CimplrCorpSaas/internal/services/docsvc"
 )
 
-func controlUIEnabled() bool {
-	v := strings.TrimSpace(strings.ToLower(os.Getenv("DMS_GENERATION_CONTROL_UI")))
-	return v == "1" || v == "true" || v == "yes" || v == "on"
-}
-
 // HandleStatus proxies Document-Service quota/hard-stop for UI banners.
+// Always live — DMS_GENERATION_CONTROL_UI used to make this optional, but
+// DMS_ENABLED (api/dms/common.RequireDMSEnabled) is now the real master
+// switch, so gating whether the UI even asks for quota status added nothing.
 func HandleStatus(w http.ResponseWriter, r *http.Request) {
 	if !dmscommon.RequirePOST(w, r) {
 		return
 	}
-	if !controlUIEnabled() {
-		api.RespondEnvelopeSuccess(w, "generation control UI disabled", map[string]interface{}{
-			"ui_enabled": false,
+	if !dmscommon.IsDMSEnabled() {
+		api.RespondEnvelopeSuccess(w, "DMS disabled", map[string]interface{}{
+			"ui_enabled":         true,
+			"allowed":            false,
+			"generation_enabled": false,
+			"error_code":         "DMS_DISABLED",
+			"message":            "DMS is disabled at application level (DMS_ENABLED is not set to true)",
 		})
 		return
 	}

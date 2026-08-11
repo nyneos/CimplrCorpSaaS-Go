@@ -3,6 +3,7 @@ package common
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 
 	"CimplrCorpSaas/api"
@@ -20,6 +21,26 @@ func DecodeJSON(r *http.Request, dst interface{}) error {
 func RequirePOST(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		RespondMethodNotAllowed(w)
+		return false
+	}
+	return true
+}
+
+// IsDMSEnabled is the single master on/off switch for the whole DMS feature.
+// Unset or any value other than true/1/yes/on means disabled — matches the
+// existing DMS_ENABLED parsing in api/dms/control/health.go, kept here as the
+// one shared implementation.
+func IsDMSEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("DMS_ENABLED")))
+	return v == "true" || v == "1" || v == "yes" || v == "on"
+}
+
+// RequireDMSEnabled blocks an HTTP handler with a 403 when DMS_ENABLED is off.
+// Every DMS action-triggering endpoint (run, adhoc generate, dispatch) must
+// call this first — this is enforcement, not just the status-light display.
+func RequireDMSEnabled(w http.ResponseWriter) bool {
+	if !IsDMSEnabled() {
+		api.RespondEnvelopeError(w, http.StatusForbidden, "DMS is disabled at application level (DMS_ENABLED is not set to true)", "DMS_DISABLED")
 		return false
 	}
 	return true

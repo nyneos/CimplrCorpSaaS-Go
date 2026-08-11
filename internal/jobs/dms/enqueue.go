@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
+	dmscommon "CimplrCorpSaas/api/dms/common"
 	"CimplrCorpSaas/internal/services/docsvc"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,6 +24,9 @@ func EnqueueRuleGeneration(
 ) (jobID string, err error) {
 	if pool == nil {
 		return "", fmt.Errorf("pool required")
+	}
+	if !dmscommon.IsDMSEnabled() {
+		return "", fmt.Errorf("DMS_DISABLED: DMS is disabled at application level")
 	}
 	client := docsvc.NewFromEnv()
 	q, err := client.QuotaCheck(ctx)
@@ -96,6 +100,9 @@ func StartGenerationQueueWorker(ctx context.Context, pool *pgxpool.Pool) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if !dmscommon.IsDMSEnabled() {
+				continue
+			}
 			q, err := client.QuotaCheck(ctx)
 			if err != nil {
 				api.LogError("[DMS-QUEUE] quota check: %v", err)

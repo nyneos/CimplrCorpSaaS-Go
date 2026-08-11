@@ -34,6 +34,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	dashboardbuilder "CimplrCorpSaas/api/dash/dashboardBuilder"
+	dmscommon "CimplrCorpSaas/api/dms/common"
 	"CimplrCorpSaas/api/domaincatalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/services/docsvc"
@@ -108,6 +109,11 @@ func runGeneration(
 	ruleID, triggerType, triggeredBy, sourceIDField string,
 	sourceIDs []string,
 ) (runID string, err error) {
+	// Master switch: DMS_ENABLED off blocks every generation path, not just the UI.
+	if !dmscommon.IsDMSEnabled() {
+		return "", fmt.Errorf("DMS_DISABLED: DMS is disabled at application level")
+	}
+
 	// Document-Service gate: hard-stop + durable quota (client cannot bypass).
 	if q, qErr := docsvc.NewFromEnv().QuotaCheck(ctx); qErr != nil {
 		return "", fmt.Errorf("document-service unavailable (generation blocked): %w", qErr)

@@ -40,6 +40,9 @@ func HandleAdhoc(pool *pgxpool.Pool) http.HandlerFunc {
 		if !common.RequirePOST(w, r) {
 			return
 		}
+		if !common.RequireDMSEnabled(w) {
+			return
+		}
 		var req adhocReq
 		if err := common.DecodeJSON(r, &req); err != nil {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, errInvalidRequestBody, "BAD_REQUEST")

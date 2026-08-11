@@ -25,6 +25,9 @@ func HandleRun(pool *pgxpool.Pool) http.HandlerFunc {
 		if !common.RequirePOST(w, r) {
 			return
 		}
+		if !common.RequireDMSEnabled(w) {
+			return
+		}
 		var req runReq
 		if err := common.DecodeJSON(r, &req); err != nil {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
@@ -111,6 +114,9 @@ func mapGenerationGateError(err error) (status int, code, msg string) {
 	case strings.Contains(msg, "document-service unavailable"), strings.Contains(msg, "document-service unreachable"), strings.Contains(msg, "document-service render"):
 		code = "DOCUMENT_SERVICE_UNAVAILABLE"
 		status = http.StatusServiceUnavailable
+	case strings.Contains(msg, "DMS_DISABLED"):
+		code = "DMS_DISABLED"
+		status = http.StatusForbidden
 	case strings.Contains(msg, "DMS_GENERATION_DISABLED"):
 		code = "DMS_GENERATION_DISABLED"
 		status = http.StatusServiceUnavailable

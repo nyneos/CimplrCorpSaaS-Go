@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
+	dmscommon "CimplrCorpSaas/api/dms/common"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	dinojobs "CimplrCorpSaas/internal/jobs/dino"
 
@@ -32,6 +33,9 @@ const errFragDoesNotExist = "does not exist"
 func DispatchRun(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 	if pool == nil || strings.TrimSpace(runID) == "" {
 		return fmt.Errorf("pool and run_id required")
+	}
+	if !dmscommon.IsDMSEnabled() {
+		return fmt.Errorf("DMS_DISABLED: DMS is disabled at application level")
 	}
 
 	var ruleID, versionID, ruleName, moduleCode, subModuleCode, runStatus, triggeredBy string
@@ -346,6 +350,9 @@ func StartDispatchWorker(ctx context.Context, pool *pgxpool.Pool) {
 			api.LogInfo("[DMS-DISPATCH] worker stopped")
 			return
 		case <-ticker.C:
+			if !dmscommon.IsDMSEnabled() {
+				continue
+			}
 			syncDispatchStatuses(ctx, pool)
 			dispatchPendingRuns(ctx, pool)
 		}
