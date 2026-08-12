@@ -419,13 +419,13 @@ func applyForwardBookingDecision(
 		action = "DELETE_REJECT"
 	}
 	triggerForwardBookingNotif(r.Context(), pool, notifRoute, action, actor, processingStatus, notifIDs)
-	if req.ProcessingStatus == constants.FwdProcessingStatusApproved {
+	if processingStatus == constants.FwdProcessingStatusApproved {
 		deleteApprovedIDs := collectBookingIDsFromRows(deletedRows)
 		if len(deleteApprovedIDs) > 0 {
 			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_DELETE", deleteApprovedIDs, actor)
 		}
 	}
-	if statusIDs := collectBookingIDsFromRows(updatedRows); len(statusIDs) > 0 && req.ProcessingStatus == constants.FwdProcessingStatusApproved {
+	if statusIDs := collectBookingIDsFromRows(updatedRows); len(statusIDs) > 0 && processingStatus == constants.FwdProcessingStatusApproved {
 		createApprovedIDs := make([]string, 0, len(statusIDs))
 		editApprovedIDs := make([]string, 0, len(statusIDs))
 		for _, id := range statusIDs {
@@ -443,7 +443,7 @@ func applyForwardBookingDecision(
 		}
 	} else if statusIDs := collectBookingIDsFromRows(updatedRows); len(statusIDs) > 0 {
 		trig := "POST_APPROVE"
-		if req.ProcessingStatus == constants.FwdProcessingStatusRejected {
+		if processingStatus == constants.FwdProcessingStatusRejected {
 			trig = "POST_REJECT"
 		}
 		dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", trig, statusIDs, actor)
