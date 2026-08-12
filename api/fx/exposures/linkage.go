@@ -61,7 +61,7 @@ func HedgeLinksDetails(pool *pgxpool.Pool) http.HandlerFunc {
 				l.exposure_header_id::text AS exposure_header_id,
 				l.booking_id::text AS booking_id,
 				COALESCE(l.hedged_amount, 0) AS hedged_amount,
-				l.link_date,
+				COALESCE(l.link_date::text, '') AS link_date,
 				COALESCE(l.is_active, false) AS is_active,
 				COALESCE(h.document_id, '') AS document_id,
 				COALESCE(f.internal_reference_id, '') AS internal_reference_id,
@@ -76,7 +76,17 @@ func HedgeLinksDetails(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM exposure_hedge_links l
 			LEFT JOIN exposure_headers h ON l.exposure_header_id = h.exposure_header_id
 			LEFT JOIN forward_bookings f ON l.booking_id = f.system_transaction_id
-			WHERE h.entity = ANY($1)
+			WHERE (
+				COALESCE(h.entity, '') = ANY($1)
+				OR COALESCE(h.entity1, '') = ANY($1)
+				OR COALESCE(h.entity2, '') = ANY($1)
+				OR COALESCE(h.entity3, '') = ANY($1)
+				OR COALESCE(f.entity_level_0, '') = ANY($1)
+				OR COALESCE(f.entity_level_1, '') = ANY($1)
+				OR COALESCE(f.entity_level_2, '') = ANY($1)
+				OR COALESCE(f.entity_level_3, '') = ANY($1)
+			)
+			ORDER BY l.link_date DESC NULLS LAST
 		`, buNames)
 		if err != nil {
 			logger.LogError("hedge-links-details query failed: %v", err)
@@ -137,7 +147,8 @@ func ExpFwdLinkingBookings(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		bookRows, err := pool.Query(ctx, `
-			SELECT system_transaction_id, entity_level_0, order_type, currency_pair, maturity_date, booking_amount, counterparty, total_rate, value_local_currency
+			SELECT system_transaction_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3,
+			       order_type, currency_pair, maturity_date, booking_amount, counterparty, total_rate, value_local_currency
 			FROM forward_bookings
 			WHERE (UPPER(COALESCE(processing_status, '')) = 'APPROVED')
 			  AND COALESCE(is_deleted, false) = false
@@ -284,8 +295,15 @@ func ExpFwdLinkingBookings(pool *pgxpool.Pool) http.HandlerFunc {
 			currencyPair, _ := b["currency_pair"].(string)
 			// bank name
 			bankName, _ := b["counterparty"].(string)
+			entity1, _ := b["entity_level_1"].(string)
+			entity2, _ := b["entity_level_2"].(string)
+			entity3, _ := b["entity_level_3"].(string)
 			response = append(response, map[string]interface{}{
 				"bu":                    entityStr,
+				"entity_level_0":        entityStr,
+				"entity_level_1":        entity1,
+				"entity_level_2":        entity2,
+				"entity_level_3":        entity3,
 				"system_transaction_id": bookingIDStr,
 				"type":                  b["order_type"],
 				"currency_pair":         currencyPair,
@@ -471,6 +489,8 @@ func ExpFwdLinking(pool *pgxpool.Pool) http.HandlerFunc {
 			if hedgeAmount < totalOpenAbs {
 				response = append(response, map[string]interface{}{
 					"bu":                 entityStr,
+					"entity_level_0":     entityStr,
+					"entity":             entityStr,
 					"exposure_header_id": h["exposure_header_id"],
 					"type":               h["exposure_type"],
 					"currency":           h["currency"],

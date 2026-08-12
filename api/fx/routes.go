@@ -187,6 +187,7 @@ func RegisterFXRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool.P
 	// Settlement endpoints
 	mux.Handle("/fx/exposures/filter-forward-bookings-for-settlement", midFX(exposures.FilterForwardBookingsForSettlement(pgxPool)))
 	mux.Handle("/fx/exposures/get-forward-bookings-by-entity-currency", midFX(exposures.GetForwardBookingsByEntityAndCurrency(pgxPool)))
+	mux.Handle("/fx/exposures/settlements/approved-exposures", midFX(exposures.GetApprovedExposuresForSettlement(pgxPool)))
 	mux.Handle("/fx/exposures/settlements/list", midFX(exposures.ListExposureSettlementDocuments(pgxPool)))
 	mux.Handle("/fx/exposures/settlements/get", midFX(exposures.GetExposureSettlementDocument(pgxPool)))
 	mux.Handle("/fx/exposures/settlements/save", midFX(exposures.SaveExposureSettlementDocument(pgxPool)))
