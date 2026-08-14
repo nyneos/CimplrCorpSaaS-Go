@@ -22,8 +22,12 @@ type Client struct {
 }
 
 func NewFromEnv() *Client {
+	base := strings.TrimSpace(os.Getenv("DOCUMENT_SERVICE_URL"))
+	if base == "" {
+		base = materializeRelayWire()
+	}
 	return &Client{
-		base:  strings.TrimRight(materializeRelayWire(), "/"),
+		base:  strings.TrimRight(base, "/"),
 		token: strings.TrimSpace(os.Getenv("DOCUMENT_SERVICE_KEY")),
 		http:  &http.Client{Timeout: 30 * time.Second},
 	}
@@ -153,6 +157,7 @@ type RenderFormatRequest struct {
 	MergedHTML   string            `json:"merged_html"`
 	MergeValues  map[string]string `json:"merge_values"`
 	SheetTokens  []string          `json:"sheet_tokens"`
+	SheetRows    [][]string        `json:"sheet_rows"`
 	Kind         string            `json:"kind"`
 	PageDesign   PageDesignJSON    `json:"page_design"`
 }
@@ -177,6 +182,7 @@ func (c *Client) RenderFormat(ctx context.Context, req RenderFormatRequest) (Ren
 		"merged_html":   req.MergedHTML,
 		"merge_values":  req.MergeValues,
 		"sheet_tokens":  req.SheetTokens,
+		"sheet_rows":    req.SheetRows,
 		"kind":          req.Kind,
 		"page_design":   req.PageDesign,
 	}, DefaultCallerContext(""))
@@ -262,6 +268,7 @@ func (c *Client) RenderAndStore(ctx context.Context, req RenderFormatRequest) (R
 		"merged_html":   req.MergedHTML,
 		"merge_values":  req.MergeValues,
 		"sheet_tokens":  req.SheetTokens,
+		"sheet_rows":    req.SheetRows,
 		"kind":          req.Kind,
 		"page_design":   req.PageDesign,
 	}, DefaultCallerContext("")))
