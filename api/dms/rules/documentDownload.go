@@ -137,6 +137,8 @@ func mimeForFormat(format string) string {
 		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 	case "HTML":
 		return "text/html"
+	case "EML":
+		return "message/rfc822"
 	default:
 		return "application/octet-stream"
 	}

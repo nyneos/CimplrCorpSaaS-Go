@@ -29,6 +29,7 @@ func renderMergedOutputViaDocSvc(
 	format, mergedHTML string,
 	mergeValues map[string]string,
 	sheetTokens []string,
+	sheetRows [][]string,
 	kind string,
 	pageDesign pageDesignJSON,
 ) (renderedFile, error) {
@@ -38,6 +39,7 @@ func renderMergedOutputViaDocSvc(
 		MergedHTML:   mergedHTML,
 		MergeValues:  mergeValues,
 		SheetTokens:  sheetTokens,
+		SheetRows:    sheetRows,
 		Kind:         kind,
 		PageDesign:   toDocSvcPageDesign(pageDesign),
 	})
@@ -69,6 +71,7 @@ func renderAndStoreViaDocSvc(
 	format, mergedHTML string,
 	mergeValues map[string]string,
 	sheetTokens []string,
+	sheetRows [][]string,
 	kind string,
 	pageDesign pageDesignJSON,
 ) (renderedFile, error) {
@@ -78,12 +81,13 @@ func renderAndStoreViaDocSvc(
 		MergedHTML:   mergedHTML,
 		MergeValues:  mergeValues,
 		SheetTokens:  sheetTokens,
+		SheetRows:    sheetRows,
 		Kind:         kind,
 		PageDesign:   toDocSvcPageDesign(pageDesign),
 	})
 	if err != nil {
 		api.LogInfo("[DMS] render+store unavailable, falling back to render-only (MAIN_S3): %v", err)
-		return renderMergedOutputViaDocSvc(ctx, format, mergedHTML, mergeValues, sheetTokens, kind, pageDesign)
+		return renderMergedOutputViaDocSvc(ctx, format, mergedHTML, mergeValues, sheetTokens, sheetRows, kind, pageDesign)
 	}
 	raw, err := base64.StdEncoding.DecodeString(data.BytesBase64)
 	if err != nil {

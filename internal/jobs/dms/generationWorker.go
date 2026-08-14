@@ -428,7 +428,8 @@ func generateOneAttachment(ctx context.Context, pool *pgxpool.Pool, job attachme
 		return err
 	}
 
-	file, err := renderAndStoreViaDocSvc(ctx, format, renderedHTML, values, content.SheetTokens, content.Kind, content.PageDesign)
+	sheetRows := resolveSheetRows(ctx, pool, tplVersionID, content, values)
+	file, err := renderAndStoreViaDocSvc(ctx, format, renderedHTML, values, content.SheetTokens, sheetRows, content.Kind, content.PageDesign)
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
 	}
@@ -475,7 +476,8 @@ func generatePagedAttachment(ctx context.Context, pool *pgxpool.Pool, job attach
 		}
 	}
 	combined := strings.Join(pages, `<div data-dms-page-break="true" class="dms-page-break"></div>`)
-	file, err := renderMergedOutputViaDocSvc(ctx, format, combined, values, content.SheetTokens, content.Kind, content.PageDesign)
+	sheetRows := resolveSheetRows(ctx, pool, tplVersionID, content, values)
+	file, err := renderMergedOutputViaDocSvc(ctx, format, combined, values, content.SheetTokens, sheetRows, content.Kind, content.PageDesign)
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
 	}
@@ -1135,6 +1137,7 @@ type templateContent struct {
 	HTML        string         `json:"html"`
 	Kind        string         `json:"kind"`
 	SheetTokens []string       `json:"sheetTokens"`
+	SheetRows   [][]string     `json:"sheetRows"`
 	EmailMeta   emailMetaJSON  `json:"emailMeta"`
 	PageDesign  pageDesignJSON `json:"pageDesign"`
 }
@@ -1220,6 +1223,76 @@ func loadMergeFields(ctx context.Context, pool *pgxpool.Pool, templateVersionID 
 		out[key] = code
 	}
 	return out, nil
+}
+
+func loadMergeFieldLabels(ctx context.Context, pool *pgxpool.Pool, templateVersionID string) (map[string]string, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT f.label, m.field_key
+		FROM dms_svc.template_merge_field m
+		JOIN domain_catalog.field f ON f.field_id = m.domain_catalog_field_id
+		WHERE m.version_id = $1::uuid`, templateVersionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]string)
+	for rows.Next() {
+		var label, key string
+		if err := rows.Scan(&label, &key); err != nil {
+			return nil, err
+		}
+		out[label] = key
+	}
+	return out, nil
+}
+
+var sheetCellTokenRe = regexp.MustCompile(`\{\{([^}]+)\}\}`)
+
+func resolveSheetRows(ctx context.Context, pool *pgxpool.Pool, templateVersionID string, content templateContent, values map[string]string) [][]string {
+	if !strings.EqualFold(content.Kind, "SPREADSHEET") {
+		return nil
+	}
+	rows := content.SheetRows
+	if len(rows) == 0 {
+		if len(content.SheetTokens) == 0 {
+			return nil
+		}
+		header := make([]string, len(content.SheetTokens))
+		body := make([]string, len(content.SheetTokens))
+		for i, t := range content.SheetTokens {
+			header[i] = t
+			body[i] = "{{" + t + "}}"
+		}
+		rows = [][]string{header, body}
+	}
+	labels := map[string]string{}
+	if pool != nil {
+		if m, err := loadMergeFieldLabels(ctx, pool, templateVersionID); err == nil {
+			labels = m
+		} else {
+			api.LogError("[DMS] load merge field labels version=%s: %v", templateVersionID, err)
+		}
+	}
+	out := make([][]string, len(rows))
+	for r, row := range rows {
+		outRow := make([]string, len(row))
+		for c, cell := range row {
+			outRow[c] = sheetCellTokenRe.ReplaceAllStringFunc(cell, func(tok string) string {
+				key := strings.TrimSpace(sheetCellTokenRe.FindStringSubmatch(tok)[1])
+				if v, ok := values[key]; ok {
+					return v
+				}
+				if fk, ok := labels[key]; ok {
+					if v, ok := values[fk]; ok {
+						return v
+					}
+				}
+				return tok
+			})
+		}
+		out[r] = outRow
+	}
+	return out
 }
 
 // ─── time window ─────────────────────────────────────────────────────────────
