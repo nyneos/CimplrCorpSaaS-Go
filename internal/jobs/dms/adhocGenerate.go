@@ -440,7 +440,10 @@ func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, p adhocAtt
 		out.HTMLPreview = wrapHTMLDocument(renderedHTML)
 	}
 
-	sheetRows := resolveSheetRows(ctx, pool, tplVersionID, content, values)
+	sheetRows := expandKPISheetCells(
+		resolveSheetRows(ctx, pool, tplVersionID, content, values),
+		genCtx.PoolRows,
+	)
 	file, err := renderAndStoreViaDocSvc(ctx, format, renderedHTML, values, content.SheetTokens, sheetRows, content.Kind, content.PageDesign)
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)

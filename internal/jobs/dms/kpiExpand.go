@@ -4,6 +4,7 @@ import (
 	"fmt"
 	htmlpkg "html"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -133,6 +134,70 @@ func normalizeKPIAccent(accent string) string {
 		}
 		return accent
 	}
+}
+
+// kpiSheetTokenRe matches the compact sheet form the editor writes into cells:
+// {{KPI:COUNT}} or {{KPI:SUM:principal_amount}}.
+var kpiSheetTokenRe = regexp.MustCompile(`(?i)\{\{\s*KPI\s*:\s*([A-Z_]+)\s*(?::\s*([^}]+?)\s*)?\}\}`)
+
+// expandKPISheetCells resolves KPI slots that live in spreadsheet cells — both
+// the compact {{KPI:OP[:measure]}} token and the older data-dms-kpi card markup
+// saved by earlier templates. The slot is replaced by the computed number at
+// full precision, not the compact card form, because a sheet cell is meant to
+// hold a usable value.
+func expandKPISheetCells(rows [][]string, poolRows []map[string]any) [][]string {
+	if len(rows) == 0 {
+		return rows
+	}
+	for r, row := range rows {
+		for c, cell := range row {
+			lower := strings.ToLower(cell)
+			hasToken := strings.Contains(lower, "{{kpi:")
+			hasMarkup := strings.Contains(lower, "data-dms-kpi")
+			if !hasToken && !hasMarkup {
+				continue
+			}
+			out := cell
+			if hasToken {
+				out = kpiSheetTokenRe.ReplaceAllStringFunc(out, func(match string) string {
+					sub := kpiSheetTokenRe.FindStringSubmatch(match)
+					if len(sub) < 2 {
+						return match
+					}
+					op := strings.ToUpper(strings.TrimSpace(sub[1]))
+					measure := ""
+					if len(sub) >= 3 {
+						measure = strings.TrimSpace(sub[2])
+					}
+					return formatSheetKPI(computeKPI(poolRows, op, measure))
+				})
+			}
+			if hasMarkup {
+				out = kpiDivRe.ReplaceAllStringFunc(out, func(match string) string {
+					sub := kpiDivRe.FindStringSubmatch(match)
+					attrs := ""
+					if len(sub) >= 4 {
+						attrs = strings.TrimSpace(sub[1] + " " + sub[2] + " " + sub[3])
+					}
+					op := strings.ToUpper(strings.TrimSpace(attrFromBlob(attrs, "data-op")))
+					if op == "" {
+						op = "COUNT"
+					}
+					measure := strings.TrimSpace(attrFromBlob(attrs, "data-measure"))
+					return formatSheetKPI(computeKPI(poolRows, op, measure))
+				})
+			}
+			rows[r][c] = strings.TrimSpace(out)
+		}
+	}
+	return rows
+}
+
+func formatSheetKPI(v float64) string {
+	if v == float64(int64(v)) {
+		return strconv.FormatInt(int64(v), 10)
+	}
+	return strconv.FormatFloat(v, 'f', 2, 64)
 }
 
 func formatCompactKPI(v float64) string {

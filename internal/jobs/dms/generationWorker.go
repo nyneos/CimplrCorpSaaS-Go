@@ -428,7 +428,10 @@ func generateOneAttachment(ctx context.Context, pool *pgxpool.Pool, job attachme
 		return err
 	}
 
-	sheetRows := resolveSheetRows(ctx, pool, tplVersionID, content, values)
+	sheetRows := expandKPISheetCells(
+		resolveSheetRows(ctx, pool, tplVersionID, content, values),
+		job.GenCtx.PoolRows,
+	)
 	file, err := renderAndStoreViaDocSvc(ctx, format, renderedHTML, values, content.SheetTokens, sheetRows, content.Kind, content.PageDesign)
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
@@ -476,7 +479,10 @@ func generatePagedAttachment(ctx context.Context, pool *pgxpool.Pool, job attach
 		}
 	}
 	combined := strings.Join(pages, `<div data-dms-page-break="true" class="dms-page-break"></div>`)
-	sheetRows := resolveSheetRows(ctx, pool, tplVersionID, content, values)
+	sheetRows := expandKPISheetCells(
+		resolveSheetRows(ctx, pool, tplVersionID, content, values),
+		job.GenCtx.PoolRows,
+	)
 	file, err := renderMergedOutputViaDocSvc(ctx, format, combined, values, content.SheetTokens, sheetRows, content.Kind, content.PageDesign)
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
