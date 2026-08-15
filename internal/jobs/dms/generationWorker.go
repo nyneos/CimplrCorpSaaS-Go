@@ -234,6 +234,7 @@ func runGeneration(
 		AsOnDate:                 asOn,
 		BankAccountScope:         bankScope,
 		AllowUnscopedBankAccount: len(bankScope) == 0, // scoped when rule has pairs; else allow all
+		EnforceDateWindow:        true,
 	})
 	if err != nil {
 		return runID, finishRunFailed(ctx, pool, runID, fmt.Errorf("fetch data source %q: %w", sourceKey, err))
@@ -279,6 +280,7 @@ func runGeneration(
 		DataRowFrom:              rowFrom,
 		DataRowTo:                rowTo,
 		RuleVersionID:            version.VersionID,
+		FieldAliases:             loadFieldAliases(ctx, pool, rule.SubModuleCode),
 	}
 
 	newAttachmentJob := func(a ruleAttachment) attachmentJob {
@@ -1207,6 +1209,37 @@ func loadApprovedTemplateContent(ctx context.Context, pool *pgxpool.Pool, templa
 		return "", content, fmt.Errorf("template content_json: %w", err)
 	}
 	return *currentVersionID, content, nil
+}
+
+func loadFieldAliases(ctx context.Context, pool *pgxpool.Pool, subModuleCode string) map[string]string {
+	out := make(map[string]string)
+	if strings.TrimSpace(subModuleCode) == "" {
+		return out
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT f.field_code, NULLIF(a.alias_key, '')
+		FROM domain_catalog.field f
+		JOIN domain_catalog.field_alias a
+		  ON a.field_id = f.field_id
+		 AND a.is_deleted = false
+		 AND a.consumer_system = 'DASHBOARD'
+		WHERE f.is_deleted = false AND f.sub_module_code = $1`, subModuleCode)
+	if err != nil {
+		api.LogError("[DMS] loadFieldAliases sub_module=%s: %v", subModuleCode, err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var code string
+		var alias *string
+		if err := rows.Scan(&code, &alias); err != nil {
+			continue
+		}
+		if alias != nil && *alias != "" {
+			out[code] = *alias
+		}
+	}
+	return out
 }
 
 // loadMergeFields returns field_key -> domain_catalog field_code for a

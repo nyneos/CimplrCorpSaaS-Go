@@ -50,6 +50,8 @@ type DataRequest struct {
 	AsOfDate         string                 `json:"as_of_date"`
 	AsOnDate         string                 `json:"as_on_date"`
 	ViewType         string                 `json:"view_type"`
+	
+	EnforceDateWindow bool `json:"enforce_date_window"`
 	// AllowUnscopedBankAccount: when true, cashBankStatements /
 	// cashBankStatementTransactions may run without bank_account_scope /
 	// account_numbers. Dashboard UI keeps the empty-scope → empty-rows guard
@@ -432,6 +434,7 @@ func FetchSourceData(ctx context.Context, pool *pgxpool.Pool, req DataRequest) (
 	ctx = context.WithValue(ctx, ctxKeyReqAsOfDate, strings.TrimSpace(req.AsOfDate))
 	ctx = context.WithValue(ctx, ctxKeyReqAsOnDate, strings.TrimSpace(req.AsOnDate))
 	ctx = context.WithValue(ctx, ctxKeyReqViewType, strings.ToLower(strings.TrimSpace(req.ViewType)))
+	ctx = context.WithValue(ctx, ctxKeyReqEnforceWindow, req.EnforceDateWindow)
 
 	// ── Per-widget filter/sort/row-limit push-down ────────────────────
 	// Stashed for runSourceQuery to consume without changing every query

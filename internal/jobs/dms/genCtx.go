@@ -23,6 +23,22 @@ type attachmentGenCtx struct {
 	DataRowFrom              int // 1-based inclusive
 	DataRowTo                int // 1-based inclusive
 	RuleVersionID            string
+
+	FieldAliases map[string]string
+}
+func (c attachmentGenCtx) rowValue(row map[string]any, key string) any {
+	if row == nil {
+		return nil
+	}
+	if v, ok := row[key]; ok {
+		return v
+	}
+	if alias, ok := c.FieldAliases[key]; ok && alias != "" && alias != key {
+		if v, ok := row[alias]; ok {
+			return v
+		}
+	}
+	return nil
 }
 
 // normalizeDataRowRange clamps from/to to a valid 1-based inclusive window.
@@ -66,5 +82,6 @@ func (c attachmentGenCtx) poolDataRequest(source string) dashboardbuilder.DataRe
 		AsOnDate:                 c.AsOnDate,
 		BankAccountScope:         c.BankAccountScope,
 		AllowUnscopedBankAccount: c.AllowUnscopedBankAccount,
+		EnforceDateWindow:        true,
 	}
 }

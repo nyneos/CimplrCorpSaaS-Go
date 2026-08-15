@@ -54,7 +54,30 @@ const (
 	ctxKeyReqRowLimit      = "reqRowLimit"
 	ctxKeyReqLimit         = "reqLimit"
 	ctxKeyReqOffset        = "reqOffset"
+	ctxKeyReqEnforceWindow = "reqEnforceWindow"
 )
+
+
+var windowDateCandidates = []string{
+	"as_of_date",
+	"value_date",
+	"transaction_date",
+	"statement_date",
+	"run_date",
+	"booking_date",
+	"deal_date",
+	"invoice_date",
+	"payment_date",
+	"actual_payout_date",
+	"requested_closure_date",
+	"actual_start_date",
+	"start_date",
+	"projection_date",
+	"effective_date",
+	"due_date",
+	"entry_date",
+	"created_at",
+}
 
 var (
 	// Trailing "LIMIT NULLIF($1, 0) OFFSET $2" every source template applies.
@@ -88,9 +111,11 @@ func runSourceQuery(ctx context.Context, pool *pgxpool.Pool, baseQ string, baseA
 	// the whole push-down (never partially — a partial push can over-filter OR groups).
 	baseArgCount := len(baseArgs) - 2
 	filterClause, filterArgs, filtersOK := buildWidgetFilterSQL(filters, baseArgCount)
+	windowClause, windowArgs := buildWindowSQL(ctx, baseArgCount+len(filterArgs))
+	hasWindow := windowClause != ""
 
 	pushdown := loc != nil && baseArgCount >= 0 &&
-		(hasFilters || hasSort || hasRowLimit) &&
+		(hasFilters || hasSort || hasRowLimit || hasWindow) &&
 		(!hasFilters || filtersOK)
 
 	if !pushdown {
@@ -125,6 +150,11 @@ func runSourceQuery(ctx context.Context, pool *pgxpool.Pool, baseQ string, baseA
 		args = append(args, filterArgs...)
 	}
 
+	if windowClause != "" {
+		b.WriteString(windowClause)
+		args = append(args, windowArgs...)
+	}
+
 	if order := buildSortSQL(sortField, sortDir, sortType); order != "" {
 		b.WriteString(order)
 	}
@@ -151,6 +181,39 @@ func runSourceQuery(ctx context.Context, pool *pgxpool.Pool, baseQ string, baseA
 		return scanRows(fr)
 	}
 	return scanRows(r)
+}
+
+// buildWindowSQL returns an " AND (...)" clause pinning the CTE output to the
+// request's as_of_date/as_on_date band, or "" when the request did not opt in.
+// The row's date is read out of to_jsonb(base) so no per-source column registry
+// is needed: a key the source does not output resolves to NULL rather than
+// erroring, and only ISO-prefixed values are cast.
+func buildWindowSQL(ctx context.Context, startArgs int) (string, []any) {
+	if enforce, _ := ctx.Value(ctxKeyReqEnforceWindow).(bool); !enforce {
+		return "", nil
+	}
+	asOf, _ := ctx.Value(ctxKeyReqAsOfDate).(string)
+	asOn, _ := ctx.Value(ctxKeyReqAsOnDate).(string)
+	asOf = strings.TrimSpace(asOf)
+	asOn = strings.TrimSpace(asOn)
+	if asOf == "" && asOn == "" {
+		return "", nil
+	}
+	parts := make([]string, 0, len(windowDateCandidates))
+	for _, c := range windowDateCandidates {
+		parts = append(parts, "NULLIF(to_jsonb(base) ->> '"+c+"', '')")
+	}
+	src := "COALESCE(" + strings.Join(parts, ", ") + ")"
+	d := "(CASE WHEN " + src + ` ~ '^\d{4}-\d{2}-\d{2}' THEN LEFT(` + src + ", 10)::date END)"
+	idx := startArgs + 1
+	switch {
+	case asOf != "" && asOn != "":
+		return fmt.Sprintf(" AND (%s IS NULL OR %s BETWEEN $%d::date AND $%d::date)", d, d, idx, idx+1), []any{asOf, asOn}
+	case asOf != "":
+		return fmt.Sprintf(" AND (%s IS NULL OR %s >= $%d::date)", d, d, idx), []any{asOf}
+	default:
+		return fmt.Sprintf(" AND (%s IS NULL OR %s <= $%d::date)", d, d, idx), []any{asOn}
+	}
 }
 
 // buildSortSQL returns an " ORDER BY ..." clause for a validated sort field, or "".
