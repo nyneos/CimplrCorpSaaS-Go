@@ -65,6 +65,34 @@ func requirePendingFree(ctx context.Context, tx pgx.Tx, ruleID string) error {
 	return nil
 }
 
+// pendingAmendableAudit returns the pending create/edit audit row a new version
+// should amend, or nil when the rule has no pending request in flight.
+func pendingAmendableAudit(ctx context.Context, tx pgx.Tx, ruleID string) (*ruleAuditRow, error) {
+	var processingStatus string
+	err := tx.QueryRow(ctx, `
+		SELECT processing_status FROM dms_svc.generation_rule
+		WHERE rule_id = $1::uuid AND is_deleted = false
+		FOR UPDATE`, ruleID,
+	).Scan(&processingStatus)
+	if err != nil {
+		return nil, err
+	}
+	if !common.IsPendingStatus(processingStatus) {
+		return nil, nil
+	}
+	if processingStatus == "PENDING_DELETE_APPROVAL" {
+		return nil, fmt.Errorf("rule is awaiting delete approval — resolve it before editing")
+	}
+	row, err := findPendingAudit(ctx, tx, ruleID)
+	if err != nil {
+		return nil, err
+	}
+	if row.ActionType != "CREATE" && row.ActionType != "CREATE_VERSION" {
+		return nil, fmt.Errorf("rule already has a pending request (%s) — resolve it before raising a new one", row.ActionType)
+	}
+	return &row, nil
+}
+
 func requestActorAndIP(r *http.Request, reqActorID string) (actor, ip string) {
 	return common.RequestActor(r, reqActorID), common.RequestIP(r)
 }

@@ -68,6 +68,32 @@ func requirePendingFree(ctx context.Context, tx pgx.Tx, templateID string) error
 	return nil
 }
 
+func pendingAmendableAudit(ctx context.Context, tx pgx.Tx, templateID string) (*templateAuditRow, error) {
+	var processingStatus string
+	err := tx.QueryRow(ctx, `
+		SELECT processing_status FROM dms_svc.template
+		WHERE template_id = $1::uuid AND is_deleted = false
+		FOR UPDATE`, templateID,
+	).Scan(&processingStatus)
+	if err != nil {
+		return nil, err
+	}
+	if !common.IsPendingStatus(processingStatus) {
+		return nil, nil
+	}
+	if processingStatus == "PENDING_DELETE_APPROVAL" {
+		return nil, fmt.Errorf("template is awaiting delete approval — resolve it before editing")
+	}
+	row, err := findPendingAudit(ctx, tx, templateID)
+	if err != nil {
+		return nil, err
+	}
+	if row.ActionType != "CREATE" && row.ActionType != "CREATE_VERSION" {
+		return nil, fmt.Errorf("template already has a pending request (%s) — resolve it before raising a new one", row.ActionType)
+	}
+	return &row, nil
+}
+
 func requestActorAndIP(r *http.Request, reqActorID string) (actor, ip string) {
 	return common.RequestActor(r, reqActorID), common.RequestIP(r)
 }
