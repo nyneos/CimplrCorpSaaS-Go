@@ -914,6 +914,12 @@ func substituteMergeFields(body string, values map[string]string) string {
 
 var mustacheRe = regexp.MustCompile(`\{\{\s*([^}]+?)\s*\}\}`)
 
+// formulaTokenRe matches notification-engine formula syntax such as
+// {{COUNT_OF(listVar)}} or {{FORMAT_CURRENCY(value, 'INR')}}. DMS merge never
+// runs EvaluateTemplate, so these can never resolve here — they are dropped
+// instead of being printed as raw template syntax in a customer-facing document.
+var formulaTokenRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\s*\(.*\)$`)
+
 // substituteMustache replaces {{field_key}} / {{Field Label}} tokens (email subjects).
 func substituteMustache(s string, values map[string]string) string {
 	return mustacheRe.ReplaceAllStringFunc(s, func(match string) string {
@@ -934,6 +940,9 @@ func substituteMustache(s string, values map[string]string) string {
 			if strings.EqualFold(k, token) || strings.EqualFold(strings.ReplaceAll(k, "_", " "), token) {
 				return v
 			}
+		}
+		if formulaTokenRe.MatchString(token) {
+			return ""
 		}
 		return match
 	})
