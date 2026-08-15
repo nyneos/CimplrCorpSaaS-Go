@@ -366,9 +366,9 @@ func normalizeDmsFilterOp(op string) string {
 func mergeTemplateHTML(ctx context.Context, pool *pgxpool.Pool, contentHTML string, mergeFields map[string]string, row map[string]any, genCtx attachmentGenCtx, format string) (string, map[string]string, error) {
 	values := make(map[string]string, len(mergeFields)+8)
 	for fieldKey, fieldCode := range mergeFields {
-		var raw any
-		if row != nil {
-			raw = row[fieldCode]
+		raw := genCtx.rowValue(row, fieldCode)
+		if raw == nil {
+			raw = genCtx.rowValue(row, fieldKey)
 		}
 		values[fieldKey] = formatFieldValue(raw)
 	}
@@ -377,7 +377,7 @@ func mergeTemplateHTML(ctx context.Context, pool *pgxpool.Pool, contentHTML stri
 			continue
 		}
 		if row != nil {
-			values[key] = formatFieldValue(row[key])
+			values[key] = formatFieldValue(genCtx.rowValue(row, key))
 		}
 	}
 	renderedHTML := substituteMergeFields(contentHTML, values)

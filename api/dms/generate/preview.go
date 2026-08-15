@@ -64,6 +64,7 @@ func HandlePreview(pool *pgxpool.Pool) http.HandlerFunc {
 			Row:                row,
 			Overrides:          req.MergeOverrides,
 			Format:             format,
+			SubModuleCode:      strings.TrimSpace(req.SubModuleCode),
 		})
 		if err != nil {
 			api.LogErrorForResponse(w, "dms preview: %v", err)
