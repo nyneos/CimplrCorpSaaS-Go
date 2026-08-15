@@ -78,7 +78,7 @@ func computeKPI(rows []map[string]any, op, measure string) float64 {
 			if row == nil {
 				continue
 			}
-			v := parseFloatLoose(row[measure])
+			v := parseFloatLoose(lookupRowField(row, measure))
 			n++
 			sum += v
 			if first {

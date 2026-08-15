@@ -156,8 +156,10 @@ func renderChartPNG(chartType string, series []chartSeriesPoint) ([]byte, error)
 		return renderEmptyChartPNG(msgNoData)
 	}
 	switch strings.ToLower(strings.TrimSpace(chartType)) {
-	case "pie", "donut", "radial_bar":
+	case "pie":
 		return renderPieChartPNG(series)
+	case "donut", "radial_bar":
+		return renderDonutChartPNG(series)
 	case "gauge":
 		return renderGaugeChartPNG(series)
 	case "line", "scatter":
@@ -385,26 +387,59 @@ func renderLineChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func renderPieChartPNG(series []chartSeriesPoint) ([]byte, error) {
-	// Keep pie readable: top 8 + Other already applied by caller; ensure positive values.
+// sliceChartValues builds pie/donut slices. Captions are drawn only on slices
+// wide enough to hold them — thinner ones used to stack on top of each other at
+// the centre and render as unreadable overlapping text. The legend table under
+// the image still names and quantifies every series.
+func sliceChartValues(series []chartSeriesPoint, percentOnly bool) ([]chart.Value, bool) {
 	palette := chartBrandPalette()
+	total := 0.0
+	for _, p := range series {
+		if p.Value > 0 {
+			total += p.Value
+		}
+	}
+	if total <= 0 {
+		return nil, false
+	}
 	values := make([]chart.Value, 0, len(series))
 	for i, p := range series {
 		if p.Value <= 0 {
 			continue
 		}
+		share := p.Value / total
+		label := ""
+		if share >= 0.06 {
+			if percentOnly {
+				label = fmt.Sprintf("%.1f%%", share*100)
+			} else {
+				label = fmt.Sprintf("%s · %.1f%%", truncateLabel(p.Label, 16), share*100)
+			}
+		}
 		values = append(values, chart.Value{
 			Value: p.Value,
-			Label: fmt.Sprintf("%s (%s)", truncateLabel(p.Label, 22), formatAxisValue(p.Value)),
-			Style: chart.Style{FillColor: palette[i%len(palette)], StrokeColor: drawing.ColorWhite, StrokeWidth: 1},
+			Label: label,
+			Style: chart.Style{
+				FillColor:   palette[i%len(palette)],
+				StrokeColor: drawing.ColorWhite,
+				StrokeWidth: 2,
+				FontColor:   drawing.ColorWhite,
+				FontSize:    10,
+			},
 		})
 	}
-	if len(values) == 0 {
+	return values, len(values) > 0
+}
+
+func renderPieChartPNG(series []chartSeriesPoint) ([]byte, error) {
+	// Keep pie readable: top 8 + Other already applied by caller; ensure positive values.
+	values, ok := sliceChartValues(series, false)
+	if !ok {
 		return renderEmptyChartPNG("No positive values")
 	}
 	pie := chart.PieChart{
-		Width:  640,
-		Height: 480,
+		Width:  720,
+		Height: 520,
 		Values: values,
 		Background: chart.Style{
 			Padding:   chart.Box{Top: 20, Left: 20, Right: 20, Bottom: 20},
@@ -413,6 +448,32 @@ func renderPieChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	}
 	var buf bytes.Buffer
 	if err := pie.Render(chart.PNG, &buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func renderDonutChartPNG(series []chartSeriesPoint) ([]byte, error) {
+	// go-chart puts donut captions just outside the ring, on the page ground, so
+	// they must be dark and short; the legend table carries the series names.
+	values, ok := sliceChartValues(series, true)
+	if !ok {
+		return renderEmptyChartPNG("No positive values")
+	}
+	for i := range values {
+		values[i].Style.FontColor = drawing.ColorFromHex("0b3d2e")
+	}
+	donut := chart.DonutChart{
+		Width:  720,
+		Height: 520,
+		Values: values,
+		Background: chart.Style{
+			Padding:   chart.Box{Top: 30, Left: 60, Right: 60, Bottom: 30},
+			FillColor: drawing.ColorWhite,
+		},
+	}
+	var buf bytes.Buffer
+	if err := donut.Render(chart.PNG, &buf); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil

@@ -1060,8 +1060,35 @@ func formatNumericDisplay(v float64) string {
 	return s
 }
 
+// dmsPreviewCSS styles the merged-HTML preview so it reads like the generated
+// document (sheet, margins, bordered tables) instead of raw unstyled markup.
+const dmsPreviewCSS = `
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:#eef2f0;font-family:"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:11pt;line-height:1.5;color:#14231e}
+.dms-page{width:210mm;min-height:297mm;margin:12mm auto;padding:28mm 18mm;background:#fff;box-shadow:0 2px 18px rgba(15,33,26,.14)}
+h1,h2,h3,h4,h5,h6{color:#0b3d2e;margin:16px 0 8px;line-height:1.25;border-bottom:1px solid #dbe7e1;padding-bottom:4px}
+h1{font-size:18pt}h2{font-size:15pt}h3{font-size:13pt}h4,h5,h6{font-size:11pt}
+p{margin:0 0 8px;min-height:1em}
+ul,ol{margin:0 0 10px;padding-left:22px}
+img{max-width:100%;height:auto}
+a{color:#0f766e}
+hr{border:0;border-top:1px solid #dbe7e1;margin:14px 0}
+table{border-collapse:collapse;width:100%;margin:10px 0 16px;font-size:9.5pt}
+table th,table td{border:1px solid #b9c7c1;padding:6px 8px;vertical-align:top;text-align:left;word-break:break-word;overflow-wrap:anywhere}
+table th{background:#0b3d2e;color:#fff;font-weight:600}
+table tbody tr:nth-child(even) td{background:#f5faf7}
+table th>p,table td>p{margin:0;min-height:0}
+.dms-chart-block{margin:14px 0 22px}
+.dms-chart-block h3{border:0;padding:0;margin:0 0 8px;font-size:12pt}
+.dms-chart-image{display:block;max-width:100%;height:auto;border:1px solid #e2e8f0;border-radius:8px}
+`
+
 func wrapHTMLDocument(body string) string {
-	return "<!doctype html><html><head><meta charset=\"utf-8\"></head><body>" + body + "</body></html>"
+	return `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+		`<meta name="viewport" content="width=device-width, initial-scale=1">` +
+		`<style>` + dmsPreviewCSS + `</style></head><body><div class="dms-page">` +
+		body + `</div></body></html>`
 }
 
 // ─── DB loaders ──────────────────────────────────────────────────────────────
