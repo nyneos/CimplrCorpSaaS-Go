@@ -95,9 +95,8 @@ func applyRejection(ctx context.Context, tx pgx.Tx, templateID, actor, ip, check
 		}
 	case "EDIT", "DELETE":
 		// Header columns / is_deleted were never touched (stage-then-apply) —
-		// reject only needs to drop the pending flag back to APPROVED.
 		if _, err := tx.Exec(ctx, `
-			UPDATE dms_svc.template SET processing_status = 'APPROVED',
+			UPDATE dms_svc.template SET processing_status = 'REJECTED',
 				last_modified_by = $1, last_modified_at = now()
 			WHERE template_id = $2::uuid`, actor, templateID); err != nil {
 			return err
@@ -114,7 +113,7 @@ func applyRejection(ctx context.Context, tx pgx.Tx, templateID, actor, ip, check
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
-			UPDATE dms_svc.template SET processing_status = 'APPROVED',
+			UPDATE dms_svc.template SET processing_status = 'REJECTED',
 				last_modified_by = $1, last_modified_at = now()
 			WHERE template_id = $2::uuid`, actor, templateID); err != nil {
 			return err

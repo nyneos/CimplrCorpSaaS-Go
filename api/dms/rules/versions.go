@@ -101,7 +101,8 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(r.Context())
 
-		if err := requirePendingFree(r.Context(), tx, req.RuleID); err != nil {
+		amend, err := pendingAmendableAudit(r.Context(), tx, req.RuleID)
+		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusConflict, err.Error(), "DMS_RULE_PENDING_EXISTS")
 			return
 		}
@@ -154,6 +155,39 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		}); err != nil {
 			api.LogErrorForResponse(w, "dms rule version children: %v", err)
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "failed to attach filters/documents/destinations/notification templates (unknown id?)", "DMS_RULE_VERSION_FAILED")
+			return
+		}
+
+		if amend != nil {
+			if amend.VersionID != nil {
+				if _, err := tx.Exec(r.Context(), `
+					UPDATE dms_svc.generation_rule_version SET is_deleted = true
+					WHERE version_id = $1::uuid`, *amend.VersionID); err != nil {
+					api.LogErrorForResponse(w, "dms rule version supersede: %v", err)
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateRuleVersion, "DMS_RULE_VERSION_FAILED")
+					return
+				}
+			}
+			if _, err := tx.Exec(r.Context(), `
+				UPDATE dms_svc.generation_rule_audit
+				SET version_id = $1::uuid, reason = COALESCE($2, reason), requested_by = $3,
+					requested_ip = $4, requested_at = now()
+				WHERE audit_id = $5::uuid`,
+				versionID, common.NullIfEmpty(req.Reason), actor, common.NullIfEmpty(ip), amend.AuditID); err != nil {
+				api.LogErrorForResponse(w, "dms rule version amend audit: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit rule version", "DMS_RULE_VERSION_FAILED")
+				return
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				api.LogErrorForResponse(w, "dms rule version commit: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateRuleVersion, "DMS_RULE_VERSION_FAILED")
+				return
+			}
+			api.RespondEnvelopeSuccess(w, "Rule version submitted for approval", map[string]interface{}{
+				"rule_id":    req.RuleID,
+				"version_id": versionID,
+				"version_no": nextVersionNo,
+			})
 			return
 		}
 

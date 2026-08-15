@@ -56,7 +56,9 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(r.Context())
 
-		if err := requirePendingFree(r.Context(), tx, req.TemplateID); err != nil {
+		
+		amend, err := pendingAmendableAudit(r.Context(), tx, req.TemplateID)
+		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusConflict, err.Error(), "DMS_TEMPLATE_PENDING_EXISTS")
 			return
 		}
@@ -89,26 +91,48 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if _, err := tx.Exec(r.Context(), `
-			UPDATE dms_svc.template SET processing_status = 'PENDING_EDIT_APPROVAL'
-			WHERE template_id = $1::uuid`, req.TemplateID); err != nil {
-			api.LogErrorForResponse(w, "dms template version flag: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateTemplateVersion, "DMS_TEMPLATE_VERSION_FAILED")
-			return
-		}
+		if amend != nil {
+			if amend.VersionID != nil {
+				if _, err := tx.Exec(r.Context(), `
+					UPDATE dms_svc.template_version SET is_deleted = true
+					WHERE version_id = $1::uuid`, *amend.VersionID); err != nil {
+					api.LogErrorForResponse(w, "dms template version supersede: %v", err)
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateTemplateVersion, "DMS_TEMPLATE_VERSION_FAILED")
+					return
+				}
+			}
+			if _, err := tx.Exec(r.Context(), `
+				UPDATE dms_svc.template_audit
+				SET version_id = $1::uuid, reason = COALESCE($2, reason), requested_by = $3,
+					requested_ip = $4, requested_at = now()
+				WHERE audit_id = $5::uuid`,
+				versionID, common.NullIfEmpty(req.Reason), actor, common.NullIfEmpty(ip), amend.AuditID); err != nil {
+				api.LogErrorForResponse(w, "dms template version amend audit: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit template version", "DMS_TEMPLATE_VERSION_FAILED")
+				return
+			}
+		} else {
+			if _, err := tx.Exec(r.Context(), `
+				UPDATE dms_svc.template SET processing_status = 'PENDING_EDIT_APPROVAL'
+				WHERE template_id = $1::uuid`, req.TemplateID); err != nil {
+				api.LogErrorForResponse(w, "dms template version flag: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateTemplateVersion, "DMS_TEMPLATE_VERSION_FAILED")
+				return
+			}
 
-		a := &auditRow{}
-		a.set("template_id", req.TemplateID)
-		a.set("version_id", versionID)
-		a.set("action_type", "CREATE_VERSION")
-		a.set("processing_status", "PENDING_EDIT_APPROVAL")
-		a.set("reason", common.NullIfEmpty(req.Reason))
-		a.set("requested_by", actor)
-		a.set("requested_ip", common.NullIfEmpty(ip))
-		if err := a.exec(r.Context(), tx); err != nil {
-			api.LogErrorForResponse(w, "dms template version audit: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit template version", "DMS_TEMPLATE_VERSION_FAILED")
-			return
+			a := &auditRow{}
+			a.set("template_id", req.TemplateID)
+			a.set("version_id", versionID)
+			a.set("action_type", "CREATE_VERSION")
+			a.set("processing_status", "PENDING_EDIT_APPROVAL")
+			a.set("reason", common.NullIfEmpty(req.Reason))
+			a.set("requested_by", actor)
+			a.set("requested_ip", common.NullIfEmpty(ip))
+			if err := a.exec(r.Context(), tx); err != nil {
+				api.LogErrorForResponse(w, "dms template version audit: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit template version", "DMS_TEMPLATE_VERSION_FAILED")
+				return
+			}
 		}
 
 		if err := tx.Commit(r.Context()); err != nil {

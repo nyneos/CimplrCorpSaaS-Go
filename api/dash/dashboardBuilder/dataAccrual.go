@@ -14,6 +14,8 @@ const accrualRunStatusSQL = `AND run_status = ANY(ARRAY['PENDING_APPROVAL','APPR
 
 func queryFDAccrualRunAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "r")
+	df, dfArgs := dateRangeFilter(ctx, "r", "run_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -51,15 +53,18 @@ func queryFDAccrualRunAll(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 		) a ON true
 		WHERE COALESCE(r.is_deleted, false) = false %s
 		  %s
+		  %s
 		ORDER BY r.run_date DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
-	`, ef, accrualRunStatusSQL)
+	`, ef, accrualRunStatusSQL, df)
 
 	return runSourceQuery(ctx, pool, q, args)
 }
 
 func queryFDAccrualLedger(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "l")
+	df, dfArgs := dateRangeFilter(ctx, "ar", "run_date", len(args)+1)
+	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -96,9 +101,10 @@ func queryFDAccrualLedger(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 			LIMIT 1
 		) a ON true
 		WHERE COALESCE(l.is_deleted, false) = false %s
+		  %s
 		ORDER BY l.created_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
-	`, ef)
+	`, ef, df)
 
 	return runSourceQuery(ctx, pool, q, args)
 }
