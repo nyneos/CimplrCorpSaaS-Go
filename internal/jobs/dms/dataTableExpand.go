@@ -138,9 +138,52 @@ func expandDataTablePlaceholders(
 		for len(labels) < len(columns) {
 			labels = append(labels, humanizeKey(columns[len(labels)]))
 		}
+		if len(rows) > 0 {
+			columns = resolveColumnKeys(columns, rows[0], genCtx)
+		}
 		return buildGenericHTMLTable(labels, columns, rows, limit)
 	})
 	return out, expandErr
+}
+
+func resolveColumnKeys(columns []string, sample map[string]any, genCtx attachmentGenCtx) []string {
+	if len(columns) == 0 || sample == nil {
+		return columns
+	}
+	norm := func(s string) string {
+		var b strings.Builder
+		for _, r := range strings.ToLower(s) {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	byNorm := make(map[string]string, len(sample))
+	for k := range sample {
+		if n := norm(k); n != "" {
+			if _, dup := byNorm[n]; !dup {
+				byNorm[n] = k
+			}
+		}
+	}
+	out := make([]string, len(columns))
+	for i, col := range columns {
+		out[i] = col
+		if _, ok := sample[col]; ok {
+			continue
+		}
+		if alias := genCtx.FieldAliases[col]; alias != "" {
+			if _, ok := sample[alias]; ok {
+				out[i] = alias
+				continue
+			}
+		}
+		if k, ok := byNorm[norm(col)]; ok {
+			out[i] = k
+		}
+	}
+	return out
 }
 
 func inferColumns(row map[string]any) []string {

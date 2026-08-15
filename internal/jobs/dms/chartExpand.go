@@ -105,18 +105,31 @@ func expandChartPlaceholders(
 		b.WriteString(chartPNGDataURI(pngBytes))
 		b.WriteString(`" />`)
 		// Legend directly under the image (no page-break) so PDF keeps chart + key together.
+		seriesTotal := 0.0
+		for _, p := range series {
+			if p.Value > 0 {
+				seriesTotal += p.Value
+			}
+		}
 		b.WriteString(`<table class="dms-table" style="width:100%;margin-top:8px;font-size:11px;border-collapse:collapse">`)
 		b.WriteString(`<tr><th style="text-align:left;padding:4px 8px;background:#0b3d2e;color:#fff">Series</th>`)
-		b.WriteString(`<th style="text-align:right;padding:4px 8px;background:#0b3d2e;color:#fff">Value</th></tr>`)
+		b.WriteString(`<th style="text-align:right;padding:4px 8px;background:#0b3d2e;color:#fff">Value</th>`)
+		b.WriteString(`<th style="text-align:right;padding:4px 8px;background:#0b3d2e;color:#fff">Share</th></tr>`)
 		for i, p := range series {
 			if i >= 12 {
-				b.WriteString(fmt.Sprintf(`<tr><td colspan="2" style="padding:4px 8px">+%d more</td></tr>`, len(series)-12))
+				b.WriteString(fmt.Sprintf(`<tr><td colspan="3" style="padding:4px 8px">+%d more</td></tr>`, len(series)-12))
 				break
+			}
+			share := ""
+			if seriesTotal > 0 && p.Value > 0 {
+				share = fmt.Sprintf("%.1f%%", p.Value/seriesTotal*100)
 			}
 			b.WriteString(`<tr><td style="padding:4px 8px;border-bottom:1px solid #e2e8f0">`)
 			b.WriteString(htmlpkg.EscapeString(p.Label))
 			b.WriteString(`</td><td style="padding:4px 8px;text-align:right;border-bottom:1px solid #e2e8f0">`)
 			b.WriteString(htmlpkg.EscapeString(formatFieldValue(p.Value)))
+			b.WriteString(`</td><td style="padding:4px 8px;text-align:right;border-bottom:1px solid #e2e8f0">`)
+			b.WriteString(share)
 			b.WriteString(`</td></tr>`)
 		}
 		b.WriteString(`</table></div>`)

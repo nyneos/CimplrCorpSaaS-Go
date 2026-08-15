@@ -4,6 +4,7 @@ import (
 	"fmt"
 	htmlpkg "html"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -42,9 +43,16 @@ func expandKPIPlaceholders(html string, poolRows []map[string]any) string {
 		if accent == "" {
 			accent = colorKPIDarkGreen
 		}
-		val := computeKPI(poolRows, op, measure)
+		val, resolved := computeKPIResolved(poolRows, op, measure)
 		// Soft system-green KPI tiles (not loud rainbow blocks).
 		accent = normalizeKPIAccent(accent)
+		shown := formatCompactKPI(val)
+		if !resolved {
+			// A measure that is not a column in the pool must not read as a real
+			// zero — the catalog inserts a placeholder field the author has to
+			// point at their own numeric column.
+			shown = "—"
+		}
 		return fmt.Sprintf(
 			`<div class="dms-kpi-card" style="display:inline-block;min-width:148px;margin:6px 10px 6px 0;padding:12px 14px;border-radius:10px;background:#f0faf4;border:1px solid #b7e0c8;color:#0b3d2e;vertical-align:top">
   <div style="font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:%s;font-weight:700">%s</div>
@@ -52,32 +60,45 @@ func expandKPIPlaceholders(html string, poolRows []map[string]any) string {
 </div>`,
 			htmlpkg.EscapeString(accent),
 			htmlpkg.EscapeString(label),
-			htmlpkg.EscapeString(formatCompactKPI(val)),
+			htmlpkg.EscapeString(shown),
 		)
 	})
 }
 
 func computeKPI(rows []map[string]any, op, measure string) float64 {
+	v, _ := computeKPIResolved(rows, op, measure)
+	return v
+}
+
+// computeKPIResolved reports whether the measure was actually found in the pool
+// rows. A missing column yields (0, false) so callers can show "—" rather than a
+// zero that looks like a real aggregate.
+func computeKPIResolved(rows []map[string]any, op, measure string) (float64, bool) {
 	if len(rows) == 0 {
-		return 0
+		return 0, false
 	}
 	switch op {
 	case "COUNT":
-		return float64(len(rows))
+		return float64(len(rows)), true
 	case "SUM", "AVG", "MIN", "MAX":
 		if measure == "" {
-			return float64(len(rows))
+			return float64(len(rows)), true
 		}
 		n := 0.0
 		sum := 0.0
 		minV := 0.0
 		maxV := 0.0
 		first := true
+		found := false
 		for _, row := range rows {
 			if row == nil {
 				continue
 			}
-			v := parseFloatLoose(row[measure])
+			raw := lookupRowField(row, measure)
+			if raw != nil {
+				found = true
+			}
+			v := parseFloatLoose(raw)
 			n++
 			sum += v
 			if first {
@@ -91,21 +112,21 @@ func computeKPI(rows []map[string]any, op, measure string) float64 {
 				}
 			}
 		}
-		if n == 0 {
-			return 0
+		if n == 0 || !found {
+			return 0, false
 		}
 		switch op {
 		case "SUM":
-			return sum
+			return sum, true
 		case "AVG":
-			return sum / n
+			return sum / n, true
 		case "MIN":
-			return minV
+			return minV, true
 		case "MAX":
-			return maxV
+			return maxV, true
 		}
 	}
-	return float64(len(rows))
+	return float64(len(rows)), true
 }
 
 func labelizeCode(code string) string {
@@ -133,6 +154,70 @@ func normalizeKPIAccent(accent string) string {
 		}
 		return accent
 	}
+}
+
+// kpiSheetTokenRe matches the compact sheet form the editor writes into cells:
+// {{KPI:COUNT}} or {{KPI:SUM:principal_amount}}.
+var kpiSheetTokenRe = regexp.MustCompile(`(?i)\{\{\s*KPI\s*:\s*([A-Z_]+)\s*(?::\s*([^}]+?)\s*)?\}\}`)
+
+// expandKPISheetCells resolves KPI slots that live in spreadsheet cells — both
+// the compact {{KPI:OP[:measure]}} token and the older data-dms-kpi card markup
+// saved by earlier templates. The slot is replaced by the computed number at
+// full precision, not the compact card form, because a sheet cell is meant to
+// hold a usable value.
+func expandKPISheetCells(rows [][]string, poolRows []map[string]any) [][]string {
+	if len(rows) == 0 {
+		return rows
+	}
+	for r, row := range rows {
+		for c, cell := range row {
+			lower := strings.ToLower(cell)
+			hasToken := strings.Contains(lower, "{{kpi:")
+			hasMarkup := strings.Contains(lower, "data-dms-kpi")
+			if !hasToken && !hasMarkup {
+				continue
+			}
+			out := cell
+			if hasToken {
+				out = kpiSheetTokenRe.ReplaceAllStringFunc(out, func(match string) string {
+					sub := kpiSheetTokenRe.FindStringSubmatch(match)
+					if len(sub) < 2 {
+						return match
+					}
+					op := strings.ToUpper(strings.TrimSpace(sub[1]))
+					measure := ""
+					if len(sub) >= 3 {
+						measure = strings.TrimSpace(sub[2])
+					}
+					return formatSheetKPI(computeKPI(poolRows, op, measure))
+				})
+			}
+			if hasMarkup {
+				out = kpiDivRe.ReplaceAllStringFunc(out, func(match string) string {
+					sub := kpiDivRe.FindStringSubmatch(match)
+					attrs := ""
+					if len(sub) >= 4 {
+						attrs = strings.TrimSpace(sub[1] + " " + sub[2] + " " + sub[3])
+					}
+					op := strings.ToUpper(strings.TrimSpace(attrFromBlob(attrs, "data-op")))
+					if op == "" {
+						op = "COUNT"
+					}
+					measure := strings.TrimSpace(attrFromBlob(attrs, "data-measure"))
+					return formatSheetKPI(computeKPI(poolRows, op, measure))
+				})
+			}
+			rows[r][c] = strings.TrimSpace(out)
+		}
+	}
+	return rows
+}
+
+func formatSheetKPI(v float64) string {
+	if v == float64(int64(v)) {
+		return strconv.FormatInt(int64(v), 10)
+	}
+	return strconv.FormatFloat(v, 'f', 2, 64)
 }
 
 func formatCompactKPI(v float64) string {

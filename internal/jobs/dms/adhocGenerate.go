@@ -63,6 +63,7 @@ type PreviewInput struct {
 	Row                map[string]any
 	Overrides          map[string]string
 	Format             string
+	SubModuleCode      string
 }
 
 // PreviewMergedOrDraft substitutes merge fields (+ optional txn tables) and returns HTML.
@@ -74,6 +75,16 @@ func PreviewMergedOrDraft(ctx context.Context, pool *pgxpool.Pool, in PreviewInp
 	}
 	html := strings.TrimSpace(in.HTML)
 	mergeFields := in.MergeFields
+	subModuleCode := strings.TrimSpace(in.SubModuleCode)
+	if tplID := strings.TrimSpace(in.DocumentTemplateID); tplID != "" && subModuleCode == "" {
+		var code *string
+		if err := pool.QueryRow(ctx, `
+			SELECT sub_module_code FROM dms_svc.template
+			WHERE template_id = $1::uuid AND is_deleted = false`, tplID,
+		).Scan(&code); err == nil && code != nil {
+			subModuleCode = strings.TrimSpace(*code)
+		}
+	}
 	if tplID := strings.TrimSpace(in.DocumentTemplateID); tplID != "" && html == "" {
 		tplVersionID, content, err := loadApprovedTemplateContent(ctx, pool, tplID)
 		if err != nil {
@@ -92,13 +103,14 @@ func PreviewMergedOrDraft(ctx context.Context, pool *pgxpool.Pool, in PreviewInp
 	if mergeFields == nil {
 		mergeFields = map[string]string{}
 	}
-	return PreviewMergedHTML(ctx, pool, html, mergeFields, in.Row, in.Overrides, format)
+	return PreviewMergedHTML(ctx, pool, html, mergeFields, in.Row, in.Overrides, format, subModuleCode)
 }
 
 // PreviewMergedHTML substitutes merge fields (+ optional txn tables) and returns HTML.
 // Does not write to DB/S3. row may be nil (uses overrides only / sample placeholders).
-func PreviewMergedHTML(ctx context.Context, pool *pgxpool.Pool, html string, mergeFields map[string]string, row map[string]any, overrides map[string]string, format string) (string, error) {
-	values := buildMergeValues(html, mergeFields, row, overrides)
+func PreviewMergedHTML(ctx context.Context, pool *pgxpool.Pool, html string, mergeFields map[string]string, row map[string]any, overrides map[string]string, format, subModuleCode string) (string, error) {
+	fieldAliases := loadFieldAliases(ctx, pool, subModuleCode)
+	values := buildMergeValues(html, mergeFields, row, overrides, fieldAliases)
 	out := substituteMergeFields(html, values)
 	var err error
 	poolRows := []map[string]any{}
@@ -108,6 +120,7 @@ func PreviewMergedHTML(ctx context.Context, pool *pgxpool.Pool, html string, mer
 	genCtx := attachmentGenCtx{
 		AllowUnscopedBankAccount: true,
 		PoolRows:                 poolRows,
+		FieldAliases:             fieldAliases,
 	}
 	out, err = expandDataTablePlaceholders(ctx, pool, out, row, genCtx, strings.ToUpper(format))
 	if err != nil {
@@ -125,12 +138,12 @@ func PreviewMergedHTML(ctx context.Context, pool *pgxpool.Pool, html string, mer
 	return wrapHTMLDocument(out), nil
 }
 
-func buildMergeValues(html string, mergeFields map[string]string, row map[string]any, overrides map[string]string) map[string]string {
+func buildMergeValues(html string, mergeFields map[string]string, row map[string]any, overrides map[string]string, fieldAliases map[string]string) map[string]string {
 	values := make(map[string]string, len(mergeFields)+8)
 	for fieldKey, fieldCode := range mergeFields {
-		var raw any
-		if row != nil {
-			raw = row[fieldCode]
+		raw := resolveRowValue(row, fieldAliases, fieldCode)
+		if raw == nil {
+			raw = resolveRowValue(row, fieldAliases, fieldKey)
 		}
 		values[fieldKey] = formatFieldValue(raw)
 	}
@@ -139,7 +152,7 @@ func buildMergeValues(html string, mergeFields map[string]string, row map[string
 			continue
 		}
 		if row != nil {
-			values[key] = formatFieldValue(row[key])
+			values[key] = formatFieldValue(resolveRowValue(row, fieldAliases, key))
 		}
 	}
 	for k, v := range overrides {
@@ -224,12 +237,13 @@ func RunAdhocGeneration(ctx context.Context, pool *pgxpool.Pool, req AdhocReques
 			Format:     format,
 			Row:        row,
 			Overrides:  req.MergeOverrides,
-			SourceKey:  sourceKey,
-			IDField:    idField,
-			SourceID:   sid,
-			StoreS3:    req.StoreS3,
-			StoreLocal: req.StoreLocal,
-			Out:        &out,
+			SourceKey:     sourceKey,
+			SubModuleCode: req.SubModuleCode,
+			IDField:       idField,
+			SourceID:      sid,
+			StoreS3:       req.StoreS3,
+			StoreLocal:    req.StoreLocal,
+			Out:           &out,
 		}); err != nil {
 			_ = finishRun(ctx, pool, runID, "FAILED", err.Error())
 			return out, err
@@ -381,12 +395,13 @@ type adhocAttachmentParams struct {
 	Format     string
 	Row        map[string]any
 	Overrides  map[string]string
-	SourceKey  string
-	IDField    string
-	SourceID   string
-	StoreS3    bool
-	StoreLocal bool
-	Out        *AdhocResult
+	SourceKey     string
+	SubModuleCode string
+	IDField       string
+	SourceID      string
+	StoreS3       bool
+	StoreLocal    bool
+	Out           *AdhocResult
 }
 
 func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, p adhocAttachmentParams) error {
@@ -404,7 +419,8 @@ func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, p adhocAtt
 	if err != nil {
 		return err
 	}
-	values := buildMergeValues(content.HTML, mergeFields, row, overrides)
+	fieldAliases := loadFieldAliases(ctx, pool, p.SubModuleCode)
+	values := buildMergeValues(content.HTML, mergeFields, row, overrides, fieldAliases)
 	renderedHTML := substituteMergeFields(content.HTML, values)
 	poolRows := []map[string]any{}
 	if row != nil {
@@ -422,6 +438,7 @@ func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, p adhocAtt
 		PoolRows:                 poolRows,
 		SourceKey:                sourceKey,
 		Filters:                  filters,
+		FieldAliases:             fieldAliases,
 	}
 	renderedHTML, err = expandDataTablePlaceholders(ctx, pool, renderedHTML, row, genCtx, format)
 	if err != nil {
@@ -440,7 +457,10 @@ func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, p adhocAtt
 		out.HTMLPreview = wrapHTMLDocument(renderedHTML)
 	}
 
-	sheetRows := resolveSheetRows(ctx, pool, tplVersionID, content, values)
+	sheetRows := expandKPISheetCells(
+		resolveSheetRows(ctx, pool, tplVersionID, content, values),
+		genCtx.PoolRows,
+	)
 	file, err := renderAndStoreViaDocSvc(ctx, format, renderedHTML, values, content.SheetTokens, sheetRows, content.Kind, content.PageDesign)
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)

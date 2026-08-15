@@ -234,6 +234,7 @@ func runGeneration(
 		AsOnDate:                 asOn,
 		BankAccountScope:         bankScope,
 		AllowUnscopedBankAccount: len(bankScope) == 0, // scoped when rule has pairs; else allow all
+		EnforceDateWindow:        true,
 	})
 	if err != nil {
 		return runID, finishRunFailed(ctx, pool, runID, fmt.Errorf("fetch data source %q: %w", sourceKey, err))
@@ -279,6 +280,7 @@ func runGeneration(
 		DataRowFrom:              rowFrom,
 		DataRowTo:                rowTo,
 		RuleVersionID:            version.VersionID,
+		FieldAliases:             loadFieldAliases(ctx, pool, rule.SubModuleCode),
 	}
 
 	newAttachmentJob := func(a ruleAttachment) attachmentJob {
@@ -364,9 +366,9 @@ func normalizeDmsFilterOp(op string) string {
 func mergeTemplateHTML(ctx context.Context, pool *pgxpool.Pool, contentHTML string, mergeFields map[string]string, row map[string]any, genCtx attachmentGenCtx, format string) (string, map[string]string, error) {
 	values := make(map[string]string, len(mergeFields)+8)
 	for fieldKey, fieldCode := range mergeFields {
-		var raw any
-		if row != nil {
-			raw = row[fieldCode]
+		raw := genCtx.rowValue(row, fieldCode)
+		if raw == nil {
+			raw = genCtx.rowValue(row, fieldKey)
 		}
 		values[fieldKey] = formatFieldValue(raw)
 	}
@@ -375,7 +377,7 @@ func mergeTemplateHTML(ctx context.Context, pool *pgxpool.Pool, contentHTML stri
 			continue
 		}
 		if row != nil {
-			values[key] = formatFieldValue(row[key])
+			values[key] = formatFieldValue(genCtx.rowValue(row, key))
 		}
 	}
 	renderedHTML := substituteMergeFields(contentHTML, values)
@@ -428,7 +430,10 @@ func generateOneAttachment(ctx context.Context, pool *pgxpool.Pool, job attachme
 		return err
 	}
 
-	sheetRows := resolveSheetRows(ctx, pool, tplVersionID, content, values)
+	sheetRows := expandKPISheetCells(
+		resolveSheetRows(ctx, pool, tplVersionID, content, values),
+		job.GenCtx.PoolRows,
+	)
 	file, err := renderAndStoreViaDocSvc(ctx, format, renderedHTML, values, content.SheetTokens, sheetRows, content.Kind, content.PageDesign)
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
@@ -476,7 +481,10 @@ func generatePagedAttachment(ctx context.Context, pool *pgxpool.Pool, job attach
 		}
 	}
 	combined := strings.Join(pages, `<div data-dms-page-break="true" class="dms-page-break"></div>`)
-	sheetRows := resolveSheetRows(ctx, pool, tplVersionID, content, values)
+	sheetRows := expandKPISheetCells(
+		resolveSheetRows(ctx, pool, tplVersionID, content, values),
+		job.GenCtx.PoolRows,
+	)
 	file, err := renderMergedOutputViaDocSvc(ctx, format, combined, values, content.SheetTokens, sheetRows, content.Kind, content.PageDesign)
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
@@ -814,6 +822,7 @@ func expandTxnTablePlaceholders(ctx context.Context, pool *pgxpool.Pool, html st
 			Limit:                    limit,
 			BankAccountScope:         genCtx.BankAccountScope,
 			AllowUnscopedBankAccount: genCtx.AllowUnscopedBankAccount,
+			EnforceDateWindow:        true,
 		})
 		if err != nil {
 			expandErr = err
@@ -905,6 +914,12 @@ func substituteMergeFields(body string, values map[string]string) string {
 
 var mustacheRe = regexp.MustCompile(`\{\{\s*([^}]+?)\s*\}\}`)
 
+// formulaTokenRe matches notification-engine formula syntax such as
+// {{COUNT_OF(listVar)}} or {{FORMAT_CURRENCY(value, 'INR')}}. DMS merge never
+// runs EvaluateTemplate, so these can never resolve here — they are dropped
+// instead of being printed as raw template syntax in a customer-facing document.
+var formulaTokenRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\s*\(.*\)$`)
+
 // substituteMustache replaces {{field_key}} / {{Field Label}} tokens (email subjects).
 func substituteMustache(s string, values map[string]string) string {
 	return mustacheRe.ReplaceAllStringFunc(s, func(match string) string {
@@ -925,6 +940,9 @@ func substituteMustache(s string, values map[string]string) string {
 			if strings.EqualFold(k, token) || strings.EqualFold(strings.ReplaceAll(k, "_", " "), token) {
 				return v
 			}
+		}
+		if formulaTokenRe.MatchString(token) {
+			return ""
 		}
 		return match
 	})
@@ -1051,8 +1069,35 @@ func formatNumericDisplay(v float64) string {
 	return s
 }
 
+// dmsPreviewCSS styles the merged-HTML preview so it reads like the generated
+// document (sheet, margins, bordered tables) instead of raw unstyled markup.
+const dmsPreviewCSS = `
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:#eef2f0;font-family:"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:11pt;line-height:1.5;color:#14231e}
+.dms-page{width:210mm;min-height:297mm;margin:12mm auto;padding:28mm 18mm;background:#fff;box-shadow:0 2px 18px rgba(15,33,26,.14)}
+h1,h2,h3,h4,h5,h6{color:#0b3d2e;margin:16px 0 8px;line-height:1.25;border-bottom:1px solid #dbe7e1;padding-bottom:4px}
+h1{font-size:18pt}h2{font-size:15pt}h3{font-size:13pt}h4,h5,h6{font-size:11pt}
+p{margin:0 0 8px;min-height:1em}
+ul,ol{margin:0 0 10px;padding-left:22px}
+img{max-width:100%;height:auto}
+a{color:#0f766e}
+hr{border:0;border-top:1px solid #dbe7e1;margin:14px 0}
+table{border-collapse:collapse;width:100%;margin:10px 0 16px;font-size:9.5pt}
+table th,table td{border:1px solid #b9c7c1;padding:6px 8px;vertical-align:top;text-align:left;word-break:break-word;overflow-wrap:anywhere}
+table th{background:#0b3d2e;color:#fff;font-weight:600}
+table tbody tr:nth-child(even) td{background:#f5faf7}
+table th>p,table td>p{margin:0;min-height:0}
+.dms-chart-block{margin:14px 0 22px}
+.dms-chart-block h3{border:0;padding:0;margin:0 0 8px;font-size:12pt}
+.dms-chart-image{display:block;max-width:100%;height:auto;border:1px solid #e2e8f0;border-radius:8px}
+`
+
 func wrapHTMLDocument(body string) string {
-	return "<!doctype html><html><head><meta charset=\"utf-8\"></head><body>" + body + "</body></html>"
+	return `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+		`<meta name="viewport" content="width=device-width, initial-scale=1">` +
+		`<style>` + dmsPreviewCSS + `</style></head><body><div class="dms-page">` +
+		body + `</div></body></html>`
 }
 
 // ─── DB loaders ──────────────────────────────────────────────────────────────
@@ -1201,6 +1246,37 @@ func loadApprovedTemplateContent(ctx context.Context, pool *pgxpool.Pool, templa
 		return "", content, fmt.Errorf("template content_json: %w", err)
 	}
 	return *currentVersionID, content, nil
+}
+
+func loadFieldAliases(ctx context.Context, pool *pgxpool.Pool, subModuleCode string) map[string]string {
+	out := make(map[string]string)
+	if strings.TrimSpace(subModuleCode) == "" {
+		return out
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT f.field_code, NULLIF(a.alias_key, '')
+		FROM domain_catalog.field f
+		JOIN domain_catalog.field_alias a
+		  ON a.field_id = f.field_id
+		 AND a.is_deleted = false
+		 AND a.consumer_system = 'DASHBOARD'
+		WHERE f.is_deleted = false AND f.sub_module_code = $1`, subModuleCode)
+	if err != nil {
+		api.LogError("[DMS] loadFieldAliases sub_module=%s: %v", subModuleCode, err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var code string
+		var alias *string
+		if err := rows.Scan(&code, &alias); err != nil {
+			continue
+		}
+		if alias != nil && *alias != "" {
+			out[code] = *alias
+		}
+	}
+	return out
 }
 
 // loadMergeFields returns field_key -> domain_catalog field_code for a

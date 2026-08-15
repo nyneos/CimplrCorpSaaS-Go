@@ -1,6 +1,10 @@
 package dmsjobs
 
-import dashboardbuilder "CimplrCorpSaas/api/dash/dashboardBuilder"
+import (
+	"strings"
+
+	dashboardbuilder "CimplrCorpSaas/api/dash/dashboardBuilder"
+)
 
 const (
 	defaultDataRowFrom = 1
@@ -23,6 +27,57 @@ type attachmentGenCtx struct {
 	DataRowFrom              int // 1-based inclusive
 	DataRowTo                int // 1-based inclusive
 	RuleVersionID            string
+
+	FieldAliases map[string]string
+}
+func (c attachmentGenCtx) rowValue(row map[string]any, key string) any {
+	return resolveRowValue(row, c.FieldAliases, key)
+}
+
+func normalizeFieldKey(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func resolveRowValue(row map[string]any, fieldAliases map[string]string, key string) any {
+	if row == nil || strings.TrimSpace(key) == "" {
+		return nil
+	}
+	if v, ok := row[key]; ok {
+		return v
+	}
+	candidates := []string{key}
+	if alias, ok := fieldAliases[key]; ok && alias != "" && alias != key {
+		if v, ok := row[alias]; ok {
+			return v
+		}
+		candidates = append(candidates, alias)
+	}
+	for code, alias := range fieldAliases {
+		if alias == key && code != key {
+			if v, ok := row[code]; ok {
+				return v
+			}
+			candidates = append(candidates, code)
+		}
+	}
+	for _, cand := range candidates {
+		nc := normalizeFieldKey(cand)
+		if nc == "" {
+			continue
+		}
+		for k, v := range row {
+			if normalizeFieldKey(k) == nc {
+				return v
+			}
+		}
+	}
+	return nil
 }
 
 // normalizeDataRowRange clamps from/to to a valid 1-based inclusive window.
@@ -66,5 +121,6 @@ func (c attachmentGenCtx) poolDataRequest(source string) dashboardbuilder.DataRe
 		AsOnDate:                 c.AsOnDate,
 		BankAccountScope:         c.BankAccountScope,
 		AllowUnscopedBankAccount: c.AllowUnscopedBankAccount,
+		EnforceDateWindow:        true,
 	}
 }
