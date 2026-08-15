@@ -51,7 +51,8 @@ type DataRequest struct {
 	AsOnDate         string                 `json:"as_on_date"`
 	ViewType         string                 `json:"view_type"`
 	
-	EnforceDateWindow bool `json:"enforce_date_window"`
+
+	EnforceDateWindow bool `json:"-"`
 	// AllowUnscopedBankAccount: when true, cashBankStatements /
 	// cashBankStatementTransactions may run without bank_account_scope /
 	// account_numbers. Dashboard UI keeps the empty-scope → empty-rows guard

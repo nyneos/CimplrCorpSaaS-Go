@@ -224,12 +224,13 @@ func RunAdhocGeneration(ctx context.Context, pool *pgxpool.Pool, req AdhocReques
 			Format:     format,
 			Row:        row,
 			Overrides:  req.MergeOverrides,
-			SourceKey:  sourceKey,
-			IDField:    idField,
-			SourceID:   sid,
-			StoreS3:    req.StoreS3,
-			StoreLocal: req.StoreLocal,
-			Out:        &out,
+			SourceKey:     sourceKey,
+			SubModuleCode: req.SubModuleCode,
+			IDField:       idField,
+			SourceID:      sid,
+			StoreS3:       req.StoreS3,
+			StoreLocal:    req.StoreLocal,
+			Out:           &out,
 		}); err != nil {
 			_ = finishRun(ctx, pool, runID, "FAILED", err.Error())
 			return out, err
@@ -381,12 +382,13 @@ type adhocAttachmentParams struct {
 	Format     string
 	Row        map[string]any
 	Overrides  map[string]string
-	SourceKey  string
-	IDField    string
-	SourceID   string
-	StoreS3    bool
-	StoreLocal bool
-	Out        *AdhocResult
+	SourceKey     string
+	SubModuleCode string
+	IDField       string
+	SourceID      string
+	StoreS3       bool
+	StoreLocal    bool
+	Out           *AdhocResult
 }
 
 func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, p adhocAttachmentParams) error {
@@ -422,6 +424,7 @@ func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, p adhocAtt
 		PoolRows:                 poolRows,
 		SourceKey:                sourceKey,
 		Filters:                  filters,
+		FieldAliases:             loadFieldAliases(ctx, pool, p.SubModuleCode),
 	}
 	renderedHTML, err = expandDataTablePlaceholders(ctx, pool, renderedHTML, row, genCtx, format)
 	if err != nil {

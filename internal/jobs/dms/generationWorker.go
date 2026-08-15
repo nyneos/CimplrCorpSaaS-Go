@@ -822,6 +822,7 @@ func expandTxnTablePlaceholders(ctx context.Context, pool *pgxpool.Pool, html st
 			Limit:                    limit,
 			BankAccountScope:         genCtx.BankAccountScope,
 			AllowUnscopedBankAccount: genCtx.AllowUnscopedBankAccount,
+			EnforceDateWindow:        true,
 		})
 		if err != nil {
 			expandErr = err

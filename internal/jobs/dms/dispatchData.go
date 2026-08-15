@@ -154,6 +154,7 @@ func refetchRunSourceRows(ctx context.Context, pool *pgxpool.Pool, runID string)
 		Limit: rowTo - rowFrom + 1, Offset: rowFrom - 1,
 		AsOfDate: asOf, AsOnDate: asOn,
 		BankAccountScope: bankScope, AllowUnscopedBankAccount: len(bankScope) == 0,
+		EnforceDateWindow: true,
 	})
 	if err != nil {
 		return nil, storedCount, fmt.Errorf("refetch: %w", err)
