@@ -328,7 +328,8 @@ func queryFXCancellation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			COALESCE(fc.realized_gain_loss, 0) AS realized_gain_loss,
 			COALESCE(fc.cancellation_reason, '') AS cancellation_reason,
 			NULL::numeric AS rollover_cost,
-			NULL::text AS fx_pair
+			-- forward_cancellations carries no currency column; the pair lives on the booking.
+			COALESCE(fb.currency_pair, '') AS fx_pair
 		FROM public.forward_cancellations fc
 		LEFT JOIN public.forward_bookings fb ON fc.booking_id = fb.system_transaction_id
 		WHERE COALESCE(fc.is_deleted, false) = false %s
@@ -354,7 +355,7 @@ func queryFXRollover(ctx context.Context, pool *pgxpool.Pool, entityIDs []string
 			NULL::numeric AS realized_gain_loss,
 			NULL::text AS cancellation_reason,
 			COALESCE(fr.rollover_cost, 0) AS rollover_cost,
-			COALESCE(fr.fx_pair, '') AS fx_pair
+			COALESCE(NULLIF(fr.fx_pair, ''), fb.currency_pair, '') AS fx_pair
 		FROM public.forward_rollovers fr
 		LEFT JOIN public.forward_bookings fb ON fr.booking_id = fb.system_transaction_id
 		WHERE COALESCE(fr.is_deleted, false) = false %s
@@ -382,7 +383,8 @@ func queryFXCancellationRollover(ctx context.Context, pool *pgxpool.Pool, entity
 				COALESCE(fc.realized_gain_loss, 0) AS realized_gain_loss,
 				COALESCE(fc.cancellation_reason, '') AS cancellation_reason,
 				NULL::numeric AS rollover_cost,
-				NULL::text AS fx_pair
+				-- forward_cancellations carries no currency column; the pair lives on the booking.
+				COALESCE(fb.currency_pair, '') AS fx_pair
 			FROM public.forward_cancellations fc
 			LEFT JOIN public.forward_bookings fb ON fc.booking_id = fb.system_transaction_id
 			WHERE COALESCE(fc.is_deleted, false) = false
@@ -399,7 +401,7 @@ func queryFXCancellationRollover(ctx context.Context, pool *pgxpool.Pool, entity
 				NULL::numeric AS realized_gain_loss,
 				NULL::text AS cancellation_reason,
 				COALESCE(fr.rollover_cost, 0) AS rollover_cost,
-				COALESCE(fr.fx_pair, '') AS fx_pair
+				COALESCE(NULLIF(fr.fx_pair, ''), fb.currency_pair, '') AS fx_pair
 			FROM public.forward_rollovers fr
 			LEFT JOIN public.forward_bookings fb ON fr.booking_id = fb.system_transaction_id
 			WHERE COALESCE(fr.is_deleted, false) = false
