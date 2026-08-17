@@ -323,6 +323,9 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 			"entity_id":         row["entity_id"],
 			"entity_name":       row["entity_name"],
 			"type":              "PAYABLE",
+			"transaction_type":  "PAYABLE",
+			"invoice_number":    row["invoice_number"],
+			"invoice_date":      row["invoice_date"],
 			"amount":            row["amount"],
 			"due_date":          row["due_date"],
 			"counterparty_id":   row["counterparty_id"],
@@ -336,6 +339,9 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 			"entity_id":         row["entity_id"],
 			"entity_name":       row["entity_name"],
 			"type":              "RECEIVABLE",
+			"transaction_type":  "RECEIVABLE",
+			"invoice_number":    row["invoice_number"],
+			"invoice_date":      row["invoice_date"],
 			"amount":            row["invoice_amount"],
 			"due_date":          row["due_date"],
 			"counterparty_id":   row["counterparty_id"],
@@ -445,10 +451,18 @@ func queryCashSweepConfig(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 	q := fmt.Sprintf(`
 		SELECT
 			COALESCE(c.sweep_id::text, '') AS config_id,
+			COALESCE(c.sweep_id::text, '') AS sweep_id,
 			COALESCE(c.entity_name, '') AS entity_name,
 			COALESCE(c.source_bank_name, '') AS bank_name,
+			COALESCE(c.source_bank_name, '') AS source_bank_name,
+			COALESCE(c.source_bank_account, '') AS source_bank_account,
+			COALESCE(c.target_bank_name, '') AS target_bank_name,
+			COALESCE(c.target_bank_account, '') AS target_bank_account,
 			COALESCE(c.sweep_type, '') AS sweep_type,
 			COALESCE(c.frequency, '') AS frequency,
+			COALESCE(c.execution_time::text, '') AS execution_time,
+			COALESCE(c.buffer_amount, 0) AS buffer_amount,
+			COALESCE(c.sweep_amount, 0) AS sweep_amount,
 			c.updated_at,
 			COALESCE(a.processing_status, '') AS processing_status
 		FROM cimplrcorpsaas.sweepconfiguration c
