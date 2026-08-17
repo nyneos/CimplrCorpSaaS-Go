@@ -159,6 +159,7 @@ type RenderFormatRequest struct {
 	MergeValues  map[string]string `json:"merge_values"`
 	SheetTokens  []string          `json:"sheet_tokens"`
 	SheetRows    [][]string        `json:"sheet_rows"`
+	SheetCells   []any             `json:"sheet_cells"`
 	Kind         string            `json:"kind"`
 	PageDesign   PageDesignJSON    `json:"page_design"`
 }
@@ -184,6 +185,7 @@ func (c *Client) RenderFormat(ctx context.Context, req RenderFormatRequest) (Ren
 		"merge_values":  req.MergeValues,
 		"sheet_tokens":  req.SheetTokens,
 		"sheet_rows":    req.SheetRows,
+		"sheet_cells":   req.SheetCells,
 		"kind":          req.Kind,
 		"page_design":   req.PageDesign,
 	}, DefaultCallerContext(""))
@@ -270,6 +272,7 @@ func (c *Client) RenderAndStore(ctx context.Context, req RenderFormatRequest) (R
 		"merge_values":  req.MergeValues,
 		"sheet_tokens":  req.SheetTokens,
 		"sheet_rows":    req.SheetRows,
+		"sheet_cells":   req.SheetCells,
 		"kind":          req.Kind,
 		"page_design":   req.PageDesign,
 	}, DefaultCallerContext("")))

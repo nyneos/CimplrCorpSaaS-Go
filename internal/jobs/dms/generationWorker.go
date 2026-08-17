@@ -37,6 +37,7 @@ import (
 	dmscommon "CimplrCorpSaas/api/dms/common"
 	"CimplrCorpSaas/api/domaincatalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/config"
 	"CimplrCorpSaas/internal/services/docsvc"
 
 	"github.com/jackc/pgx/v5"
@@ -434,7 +435,7 @@ func generateOneAttachment(ctx context.Context, pool *pgxpool.Pool, job attachme
 		resolveSheetRows(ctx, pool, tplVersionID, content, values),
 		job.GenCtx.PoolRows,
 	)
-	file, err := renderAndStoreViaDocSvc(ctx, format, renderedHTML, values, content.SheetTokens, sheetRows, content.Kind, content.PageDesign)
+	file, err := renderAndStoreViaDocSvc(ctx, format, renderedHTML, values, content.SheetTokens, sheetRows, content.SheetCells, content.Kind, content.PageDesign)
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
 	}
@@ -485,7 +486,7 @@ func generatePagedAttachment(ctx context.Context, pool *pgxpool.Pool, job attach
 		resolveSheetRows(ctx, pool, tplVersionID, content, values),
 		job.GenCtx.PoolRows,
 	)
-	file, err := renderMergedOutputViaDocSvc(ctx, format, combined, values, content.SheetTokens, sheetRows, content.Kind, content.PageDesign)
+	file, err := renderMergedOutputViaDocSvc(ctx, format, combined, values, content.SheetTokens, sheetRows, content.SheetCells, content.Kind, content.PageDesign)
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
 	}
@@ -1183,6 +1184,7 @@ type templateContent struct {
 	Kind        string         `json:"kind"`
 	SheetTokens []string       `json:"sheetTokens"`
 	SheetRows   [][]string     `json:"sheetRows"`
+	SheetCells  []any          `json:"sheetCells"`
 	EmailMeta   emailMetaJSON  `json:"emailMeta"`
 	PageDesign  pageDesignJSON `json:"pageDesign"`
 }
@@ -1390,6 +1392,9 @@ func computeWindow(v ruleVersionConfig) (start, end *string, err error) {
 		return v.CustomStart, v.CustomEnd, nil
 	case "ROLLING", "FIXED":
 		now := time.Now().UTC()
+		if loc, locErr := time.LoadLocation(config.DefaultTimeZone); locErr == nil {
+			now = time.Now().In(loc)
+		}
 		endStr := now.Format(time.DateOnly)
 		if v.TimeWindowValue == nil || v.TimeWindowUnit == nil {
 			return nil, &endStr, nil
