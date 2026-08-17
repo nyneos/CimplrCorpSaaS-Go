@@ -76,6 +76,7 @@ func PreviewMergedOrDraft(ctx context.Context, pool *pgxpool.Pool, in PreviewInp
 	html := strings.TrimSpace(in.HTML)
 	mergeFields := in.MergeFields
 	subModuleCode := strings.TrimSpace(in.SubModuleCode)
+	var design pageDesignJSON
 	if tplID := strings.TrimSpace(in.DocumentTemplateID); tplID != "" && subModuleCode == "" {
 		var code *string
 		if err := pool.QueryRow(ctx, `
@@ -91,11 +92,18 @@ func PreviewMergedOrDraft(ctx context.Context, pool *pgxpool.Pool, in PreviewInp
 			return "", err
 		}
 		html = content.HTML
+		design = content.PageDesign
 		loaded, err := loadMergeFields(ctx, pool, tplVersionID)
 		if err != nil {
 			return "", err
 		}
 		mergeFields = loaded
+	} else if tplID := strings.TrimSpace(in.DocumentTemplateID); tplID != "" {
+		// Draft HTML from the editor still belongs to a saved template — reuse its
+		// chrome so the preview is not stripped back to a bare page.
+		if _, content, err := loadApprovedTemplateContent(ctx, pool, tplID); err == nil {
+			design = content.PageDesign
+		}
 	}
 	if html == "" {
 		return "", fmt.Errorf("html or document_template_id required")
@@ -103,12 +111,12 @@ func PreviewMergedOrDraft(ctx context.Context, pool *pgxpool.Pool, in PreviewInp
 	if mergeFields == nil {
 		mergeFields = map[string]string{}
 	}
-	return PreviewMergedHTML(ctx, pool, html, mergeFields, in.Row, in.Overrides, format, subModuleCode)
+	return PreviewMergedHTML(ctx, pool, html, mergeFields, in.Row, in.Overrides, format, subModuleCode, design)
 }
 
 // PreviewMergedHTML substitutes merge fields (+ optional txn tables) and returns HTML.
 // Does not write to DB/S3. row may be nil (uses overrides only / sample placeholders).
-func PreviewMergedHTML(ctx context.Context, pool *pgxpool.Pool, html string, mergeFields map[string]string, row map[string]any, overrides map[string]string, format, subModuleCode string) (string, error) {
+func PreviewMergedHTML(ctx context.Context, pool *pgxpool.Pool, html string, mergeFields map[string]string, row map[string]any, overrides map[string]string, format, subModuleCode string, design pageDesignJSON) (string, error) {
 	fieldAliases := loadFieldAliases(ctx, pool, subModuleCode)
 	values := buildMergeValues(html, mergeFields, row, overrides, fieldAliases)
 	out := substituteMergeFields(html, values)
@@ -135,7 +143,18 @@ func PreviewMergedHTML(ctx context.Context, pool *pgxpool.Pool, html string, mer
 		return "", err
 	}
 	out = expandKPIPlaceholders(out, genCtx.PoolRows)
-	return wrapHTMLDocument(out), nil
+	return previewHTMLDocument(ctx, out, design), nil
+}
+
+func previewHTMLDocument(ctx context.Context, body string, design pageDesignJSON) string {
+	file, err := renderMergedOutputViaDocSvc(ctx, "HTML", body, nil, nil, nil, nil, "DOCUMENT", design)
+	if err != nil || len(file.Bytes) == 0 {
+		if err != nil {
+			api.LogInfo("[DMS] preview render via document-service failed, using local wrapper: %v", err)
+		}
+		return wrapHTMLDocument(body)
+	}
+	return string(file.Bytes)
 }
 
 func buildMergeValues(html string, mergeFields map[string]string, row map[string]any, overrides map[string]string, fieldAliases map[string]string) map[string]string {
@@ -454,7 +473,7 @@ func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, p adhocAtt
 	}
 	renderedHTML = expandKPIPlaceholders(renderedHTML, genCtx.PoolRows)
 	if out.HTMLPreview == "" {
-		out.HTMLPreview = wrapHTMLDocument(renderedHTML)
+		out.HTMLPreview = previewHTMLDocument(ctx, renderedHTML, content.PageDesign)
 	}
 
 	sheetRows := expandKPISheetCells(

@@ -1213,24 +1213,25 @@ type emailMetaJSON struct {
 // pageDesignJSON is PDF chrome stored alongside TipTap html in content_json
 // (same documented last-resort envelope as emailMeta / sheetTokens).
 type pageDesignJSON struct {
-	HeaderText        string  `json:"headerText"`
-	FooterText        string  `json:"footerText"`
-	WatermarkText     string  `json:"watermarkText"`
-	WatermarkDataURL  string  `json:"watermarkDataUrl"`
-	WatermarkAngle    float64 `json:"watermarkAngle"` // degrees; default -45
-	LetterheadDataURL string  `json:"letterheadDataUrl"`
-	LogoDataURL       string  `json:"logoDataUrl"`
-	FooterLogoDataURL string  `json:"footerLogoDataUrl"`
-	BackgroundColor   string  `json:"backgroundColor"`
-	LogoAlign         string  `json:"logoAlign"`   // left | center | right
-	HeaderAlign       string  `json:"headerAlign"` // left | center | right
-	FooterAlign       string  `json:"footerAlign"` // left | center | right
-	PageSize          string  `json:"pageSize"`    // A4 | A3 | Letter | Legal
-	Orientation       string  `json:"orientation"` // portrait | landscape
-	MarginTop         float64 `json:"marginTop"`
-	MarginRight       float64 `json:"marginRight"`
-	MarginBottom      float64 `json:"marginBottom"`
-	MarginLeft        float64 `json:"marginLeft"`
+	HeaderText         string  `json:"headerText"`
+	FooterText         string  `json:"footerText"`
+	WatermarkText      string  `json:"watermarkText"`
+	WatermarkDataURL   string  `json:"watermarkDataUrl"`
+	WatermarkAngle     float64 `json:"watermarkAngle"` // degrees; default -45
+	LetterheadDataURL  string  `json:"letterheadDataUrl"`
+	LogoDataURL        string  `json:"logoDataUrl"`
+	TopLeftLogoDataURL string  `json:"topLeftLogoDataUrl"`
+	FooterLogoDataURL  string  `json:"footerLogoDataUrl"`
+	BackgroundColor    string  `json:"backgroundColor"`
+	LogoAlign          string  `json:"logoAlign"`   // left | center | right
+	HeaderAlign        string  `json:"headerAlign"` // left | center | right
+	FooterAlign        string  `json:"footerAlign"` // left | center | right
+	PageSize           string  `json:"pageSize"`    // A4 | A3 | Letter | Legal
+	Orientation        string  `json:"orientation"` // portrait | landscape
+	MarginTop          float64 `json:"marginTop"`
+	MarginRight        float64 `json:"marginRight"`
+	MarginBottom       float64 `json:"marginBottom"`
+	MarginLeft         float64 `json:"marginLeft"`
 }
 
 // loadApprovedTemplateContent returns the current approved version's id and

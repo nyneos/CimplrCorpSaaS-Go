@@ -134,24 +134,25 @@ func (c *Client) Resume(ctx context.Context, by string) error {
 
 // PageDesignJSON mirrors template content_json.pageDesign for render payloads.
 type PageDesignJSON struct {
-	HeaderText        string  `json:"headerText"`
-	FooterText        string  `json:"footerText"`
-	WatermarkText     string  `json:"watermarkText"`
-	WatermarkDataURL  string  `json:"watermarkDataUrl"`
-	WatermarkAngle    float64 `json:"watermarkAngle"`
-	LetterheadDataURL string  `json:"letterheadDataUrl"`
-	LogoDataURL       string  `json:"logoDataUrl"`
-	FooterLogoDataURL string  `json:"footerLogoDataUrl"`
-	BackgroundColor   string  `json:"backgroundColor"`
-	LogoAlign         string  `json:"logoAlign"`
-	HeaderAlign       string  `json:"headerAlign"`
-	FooterAlign       string  `json:"footerAlign"`
-	PageSize          string  `json:"pageSize"`
-	Orientation       string  `json:"orientation"`
-	MarginTop         float64 `json:"marginTop"`
-	MarginRight       float64 `json:"marginRight"`
-	MarginBottom      float64 `json:"marginBottom"`
-	MarginLeft        float64 `json:"marginLeft"`
+	HeaderText         string  `json:"headerText"`
+	FooterText         string  `json:"footerText"`
+	WatermarkText      string  `json:"watermarkText"`
+	WatermarkDataURL   string  `json:"watermarkDataUrl"`
+	WatermarkAngle     float64 `json:"watermarkAngle"`
+	LetterheadDataURL  string  `json:"letterheadDataUrl"`
+	LogoDataURL        string  `json:"logoDataUrl"`
+	TopLeftLogoDataURL string  `json:"topLeftLogoDataUrl"`
+	FooterLogoDataURL  string  `json:"footerLogoDataUrl"`
+	BackgroundColor    string  `json:"backgroundColor"`
+	LogoAlign          string  `json:"logoAlign"`
+	HeaderAlign        string  `json:"headerAlign"`
+	FooterAlign        string  `json:"footerAlign"`
+	PageSize           string  `json:"pageSize"`
+	Orientation        string  `json:"orientation"`
+	MarginTop          float64 `json:"marginTop"`
+	MarginRight        float64 `json:"marginRight"`
+	MarginBottom       float64 `json:"marginBottom"`
+	MarginLeft         float64 `json:"marginLeft"`
 }
 
 type RenderFormatRequest struct {
