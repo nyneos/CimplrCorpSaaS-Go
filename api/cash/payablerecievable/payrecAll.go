@@ -2,6 +2,7 @@ package payablerecievable
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
@@ -41,6 +42,40 @@ func stringPtrValue(value *string) string {
 		return ""
 	}
 	return strings.TrimSpace(*value)
+}
+
+func submitPayRecForApproval(pool *pgxpool.Pool, recordID, entityName, submittedByUserID, actorEmail, txType string, amount float64) {
+	go func() {
+		bgCtx := context.Background()
+		
+		recordTable := "cimplrcorpsaas.tr_payables"
+		auditTable := "public.auditactionpayable"
+		auditColumn := "payable_id"
+		actionType := strings.TrimPrefix(txType, "PAYABLE_")
+		if strings.HasPrefix(txType, "RECEIVABLE_") {
+			recordTable = "cimplrcorpsaas.tr_receivables"
+			auditTable = "public.auditactionreceivable"
+			auditColumn = "receivable_id"
+			actionType = strings.TrimPrefix(txType, "RECEIVABLE_")
+		}
+
+		_, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+			ModuleCode:       "CASH",
+			EntityCode:       entityName,
+			TransactionType:  txType,
+			RecordID:         recordID,
+			RecordTable:      recordTable,
+			AuditTable:       auditTable,
+			AuditIDColumn:    auditColumn,
+			ActionType:       actionType,
+			Amount:           amount,
+			SubmittedBy:      submittedByUserID,
+			SubmittedByEmail: actorEmail,
+		})
+		if err != nil {
+			api.LogError("[PayRec] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"record_id": recordID, "tx_type": txType, "error": err.Error()})
+		}
+	}()
 }
 
 func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -505,10 +540,12 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Fetch user name from active sessions
 		userName := ""
+		actorEmail := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == userID {
 				userName = s.Name
+				actorEmail = s.Email
 				break
 			}
 		}
@@ -617,17 +654,21 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						INSERT INTO payables (entity_id, vendor_id, invoice_number, invoice_date, due_date, amount, currency_code)
 						SELECT entity_id, vendor_id, invoice_number, invoice_date::date, due_date::date, amount::numeric, currency_code
 						FROM input_transactions WHERE upload_batch_id = $1
-						RETURNING payable_id
+						RETURNING payable_id, COALESCE((SELECT entity_name FROM masterentitycash WHERE entity_id = payables.entity_id), ''), amount
 					`, batchID)
 					if err != nil {
 						http.Error(w, "Final insert error (payables): "+err.Error(), http.StatusInternalServerError)
 						return
 					}
 					var payableIDs []string
+					type info struct { id, ename string; amt float64 }
+					var infos []info
 					for rows.Next() {
-						var payableID string
-						if err := rows.Scan(&payableID); err == nil {
+						var payableID, ename string
+						var amt float64
+						if err := rows.Scan(&payableID, &ename, &amt); err == nil {
 							payableIDs = append(payableIDs, payableID)
+							infos = append(infos, info{payableID, ename, amt})
 						}
 					}
 					rows.Close()
@@ -641,6 +682,9 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							http.Error(w, "Audit log error (payables): "+auditErr.Error(), http.StatusInternalServerError)
 							return
 						}
+						for _, i := range infos {
+							submitPayRecForApproval(pgxPool, i.id, i.ename, userID, actorEmail, "PAYABLE_CREATE", i.amt)
+						}
 					}
 				} else if txTypeUpper == "RECEIVABLE" {
 					// Insert into receivables and get receivable_ids
@@ -648,17 +692,21 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						INSERT INTO receivables (entity_id, customer_id, invoice_number, invoice_date, due_date, invoice_amount, currency_code)
 						SELECT entity_id, customer_id, invoice_number, invoice_date::date, due_date::date, invoice_amount::numeric, currency_code
 						FROM input_transactions WHERE upload_batch_id = $1
-						RETURNING receivable_id
+						RETURNING receivable_id, COALESCE((SELECT entity_name FROM masterentitycash WHERE entity_id = receivables.entity_id), ''), invoice_amount
 					`, batchID)
 					if err != nil {
 						http.Error(w, "Final insert error (receivables): "+err.Error(), http.StatusInternalServerError)
 						return
 					}
 					var receivableIDs []string
+					type info struct { id, ename string; amt float64 }
+					var infos []info
 					for rows.Next() {
-						var receivableID string
-						if err := rows.Scan(&receivableID); err == nil {
+						var receivableID, ename string
+						var amt float64
+						if err := rows.Scan(&receivableID, &ename, &amt); err == nil {
 							receivableIDs = append(receivableIDs, receivableID)
+							infos = append(infos, info{receivableID, ename, amt})
 						}
 					}
 					rows.Close()
@@ -671,6 +719,9 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						if auditErr != nil {
 							http.Error(w, "Audit log error (receivables): "+auditErr.Error(), http.StatusInternalServerError)
 							return
+						}
+						for _, i := range infos {
+							submitPayRecForApproval(pgxPool, i.id, i.ename, userID, actorEmail, "RECEIVABLE_CREATE", i.amt)
 						}
 					}
 				} else {
@@ -717,6 +768,8 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			EditedAt        string  `json:"edited_at"`
 			DeletedBy       string  `json:"deleted_by"`
 			DeletedAt       string  `json:"deleted_at"`
+			PendingApproval bool    `json:"pending_approval"`
+			InstanceID      string  `json:"instance_id"`
 		}
 		type Receivable struct {
 			ReceivableID     string  `json:"receivable_id"`
@@ -745,6 +798,8 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			EditedAt        string  `json:"edited_at"`
 			DeletedBy       string  `json:"deleted_by"`
 			DeletedAt       string  `json:"deleted_at"`
+			PendingApproval bool    `json:"pending_approval"`
+			InstanceID      string  `json:"instance_id"`
 		}
 
 		// 1. Fetch all payables (new table tr_payables)
@@ -767,7 +822,9 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				p.old_invoice_date,
 				p.old_due_date,
 				p.old_amount,
-				p.old_currency_code
+				p.old_currency_code,
+				(ai.instance_id IS NOT NULL) as pending_approval,
+				COALESCE(ai.instance_id::text, '') as instance_id
 			FROM tr_payables p
 			LEFT JOIN masterentitycash e
 				ON LOWER(TRIM(e.entity_name)) = LOWER(TRIM(p.entity_name))
@@ -775,6 +832,13 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN mastercounterparty c
 				ON LOWER(TRIM(c.counterparty_name)) = LOWER(TRIM(p.counterparty_name))
 				AND COALESCE(c.is_deleted, false) = false
+			LEFT JOIN LATERAL (
+				SELECT ai2.instance_id
+				FROM uam.approval_instance ai2
+				WHERE ai2.record_id = p.payable_id::text AND ai2.module_code = 'CASH'
+				  AND ai2.status = 'PENDING' AND ai2.is_deleted = false
+				ORDER BY ai2.submitted_at DESC, ai2.instance_id DESC LIMIT 1
+			) ai ON true
 			WHERE COALESCE(p.is_deleted, false) != TRUE`)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
@@ -791,7 +855,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var oldInvoiceDate, oldDueDate *time.Time
 			var oldAmountPtr *float64
 			var oldCurrencyPtr *string
-			if err := payableRows.Scan(&p.PayableID, &p.EntityID, &p.EntityName, &p.CounterpartyID, &p.CounterpartyName, &p.InvoiceNo, &invoiceDate, &dueDate, &p.Amount, &p.CurrencyCode, &uploadS3Key, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
+			if err := payableRows.Scan(&p.PayableID, &p.EntityID, &p.EntityName, &p.CounterpartyID, &p.CounterpartyName, &p.InvoiceNo, &invoiceDate, &dueDate, &p.Amount, &p.CurrencyCode, &uploadS3Key, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr, &p.PendingApproval, &p.InstanceID); err != nil {
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
 				return
 			}
@@ -872,7 +936,9 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				r.old_invoice_date,
 				r.old_due_date,
 				r.old_invoice_amount,
-				r.old_currency_code
+				r.old_currency_code,
+				(ai.instance_id IS NOT NULL) as pending_approval,
+				COALESCE(ai.instance_id::text, '') as instance_id
 			FROM tr_receivables r
 			LEFT JOIN masterentitycash e
 				ON LOWER(TRIM(e.entity_name)) = LOWER(TRIM(r.entity_name))
@@ -880,6 +946,13 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN mastercounterparty c
 				ON LOWER(TRIM(c.counterparty_name)) = LOWER(TRIM(r.counterparty_name))
 				AND COALESCE(c.is_deleted, false) = false
+			LEFT JOIN LATERAL (
+				SELECT ai2.instance_id
+				FROM uam.approval_instance ai2
+				WHERE ai2.record_id = r.receivable_id::text AND ai2.module_code = 'CASH'
+				  AND ai2.status = 'PENDING' AND ai2.is_deleted = false
+				ORDER BY ai2.submitted_at DESC, ai2.instance_id DESC LIMIT 1
+			) ai ON true
 			WHERE COALESCE(r.is_deleted, false) != TRUE`)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
@@ -896,7 +969,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var oldInvoiceDate, oldDueDate *time.Time
 			var oldAmountPtr *float64
 			var oldCurrencyPtr *string
-			if err := receivableRows.Scan(&rcv.ReceivableID, &rcv.EntityID, &rcv.EntityName, &rcv.CounterpartyID, &rcv.CounterpartyName, &rcv.InvoiceNo, &invoiceDate, &dueDate, &rcv.Amount, &rcv.CurrencyCode, &uploadS3Key, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
+			if err := receivableRows.Scan(&rcv.ReceivableID, &rcv.EntityID, &rcv.EntityName, &rcv.CounterpartyID, &rcv.CounterpartyName, &rcv.InvoiceNo, &invoiceDate, &dueDate, &rcv.Amount, &rcv.CurrencyCode, &uploadS3Key, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr, &rcv.PendingApproval, &rcv.InstanceID); err != nil {
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
 				return
 			}
@@ -1089,9 +1162,11 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		requestedBy := ""
+		actorEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
 				requestedBy = s.Name
+				actorEmail = s.Email
 				break
 			}
 		}
@@ -1112,7 +1187,10 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		fieldsMap := make(map[string]map[string]interface{})
 		for _, id := range req.TransactionIDs {
+			f := loadTransactionPolicyFields(ctx, pgxPool, id)
+			fieldsMap[id] = f
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
@@ -1121,12 +1199,19 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "BulkRequestDeleteTransactions",
 				APIPath:             "/cash/transactions/bulk-delete",
 				DefaultBlockMessage: "Payable/receivable delete blocked by policy",
-				Fields:              loadTransactionPolicyFields(ctx, pgxPool, id),
+				Fields:              f,
 			}); !ok {
 				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, msg, "")
 				return
 			}
 		}
+		
+		for _, id := range req.TransactionIDs {
+			if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", id, actorEmail); err != nil {
+				api.LogError("[PayRec] CancelPendingInstances failed for delete on %s: %v", id, err)
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction, "")
@@ -1189,6 +1274,19 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
+		for _, id := range txIDsPay {
+			f := fieldsMap[id]
+			entityName := fmt.Sprint(f["entity_name"])
+			amt, _ := strconv.ParseFloat(fmt.Sprint(f["amount"]), 64)
+			submitPayRecForApproval(pgxPool, id, entityName, req.UserID, actorEmail, "PAYABLE_DELETE", amt)
+		}
+		for _, id := range txIDsRec {
+			f := fieldsMap[id]
+			entityName := fmt.Sprint(f["entity_name"])
+			amt, _ := strconv.ParseFloat(fmt.Sprint(f["invoice_amount"]), 64)
+			submitPayRecForApproval(pgxPool, id, entityName, req.UserID, actorEmail, "RECEIVABLE_DELETE", amt)
+		}
+
 		api.RespondEnvelopeSuccess(w, "delete requests created", nil)
 	}
 }
@@ -1207,9 +1305,11 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		checkerBy := ""
+		checkerEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
 				checkerBy = s.Name
+				checkerEmail = s.Email
 				break
 			}
 		}
@@ -1231,6 +1331,23 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		engineActed := make(map[string]bool)
+		for _, id := range req.TransactionIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "CASH", RecordID: id,
+				UserID: req.UserID, UserEmail: checkerEmail,
+				Action: approvalengine.ActionRejected, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[PayRec] ActOnPendingOrDiagnose reject failed for %s: %v", map[string]interface{}{"record_id": id, "error": actionErr.Error()})
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[id] = true
+			}
+		}
+
 		payActionIDs := make([]string, 0, len(payIDs))
 		recActionIDs := make([]string, 0, len(recIDs))
 		payEditActionIDs := make([]string, 0)
@@ -1266,6 +1383,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// For payables: find latest action_id per payable and add to list
 		if len(payIDs) > 0 {
 			for _, pid := range payIDs {
+				if engineActed[pid] { continue }
 				var aid, atype, status string
 				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionpayable WHERE payable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1`, pid).Scan(&aid, &atype, &status); err != nil {
 					api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction+pid, "")
@@ -1289,6 +1407,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// For receivables
 		if len(recIDs) > 0 {
 			for _, rid := range recIDs {
+				if engineActed[rid] { continue }
 				var aid, atype, status string
 				if err := tx.QueryRow(ctx, `SELECT action_id, actiontype, processing_status FROM auditactionreceivable WHERE receivable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1`, rid).Scan(&aid, &atype, &status); err != nil {
 					api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrMissingLatestAuditForTransaction+rid, "")
@@ -1393,9 +1512,11 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		checkerBy := ""
+		checkerEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
 				checkerBy = s.Name
+				checkerEmail = s.Email
 				break
 			}
 		}
@@ -1417,6 +1538,23 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		
+		engineActed := make(map[string]bool)
+		for _, id := range req.TransactionIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "CASH", RecordID: id,
+				UserID: req.UserID, UserEmail: checkerEmail,
+				Action: approvalengine.ActionApproved, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[PayRec] ActOnPendingOrDiagnose approve failed for %s: %v", map[string]interface{}{"record_id": id, "error": actionErr.Error()})
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[id] = true
+			}
+		}
+
 		payActionIDs := make([]string, 0, len(payIDs))
 		recActionIDs := make([]string, 0, len(recIDs))
 		payDeleteActionIDs := make([]string, 0)
@@ -1426,6 +1564,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		payEditActionIDs := make([]string, 0)
 		recEditActionIDs := make([]string, 0)
 		for _, pid := range payIDs {
+			if engineActed[pid] { continue }
 			var aid, atype, status string
 			if err := pgxPool.QueryRow(ctx, `
 				SELECT action_id, actiontype, processing_status
@@ -1454,6 +1593,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		for _, rid := range recIDs {
+			if engineActed[rid] { continue }
 			var aid, atype, status string
 			if err := pgxPool.QueryRow(ctx, `
 				SELECT action_id, actiontype, processing_status
@@ -1482,11 +1622,12 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if len(payActionIDs) == 0 && len(recActionIDs) == 0 {
+		if len(payActionIDs) == 0 && len(recActionIDs) == 0 && len(engineActed) == 0 {
 			api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "no valid actions found for provided ids", "")
 			return
 		}
 		for _, id := range req.TransactionIDs {
+			if engineActed[id] { continue }
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreApprove,
 				ModuleCode:          common.ModuleCash,
@@ -1677,9 +1818,11 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		userName := ""
+		actorEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
 				userName = s.Name
+				actorEmail = s.Email
 				break
 			}
 		}
@@ -1687,6 +1830,14 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, "")
 			return
 		}
+
+		type instanceReq struct {
+			recordID   string
+			entityName string
+			txType     string
+			amount     float64
+		}
+		var instancesToCreate []instanceReq
 
 		for idx, itm := range req.Items {
 			entityName := fmt.Sprint(itm["entity_name"])
@@ -1796,6 +1947,12 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 				payableActionIDs = append(payableActionIDs, actionID)
+				instancesToCreate = append(instancesToCreate, instanceReq{
+					recordID:   pid,
+					entityName: entityName,
+					txType:     "PAYABLE_CREATE",
+					amount:     amountF,
+				})
 
 			} else if txType == "RECEIVABLE" {
 				var rid string
@@ -1814,6 +1971,12 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 				receivableActionIDs = append(receivableActionIDs, actionID)
+				instancesToCreate = append(instancesToCreate, instanceReq{
+					recordID:   rid,
+					entityName: entityName,
+					txType:     "RECEIVABLE_CREATE",
+					amount:     amountF,
+				})
 
 			} else {
 				tx.Rollback(ctx)
@@ -1827,6 +1990,10 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		for _, reqInst := range instancesToCreate {
+			submitPayRecForApproval(pgxPool, reqInst.recordID, reqInst.entityName, req.UserID, actorEmail, reqInst.txType, reqInst.amount)
+		}
 
 		if createdIDs := append(append([]string{}, createdPayables...), createdReceivables...); len(createdIDs) > 0 {
 			dmsevent.Fire(pgxPool, "CASH", "PAYABLE_RECEIVABLE", "POST_CREATE", createdIDs, userName)
@@ -1865,9 +2032,11 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		userName := ""
+		actorEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
 				userName = s.Name
+				actorEmail = s.Email
 				break
 			}
 		}
@@ -1908,6 +2077,10 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", req.ID, actorEmail); err != nil {
+			api.LogError("[PayRec] CancelPendingInstances failed for edit on %s: %v", req.ID, err)
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
@@ -1921,8 +2094,12 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		var actionID string
+		var effEntity string
+		var effAmount float64
+		var txType string
 
 		if strings.HasPrefix(id, constants.ErrPrefixPayable) {
+			txType = "PAYABLE_EDIT"
 			extractStr := func(key string) *string {
 				if v, ok := req.Fields[key]; ok {
 					s := fmt.Sprint(v)
@@ -2008,6 +2185,12 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusForbidden, msg)
 				return
+			}
+			effEntity = effectiveEntity
+			if newAmount != nil {
+				effAmount = *newAmount
+			} else if oldAmount != nil {
+				effAmount = *oldAmount
 			}
 
 			auditQ := `
@@ -2119,6 +2302,13 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusForbidden, msg)
 				return
 			}
+			txType = "RECEIVABLE_EDIT"
+			effEntity = effectiveEntity
+			if newAmount != nil {
+				effAmount = *newAmount
+			} else if oldAmount != nil {
+				effAmount = *oldAmount
+			}
 
 			auditQ := `
 				INSERT INTO auditactionreceivable
@@ -2153,6 +2343,8 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		submitPayRecForApproval(pgxPool, id, effEntity, req.UserID, actorEmail, txType, effAmount)
 
 		dmsevent.Fire(pgxPool, "CASH", "PAYABLE_RECEIVABLE", "POST_EDIT", []string{req.ID}, userName)
 

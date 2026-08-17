@@ -115,7 +115,7 @@ func HandleTest(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		result, detail, message := "PASS", "", ""
+		result, detail, message := "NO_RESULTS", "", "No policies were evaluated for this scope/configuration."
 		if len(checkRes.Results) > 0 {
 			picked := checkRes.Results[0]
 			for _, pr := range checkRes.Results {

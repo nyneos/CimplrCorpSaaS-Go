@@ -2,6 +2,7 @@ package investmentsuite
 
 import (
 	"CimplrCorpSaas/api"
+	approvalengine "CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/investment/portfolio"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -25,6 +26,109 @@ import (
 )
 
 const amountTolerance = 0.01
+
+// submitMFProposalForApproval fires the approval-matrix engine for a
+// newly created or edited MF investment proposal, asynchronously.
+// submittedByUserID must be the session's numeric user_id (hard FK to
+// public.users(id) — never a display name or email).
+func submitMFProposalForApproval(pool *pgxpool.Pool, proposalID, entityName, submittedByUserID, actorEmail, txType string, amount float64) {
+	go func() {
+		bgCtx := context.Background()
+		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+			ModuleCode:       "INVESTMENT_MF",
+			EntityCode:       entityName,
+			TransactionType:  txType,
+			RecordID:         proposalID,
+			RecordTable:      "investment.investment_proposal",
+			AuditTable:       "investment.auditactionproposal",
+			AuditIDColumn:    "proposal_id",
+			ActionType:       strings.TrimPrefix(txType, "MF_PROPOSAL_"),
+			Amount:           amount,
+			SubmittedBy:      submittedByUserID,
+			SubmittedByEmail: actorEmail,
+		}); err != nil {
+			api.LogError("[MFProposal] approvalengine.CreateInstance failed for proposal %s (%s): %v", proposalID, txType, err)
+		}
+	}()
+}
+
+// loadMFProposalApprovalWorkflow finds the most recent INVESTMENT_MF approval-
+// matrix instance for this proposal and returns its rich detail for the
+// ApprovalWorkflowViewer UI. Self-heals (mirrors sweepConfig/audit.go's
+// loadSweepInitiationApprovalWorkflow): if no instance exists yet but a
+// PENDING% audit row does, creates the instance on the fly. auditactionproposal
+// stores the requester's real email in requested_by (not a display name), so
+// resolving a real user_id only needs a join on public.users.email.
+func loadMFProposalApprovalWorkflow(ctx context.Context, pool *pgxpool.Pool, proposalID, viewerUserID string) interface{} {
+	if proposalID == "" {
+		return nil
+	}
+
+	var instanceID string
+	_ = pool.QueryRow(ctx, `
+		SELECT instance_id
+		FROM uam.approval_instance
+		WHERE record_id = $1 AND module_code = 'INVESTMENT_MF' AND is_deleted = false
+		ORDER BY submitted_at DESC LIMIT 1`, proposalID,
+	).Scan(&instanceID)
+
+	if instanceID == "" {
+		var pendingActionType, entityName, submittedByUserID, submittedByEmail string
+		var totalAmount float64
+		scanErr := pool.QueryRow(ctx, `
+			SELECT a.actiontype, COALESCE(p.entity_name,''), COALESCE(u.id,''), COALESCE(a.requested_by,''),
+			       COALESCE(p.total_amount,0)
+			FROM investment.auditactionproposal a
+			JOIN investment.investment_proposal p ON p.proposal_id = a.proposal_id
+			LEFT JOIN public.users u ON u.email = a.requested_by
+			WHERE a.proposal_id = $1
+			  AND a.processing_status LIKE 'PENDING%'
+			ORDER BY a.requested_at DESC LIMIT 1`, proposalID,
+		).Scan(&pendingActionType, &entityName, &submittedByUserID, &submittedByEmail, &totalAmount)
+
+		if scanErr == nil && pendingActionType != "" && submittedByUserID != "" {
+			txType := map[string]string{
+				"CREATE": "MF_PROPOSAL_CREATE",
+				"EDIT":   "MF_PROPOSAL_EDIT",
+				"DELETE": "MF_PROPOSAL_DELETE",
+			}[pendingActionType]
+			if txType == "" {
+				txType = "MF_PROPOSAL_CREATE"
+			}
+			newInstID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "INVESTMENT_MF",
+				EntityCode:       entityName,
+				TransactionType:  txType,
+				RecordID:         proposalID,
+				RecordTable:      "investment.investment_proposal",
+				AuditTable:       "investment.auditactionproposal",
+				AuditIDColumn:    "proposal_id",
+				ActionType:       pendingActionType,
+				Amount:           totalAmount,
+				SubmittedBy:      submittedByUserID,
+				SubmittedByEmail: submittedByEmail,
+			})
+			if instErr != nil {
+				api.LogError("[MFProposal] Self-heal CreateInstance for %s: %v", proposalID, instErr)
+			} else if newInstID != "" {
+				instanceID = newInstID
+				api.LogInfo("[MFProposal] Self-heal: created instance %s for proposal %s", newInstID, proposalID)
+			}
+		} else if scanErr == nil && pendingActionType != "" {
+			api.LogInfo("[MFProposal] Self-heal skipped for %s: requester email did not resolve to a unique user_id", proposalID)
+		}
+	}
+
+	if instanceID == "" {
+		return nil
+	}
+	richDetail, richErr := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, viewerUserID)
+	if richErr != nil {
+		api.LogError("[MFProposal] GetRichInstanceDetail failed for instance=%s proposal=%s: %v", instanceID, proposalID, richErr)
+		return nil
+	}
+	return richDetail
+}
 
 // CreateProposalRequest models the payload for manual proposal creation
 type CreateProposalRequest struct {
@@ -258,6 +362,9 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit proposal transaction")
 			return
 		}
+
+		// Fire approval-matrix engine instance (async, no-op if engine disabled or no matrix)
+		submitMFProposalForApproval(pool, proposalID, req.EntityName, req.UserID, userEmail, "MF_PROPOSAL_CREATE", req.TotalAmount)
 
 		go func() {
 			payload := BuildProposalNotifPayload(context.Background(), pool, []string{proposalID}, constants.AuditActionCreate, userEmail)
@@ -524,6 +631,52 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			}
 		}
 
+		// ── Approval-matrix engine: attempt engine-side approve/reject first.
+		// IDs that the engine handled (actionRes.Acted==true) are removed from
+		// the legacy stamp lists below. IDs where no matrix is configured fall
+		// through to the existing direct-stamp SQL unchanged.
+		engineActed := make(map[string]bool)
+		engineAction := approvalengine.ActionApproved
+		if action != constants.AuditActionApprove {
+			engineAction = approvalengine.ActionRejected
+		}
+		allDecisionIDs := append(append([]string{}, approvedProposals...), deletedProposals...)
+		allDecisionIDs = append(allDecisionIDs, rejectedProposals...)
+		for _, proposalID := range allDecisionIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "INVESTMENT_MF", RecordID: proposalID,
+				UserID: req.UserID, UserEmail: userEmail,
+				Action: engineAction, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[MFProposal] ActOnPendingOrDiagnose %s failed for %s: %v", action, proposalID, actionErr)
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[proposalID] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[MFProposal] cancelled stale approval instance for proposal %s", proposalID)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[MFProposal] engine skipped proposal %s: %s", proposalID, actionRes.Reason)
+			}
+		}
+		// Filter out engine-handled IDs from legacy stamp lists
+		filterEngineActed := func(ids []string) []string {
+			out := ids[:0]
+			for _, id := range ids {
+				if !engineActed[id] {
+					out = append(out, id)
+				}
+			}
+			return out
+		}
+		approvedActions = filterEngineActed(approvedActions)
+		approvedProposals = filterEngineActed(approvedProposals)
+		deletedActions = filterEngineActed(deletedActions)
+		deletedProposals = filterEngineActed(deletedProposals)
+		rejectedActions = filterEngineActed(rejectedActions)
+		rejectedProposals = filterEngineActed(rejectedProposals)
+
 		if len(approvedActions) > 0 {
 			if err := updateAuditStatuses(ctx, tx, approvedActions, constants.StatusApproved, userEmail, req.Comment); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
@@ -785,6 +938,15 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// ── Approval-matrix engine: cancel any stale instance then create a DELETE one.
+		for _, id := range readyForDelete {
+			if err := approvalengine.CancelPendingInstances(context.Background(), pool, "INVESTMENT_MF", id, userEmail); err != nil {
+				api.LogError("[MFProposal] CancelPendingInstances for delete failed for %s: %v", id, err)
+			}
+			proposalRow, _ := loadMFProposalRow(context.Background(), pool, id)
+			submitMFProposalForApproval(pool, id, proposalRow.EntityName, req.UserID, userEmail, "MF_PROPOSAL_DELETE", proposalRow.TotalAmount)
+		}
+
 		response := ProposalBulkDeleteResponse{
 			Success:        true,
 			RequestedIDs:   readyForDelete,
@@ -890,10 +1052,35 @@ func fetchProposalRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([
 			COALESCE(h.edited_by,'') AS edited_by,
 			COALESCE(h.edited_at,'') AS edited_at,
 			COALESCE(h.deleted_by,'') AS deleted_by,
-			COALESCE(h.deleted_at,'') AS deleted_at
+			COALESCE(h.deleted_at,'') AS deleted_at,
+			-- ── Approval-engine columns ────────────────────────────────────────
+			COALESCE(ai.instance_id,'')        AS approval_instance_id,
+			COALESCE(ai.status,'')             AS approval_engine_status,
+			COALESCE(aie.instance_eye_id,'')   AS current_eye_id,
+			COALESCE(aie.position::text,'')    AS current_eye_position,
+			COALESCE(aie.approvals_required,0) AS approvals_required,
+			COALESCE(aie.approvals_received,0) AS approvals_received,
+			aie.sla_deadline                   AS sla_deadline,
+			COALESCE(aie.is_escalated,false)   AS is_escalated
 		FROM investment.investment_proposal p
 		LEFT JOIN latest_audit l ON l.proposal_id = p.proposal_id
 		LEFT JOIN history h ON h.proposal_id = p.proposal_id
+		LEFT JOIN LATERAL (
+			SELECT ai.* FROM uam.approval_instance ai
+			WHERE ai.record_id = p.proposal_id::text
+			  AND ai.module_code = 'INVESTMENT_MF'
+			  AND ai.status = 'PENDING'
+			  AND ai.is_deleted = false
+			ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+			LIMIT 1
+		) ai ON true
+		LEFT JOIN LATERAL (
+			SELECT aie.* FROM uam.approval_instance_eye aie
+			WHERE aie.instance_id = ai.instance_id
+			  AND aie.status = 'ACTIVE'
+			ORDER BY aie.position ASC, aie.instance_eye_id ASC
+			LIMIT 1
+		) aie ON true
 	`
 
 	var (
@@ -1359,6 +1546,7 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			a["entity_demats"] = entityDemats
 			allocations[i] = a
 		}
+		payload["approval_workflow"] = loadMFProposalApprovalWorkflow(ctx, pool, req.ProposalID, api.GetUserIDFromCtx(ctx))
 		api.RespondWithPayload(w, true, "", payload)
 	}
 }

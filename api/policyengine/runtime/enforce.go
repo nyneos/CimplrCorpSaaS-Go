@@ -121,6 +121,15 @@ func EnforceInline(ctx context.Context, r *http.Request, pool *pgxpool.Pool, in 
 	return out.OK, out.Message
 }
 
+// EnforceInlineWithMatrix returns (ok, errorMessage, triggerApprovalMatrixID) without writing HTTP.
+func EnforceInlineWithMatrix(ctx context.Context, r *http.Request, pool *pgxpool.Pool, in EnforceInput) (bool, string, string) {
+	out := EnforceDetailed(ctx, r, pool, in)
+	if out.OK {
+		return true, "", out.Result.TriggerApprovalMatrixID
+	}
+	return false, out.Message, ""
+}
+
 // EnforceDetailed runs the check and returns the full CheckResult for UIs.
 func EnforceDetailed(ctx context.Context, r *http.Request, pool *pgxpool.Pool, in EnforceInput) EnforceOutcome {
 	if !PolicyChecksEnabled() {

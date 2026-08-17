@@ -2,6 +2,7 @@ package redemption
 
 import (
 	"CimplrCorpSaas/api"
+	approvalengine "CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/portfolio"
 	"CimplrCorpSaas/api/notification/catalog"
@@ -23,6 +24,115 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// submitMFRedemptionForApproval fires the approval-matrix engine for a
+// newly created or edited MF redemption initiation, asynchronously.
+// submittedByUserID must be the session's numeric user_id (hard FK to
+// public.users(id) — never a display name or email).
+func submitMFRedemptionForApproval(pool *pgxpool.Pool, redemptionID, entityName, submittedByUserID, actorEmail, txType string, amount *float64) {
+	go func() {
+		bgCtx := context.Background()
+		var amt float64
+		if amount != nil {
+			amt = *amount
+		}
+		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+			ModuleCode:       "INVESTMENT_MF",
+			EntityCode:       entityName,
+			TransactionType:  txType,
+			RecordID:         redemptionID,
+			RecordTable:      "investment.redemption_initiation",
+			AuditTable:       "investment.auditactionredemption",
+			AuditIDColumn:    "redemption_id",
+			ActionType:       strings.TrimPrefix(txType, "MF_REDEMPTION_INITIATION_"),
+			Amount:           amt,
+			SubmittedBy:      submittedByUserID,
+			SubmittedByEmail: actorEmail,
+		}); err != nil {
+			api.LogError("[MFRedemptionInitiation] approvalengine.CreateInstance failed for redemption %s (%s): %v", redemptionID, txType, err)
+		}
+	}()
+}
+
+// loadMFRedemptionApprovalWorkflow finds the most recent INVESTMENT_MF
+// approval-matrix instance for this redemption initiation and returns its
+// rich detail for the ApprovalWorkflowViewer UI. Self-heals if no instance
+// exists yet but a PENDING% audit row does. auditactionredemption stores the
+// requester's real email in requested_by for CREATE/EDIT/DELETE rows.
+func loadMFRedemptionApprovalWorkflow(ctx context.Context, pool *pgxpool.Pool, redemptionID, viewerUserID string) interface{} {
+	if redemptionID == "" {
+		return nil
+	}
+
+	var instanceID string
+	_ = pool.QueryRow(ctx, `
+		SELECT instance_id
+		FROM uam.approval_instance
+		WHERE record_id = $1 AND module_code = 'INVESTMENT_MF' AND is_deleted = false
+		ORDER BY submitted_at DESC LIMIT 1`, redemptionID,
+	).Scan(&instanceID)
+
+	if instanceID == "" {
+		var pendingActionType, entityName, submittedByUserID, submittedByEmail string
+		var byAmount sql.NullFloat64
+		scanErr := pool.QueryRow(ctx, `
+			SELECT a.actiontype, COALESCE(r.entity_name,''), COALESCE(u.id,''), COALESCE(a.requested_by,''),
+			       r.by_amount
+			FROM investment.auditactionredemption a
+			JOIN investment.redemption_initiation r ON r.redemption_id = a.redemption_id
+			LEFT JOIN public.users u ON u.email = a.requested_by
+			WHERE a.redemption_id = $1
+			  AND a.processing_status LIKE 'PENDING%'
+			ORDER BY a.requested_at DESC LIMIT 1`, redemptionID,
+		).Scan(&pendingActionType, &entityName, &submittedByUserID, &submittedByEmail, &byAmount)
+
+		if scanErr == nil && pendingActionType != "" && submittedByUserID != "" {
+			txType := map[string]string{
+				"CREATE": "MF_REDEMPTION_INITIATION_CREATE",
+				"EDIT":   "MF_REDEMPTION_INITIATION_EDIT",
+				"DELETE": "MF_REDEMPTION_INITIATION_DELETE",
+			}[pendingActionType]
+			if txType == "" {
+				txType = "MF_REDEMPTION_INITIATION_CREATE"
+			}
+			var amount float64
+			if byAmount.Valid {
+				amount = byAmount.Float64
+			}
+			newInstID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "INVESTMENT_MF",
+				EntityCode:       entityName,
+				TransactionType:  txType,
+				RecordID:         redemptionID,
+				RecordTable:      "investment.redemption_initiation",
+				AuditTable:       "investment.auditactionredemption",
+				AuditIDColumn:    "redemption_id",
+				ActionType:       pendingActionType,
+				Amount:           amount,
+				SubmittedBy:      submittedByUserID,
+				SubmittedByEmail: submittedByEmail,
+			})
+			if instErr != nil {
+				api.LogError("[MFRedemptionInitiation] Self-heal CreateInstance for %s: %v", redemptionID, instErr)
+			} else if newInstID != "" {
+				instanceID = newInstID
+				api.LogInfo("[MFRedemptionInitiation] Self-heal: created instance %s for redemption %s", newInstID, redemptionID)
+			}
+		} else if scanErr == nil && pendingActionType != "" {
+			api.LogInfo("[MFRedemptionInitiation] Self-heal skipped for %s: requester email did not resolve to a unique user_id", redemptionID)
+		}
+	}
+
+	if instanceID == "" {
+		return nil
+	}
+	richDetail, richErr := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, viewerUserID)
+	if richErr != nil {
+		api.LogError("[MFRedemptionInitiation] GetRichInstanceDetail failed for instance=%s redemption=%s: %v", instanceID, redemptionID, richErr)
+		return nil
+	}
+	return richDetail
+}
 
 const (
 	errLoadRedemptionForPolicyCheck = ": failed to load redemption for policy check: "
@@ -359,6 +469,15 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Fire approval-matrix engine instance (async, no-op if engine disabled or no matrix)
+		var amountToPass *float64
+		if req.ByAmount > 0 {
+			amountToPass = &req.ByAmount
+		} else if req.EstimatedProceeds > 0 {
+			amountToPass = &req.EstimatedProceeds
+		}
+		submitMFRedemptionForApproval(pgxPool, redemptionID, req.EntityName, req.UserID, userEmail, "MF_REDEMPTION_INITIATION_CREATE", amountToPass)
+
 		correlationID := redemptionID
 		go func() {
 			payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, []string{redemptionID}, constants.AuditActionCreate, userEmail)
@@ -623,6 +742,14 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error()})
 				continue
 			}
+
+			var amountToPass *float64
+			if row.ByAmount > 0 {
+				amountToPass = &row.ByAmount
+			} else if row.EstimatedProceeds > 0 {
+				amountToPass = &row.EstimatedProceeds
+			}
+			submitMFRedemptionForApproval(pgxPool, redemptionID, row.EntityName, req.UserID, userEmail, "MF_REDEMPTION_INITIATION_CREATE", amountToPass)
 
 			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION", "POST_CREATE", []string{redemptionID}, userEmail)
 
@@ -992,6 +1119,21 @@ func DeleteRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// ── Approval-matrix engine: cancel stale instances and create DELETE instances.
+		for _, id := range req.RedemptionIDs {
+			if err := approvalengine.CancelPendingInstances(context.Background(), pgxPool, "INVESTMENT_MF", id, requestedBy); err != nil {
+				api.LogError("[MFRedemptionInitiation] CancelPendingInstances for delete failed for %s: %v", id, err)
+			}
+			redemptionRow, _ := loadRedemptionInitiationRow(context.Background(), pgxPool, id)
+			var amountToPass *float64
+			if redemptionRow.ByAmount != nil && *redemptionRow.ByAmount > 0 {
+				amountToPass = redemptionRow.ByAmount
+			} else if redemptionRow.EstimatedProceeds != nil && *redemptionRow.EstimatedProceeds > 0 {
+				amountToPass = redemptionRow.EstimatedProceeds
+			}
+			submitMFRedemptionForApproval(pgxPool, id, redemptionRow.EntityName, req.UserID, requestedBy, "MF_REDEMPTION_INITIATION_DELETE", amountToPass)
+		}
+
 		go func() {
 			payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, req.RedemptionIDs, "DELETE_REQUEST", requestedBy)
 			corID := ""
@@ -1098,6 +1240,42 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			return
 		}
+
+		// ── Approval-matrix engine: handle engine-managed records first.
+		// Records the engine handled (Acted==true) are skipped in legacy stamp below.
+		engineActed := map[string]bool{}
+		for _, rid := range req.RedemptionIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "INVESTMENT_MF", RecordID: rid,
+				UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionApproved, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[MFRedemptionInitiation] ActOnPendingOrDiagnose approve failed for %s: %v", rid, actionErr)
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[rid] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[MFRedemptionInitiation] cancelled stale instance for %s", rid)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[MFRedemptionInitiation] engine skipped %s: %s", rid, actionRes.Reason)
+			}
+		}
+		// Remove engine-handled IDs from legacy stamp lists
+		filterEA := func(ids []string) []string {
+			out := ids[:0]
+			for _, id := range ids {
+				if !engineActed[id] {
+					out = append(out, id)
+				}
+			}
+			return out
+		}
+		toApprove = filterEA(toApprove)
+		toApproveRedemptionIDs = filterEA(toApproveRedemptionIDs)
+		toDeleteActionIDs = filterEA(toDeleteActionIDs)
+		deleteMasterIDs = filterEA(deleteMasterIDs)
 
 		if len(toApprove) > 0 {
 			if _, err := tx.Exec(ctx, `
@@ -1367,6 +1545,21 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// ── Approval-matrix engine: reject engine-managed records
+		for _, rid := range req.RedemptionIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "INVESTMENT_MF", RecordID: rid,
+				UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionRejected, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[MFRedemptionInitiation] ActOnPendingOrDiagnose reject failed for %s: %v", rid, actionErr)
+			}
+			if actionRes.Acted {
+				api.LogInfo("[MFRedemptionInitiation] engine rejected %s", rid)
+			}
+		}
+
 		// Release blocked units for rejected redemptions with entity scoping
 		for _, rid := range req.RedemptionIDs {
 			var folioID, dematID, schemeID, entityName sql.NullString
@@ -1605,7 +1798,16 @@ func fetchRedemptionInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, i
 			COALESCE(h.edited_by,'') AS edited_by,
 			COALESCE(h.edited_at,'') AS edited_at,
 			COALESCE(h.deleted_by,'') AS deleted_by,
-			COALESCE(h.deleted_at,'') AS deleted_at
+			COALESCE(h.deleted_at,'') AS deleted_at,
+			-- ── Approval-engine columns ────────────────────────────────────────
+			COALESCE(ai.instance_id,'')        AS approval_instance_id,
+			COALESCE(ai.status,'')             AS approval_engine_status,
+			COALESCE(aie.instance_eye_id,'')   AS current_eye_id,
+			COALESCE(aie.position::text,'')    AS current_eye_position,
+			COALESCE(aie.approvals_required,0) AS approvals_required,
+			COALESCE(aie.approvals_received,0) AS approvals_received,
+			aie.sla_deadline                   AS sla_deadline,
+			COALESCE(aie.is_escalated,false)   AS is_escalated
 		FROM investment.redemption_initiation m
 		LEFT JOIN latest_audit l ON l.redemption_id = m.redemption_id
 		LEFT JOIN history h ON h.redemption_id = m.redemption_id
@@ -1617,6 +1819,22 @@ func fetchRedemptionInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, i
 		)
 		LEFT JOIN resolved_folio rf ON rf.redemption_id = m.redemption_id
 		LEFT JOIN resolved_demat rd ON rd.redemption_id = m.redemption_id
+		LEFT JOIN LATERAL (
+			SELECT ai.* FROM uam.approval_instance ai
+			WHERE ai.record_id = m.redemption_id::text
+			  AND ai.module_code = 'INVESTMENT_MF'
+			  AND ai.status = 'PENDING'
+			  AND ai.is_deleted = false
+			ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+			LIMIT 1
+		) ai ON true
+		LEFT JOIN LATERAL (
+			SELECT aie.* FROM uam.approval_instance_eye aie
+			WHERE aie.instance_id = ai.instance_id
+			  AND aie.status = 'ACTIVE'
+			ORDER BY aie.position ASC, aie.instance_eye_id ASC
+			LIMIT 1
+		) aie ON true
 	`
 
 	var (
@@ -2502,6 +2720,7 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]any{
+			"approval_workflow": loadMFRedemptionApprovalWorkflow(ctx, pgxPool, redemptionID, api.GetUserIDFromCtx(ctx)),
 			"redemption": map[string]any{
 				"redemption_id":              redemptionID,
 				"entity_name":                entityNameScoped,

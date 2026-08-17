@@ -1,9 +1,12 @@
 package bankstatement
 
 import (
+	"context"
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -298,7 +301,22 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Insert audit action rows for created bank statements
 			requestedIP := nullIfBlank(api.ClientIPFromRequest(r))
 			for _, bsid := range newIDs {
-				if _, aerr := pgxPool.Exec(ctx, `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now(),$3)`, bsid, userName, requestedIP); aerr != nil {
+				if _, aerr := pgxPool.Exec(ctx, `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now(),$3)`, bsid, userName, requestedIP); aerr == nil {
+					go func(bID string) {
+						approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
+							ModuleCode:       common.ModuleCash,
+							TransactionType:  "BANK_STATEMENT_CREATE",
+							RecordID:         bID,
+							RecordTable:      "bank_statement",
+							AuditTable:       "public.auditactionbankstatement",
+							AuditIDColumn:    "bankstatementid",
+							ActionType:       "CREATE",
+							Amount:           0,
+							SubmittedBy:      userID,
+							SubmittedByEmail: userName,
+						})
+					}(bsid)
+				} else {
 					// log but don't fail the entire upload for audit insert error
 					// (could collect and return these later if desired)
 					fmt.Println("audit insert error:", aerr)
@@ -413,11 +431,24 @@ func GetBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				s.old_depositamount,
 				s.old_modeoftransaction,
 				e.entity_name,
-				b.bank_name
+				b.bank_name,
+				ai.instance_id,
+				ai.status as approval_engine_status,
+				ai.current_eye_position,
+				ai.total_eyes
 			FROM bank_statement s
 			LEFT JOIN LATERAL (
 				SELECT reason FROM auditactionbankstatement ab WHERE ab.bankstatementid = s.bankstatementid ORDER BY requested_at DESC, action_id DESC LIMIT 1
 			) la ON TRUE
+			LEFT JOIN LATERAL (
+				SELECT instance_id, status, current_eye_position, total_eyes
+				FROM uam.approval_instance
+				WHERE record_id = s.bankstatementid
+				  AND module_code = 'CASH'
+				  AND is_active = true
+				ORDER BY created_at DESC
+				LIMIT 1
+			) ai ON TRUE
 			JOIN masterbankaccount mba ON s.account_number = mba.account_number
 			JOIN masterentity e ON mba.entity_id = e.entity_id
 			JOIN masterbank b ON mba.bank_id = b.bank_id
@@ -474,6 +505,10 @@ func GetBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			EditedAtAudit         string     `json:"edited_at"`
 			DeletedByAudit        string     `json:"deleted_by"`
 			DeletedAtAudit        string     `json:"deleted_at"`
+			ApprovalInstanceID    string     `json:"approval_instance_id"`
+			ApprovalEngineStatus  string     `json:"approval_engine_status"`
+			CurrentEyePosition    *int       `json:"current_eye_position"`
+			TotalEyes             *int       `json:"total_eyes"`
 		}
 
 		var stmtIDs []string
@@ -497,6 +532,8 @@ func GetBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var oldCheque *string
 			var oldWithdraw, oldDeposit *float64
 			var oldMode *string
+			var aiInstanceID, aiStatus *string
+			var aiCurrentEye, aiTotalEyes *int
 			if err := rows.Scan(
 				&it.BankStatementID,
 				&it.EntityID,
@@ -533,6 +570,10 @@ func GetBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&it.EntityName,
 				&it.BankName,
 				&reasonRaw,
+				&aiInstanceID,
+				&aiStatus,
+				&aiCurrentEye,
+				&aiTotalEyes,
 			); err != nil {
 				api.RespondWithPayload(w, false, err.Error(), nil)
 				return
@@ -552,6 +593,18 @@ func GetBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				it.IsDeleted = false
 			}
+			if aiInstanceID != nil {
+				it.ApprovalInstanceID = *aiInstanceID
+			} else {
+				it.ApprovalInstanceID = ""
+			}
+			if aiStatus != nil {
+				it.ApprovalEngineStatus = *aiStatus
+			} else {
+				it.ApprovalEngineStatus = ""
+			}
+			it.CurrentEyePosition = aiCurrentEye
+			it.TotalEyes = aiTotalEyes
 			it.OldEntityID = ""
 			it.OldAccountNo = ""
 			it.OldDescription = ""
@@ -746,6 +799,33 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+		engineIDs := make([]string, 0, len(req.BankStatementIDs))
+		legacyIDs := make([]string, 0, len(req.BankStatementIDs))
+		var actErrs []string
+		for _, bID := range req.BankStatementIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: common.ModuleCash, RecordID: bID, UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionApproved, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[BankStatement] ActOnPendingOrDiagnose approve failed for %s: %v", bID, actionErr)
+				actErrs = append(actErrs, bID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
+				engineIDs = append(engineIDs, bID)
+				continue
+			}
+			if actionRes.CancelledStale {
+				api.LogInfo("[BankStatement] cancelled stale approval instance for %s: %s", bID, actionRes.Reason)
+			} else if actionRes.Reason != "" {
+				actErrs = append(actErrs, bID+": "+actionRes.Reason)
+				continue
+			}
+			legacyIDs = append(legacyIDs, bID)
+		}
+
+		if len(legacyIDs) > 0 {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
@@ -769,7 +849,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				requested_at DESC,
 				action_id DESC
 		`
-		rows, err := tx.Query(ctx, sel, req.BankStatementIDs)
+		rows, err := tx.Query(ctx, sel, legacyIDs)
 		if err != nil {
 			api.RespondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
 			return
@@ -793,7 +873,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		missing := []string{}
-		for _, bid := range req.BankStatementIDs {
+		for _, bid := range legacyIDs {
 			if !found[bid] {
 				missing = append(missing, bid)
 			}
@@ -852,7 +932,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SET status = 'APPROVED'
 			WHERE bankstatementid = ANY($1)
 			  AND COALESCE(is_deleted, false) = false
-		`, req.BankStatementIDs); err != nil {
+		`, legacyIDs); err != nil {
 			api.RespondWithPayload(w, false, "failed to update bank_statement status: "+err.Error(), nil)
 			return
 		}
@@ -892,6 +972,10 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
+		}
+		if len(legacyIDs) == 0 && len(engineIDs) > 0 {
+			api.RespondWithPayload(w, true, fmt.Sprintf("Approved %d bank statements via matrix", len(engineIDs)), nil)
+		}
 	}
 }
 func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -918,6 +1002,33 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+		engineIDs := make([]string, 0, len(req.IDs))
+		legacyIDs := make([]string, 0, len(req.IDs))
+		var actErrs []string
+		for _, bID := range req.IDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: common.ModuleCash, RecordID: bID, UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionRejected, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[BankStatement] ActOnPendingOrDiagnose reject failed for %s: %v", bID, actionErr)
+				actErrs = append(actErrs, bID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
+				engineIDs = append(engineIDs, bID)
+				continue
+			}
+			if actionRes.CancelledStale {
+				api.LogInfo("[BankStatement] cancelled stale approval instance for %s: %s", bID, actionRes.Reason)
+			} else if actionRes.Reason != "" {
+				actErrs = append(actErrs, bID+": "+actionRes.Reason)
+				continue
+			}
+			legacyIDs = append(legacyIDs, bID)
+		}
+
+		if len(legacyIDs) > 0 {
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
@@ -930,7 +1041,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 		sel := `SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, processing_status FROM auditactionbankstatement WHERE bankstatementid = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY bankstatementid, requested_at DESC, action_id DESC`
-		rows, err := tx.Query(ctx, sel, req.IDs)
+		rows, err := tx.Query(ctx, sel, legacyIDs)
 		if err != nil {
 			api.RespondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
 			return
@@ -952,7 +1063,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		missing := []string{}
-		for _, bid := range req.IDs {
+		for _, bid := range legacyIDs {
 			if !found[bid] {
 				missing = append(missing, bid)
 			}
@@ -1011,6 +1122,10 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
+		}
+		if len(legacyIDs) == 0 && len(engineIDs) > 0 {
+			api.RespondWithPayload(w, true, fmt.Sprintf("Rejected %d bank statements via matrix", len(engineIDs)), nil)
+		}
 	}
 }
 
@@ -1080,6 +1195,7 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if strings.TrimSpace(deleteReason) == "" {
 				deleteReason = req.Comment
 			}
+			approvalengine.CancelPendingInstances(ctx, pgxPool, common.ModuleCash, id, requestedBy)
 			if _, err := tx.Exec(ctx, q, id, deleteReason, requestedBy, requestedIP); err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithPayload(w, false, err.Error(), nil)
@@ -1091,6 +1207,22 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+		for _, id := range req.IDs {
+			go func(bID string) {
+				approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
+					ModuleCode:       common.ModuleCash,
+					TransactionType:  "BANK_STATEMENT_DELETE",
+					RecordID:         bID,
+					RecordTable:      "bank_statement",
+					AuditTable:       "public.auditactionbankstatement",
+					AuditIDColumn:    "bankstatementid",
+					ActionType:       "DELETE",
+					Amount:           0,
+					SubmittedBy:      req.UserID,
+					SubmittedByEmail: requestedBy,
+				})
+			}(id)
+		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true})
 	}
 }
@@ -1667,6 +1799,23 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
+		for _, id := range created {
+			go func(bID string) {
+				approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
+					ModuleCode:       common.ModuleCash,
+					TransactionType:  "BANK_STATEMENT_CREATE",
+					RecordID:         bID,
+					RecordTable:      "bank_statement",
+					AuditTable:       "public.auditactionbankstatement",
+					AuditIDColumn:    "bankstatementid",
+					ActionType:       "CREATE",
+					Amount:           0,
+					SubmittedBy:      req.UserID,
+					SubmittedByEmail: createdBy,
+				})
+			}(id)
+		}
+
 		// respond with created ids and overall success
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"created": created})
 	}
@@ -1908,6 +2057,21 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_STATEMENT", "POST_EDIT", []string{req.BankStatementID}, requestedBy)
+
+		go func(bID string) {
+			approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
+				ModuleCode:       common.ModuleCash,
+				TransactionType:  "BANK_STATEMENT_EDIT",
+				RecordID:         bID,
+				RecordTable:      "bank_statement",
+				AuditTable:       "public.auditactionbankstatement",
+				AuditIDColumn:    "bankstatementid",
+				ActionType:       "EDIT",
+				Amount:           0,
+				SubmittedBy:      req.UserID,
+				SubmittedByEmail: requestedBy,
+			})
+		}(req.BankStatementID)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"bankstatementid": req.BankStatementID})
 	}

@@ -2,6 +2,7 @@ package investmentsuite
 
 import (
 	"CimplrCorpSaas/api"
+	approvalengine "CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -24,6 +25,108 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
 )
+
+// submitMFInitiationForApproval fires the approval-matrix engine for a
+// newly created or edited MF investment initiation, asynchronously.
+// submittedByUserID must be the session's numeric user_id (hard FK to
+// public.users(id) — never a display name or email).
+func submitMFInitiationForApproval(pool *pgxpool.Pool, initiationID, entityName, submittedByUserID, actorEmail, txType string, amount float64) {
+	go func() {
+		bgCtx := context.Background()
+		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+			ModuleCode:       "INVESTMENT_MF",
+			EntityCode:       entityName,
+			TransactionType:  txType,
+			RecordID:         initiationID,
+			RecordTable:      "investment.investment_initiation",
+			AuditTable:       "investment.auditactioninitiation",
+			AuditIDColumn:    "initiation_id",
+			ActionType:       strings.TrimPrefix(txType, "MF_INITIATION_"),
+			Amount:           amount,
+			SubmittedBy:      submittedByUserID,
+			SubmittedByEmail: actorEmail,
+		}); err != nil {
+			api.LogError("[MFInitiation] approvalengine.CreateInstance failed for initiation %s (%s): %v", initiationID, txType, err)
+		}
+	}()
+}
+
+// loadMFInitiationApprovalWorkflow finds the most recent INVESTMENT_MF
+// approval-matrix instance for this initiation and returns its rich detail
+// for the ApprovalWorkflowViewer UI. Self-heals if no instance exists yet but
+// a PENDING% audit row does. auditactioninitiation stores the requester's
+// real email in requested_by, so resolving a real user_id only needs a join
+// on public.users.email.
+func loadMFInitiationApprovalWorkflow(ctx context.Context, pool *pgxpool.Pool, initiationID, viewerUserID string) interface{} {
+	if initiationID == "" {
+		return nil
+	}
+
+	var instanceID string
+	_ = pool.QueryRow(ctx, `
+		SELECT instance_id
+		FROM uam.approval_instance
+		WHERE record_id = $1 AND module_code = 'INVESTMENT_MF' AND is_deleted = false
+		ORDER BY submitted_at DESC LIMIT 1`, initiationID,
+	).Scan(&instanceID)
+
+	if instanceID == "" {
+		var pendingActionType, entityName, submittedByUserID, submittedByEmail string
+		var amount float64
+		scanErr := pool.QueryRow(ctx, `
+			SELECT a.actiontype, COALESCE(i.entity_name,''), COALESCE(u.id,''), COALESCE(a.requested_by,''),
+			       COALESCE(i.amount,0)
+			FROM investment.auditactioninitiation a
+			JOIN investment.investment_initiation i ON i.initiation_id = a.initiation_id
+			LEFT JOIN public.users u ON u.email = a.requested_by
+			WHERE a.initiation_id = $1
+			  AND a.processing_status LIKE 'PENDING%'
+			ORDER BY a.requested_at DESC LIMIT 1`, initiationID,
+		).Scan(&pendingActionType, &entityName, &submittedByUserID, &submittedByEmail, &amount)
+
+		if scanErr == nil && pendingActionType != "" && submittedByUserID != "" {
+			txType := map[string]string{
+				"CREATE": "MF_INITIATION_CREATE",
+				"EDIT":   "MF_INITIATION_EDIT",
+				"DELETE": "MF_INITIATION_DELETE",
+			}[pendingActionType]
+			if txType == "" {
+				txType = "MF_INITIATION_CREATE"
+			}
+			newInstID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "INVESTMENT_MF",
+				EntityCode:       entityName,
+				TransactionType:  txType,
+				RecordID:         initiationID,
+				RecordTable:      "investment.investment_initiation",
+				AuditTable:       "investment.auditactioninitiation",
+				AuditIDColumn:    "initiation_id",
+				ActionType:       pendingActionType,
+				Amount:           amount,
+				SubmittedBy:      submittedByUserID,
+				SubmittedByEmail: submittedByEmail,
+			})
+			if instErr != nil {
+				api.LogError("[MFInitiation] Self-heal CreateInstance for %s: %v", initiationID, instErr)
+			} else if newInstID != "" {
+				instanceID = newInstID
+				api.LogInfo("[MFInitiation] Self-heal: created instance %s for initiation %s", newInstID, initiationID)
+			}
+		} else if scanErr == nil && pendingActionType != "" {
+			api.LogInfo("[MFInitiation] Self-heal skipped for %s: requester email did not resolve to a unique user_id", initiationID)
+		}
+	}
+
+	if instanceID == "" {
+		return nil
+	}
+	richDetail, richErr := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, viewerUserID)
+	if richErr != nil {
+		api.LogError("[MFInitiation] GetRichInstanceDetail failed for instance=%s initiation=%s: %v", instanceID, initiationID, richErr)
+		return nil
+	}
+	return richDetail
+}
 
 // errInitiationLoadFailedSuffix is appended to a record id when a row load
 // fails while processing a bulk action, to build the per-item error message.
@@ -213,6 +316,9 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
+
+		// Fire approval-matrix engine instance (async, no-op if engine disabled or no matrix)
+		submitMFInitiationForApproval(pgxPool, initiationID, req.EntityName, req.UserID, userEmail, "MF_INITIATION_CREATE", req.Amount)
 
 		go func(iID, uID, uEmail string) {
 			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, []string{iID}, constants.AuditActionCreate, uEmail)
@@ -791,6 +897,15 @@ func DeleteInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// ── Approval-matrix engine: cancel stale instances and create DELETE instances.
+		for _, id := range req.InitiationIDs {
+			if err := approvalengine.CancelPendingInstances(context.Background(), pgxPool, "INVESTMENT_MF", id, requestedBy); err != nil {
+				api.LogError("[MFInitiation] CancelPendingInstances for delete failed for %s: %v", id, err)
+			}
+			initiationRow, _ := loadMFInitiationRow(context.Background(), pgxPool, id)
+			submitMFInitiationForApproval(pgxPool, id, initiationRow.EntityName, req.UserID, requestedBy, "MF_INITIATION_DELETE", initiationRow.Amount)
+		}
+
 		go func(ids []string, uID, uEmail string) {
 			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "DELETE_REQUEST", uEmail)
 			catalog.TriggerNotification(
@@ -903,6 +1018,42 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			return
 		}
+
+		// ── Approval-matrix engine: handle engine-managed records first.
+		// Records the engine handled (Acted==true) are skipped in legacy stamp below.
+		engineActed := map[string]bool{}
+		for _, iid := range req.InitiationIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "INVESTMENT_MF", RecordID: iid,
+				UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionApproved, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[MFInitiation] ActOnPendingOrDiagnose approve failed for %s: %v", iid, actionErr)
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[iid] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[MFInitiation] cancelled stale instance for %s", iid)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[MFInitiation] engine skipped %s: %s", iid, actionRes.Reason)
+			}
+		}
+		// Remove engine-handled IDs from legacy stamp lists
+		filterEA := func(ids []string) []string {
+			out := ids[:0]
+			for _, id := range ids {
+				if !engineActed[id] {
+					out = append(out, id)
+				}
+			}
+			return out
+		}
+		toApprove = filterEA(toApprove)
+		toApproveInitiations = filterEA(toApproveInitiations)
+		toDeleteActionIDs = filterEA(toDeleteActionIDs)
+		deleteMasterIDs = filterEA(deleteMasterIDs)
 
 		if len(toApprove) > 0 {
 			if _, err := tx.Exec(ctx, `
@@ -1100,6 +1251,21 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, api.SystemIfBlank(checkerBy), req.Comment, api.SystemIfBlank(api.ClientIPFromContext(ctx)), actionIDs); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
+		}
+
+		// ── Approval-matrix engine: reject engine-managed records
+		for _, iid := range req.InitiationIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "INVESTMENT_MF", RecordID: iid,
+				UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionRejected, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[MFInitiation] ActOnPendingOrDiagnose reject failed for %s: %v", iid, actionErr)
+			}
+			if actionRes.Acted {
+				api.LogInfo("[MFInitiation] engine rejected %s", iid)
+			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -1412,7 +1578,16 @@ func fetchInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []strin
 			COALESCE(h.deleted_by,'') AS deleted_by,
 			COALESCE(h.deleted_at,'') AS deleted_at,
 			COALESCE(nav.nav_value,0) AS nav,
-			TO_CHAR(nav.nav_date,'YYYY-MM-DD') AS applicable_nav_date
+			TO_CHAR(nav.nav_date,'YYYY-MM-DD') AS applicable_nav_date,
+			-- ── Approval-engine columns ────────────────────────────────────────
+			COALESCE(ai.instance_id,'')        AS approval_instance_id,
+			COALESCE(ai.status,'')             AS approval_engine_status,
+			COALESCE(aie.instance_eye_id,'')   AS current_eye_id,
+			COALESCE(aie.position::text,'')    AS current_eye_position,
+			COALESCE(aie.approvals_required,0) AS approvals_required,
+			COALESCE(aie.approvals_received,0) AS approvals_received,
+			aie.sla_deadline                   AS sla_deadline,
+			COALESCE(aie.is_escalated,false)   AS is_escalated
 		FROM investment.investment_initiation m
 		LEFT JOIN latest_audit l ON l.initiation_id = m.initiation_id
 		LEFT JOIN history h ON h.initiation_id = m.initiation_id
@@ -1441,6 +1616,22 @@ func fetchInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []strin
 			ORDER BY ans.nav_date DESC
 			LIMIT 1
 		) nav ON true
+		LEFT JOIN LATERAL (
+			SELECT ai.* FROM uam.approval_instance ai
+			WHERE ai.record_id = m.initiation_id::text
+			  AND ai.module_code = 'INVESTMENT_MF'
+			  AND ai.status = 'PENDING'
+			  AND ai.is_deleted = false
+			ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+			LIMIT 1
+		) ai ON true
+		LEFT JOIN LATERAL (
+			SELECT aie.* FROM uam.approval_instance_eye aie
+			WHERE aie.instance_id = ai.instance_id
+			  AND aie.status = 'ACTIVE'
+			ORDER BY aie.position ASC, aie.instance_eye_id ASC
+			LIMIT 1
+		) aie ON true
 	`
 
 	var (
@@ -1621,6 +1812,7 @@ func GetInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, "initiation not found")
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"data": rows[0]})
+		approvalWorkflow := loadMFInitiationApprovalWorkflow(r.Context(), pgxPool, req.InitiationID, api.GetUserIDFromCtx(r.Context()))
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"data": rows[0], "approval_workflow": approvalWorkflow})
 	}
 }

@@ -23,7 +23,9 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/auth")
 
 const (
 	cancelRollTypeCancellation = "cancellation"
@@ -542,9 +544,34 @@ func GetPendingCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Join forward_cancellations with forward_bookings to get entity_level_0 (bu)
 		getQuery := `
-			SELECT fc.booking_id, fc.status, fb.entity_level_0 AS business_unit, fc.amount_cancelled, fc.cancellation_date, fc.cancellation_rate, fc.realized_gain_loss, fc.cancellation_reason
+			SELECT fc.booking_id, fc.status, fb.entity_level_0 AS business_unit, fc.amount_cancelled, fc.cancellation_date, fc.cancellation_rate, fc.realized_gain_loss, fc.cancellation_reason,
+				COALESCE(ai.instance_id,'')         AS approval_instance_id,
+				COALESCE(ai.status,'')              AS approval_engine_status,
+				COALESCE(aie.instance_eye_id,'')    AS current_eye_id,
+				COALESCE(aie.position::text,'')     AS current_eye_position,
+				COALESCE(aie.approvals_required,0)  AS approvals_required,
+				COALESCE(aie.approvals_received,0)  AS approvals_received,
+				aie.sla_deadline                    AS sla_deadline,
+				COALESCE(aie.is_escalated,false)    AS is_escalated
 			FROM forward_cancellations fc
 			LEFT JOIN forward_bookings fb ON fc.booking_id = fb.system_transaction_id
+			LEFT JOIN LATERAL (
+				SELECT ai.* FROM uam.approval_instance ai
+				WHERE ai.record_id = fc.booking_id::text
+				  AND ai.module_code = 'FX'
+				  AND ai.transaction_type = 'FX_FORWARD_CANCELLATION'
+				  AND ai.status = 'PENDING'
+				  AND ai.is_deleted = false
+				ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+				LIMIT 1
+			) ai ON true
+			LEFT JOIN LATERAL (
+				SELECT aie.* FROM uam.approval_instance_eye aie
+				WHERE aie.instance_id = ai.instance_id
+				  AND aie.status = 'ACTIVE'
+				ORDER BY aie.position ASC, aie.instance_eye_id ASC
+				LIMIT 1
+			) aie ON true
 			WHERE fc.status = 'Pending'
 			  AND COALESCE(fc.is_deleted, false) = false
 			  AND (fb.entity_level_0 = ANY($1) OR fb.system_transaction_id IS NULL)
@@ -633,7 +660,15 @@ func GetAllCancellationRollovers(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		query := `
-			SELECT *
+			SELECT rows.*,
+				COALESCE(ai.instance_id,'')         AS approval_instance_id,
+				COALESCE(ai.status,'')              AS approval_engine_status,
+				COALESCE(aie.instance_eye_id,'')    AS current_eye_id,
+				COALESCE(aie.position::text,'')     AS current_eye_position,
+				COALESCE(aie.approvals_required,0)  AS approvals_required,
+				COALESCE(aie.approvals_received,0)  AS approvals_received,
+				aie.sla_deadline                    AS sla_deadline,
+				COALESCE(aie.is_escalated,false)    AS is_escalated
 			FROM (
 				SELECT
 					'cancellation' AS request_type,
@@ -669,6 +704,23 @@ func GetAllCancellationRollovers(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE COALESCE(fr.is_deleted, false) = false
 				  AND (fb.entity_level_0 = ANY($1) OR fb.system_transaction_id IS NULL)
 			) rows
+			LEFT JOIN LATERAL (
+				SELECT ai.* FROM uam.approval_instance ai
+				WHERE ai.record_id = rows.booking_id::text
+				  AND ai.module_code = 'FX'
+				  AND ai.transaction_type = CASE WHEN rows.request_type = 'cancellation' THEN 'FX_FORWARD_CANCELLATION' ELSE 'FX_FORWARD_ROLLOVER' END
+				  AND ai.status = 'PENDING'
+				  AND ai.is_deleted = false
+				ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+				LIMIT 1
+			) ai ON true
+			LEFT JOIN LATERAL (
+				SELECT aie.* FROM uam.approval_instance_eye aie
+				WHERE aie.instance_id = ai.instance_id
+				  AND aie.status = 'ACTIVE'
+				ORDER BY aie.position ASC, aie.instance_eye_id ASC
+				LIMIT 1
+			) aie ON true
 			ORDER BY request_date DESC NULLS LAST, booking_id
 		`
 		rows, err := pool.Query(r.Context(), query, buNames)
@@ -1001,7 +1053,7 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 			NewForwardNetRate:         parseFloatPtr(req.NewForward.NetRate),
 		})
 		rolloverCreateFields["booking_count"] = len(req.BookingAmounts)
-		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+		ok, tID := runtime.EnforceWithMatrix(r.Context(), w, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleFX,
 			SubModule:           "FORWARD_ROLLOVER",
@@ -1011,7 +1063,8 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/fx/forwards/create-forward-rollover",
 			DefaultBlockMessage: "Forward rollover request blocked by policy",
 			Fields:              rolloverCreateFields,
-		}) {
+		})
+		if !ok {
 			return
 		}
 
@@ -1044,6 +1097,28 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 		if len(createdBookingIDs) > 0 {
 			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_ROLLOVER", "POST_CREATE", createdBookingIDs, auditutil.Actor(req.UserID))
 		}
+
+		makerEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				makerEmail = s.Email
+				break
+			}
+		}
+		go func(ids []string, email string, matrixID string) {
+			bgCtx := context.Background()
+			for _, id := range ids {
+				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+					ModuleCode:       "FX",
+					TransactionType:  "FX_FORWARD_ROLLOVER",
+					RecordID:         id,
+					MatrixID:         matrixID,
+					SubmittedByEmail: email,
+				})
+			}
+		}(createdBookingIDs, makerEmail, tID)
+
 		respondEnvelopeSuccess(w, "Forward rollover request submitted for approval", nil)
 	}
 }
@@ -1336,7 +1411,7 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 			Status:             "Pending",
 		})
 		createFields["booking_count"] = len(req.BookingAmounts)
-		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+		ok, tID := runtime.EnforceWithMatrix(r.Context(), w, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleFX,
 			SubModule:           "FORWARD_CANCELLATION",
@@ -1346,7 +1421,8 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/fx/forwards/create-forward-cancellations",
 			DefaultBlockMessage: "Forward cancellation request blocked by policy",
 			Fields:              createFields,
-		}) {
+		})
+		if !ok {
 			return
 		}
 		// Save cancellation request as pending
@@ -1379,7 +1455,29 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 		if len(createdBookingIDs) > 0 {
 			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_CANCELLATION", "POST_CREATE", createdBookingIDs, auditutil.Actor(req.UserID))
 		}
-		respondEnvelopeSuccess(w, "Forward cancellation request submitted for approval", nil)
+
+		makerEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				makerEmail = s.Email
+				break
+			}
+		}
+		go func(ids []string, email string, matrixID string) {
+			bgCtx := context.Background()
+			for _, id := range ids {
+				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+					ModuleCode:       "FX",
+					TransactionType:  "FX_FORWARD_CANCELLATION",
+					RecordID:         id,
+					MatrixID:         matrixID,
+					SubmittedByEmail: email,
+				})
+			}
+		}(createdBookingIDs, makerEmail, tID)
+
+		respondEnvelopeSuccess(w, "Forward cancellation requests submitted for approval", nil)
 	}
 }
 
@@ -1602,9 +1700,34 @@ func GetPendingRollovers(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Join forward_rollovers with forward_bookings to get entity_level_0 (bu)
 		getQuery := `
-		       SELECT fr.booking_id, fr.status, fb.entity_level_0 AS business_unit, fr.amount_rolled_over, fr.rollover_date, fr.original_maturity_date, fr.new_maturity_date, fr.rollover_cost, fr.fx_pair, fr.order_type, fr.new_forward_amount, fr.new_forward_spot_rate, fr.new_forward_premium_discount, fr.new_forward_margin_rate, fr.new_forward_net_rate
+		       SELECT fr.booking_id, fr.status, fb.entity_level_0 AS business_unit, fr.amount_rolled_over, fr.rollover_date, fr.original_maturity_date, fr.new_maturity_date, fr.rollover_cost, fr.fx_pair, fr.order_type, fr.new_forward_amount, fr.new_forward_spot_rate, fr.new_forward_premium_discount, fr.new_forward_margin_rate, fr.new_forward_net_rate,
+				COALESCE(ai.instance_id,'')         AS approval_instance_id,
+				COALESCE(ai.status,'')              AS approval_engine_status,
+				COALESCE(aie.instance_eye_id,'')    AS current_eye_id,
+				COALESCE(aie.position::text,'')     AS current_eye_position,
+				COALESCE(aie.approvals_required,0)  AS approvals_required,
+				COALESCE(aie.approvals_received,0)  AS approvals_received,
+				aie.sla_deadline                    AS sla_deadline,
+				COALESCE(aie.is_escalated,false)    AS is_escalated
 		       FROM forward_rollovers fr
 		       LEFT JOIN forward_bookings fb ON fr.booking_id = fb.system_transaction_id
+				LEFT JOIN LATERAL (
+					SELECT ai.* FROM uam.approval_instance ai
+					WHERE ai.record_id = fr.booking_id::text
+					  AND ai.module_code = 'FX'
+					  AND ai.transaction_type = 'FX_FORWARD_ROLLOVER'
+					  AND ai.status = 'PENDING'
+					  AND ai.is_deleted = false
+					ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+					LIMIT 1
+				) ai ON true
+				LEFT JOIN LATERAL (
+					SELECT aie.* FROM uam.approval_instance_eye aie
+					WHERE aie.instance_id = ai.instance_id
+					  AND aie.status = 'ACTIVE'
+					ORDER BY aie.position ASC, aie.instance_eye_id ASC
+					LIMIT 1
+				) aie ON true
 		       WHERE fr.status = 'Pending'
 		         AND COALESCE(fr.is_deleted, false) = false
 		         AND (fb.entity_level_0 = ANY($1) OR fb.system_transaction_id IS NULL)

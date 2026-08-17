@@ -12,6 +12,8 @@ import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
+	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 
@@ -723,6 +725,35 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		recordSettlementAudit(ctx, pool, settlementID, actionType, finalStatus, strings.TrimSpace(req.Comments), actor, auditSnap, method)
 
+		if req.Submit {
+			makerEmail := ""
+			for _, s := range auth.GetActiveSessions() {
+				if s.UserID == req.UserID {
+					makerEmail = s.Email
+					break
+				}
+			}
+			txnType := "FX_SETTLEMENT_EDIT"
+			if len(oldSnap) == 0 {
+				txnType = "FX_SETTLEMENT_CREATE"
+			}
+			if method == "ROLLOVER" {
+				txnType = "FX_SETTLEMENT_ROLLOVER"
+			} else if method == "CANCELLATION" {
+				txnType = "FX_SETTLEMENT_CANCELLATION"
+			}
+			go func(id, email, tType string) {
+				bgCtx := context.Background()
+				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+					ModuleCode:       "FX",
+					TransactionType:  tType,
+					RecordID:         id,
+					SubmittedByEmail: email,
+				})
+			}(settlementID, makerEmail, txnType)
+		}
+
 		respondWithSuccess(w, http.StatusOK, "Settlement saved", map[string]any{
 			"settlement_id":        settlementID,
 			"settlement_method":    method,
@@ -760,10 +791,35 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				updated_by,
 				updated_at,
 				comments,
-				new_exposure_header_id
-			FROM public.exposure_settlement_document
-			WHERE COALESCE(is_deleted, false) = false
-			ORDER BY created_at DESC
+				new_exposure_header_id,
+				COALESCE(ai.instance_id,'')         AS approval_instance_id,
+				COALESCE(ai.status,'')              AS approval_engine_status,
+				COALESCE(aie.instance_eye_id,'')    AS current_eye_id,
+				COALESCE(aie.position::text,'')     AS current_eye_position,
+				COALESCE(aie.approvals_required,0)  AS approvals_required,
+				COALESCE(aie.approvals_received,0)  AS approvals_received,
+				aie.sla_deadline                    AS sla_deadline,
+				COALESCE(aie.is_escalated,false)    AS is_escalated
+			FROM public.exposure_settlement_document esd
+			LEFT JOIN LATERAL (
+				SELECT ai.* FROM uam.approval_instance ai
+				WHERE ai.record_id = esd.settlement_id::text
+				  AND ai.module_code = 'FX'
+				  AND ai.transaction_type = CASE WHEN esd.settlement_method = 'ROLLOVER' OR esd.settlement_method = 'CANCELLATION' THEN 'FX_SETTLEMENT_' || esd.settlement_method ELSE 'FX_SETTLEMENT_CREATE' END
+				  AND ai.status = 'PENDING'
+				  AND ai.is_deleted = false
+				ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+				LIMIT 1
+			) ai ON true
+			LEFT JOIN LATERAL (
+				SELECT aie.* FROM uam.approval_instance_eye aie
+				WHERE aie.instance_id = ai.instance_id
+				  AND aie.status = 'ACTIVE'
+				ORDER BY aie.position ASC, aie.instance_eye_id ASC
+				LIMIT 1
+			) aie ON true
+			WHERE COALESCE(esd.is_deleted, false) = false
+			ORDER BY esd.created_at DESC
 		`)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to list settlements")
@@ -780,8 +836,13 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				createdAt                                       time.Time
 				updatedAt                                       *time.Time
 				openAmt, settledAmt                             float64
+				approvalInstanceID, approvalEngineStatus, currentEyeID, currentEyePosition string
+				approvalsRequired, approvalsReceived int
+				slaDeadline *time.Time
+				isEscalated bool
 			)
-			if err := rows.Scan(&id, &method, &entity, &currency, &settlementDate, &openAmt, &settledAmt, &status, &createdBy, &createdAt, &updatedBy, &updatedAt, &comments, &newExpID); err != nil {
+			if err := rows.Scan(&id, &method, &entity, &currency, &settlementDate, &openAmt, &settledAmt, &status, &createdBy, &createdAt, &updatedBy, &updatedAt, &comments, &newExpID,
+				&approvalInstanceID, &approvalEngineStatus, &currentEyeID, &currentEyePosition, &approvalsRequired, &approvalsReceived, &slaDeadline, &isEscalated); err != nil {
 				continue
 			}
 			row := map[string]any{
@@ -794,6 +855,14 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				"processing_status":    status,
 				"created_by":           createdBy,
 				"created_at":           createdAt,
+				"approval_instance_id": approvalInstanceID,
+				"approval_engine_status": approvalEngineStatus,
+				"current_eye_id": currentEyeID,
+				"current_eye_position": currentEyePosition,
+				"approvals_required": approvalsRequired,
+				"approvals_received": approvalsReceived,
+				"sla_deadline": slaDeadline,
+				"is_escalated": isEscalated,
 			}
 			if settlementDate != nil {
 				row["settlement_date"] = settlementDate.Format("2006-01-02")
@@ -839,6 +908,13 @@ func GetExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "settlement not found")
 			return
 		}
+
+		if detail, dErr := approvalengine.GetRichInstanceDetail(ctx, pool, "FX", settlementID); dErr == nil {
+			if detail != nil && detail.Status == "PENDING" && len(detail.Eyes) > 0 {
+				snap["processing_status"] = detail.Eyes[0].Status
+			}
+		}
+
 		respondWithSuccess(w, http.StatusOK, "Success", snap)
 	}
 }
@@ -849,6 +925,7 @@ func updateExposureSettlementStatuses(
 	ids []string,
 	status string,
 	actor string,
+	userID string,
 	comments string,
 	actionType string,
 ) (int, error) {
@@ -896,20 +973,44 @@ func updateExposureSettlementStatuses(
 			}
 		}
 
-		methodHint := ""
-		if m := snapString(oldSnap, "settlement_method"); m != nil {
-			methodHint = fmt.Sprint(m)
-		}
-		recordSettlementAudit(ctx, pool, id, actionType, status, comments, actor, oldSnap, methodHint)
+		var engineActed bool
 		if actionType == "CONFIRM" || actionType == "REJECT" {
-			auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{
-				TableName:    auditutil.TableExposureSettlement,
-				ParentColumn: "settlement_id",
-				ParentID:     id,
-				Status:       status,
-				CheckerBy:    actor,
-				Comment:      comments,
+			userEmail := ""
+			for _, s := range auth.GetActiveSessions() {
+				if s.UserID == userID {
+					userEmail = s.Email
+					break
+				}
+			}
+			actionStr := "APPROVED"
+			if actionType == "REJECT" {
+				actionStr = "REJECTED"
+			}
+			res, err := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FX", RecordID: id, UserID: userID, UserEmail: userEmail,
+				Action: actionStr, Comment: comments,
 			})
+			if err == nil && res.Acted {
+				engineActed = true
+			}
+		}
+
+		if !engineActed {
+			methodHint := ""
+			if m := snapString(oldSnap, "settlement_method"); m != nil {
+				methodHint = fmt.Sprint(m)
+			}
+			recordSettlementAudit(ctx, pool, id, actionType, status, comments, actor, oldSnap, methodHint)
+			if actionType == "CONFIRM" || actionType == "REJECT" {
+				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{
+					TableName:    auditutil.TableExposureSettlement,
+					ParentColumn: "settlement_id",
+					ParentID:     id,
+					Status:       status,
+					CheckerBy:    actor,
+					Comment:      comments,
+				})
+			}
 		}
 		count++
 	}
@@ -933,7 +1034,7 @@ func ApproveExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
-		n, err := updateExposureSettlementStatuses(ctx, pool, req.SettlementIDs, constants.StatusApproved, actor, strings.TrimSpace(req.Comments), "CONFIRM")
+		n, err := updateExposureSettlementStatuses(ctx, pool, req.SettlementIDs, constants.StatusApproved, actor, req.UserID, strings.TrimSpace(req.Comments), "CONFIRM")
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to approve settlements")
 			return
@@ -959,7 +1060,7 @@ func RejectExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
-		n, err := updateExposureSettlementStatuses(ctx, pool, req.SettlementIDs, constants.StatusRejected, actor, strings.TrimSpace(req.Comments), "REJECT")
+		n, err := updateExposureSettlementStatuses(ctx, pool, req.SettlementIDs, constants.StatusRejected, actor, req.UserID, strings.TrimSpace(req.Comments), "REJECT")
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to reject settlements")
 			return
@@ -985,11 +1086,32 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
-		n, err := updateExposureSettlementStatuses(ctx, pool, req.SettlementIDs, constants.StatusPendingDeleteApproval, actor, strings.TrimSpace(req.Comments), "DELETE")
+		n, err := updateExposureSettlementStatuses(ctx, pool, req.SettlementIDs, constants.StatusPendingDeleteApproval, actor, req.UserID, strings.TrimSpace(req.Comments), "DELETE")
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to delete settlements")
 			return
 		}
+
+		makerEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				makerEmail = s.Email
+				break
+			}
+		}
+		go func(ids []string, email string) {
+			bgCtx := context.Background()
+			for _, id := range ids {
+				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+					ModuleCode:       "FX",
+					TransactionType:  "FX_SETTLEMENT_DELETE",
+					RecordID:         id,
+					SubmittedByEmail: email,
+				})
+			}
+		}(req.SettlementIDs, makerEmail)
+
 		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d settlement(s) marked for delete", n), map[string]any{"count": n})
 	}
 }

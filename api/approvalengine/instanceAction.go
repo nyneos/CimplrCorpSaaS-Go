@@ -136,7 +136,10 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 		return fmt.Errorf("RecordAction fetch eye: %w", err)
 	}
 	// audit_id_column is not stored in the DB — derive it from the transaction type.
-	_, auditIDColumn := LookupTxTableConfig(transactionType)
+	regAuditTable, auditIDColumn := LookupTxTableConfig(transactionType)
+	if auditTable == "" {
+		auditTable = regAuditTable
+	}
 
 	if eyeStatus != EyeStatusActive {
 		return fmt.Errorf("eye is not active (current status: %s)", eyeStatus)

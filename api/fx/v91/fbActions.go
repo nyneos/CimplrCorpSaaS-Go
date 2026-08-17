@@ -8,8 +8,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"context"
 
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxexposures "CimplrCorpSaas/api/fx/exposures"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
@@ -218,9 +220,11 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		approver := ""
+		approverEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
 				approver = s.Name
+				approverEmail = s.Email
 				break
 			}
 		}
@@ -271,6 +275,17 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		engineActedMap := make(map[string]bool)
+		for _, id := range req.ExposureIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FX", RecordID: id, UserID: req.UserID, UserEmail: approverEmail,
+				Action: approvalengine.ActionApproved, Comment: req.Comment,
+			})
+			if actionErr == nil && actionRes.Acted {
+				engineActedMap[id] = true
+			}
+		}
+
 		approvedIDs := []string{}
 		deletedIDs := []string{}
 		if len(toApprove) > 0 {
@@ -287,7 +302,9 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				var id string
 				if err := r2.Scan(&id); err == nil {
 					approvedIDs = append(approvedIDs, id)
-					auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approver, Comment: req.Comment})
+					if !engineActedMap[id] {
+						auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approver, Comment: req.Comment})
+					}
 				}
 			}
 		}
@@ -313,7 +330,9 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				var id string
 				if err := drows.Scan(&id); err == nil {
 					deletedIDs = append(deletedIDs, id)
-					auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approver, Comment: req.Comment})
+					if !engineActedMap[id] {
+						auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approver, Comment: req.Comment})
+					}
 				}
 			}
 			drows.Close()
@@ -348,9 +367,11 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		rejector := ""
+		rejectorEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
 				rejector = s.Name
+				rejectorEmail = s.Email
 				break
 			}
 		}
@@ -380,6 +401,17 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		engineActedMap := make(map[string]bool)
+		for _, id := range req.ExposureIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FX", RecordID: id, UserID: req.UserID, UserEmail: rejectorEmail,
+				Action: approvalengine.ActionRejected, Comment: req.Comment,
+			})
+			if actionErr == nil && actionRes.Acted {
+				engineActedMap[id] = true
+			}
+		}
+
 		// q := `UPDATE public.exposure_headers SET approval_status='Rejected', rejection_comment=$1, rejected_by=$2, rejected_at=now(), updated_at=now() WHERE exposure_header_id = ANY($3) RETURNING exposure_header_id`
 		// rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), rejector, req.ExposureIDs)
 		q := `
@@ -400,7 +432,9 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			if err := rows.Scan(&id); err == nil {
 				updated = append(updated, id)
-				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusRejected, CheckerBy: rejector, Comment: req.Comment})
+				if !engineActedMap[id] {
+					auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusRejected, CheckerBy: rejector, Comment: req.Comment})
+				}
 			}
 		}
 		if len(updated) > 0 {
@@ -443,13 +477,14 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
+		triggerMatrices := make(map[string]string)
 		for _, id := range req.ExposureIDs {
 			creationRow, err := fxexposures.LoadExposureCreationRow(ctx, pool, id)
 			if err != nil {
 				respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error(), v91ErrorCode(http.StatusInternalServerError))
 				return
 			}
-			if ok, msg := policyruntime.EnforceInline(ctx, r, pool, policyruntime.EnforceInput{
+			if ok, msg, tID := policyruntime.EnforceInlineWithMatrix(ctx, r, pool, policyruntime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleFX,
 				SubModule:           v91ExposurePolicySubModule(r),
@@ -462,6 +497,8 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			}); !ok {
 				respondEnvelopeError(w, http.StatusUnprocessableEntity, msg, v91ErrorCode(http.StatusUnprocessableEntity))
 				return
+			} else {
+				triggerMatrices[id] = tID
 			}
 		}
 
@@ -499,6 +536,28 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				"deleted": deleted,
 			},
 		})
+
+		makerEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				makerEmail = s.Email
+				break
+			}
+		}
+
+			go func(ids []string, email string, matrices map[string]string) {
+				bgCtx := context.Background()
+				for _, id := range ids {
+					_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+					_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+						ModuleCode:       "FX",
+						TransactionType:  "FX_EXPOSURE_DELETE",
+						RecordID:         id,
+						MatrixID:         matrices[id],
+						SubmittedByEmail: email,
+					})
+				}
+			}(deleted, makerEmail, triggerMatrices)
 	}
 }
 

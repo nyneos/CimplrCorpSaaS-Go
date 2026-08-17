@@ -2,6 +2,7 @@ package sweepconfig
 
 import (
 	api "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
 	"context"
@@ -97,8 +98,106 @@ func GetSweepConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		sortSweepAuditPayload(payload)
 
-		writeSweepAuditPayload(w, payload)
+		sortSweepAuditPayload(payload)
+
+		approvalWorkflow := loadSweepConfigApprovalWorkflow(ctx, pgxPool, strings.TrimSpace(req.SweepID), api.GetUserIDFromCtx(ctx))
+
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"audit_logs":        payload,
+			"approval_workflow": approvalWorkflow,
+		})
 	}
+}
+
+// loadSweepConfigApprovalWorkflow finds the most recent CASH/SWEEP_CONFIG
+// approval-matrix instance for this config and returns its rich detail for
+// the ApprovalWorkflowViewer UI. Self-heals if no instance exists yet but a PENDING% audit row does.
+func loadSweepConfigApprovalWorkflow(ctx context.Context, pgxPool *pgxpool.Pool, sweepID, viewerUserID string) interface{} {
+	if sweepID == "" {
+		return nil
+	}
+
+	var instanceID string
+	_ = pgxPool.QueryRow(ctx, `
+		SELECT instance_id
+		FROM uam.approval_instance
+		WHERE record_id = $1 AND module_code = 'CASH' AND is_deleted = false
+		ORDER BY submitted_at DESC LIMIT 1`, sweepID,
+	).Scan(&instanceID)
+
+	if instanceID == "" {
+		var pendingActionType, entityName, submittedByUserID, submittedByEmail string
+		var sweepAmount, bufferAmount sql.NullFloat64
+		scanErr := pgxPool.QueryRow(ctx, `
+			SELECT a.actiontype, COALESCE(c.entity_name,''),
+			       COALESCE(u.id,''), COALESCE(u.email,''),
+			       c.sweep_amount, c.buffer_amount
+			FROM cimplrcorpsaas.auditactionsweepconfiguration a
+			JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = a.sweep_id
+			LEFT JOIN public.users u ON u.employee_name = a.requested_by
+			WHERE a.sweep_id = $1
+			  AND a.processing_status LIKE 'PENDING%'
+			ORDER BY a.requested_at DESC LIMIT 1`, sweepID,
+		).Scan(&pendingActionType, &entityName, &submittedByUserID, &submittedByEmail, &sweepAmount, &bufferAmount)
+
+		if scanErr == nil && pendingActionType != "" && submittedByUserID == "" {
+			api.LogInfo("[SweepConfig] Self-heal skipped for %s: requester name did not resolve to a unique user_id", sweepID)
+		}
+		if scanErr == nil && pendingActionType != "" && submittedByUserID != "" {
+			txType := map[string]string{
+				"CREATE": "SWEEP_CONFIG_CREATE",
+				"EDIT":   "SWEEP_CONFIG_EDIT",
+				"DELETE": "SWEEP_CONFIG_DELETE",
+			}[pendingActionType]
+			if txType == "" {
+				txType = "SWEEP_CONFIG_CREATE"
+			}
+			
+			var swp, buf *float64
+			if sweepAmount.Valid {
+				v := sweepAmount.Float64
+				swp = &v
+			}
+			if bufferAmount.Valid {
+				v := bufferAmount.Float64
+				buf = &v
+			}
+			var amount float64
+			if swp != nil {
+				amount = *swp
+			} else if buf != nil {
+				amount = *buf
+			}
+
+			newInstID, instErr := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+				ModuleCode:       "CASH",
+				EntityCode:       entityName,
+				TransactionType:  txType,
+				RecordID:         sweepID,
+				RecordTable:      "cimplrcorpsaas.sweepconfiguration",
+				AuditTable:       "cimplrcorpsaas.auditactionsweepconfiguration",
+				AuditIDColumn:    "sweep_id",
+				ActionType:       pendingActionType,
+				Amount:           amount,
+				SubmittedBy:      submittedByUserID,
+				SubmittedByEmail: submittedByEmail,
+			})
+			if instErr == nil {
+				instanceID = newInstID
+				api.LogInfo("[SweepConfig] Self-healed %s instance %s for sweep %s", txType, newInstID, sweepID)
+			}
+		}
+	}
+
+	if instanceID != "" {
+		detail, err := approvalengine.GetRichInstanceDetail(ctx, pgxPool, instanceID, viewerUserID)
+		if err == nil {
+			return detail
+		}
+		api.LogError("[SweepConfig] GetRichInstanceDetail failed for instance %s: %v", instanceID, err)
+	}
+
+	return nil
 }
 
 func GetSweepInitiationAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -165,8 +264,111 @@ func GetSweepInitiationAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		sortSweepAuditPayload(payload)
 
-		writeSweepAuditPayload(w, payload)
+		approvalWorkflow := loadSweepInitiationApprovalWorkflow(ctx, pgxPool, strings.TrimSpace(req.InitiationID), api.GetUserIDFromCtx(ctx))
+
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"audit_logs":        payload,
+			"approval_workflow": approvalWorkflow,
+		})
 	}
+}
+
+// loadSweepInitiationApprovalWorkflow finds the most recent CASH/SWEEP_INITIATION
+// approval-matrix instance for this initiation and returns its rich detail for
+// the ApprovalWorkflowViewer UI. Self-heals (mirrors fdBookingWorkbench's
+// GetBookingDetail): if no instance exists yet but a PENDING% audit row does
+// (e.g. record created before the engine was enabled), it creates the instance
+// on the fly so the viewer always has something to show for pending records.
+func loadSweepInitiationApprovalWorkflow(ctx context.Context, pgxPool *pgxpool.Pool, initiationID, viewerUserID string) interface{} {
+	if initiationID == "" {
+		return nil
+	}
+
+	var instanceID string
+	_ = pgxPool.QueryRow(ctx, `
+		SELECT instance_id
+		FROM uam.approval_instance
+		WHERE record_id = $1 AND module_code = 'CASH' AND is_deleted = false
+		ORDER BY submitted_at DESC LIMIT 1`, initiationID,
+	).Scan(&instanceID)
+
+	if instanceID == "" {
+		// requested_by on this audit table stores the requester's display name,
+		// not a user_id — but uam.approval_instance.submitted_by has a hard FK
+		// to public.users(id) (NOT NULL). Resolve the real user_id/email via a
+		// best-effort join on employee_name; if it doesn't resolve to exactly
+		// one user, skip self-heal rather than insert a value that fails the FK.
+		var pendingActionType, entityName, submittedByUserID, submittedByEmail string
+		var overriddenAmount, sweepAmount, bufferAmount sql.NullFloat64
+		scanErr := pgxPool.QueryRow(ctx, `
+			SELECT a.actiontype, COALESCE(c.entity_name,''),
+			       COALESCE(u.id,''), COALESCE(u.email,''),
+			       si.overridden_amount, c.sweep_amount, c.buffer_amount
+			FROM cimplrcorpsaas.auditactionsweepinitiation a
+			JOIN cimplrcorpsaas.sweep_initiation si ON si.initiation_id = a.initiation_id
+			JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = si.sweep_id
+			LEFT JOIN public.users u ON u.employee_name = a.requested_by
+			WHERE a.initiation_id = $1
+			  AND a.processing_status LIKE 'PENDING%'
+			ORDER BY a.requested_at DESC LIMIT 1`, initiationID,
+		).Scan(&pendingActionType, &entityName, &submittedByUserID, &submittedByEmail, &overriddenAmount, &sweepAmount, &bufferAmount)
+
+		if scanErr == nil && pendingActionType != "" && submittedByUserID == "" {
+			api.LogInfo("[SweepInitiation] Self-heal skipped for %s: requester name did not resolve to a unique user_id", initiationID)
+		}
+		if scanErr == nil && pendingActionType != "" && submittedByUserID != "" {
+			txType := map[string]string{
+				"CREATE": "SWEEP_INITIATION_CREATE",
+				"EDIT":   "SWEEP_INITIATION_EDIT",
+				"DELETE": "SWEEP_INITIATION_DELETE",
+			}[pendingActionType]
+			if txType == "" {
+				txType = "SWEEP_INITIATION_CREATE"
+			}
+			var ovr, swp, buf *float64
+			if overriddenAmount.Valid {
+				v := overriddenAmount.Float64
+				ovr = &v
+			}
+			if sweepAmount.Valid {
+				v := sweepAmount.Float64
+				swp = &v
+			}
+			if bufferAmount.Valid {
+				v := bufferAmount.Float64
+				buf = &v
+			}
+			newInstID, instErr := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+				ModuleCode:       "CASH",
+				EntityCode:       entityName,
+				TransactionType:  txType,
+				RecordID:         initiationID,
+				RecordTable:      "cimplrcorpsaas.sweep_initiation",
+				AuditTable:       "cimplrcorpsaas.auditactionsweepinitiation",
+				AuditIDColumn:    "initiation_id",
+				ActionType:       pendingActionType,
+				Amount:           resolveSweepInitiationAmount(ovr, swp, buf),
+				SubmittedBy:      submittedByUserID,
+				SubmittedByEmail: submittedByEmail,
+			})
+			if instErr != nil {
+				api.LogError("[SweepInitiation] Self-heal CreateInstance for %s: %v", initiationID, instErr)
+			} else if newInstID != "" {
+				instanceID = newInstID
+				api.LogInfo("[SweepInitiation] Self-heal: created instance %s for initiation %s", newInstID, initiationID)
+			}
+		}
+	}
+
+	if instanceID == "" {
+		return nil
+	}
+	richDetail, richErr := approvalengine.GetRichInstanceDetail(ctx, pgxPool, instanceID, viewerUserID)
+	if richErr != nil {
+		api.LogError("[SweepInitiation] GetRichInstanceDetail failed for instance=%s initiation=%s: %v", instanceID, initiationID, richErr)
+		return nil
+	}
+	return richDetail
 }
 
 func validateSweepConfigAuditAccess(ctx context.Context, pgxPool *pgxpool.Pool, sweepID string) (int, string) {

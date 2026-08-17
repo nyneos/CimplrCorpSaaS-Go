@@ -3,6 +3,7 @@ package projection
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
@@ -245,6 +246,23 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		elapsed := time.Since(start)
 		logger.LogInfo("[DeleteCashFlowProposalV2] Processed %d proposals in %v", len(req.ProposalIDs), elapsed)
+		for _, proposalID := range req.ProposalIDs {
+			approvalengine.CancelPendingInstances(ctx, pgxPool, common.ModuleCash, proposalID, requestedBy)
+			go func(pID string) {
+				approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
+					ModuleCode:       common.ModuleCash,
+					TransactionType:  "CASH_FLOW_PROJECTION_DELETE",
+					RecordID:         pID,
+					RecordTable:      "cimplrcorpsaas.cashflow_proposal",
+					AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
+					AuditIDColumn:    "proposal_id",
+					ActionType:       "DELETE",
+					Amount:           0,
+					SubmittedBy:      req.UserID,
+					SubmittedByEmail: requestedBy,
+				})
+			}(proposalID)
+		}
 		api.RespondWithResult(w, true, fmt.Sprintf("Marked %d proposals for deletion in %v", len(req.ProposalIDs), elapsed))
 		// Notify: FULL proposal data for rich templates
 		capturedIDs := req.ProposalIDs
@@ -312,11 +330,38 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 				return
 			}
 		}
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
-			return
+		engineIDs := make([]string, 0, len(req.ProposalIDs))
+		legacyIDs := make([]string, 0, len(req.ProposalIDs))
+		var actErrs []string
+		for _, proposalID := range req.ProposalIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: common.ModuleCash, RecordID: proposalID, UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionRejected, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[CashFlowProjection] ActOnPendingOrDiagnose reject failed for %s: %v", proposalID, actionErr)
+				actErrs = append(actErrs, proposalID+": "+actionErr.Error())
+				continue
+			}
+			if actionRes.Acted {
+				engineIDs = append(engineIDs, proposalID)
+				continue
+			}
+			if actionRes.CancelledStale {
+				api.LogInfo("[CashFlowProjection] cancelled stale approval instance for %s: %s", proposalID, actionRes.Reason)
+			} else if actionRes.Reason != "" {
+				actErrs = append(actErrs, proposalID+": "+actionRes.Reason)
+				continue
+			}
+			legacyIDs = append(legacyIDs, proposalID)
 		}
+
+		if len(legacyIDs) > 0 {
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+				return
+			}
 		committed := false
 		defer func() {
 			if !committed {
@@ -333,15 +378,15 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 			  AND action_type IN ('CREATE', 'EDIT', 'DELETE')
 			ORDER BY proposal_id, requested_at DESC, action_id DESC
 		`
-		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
+		rows, err := tx.Query(ctx, sel, legacyIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
 
-		actionIDs := make([]string, 0, len(req.ProposalIDs))
-		foundProposals := make(map[string]bool, len(req.ProposalIDs))
+		actionIDs := make([]string, 0, len(legacyIDs))
+		foundProposals := make(map[string]bool, len(legacyIDs))
 		cannotReject := make([]string, 0)
 
 		for rows.Next() {
@@ -360,7 +405,7 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 
 		// Check for missing or cannot reject
 		missing := make([]string, 0)
-		for _, pid := range req.ProposalIDs {
+		for _, pid := range legacyIDs {
 			if !foundProposals[pid] {
 				missing = append(missing, pid)
 			}
@@ -401,13 +446,13 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 		committed = true
 
-		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_REJECT", req.ProposalIDs, checkerBy)
+		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_REJECT", legacyIDs, checkerBy)
 
 		elapsed := time.Since(start)
 		logger.LogInfo("[BulkRejectCashFlowProposalActionsV2] Rejected %d proposals in %v", len(actionIDs), elapsed)
 		api.RespondWithResult(w, true, fmt.Sprintf("Rejected %d proposals in %v", len(actionIDs), elapsed))
 		// Notify: FULL proposal data for rich templates
-		capturedIDs := req.ProposalIDs
+		capturedIDs := legacyIDs
 		capturedUser := req.UserID
 		capturedComment := req.Comment
 		notifyCtx := context.WithoutCancel(ctx)
@@ -420,6 +465,11 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 			fmt.Sprintf("PROJ_REJECT/%s/%d", capturedUser, time.Now().UnixMilli()),
 			payloadMap,
 		)
+		}
+		
+		if len(legacyIDs) == 0 && len(engineIDs) > 0 {
+			api.RespondWithResult(w, true, fmt.Sprintf("Rejected %d proposals via matrix", len(engineIDs)))
+		}
 	}
 }
 

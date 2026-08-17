@@ -2,6 +2,7 @@ package sweepconfig
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
@@ -20,6 +21,38 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// resolveSweepConfigAmount picks the amount used to route the approval matrix
+func resolveSweepConfigAmount(sweepAmount, bufferAmount *float64) float64 {
+	if sweepAmount != nil {
+		return *sweepAmount
+	}
+	if bufferAmount != nil {
+		return *bufferAmount
+	}
+	return 0
+}
+
+func submitSweepConfigForApproval(pgxPool *pgxpool.Pool, sweepID, entityName, submittedByUserID, actorEmail, actionType string, amount float64) {
+	go func() {
+		bgCtx := context.Background()
+		if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+			ModuleCode:       "CASH",
+			EntityCode:       entityName,
+			TransactionType:  actionType,
+			RecordID:         sweepID,
+			RecordTable:      "cimplrcorpsaas.sweepconfiguration",
+			AuditTable:       "cimplrcorpsaas.auditactionsweepconfiguration",
+			AuditIDColumn:    "sweep_id",
+			ActionType:       strings.Split(actionType, "_")[2],
+			Amount:           amount,
+			SubmittedBy:      submittedByUserID,
+			SubmittedByEmail: actorEmail,
+		}); err != nil {
+			api.LogError("approvalengine.CreateInstance failed for sweep config %s: %v", sweepID, err)
+		}
+	}()
+}
 
 const errFailedToFetchSweepConfigForPolicyCheck = "failed to fetch sweep config for policy check: "
 
@@ -165,11 +198,10 @@ func CreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		auditQ := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now(),$4)`
-		if _, err := pgxPool.Exec(ctx, auditQ, sweepID, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit action: "+err.Error())
-			return
-		}
+		submitSweepConfigForApproval(
+			pgxPool, sweepID, req.EntityName, req.UserID, requestedBy,
+			"SWEEP_CONFIG_CREATE", resolveSweepConfigAmount(req.SweepAmount, req.BufferAmount),
+		)
 
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_CREATE", []string{sweepID}, requestedBy)
 
@@ -248,6 +280,13 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		var createdIDs []string
+		
+		type pendingConfig struct {
+			sweepID    string
+			entityName string
+			amount     float64
+		}
+		var pendingConfigs []pendingConfig
 
 		for i, cfg := range req.Configs {
 			// Validate entity / banks / accounts against middleware-provided context
@@ -337,12 +376,11 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			// Create audit record
-			auditQ := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now(),$4)`
-			if _, err := tx.Exec(ctx, auditQ, sweepID, nullifyEmpty(cfg.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
-				api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: failed to create audit: %s", i, err.Error()))
-				return
-			}
+			pendingConfigs = append(pendingConfigs, pendingConfig{
+				sweepID:    sweepID,
+				entityName: cfg.EntityName,
+				amount:     resolveSweepConfigAmount(cfg.SweepAmount, cfg.BufferAmount),
+			})
 
 			createdIDs = append(createdIDs, sweepID)
 		}
@@ -353,6 +391,13 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		for _, p := range pendingConfigs {
+			submitSweepConfigForApproval(
+				pgxPool, p.sweepID, p.entityName, req.UserID, requestedBy,
+				"SWEEP_CONFIG_CREATE", p.amount,
+			)
+		}
 
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_CREATE", createdIDs, requestedBy)
 
@@ -636,6 +681,10 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", req.SweepID, requestedBy); err != nil {
+			api.LogError("[SweepConfig] CancelPendingInstances failed for %s: %v", map[string]interface{}{"sweep_id": req.SweepID, "error": err.Error()})
+		}
+
 		q := "UPDATE cimplrcorpsaas.sweepconfiguration SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE sweep_id=$%d", pos)
 		args = append(args, req.SweepID)
 
@@ -644,17 +693,23 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		auditQ := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4)`
-		if _, err := tx.Exec(ctx, auditQ, req.SweepID, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit action: "+err.Error())
-			return
-		}
-
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 		committed = true
+
+		var currentSweepAmount, currentBufferAmount *float64
+		if curSweepAmount.Valid {
+			currentSweepAmount = &curSweepAmount.F
+		}
+		if curBufferAmount.Valid {
+			currentBufferAmount = &curBufferAmount.F
+		}
+		submitSweepConfigForApproval(
+			pgxPool, req.SweepID, finalEntity, req.UserID, requestedBy,
+			"SWEEP_CONFIG_EDIT", resolveSweepConfigAmount(currentSweepAmount, currentBufferAmount),
+		)
 
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_EDIT", []string{req.SweepID}, requestedBy)
 
@@ -746,7 +801,8 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								old_target_bank_name, old_target_bank_account, 
 								old_sweep_type, old_frequency, 
 								old_effective_date, old_execution_time, 
-								old_buffer_amount, old_sweep_amount
+								old_buffer_amount, old_sweep_amount,
+								inst.instance_id, inst.status as inst_status
 						FROM cimplrcorpsaas.sweepconfiguration 
 						LEFT JOIN LATERAL (
 								SELECT COALESCE(bbm.closing_balance,0) AS current_balance
@@ -766,6 +822,13 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								ORDER BY bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
 								LIMIT 1
 						) bbal2 ON true
+						LEFT JOIN LATERAL (
+							SELECT ai.instance_id, ai.status
+							FROM uam.approval_instance ai
+							WHERE ai.record_id = sweepconfiguration.sweep_id::text AND ai.module_code = 'CASH'
+							  AND ai.status = 'PENDING' AND ai.is_deleted = false
+							ORDER BY ai.submitted_at DESC, ai.instance_id DESC LIMIT 1
+						) inst ON true
 						WHERE is_deleted != TRUE AND lower(trim(entity_name)) = ANY($1) 
 						ORDER BY GREATEST(COALESCE(created_at, '1970-01-01'::timestamp), COALESCE(updated_at, '1970-01-01'::timestamp)) DESC, sweep_id`
 			rows, err = pgxPool.Query(ctx, q, norm)
@@ -786,7 +849,8 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								old_target_bank_name, old_target_bank_account, 
 								old_sweep_type, old_frequency, 
 								old_effective_date, old_execution_time, 
-								old_buffer_amount, old_sweep_amount
+								old_buffer_amount, old_sweep_amount,
+								inst.instance_id, inst.status as inst_status
 						FROM cimplrcorpsaas.sweepconfiguration 
 						LEFT JOIN LATERAL (
 								SELECT COALESCE(bbm.closing_balance,0) AS current_balance
@@ -806,6 +870,13 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								ORDER BY bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
 								LIMIT 1
 						) bbal2 ON true
+						LEFT JOIN LATERAL (
+							SELECT ai.instance_id, ai.status
+							FROM uam.approval_instance ai
+							WHERE ai.record_id = sweepconfiguration.sweep_id::text AND ai.module_code = 'CASH'
+							  AND ai.status = 'PENDING' AND ai.is_deleted = false
+							ORDER BY ai.submitted_at DESC, ai.instance_id DESC LIMIT 1
+						) inst ON true
 						WHERE is_deleted != TRUE 
 						ORDER BY GREATEST(COALESCE(created_at, '1970-01-01'::timestamp), COALESCE(updated_at, '1970-01-01'::timestamp)) DESC, sweep_id`
 			rows, err = pgxPool.Query(ctx, q)
@@ -827,6 +898,7 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var oldEntity, oldSourceBank, oldSourceAccount, oldTargetBank, oldTargetAccount, oldSweepType, oldFreq sqlNullString
 			var oldEffectiveDate, oldExecTime sqlNullString
 			var oldBufferAmt, oldSweepAmt sqlNullFloat
+			var instID, instStatus *string
 
 			if err := rows.Scan(
 				&sweepID, &entity,
@@ -843,6 +915,7 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldSweepType, &oldFreq,
 				&oldEffectiveDate, &oldExecTime,
 				&oldBufferAmt, &oldSweepAmt,
+				&instID, &instStatus,
 			); err != nil {
 				api.RespondWithResult(w, false, "failed to read sweep configurations: "+err.Error())
 				return
@@ -971,6 +1044,14 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"edited_at":  editedAt,
 				"deleted_by": deletedBy,
 				"deleted_at": deletedAt,
+
+				"pending_approval": instID != nil,
+				"instance_id": func() string {
+					if instID != nil {
+						return *instID
+					}
+					return ""
+				}(),
 			}
 			out = append(out, m)
 		}
@@ -1021,6 +1102,8 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		actionIDs := make([]string, 0)
 		deleteSweepIDs := make([]string, 0)
 		found := map[string]bool{}
+		actionToSweepMap := make(map[string]string)
+
 		for rows.Next() {
 			var actionID, sweepID, actionType, procStatus string
 			if err := rows.Scan(&actionID, &sweepID, &actionType, &procStatus); err != nil {
@@ -1033,6 +1116,7 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			actionIDs = append(actionIDs, actionID)
+			actionToSweepMap[actionID] = sweepID
 			if actionType == constants.AuditActionDelete {
 				deleteSweepIDs = append(deleteSweepIDs, sweepID)
 			}
@@ -1083,17 +1167,50 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		upd := `UPDATE cimplrcorpsaas.auditactionsweepconfiguration SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
-		if _, err := tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
-			api.RespondWithResult(w, false, "failed to approve actions: "+err.Error())
-			return
+		// ── Approval-matrix engine: attempt engine-side approve first.
+		engineActed := make(map[string]bool)
+		for _, sweepID := range req.SweepIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "CASH", RecordID: sweepID,
+				UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionApproved, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[SweepConfig] ActOnPendingOrDiagnose approve failed for %s: %v", map[string]interface{}{"sweep_id": sweepID, "error": actionErr.Error()})
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[sweepID] = true
+			}
+		}
+
+		var legacyActionIDs []string
+		var legacyDeleteIDs []string
+		for _, id := range actionIDs {
+			sID := actionToSweepMap[id]
+			if !engineActed[sID] {
+				legacyActionIDs = append(legacyActionIDs, id)
+			}
+		}
+		for _, id := range deleteSweepIDs {
+			if !engineActed[id] {
+				legacyDeleteIDs = append(legacyDeleteIDs, id)
+			}
+		}
+
+		if len(legacyActionIDs) > 0 {
+			upd := `UPDATE cimplrcorpsaas.auditactionsweepconfiguration SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
+			if _, err := tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullifyEmpty(api.ClientIPFromRequest(r)), legacyActionIDs); err != nil {
+				api.RespondWithResult(w, false, "failed to approve actions: "+err.Error())
+				return
+			}
 		}
 
 		deleted := []string{}
-		if len(deleteSweepIDs) > 0 {
+		if len(legacyDeleteIDs) > 0 {
 			// perform soft-delete
 			updDel := `UPDATE cimplrcorpsaas.sweepconfiguration SET is_deleted = TRUE, updated_at = now() WHERE sweep_id = ANY($1) RETURNING sweep_id`
-			drows, derr := tx.Query(ctx, updDel, deleteSweepIDs)
+			drows, derr := tx.Query(ctx, updDel, legacyDeleteIDs)
 			if derr != nil {
 				api.RespondWithResult(w, false, "failed to soft delete sweeps: "+derr.Error())
 				return
@@ -1177,6 +1294,7 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		actionIDs := make([]string, 0)
 		found := map[string]bool{}
+		actionToSweepMap := make(map[string]string)
 		for rows.Next() {
 			var actionID, sweepID, procStatus string
 			if err := rows.Scan(&actionID, &sweepID, &procStatus); err != nil {
@@ -1189,6 +1307,7 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			actionIDs = append(actionIDs, actionID)
+			actionToSweepMap[actionID] = sweepID
 		}
 		missing := []string{}
 		for _, id := range req.SweepIDs {
@@ -1235,10 +1354,37 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		upd := `UPDATE cimplrcorpsaas.auditactionsweepconfiguration SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
-		if _, err := tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
-			api.RespondWithResult(w, false, "failed to reject actions: "+err.Error())
-			return
+		// ── Approval-matrix engine: attempt engine-side reject first.
+		engineActed := make(map[string]bool)
+		for _, sweepID := range req.SweepIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "CASH", RecordID: sweepID,
+				UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionRejected, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[SweepConfig] ActOnPendingOrDiagnose reject failed for %s: %v", map[string]interface{}{"sweep_id": sweepID, "error": actionErr.Error()})
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[sweepID] = true
+			}
+		}
+
+		var legacyActionIDs []string
+		for _, id := range actionIDs {
+			sID := actionToSweepMap[id]
+			if !engineActed[sID] {
+				legacyActionIDs = append(legacyActionIDs, id)
+			}
+		}
+
+		if len(legacyActionIDs) > 0 {
+			upd := `UPDATE cimplrcorpsaas.auditactionsweepconfiguration SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
+			if _, err := tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullifyEmpty(api.ClientIPFromRequest(r)), legacyActionIDs); err != nil {
+				api.RespondWithResult(w, false, "failed to reject actions: "+err.Error())
+				return
+			}
 		}
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, "failed to commit reject: "+err.Error())
@@ -1325,31 +1471,60 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 			}
 		}()
 
-		requestedIP := nullifyEmpty(api.ClientIPFromRequest(r))
-		ins := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4)`
+		type pendingDel struct {
+			sweepID    string
+			entityName string
+			amount     float64
+		}
+		var pendingDels []pendingDel
+
 		for _, id := range req.SweepIDs {
-			var latestActionType, latestStatus string
-			latestErr := tx.QueryRow(ctx, `
-				SELECT actiontype, processing_status
-				FROM cimplrcorpsaas.auditactionsweepconfiguration
-				WHERE sweep_id = $1
-				ORDER BY requested_at DESC, action_id DESC
-				LIMIT 1
-			`, id).Scan(&latestActionType, &latestStatus)
-			if latestErr == nil && latestActionType == constants.AuditActionDelete && latestStatus == constants.StatusPendingDeleteApproval {
-				api.RespondWithResult(w, false, "delete request already pending for sweep: "+id)
+			var entityName string
+			var sweepAmt, bufferAmt sqlNullFloat
+			if err := tx.QueryRow(ctx, "SELECT entity_name, sweep_amount, buffer_amount FROM cimplrcorpsaas.sweepconfiguration WHERE sweep_id=$1", id).Scan(&entityName, &sweepAmt, &bufferAmt); err != nil {
+				api.RespondWithResult(w, false, "sweep config not found for "+id)
 				return
 			}
-			if _, err := tx.Exec(ctx, ins, id, nullifyEmpty(req.Reason), requestedBy, requestedIP); err != nil {
-				api.RespondWithResult(w, false, "failed to create delete audit: "+err.Error())
+			var sAmt, bAmt *float64
+			if sweepAmt.Valid {
+				sAmt = &sweepAmt.F
+			}
+			if bufferAmt.Valid {
+				bAmt = &bufferAmt.F
+			}
+
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (
+					sweep_id, actiontype, processing_status, reason,
+					requested_by, requested_at, requested_ip
+				) VALUES ($1, 'DELETE', $2, $3, $4, now(), $5)`,
+				id, constants.StatusPendingDeleteApproval, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r)),
+			); err != nil {
+				api.RespondWithResult(w, false, "failed to create delete request for "+id+": "+err.Error())
 				return
 			}
+
+			pendingDels = append(pendingDels, pendingDel{
+				sweepID:    id,
+				entityName: entityName,
+				amount:     resolveSweepConfigAmount(sAmt, bAmt),
+			})
 		}
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 		committed = true
+
+		for _, p := range pendingDels {
+			if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", p.sweepID, requestedBy); err != nil {
+				api.LogError("[SweepConfig] CancelPendingInstances failed for delete on %s: %v", p.sweepID, err)
+			}
+			submitSweepConfigForApproval(
+				pgxPool, p.sweepID, p.entityName, req.UserID, requestedBy,
+				"SWEEP_CONFIG_DELETE", p.amount,
+			)
+		}
 
 		api.RespondWithResult(w, true, fmt.Sprintf("created %d delete requests", len(req.SweepIDs)))
 		// Notify: FULL sweep config data for rich templates

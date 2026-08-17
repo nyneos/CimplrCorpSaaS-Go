@@ -2,6 +2,7 @@ package bankbalances
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -472,7 +473,13 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_BALANCE", "POST_CREATE", []string{balanceID}, requestedBy)
 
-		api.RespondWithResult(w, true, balanceID)
+		var amt float64
+		if req.BalanceAmount != nil {
+			amt = *req.BalanceAmount
+		}
+		submitBankBalanceForApproval(pgxPool, balanceID, req.AccountNo, req.UserID, requestedBy, "BANK_BALANCE_CREATE", amt)
+
+		api.RespondWithPayload(w, true, "", map[string]any{"balance_id": balanceID})
 	}
 }
 
@@ -511,6 +518,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		actionIDs := make([]string, 0)
 		deleteActionIDs := make([]string, 0)
 		found := map[string]bool{}
+		actionToBalanceMap := make(map[string]string)
 		for rows.Next() {
 			var actionID, balanceID, actionType, procStatus string
 			if err := rows.Scan(&actionID, &balanceID, &actionType, &procStatus); err != nil {
@@ -522,6 +530,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithResult(w, false, "cannot approve non-pending balance: "+balanceID)
 				return
 			}
+			actionToBalanceMap[actionID] = balanceID
 			actionIDs = append(actionIDs, actionID)
 			if actionType == "DELETE" {
 				deleteActionIDs = append(deleteActionIDs, actionID)
@@ -561,6 +570,43 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		// ── Approval-matrix engine: attempt engine-side approve first.
+		engineActed := make(map[string]bool)
+		for _, balanceID := range req.BalanceIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "CASH", RecordID: balanceID,
+				UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionApproved, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[BankBalance] ActOnPendingOrDiagnose approve failed for %s: %v", balanceID, actionErr)
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[balanceID] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[BankBalance] cancelled stale approval instance for balance %s", balanceID)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[BankBalance] engine skipped balance %s: %s", balanceID, actionRes.Reason)
+			}
+		}
+
+		// Filter out engine-handled IDs from legacy SQL lists
+		var legacyActionIDs []string
+		for _, id := range actionIDs {
+			balID := actionToBalanceMap[id]
+			if !engineActed[balID] {
+				legacyActionIDs = append(legacyActionIDs, id)
+			}
+		}
+		var legacyDeleteActionIDs []string
+		for _, id := range deleteActionIDs {
+			balID := actionToBalanceMap[id]
+			if !engineActed[balID] {
+				legacyDeleteActionIDs = append(legacyDeleteActionIDs, id)
+			}
+		}
+		
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+pgUserFriendlyMessage(err))
@@ -575,7 +621,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Update audit actions to APPROVED
 		upd := `UPDATE auditactionbankbalances SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
-		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullIfEmpty(api.ClientIPFromRequest(r)), actionIDs)
+		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullIfEmpty(api.ClientIPFromRequest(r)), legacyActionIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to approve actions: "+pgUserFriendlyMessage(err))
 			return
@@ -591,7 +637,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Delete any balances requested for delete
 		deleted := []string{}
-		if len(deleteActionIDs) > 0 {
+		if len(legacyDeleteActionIDs) > 0 {
 			// delQ := `DELETE FROM bank_balances_manual WHERE balance_id = ANY($1) RETURNING balance_id`
 			delQ := `
 				UPDATE bank_balances_manual b
@@ -604,7 +650,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND aa.balance_id = b.balance_id
 				RETURNING b.balance_id
 			`
-			drows, derr := tx.Query(ctx, delQ, deleteActionIDs)
+			drows, derr := tx.Query(ctx, delQ, legacyDeleteActionIDs)
 			if derr != nil {
 				api.RespondWithResult(w, false, "failed to soft delete balances: "+pgUserFriendlyMessage(derr))
 				return
@@ -685,6 +731,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		actionIDs := make([]string, 0)
 		found := map[string]bool{}
+		actionToBalanceMap := make(map[string]string)
 		for rows.Next() {
 			var actionID string
 			var balanceID string
@@ -698,6 +745,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithResult(w, false, "cannot reject non-pending balance: "+balanceID)
 				return
 			}
+			actionToBalanceMap[actionID] = balanceID
 			actionIDs = append(actionIDs, actionID)
 		}
 		missing := []string{}
@@ -745,8 +793,33 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
+		// ── Approval-matrix engine: attempt engine-side reject first.
+		engineActed := make(map[string]bool)
+		for _, balanceID := range req.BalanceIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "CASH", RecordID: balanceID,
+				UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionRejected, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[BankBalance] ActOnPendingOrDiagnose reject failed for %s: %v", balanceID, actionErr)
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[balanceID] = true
+			}
+		}
+
+		var legacyActionIDs []string
+		for _, id := range actionIDs {
+			balID := actionToBalanceMap[id]
+			if !engineActed[balID] {
+				legacyActionIDs = append(legacyActionIDs, id)
+			}
+		}
+
 		upd := `UPDATE auditactionbankbalances SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4)`
-		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullIfEmpty(api.ClientIPFromRequest(r)), actionIDs)
+		_, err = tx.Exec(ctx, upd, checkerBy, nullifyEmpty(req.Comment), nullIfEmpty(api.ClientIPFromRequest(r)), legacyActionIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to reject actions: "+pgUserFriendlyMessage(err))
 			return
@@ -841,13 +914,23 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
 			if latestErr == nil && latestActionType == "DELETE" && latestStatus == constants.StatusPendingDeleteApproval {
-				api.RespondWithResult(w, false, fmt.Sprintf("delete request already pending for balance_id: %s", id))
-				return
+				continue
 			}
+
 			if _, err := tx.Exec(ctx, ins, id, nullifyEmpty(req.Reason), requestedBy, requestedIP); err != nil {
-				api.RespondWithResult(w, false, "failed to create delete audit: "+pgUserFriendlyMessage(err))
+				api.RespondWithResult(w, false, "failed to insert delete audit: "+err.Error())
 				return
 			}
+			
+			// ── Approval-matrix engine delete request ──
+			_ = approvalengine.CancelPendingInstances(context.Background(), pgxPool, "CASH", id, requestedBy)
+			
+			row, _ := loadBankBalanceRow(ctx, pgxPool, id) // ignoring err as it's guaranteed to load by this point
+			var amt float64
+			if row.BalanceAmount != nil {
+				amt = *row.BalanceAmount
+			}
+			submitBankBalanceForApproval(pgxPool, id, row.AccountNo, req.UserID, requestedBy, "BANK_BALANCE_DELETE", amt)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
@@ -904,8 +987,17 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   b.opening_balance, b.total_credits, b.total_debits, b.closing_balance,
 				   b.old_bank_name, b.old_account_no, b.old_iban, b.old_currency_code, b.old_nickname,
 				   b.old_as_of_date, b.old_as_of_time, b.old_balance_type, b.old_balance_amount, b.old_statement_type, b.old_source_channel,
-				   b.old_opening_balance, b.old_total_credits, b.old_total_debits, b.old_closing_balance,
-			   COALESCE(ec.entity_name, me.entity_name, '') AS entity_name
+			   b.old_opening_balance, b.old_total_credits, b.old_total_debits, b.old_closing_balance,
+			   COALESCE(ec.entity_name, me.entity_name, '') AS entity_name,
+			   -- ── Approval-engine columns ────────────────────────────────────────
+			   COALESCE(ai.instance_id,'')        AS approval_instance_id,
+			   COALESCE(ai.status,'')             AS approval_engine_status,
+			   COALESCE(aie.instance_eye_id,'')   AS current_eye_id,
+			   COALESCE(aie.position::text,'')    AS current_eye_position,
+			   COALESCE(aie.approvals_required,0) AS approvals_required,
+			   COALESCE(aie.approvals_received,0) AS approvals_received,
+			   aie.sla_deadline                   AS sla_deadline,
+			   COALESCE(aie.is_escalated,false)   AS is_escalated
 		   FROM bank_balances_manual b
 		   JOIN (
 			   SELECT account_number, MIN(entity_id) AS entity_id
@@ -914,6 +1006,22 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		   ) mba ON b.account_no = mba.account_number
 		   LEFT JOIN public.masterentitycash ec ON mba.entity_id = ec.entity_id
 		   LEFT JOIN public.masterentity me ON me.entity_id::text = mba.entity_id
+		   LEFT JOIN LATERAL (
+			   SELECT ai.* FROM uam.approval_instance ai
+			   WHERE ai.record_id = b.balance_id::text
+			     AND ai.module_code = 'CASH'
+			     AND ai.status = 'PENDING'
+			     AND ai.is_deleted = false
+			   ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+			   LIMIT 1
+		   ) ai ON true
+		   LEFT JOIN LATERAL (
+			   SELECT aie.* FROM uam.approval_instance_eye aie
+			   WHERE aie.instance_id = ai.instance_id
+			     AND aie.status = 'ACTIVE'
+			   ORDER BY aie.position ASC, aie.instance_eye_id ASC
+			   LIMIT 1
+		   ) aie ON true
 		`
 		var rows pgx.Rows
 		var err error
@@ -1019,6 +1127,10 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					oldBalanceAmount, oldOpening, oldCredits, oldDebits, oldClosing   sqlNullFloat
 					oldStatementType, oldSourceChannel                                sqlNullString
 					entityName                                                        sqlNullString
+					aiInstanceID, aiStatus, eyeID, eyePosition                        sqlNullString
+					reqApprovals, recApprovals                                        *int
+					slaDeadline                                                       sqlNullTime
+					isEscalated                                                       *bool
 				)
 				// use Scan with many nullable types
 				err := rows.Scan(&balanceID, &bankName, &accountNo, &iban, &currency, &nickname, &country,
@@ -1026,7 +1138,8 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&uploadS3Key, &opening, &credits, &debits, &closing,
 					&oldBankName, &oldAccountNo, &oldIban, &oldCurrency, &oldNickname,
 					&oldAsOfDate, &oldAsOfTime, &oldBalanceType, &oldBalanceAmount, &oldStatementType, &oldSourceChannel,
-					&oldOpening, &oldCredits, &oldDebits, &oldClosing, &entityName)
+					&oldOpening, &oldCredits, &oldDebits, &oldClosing, &entityName,
+					&aiInstanceID, &aiStatus, &eyeID, &eyePosition, &reqApprovals, &recApprovals, &slaDeadline, &isEscalated)
 				if err != nil {
 					continue
 				}
@@ -1074,6 +1187,15 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"checker_by":          "",
 					"checker_at":          "",
 					"checker_comment":     "",
+					// ── Approval engine payload ──
+					"approval_instance_id":   aiInstanceID.ValueOrZero(),
+					"approval_engine_status": aiStatus.ValueOrZero(),
+					"current_eye_id":         eyeID.ValueOrZero(),
+					"current_eye_position":   eyePosition.ValueOrZero(),
+					"approvals_required":     zeroIfNilInt(reqApprovals),
+					"approvals_received":     zeroIfNilInt(recApprovals),
+					"sla_deadline":           slaDeadline.ValueOrZero(),
+					"is_escalated":           falseIfNilBool(isEscalated),
 					"reason":              "",
 					"created_by":          "",
 					"created_at":          "",
@@ -1544,6 +1666,50 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_BALANCE", "POST_EDIT", []string{req.BalanceID}, requestedBy)
 
+		_ = approvalengine.CancelPendingInstances(context.Background(), pgxPool, "CASH", req.BalanceID, requestedBy)
+		var amt float64
+		if mergedRow.BalanceAmount != nil {
+			amt = *mergedRow.BalanceAmount
+		}
+		submitBankBalanceForApproval(pgxPool, req.BalanceID, mergedRow.AccountNo, req.UserID, requestedBy, "BANK_BALANCE_EDIT", amt)
+
 		api.RespondWithResult(w, true, req.BalanceID)
 	}
+}
+
+// submitBankBalanceForApproval submits an instance to the approval engine.
+func submitBankBalanceForApproval(pool *pgxpool.Pool, balanceID, accountNo, submittedByUserID, actorEmail, txType string, amount float64) {
+	go func() {
+		bgCtx := context.Background()
+		entityCode := lookupEntityIDForAccountNo(bgCtx, pool, accountNo)
+		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+			ModuleCode:       "CASH",
+			EntityCode:       entityCode,
+			TransactionType:  txType,
+			RecordID:         balanceID,
+			RecordTable:      "cimplrcorpsaas.bank_balances_manual",
+			AuditTable:       "public.auditactionbankbalances",
+			AuditIDColumn:    "balance_id",
+			ActionType:       strings.TrimPrefix(txType, "BANK_BALANCE_"),
+			Amount:           amount,
+			SubmittedBy:      submittedByUserID,
+			SubmittedByEmail: actorEmail,
+		}); err != nil {
+			api.LogError("[BankBalance] approvalengine.CreateInstance failed for %s (%s): %v", balanceID, txType, err)
+		}
+	}()
+}
+
+func zeroIfNilInt(v *int) int {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+func falseIfNilBool(v *bool) bool {
+	if v == nil {
+		return false
+	}
+	return *v
 }
