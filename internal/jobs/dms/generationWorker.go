@@ -398,6 +398,14 @@ func mergeTemplateHTML(ctx context.Context, pool *pgxpool.Pool, contentHTML stri
 	return renderedHTML, values, nil
 }
 
+// templateIsPoolScoped reports whether a template body already renders the whole
+// row pool itself — a data/txn table lists every matched row, so the body is the
+// same no matter which row is merged into it.
+func templateIsPoolScoped(html string) bool {
+	lower := strings.ToLower(html)
+	return strings.Contains(lower, "data-dms-table") || strings.Contains(lower, "data-dms-txn-table")
+}
+
 // attachmentJob is one attachment of one run to render: the run it belongs to,
 // the rule's attachment definition, the output naming, whether this run emits
 // multiple documents, and the shared generation context. The source row(s) stay
@@ -452,6 +460,9 @@ func generateOneAttachment(ctx context.Context, pool *pgxpool.Pool, job attachme
 }
 
 // generatePagedAttachment renders one file where each source row becomes a page.
+// A template whose body is pool-scoped (it lists every row itself via a data
+// table) is rendered once instead — repeating it per row would emit N identical
+// pages, and the table already spills onto further pages when it is long.
 func generatePagedAttachment(ctx context.Context, pool *pgxpool.Pool, job attachmentJob, rows []map[string]any) error {
 	a := job.Attachment
 	format := strings.ToUpper(strings.TrimSpace(a.OutputFormat))
@@ -469,9 +480,13 @@ func generatePagedAttachment(ctx context.Context, pool *pgxpool.Pool, job attach
 	if len(rows) == 0 {
 		rows = []map[string]any{nil}
 	}
+	pageRows := rows
+	if templateIsPoolScoped(content.HTML) {
+		pageRows = rows[:1]
+	}
 	var pages []string
 	var values map[string]string
-	for i, row := range rows {
+	for i, row := range pageRows {
 		pageHTML, pageValues, err := mergeTemplateHTML(ctx, pool, content.HTML, mergeFields, row, job.GenCtx, format)
 		if err != nil {
 			return err
