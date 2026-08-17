@@ -2,6 +2,7 @@ package exposures
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
@@ -301,9 +302,11 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		return nil, 0, http.StatusBadRequest, errors.New(constants.ErrUserIDRequired)
 	}
 	userName := ""
+	makerEmail := ""
 	for _, s := range auth.GetActiveSessions() {
 		if s.UserID == userID {
 			userName = s.Name
+			makerEmail = s.Email
 			break
 		}
 	}
@@ -1375,6 +1378,19 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		logger.LogInfo("[FBUP] committed batch %s for file %s", batchID.String(), fh.Filename)
 
 		fxnotif.NotifyExposureUpload(ctx, pool, fxnotif.SourceRouteV91Upload, batchID.String(), userID, userName)
+
+		// Create approval instances for all new headers
+		go func(docs map[string]string, email string) {
+			bgCtx := context.Background()
+			for _, hidStr := range docs {
+				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+					ModuleCode:       "FX",
+					TransactionType:  "FX_EXPOSURE_CREATE",
+					RecordID:         hidStr,
+					SubmittedByEmail: email,
+				})
+			}
+		}(docToID, makerEmail)
 
 		// Authoritative preview: use DB-driven preview builder instead of in-memory approximation.
 		// The old in-memory preview (based on canonicals) is intentionally removed to ensure

@@ -10,6 +10,8 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
+	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -253,6 +255,30 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			NewValues:    newSnap,
 		})
 
+		if req.Submit {
+			makerEmail := ""
+			for _, s := range auth.GetActiveSessions() {
+				if s.UserID == req.UserID {
+					makerEmail = s.Email
+					break
+				}
+			}
+			txnType := "FX_HEDGE_PROPOSAL_EDIT"
+			if oldSnap == nil {
+				txnType = "FX_HEDGE_PROPOSAL_CREATE"
+			}
+			go func(id, email, tType string) {
+				bgCtx := context.Background()
+				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+					ModuleCode:       "FX",
+					TransactionType:  tType,
+					RecordID:         id,
+					SubmittedByEmail: email,
+				})
+			}(proposalID, makerEmail, txnType)
+		}
+
 		respondWithSuccess(w, http.StatusOK, "Hedging proposal saved", map[string]any{
 			"proposal_id":       proposalID,
 			"proposal_name":     name,
@@ -365,6 +391,12 @@ func GetHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "hedging proposal not found")
 			return
 		}
+		
+		if detail, dErr := approvalengine.GetRichInstanceDetail(ctx, pool, "FX", proposalID); dErr == nil {
+			if detail != nil && detail.Status == "PENDING" && len(detail.Eyes) > 0 {
+				status = detail.Eyes[0].Status
+			}
+		}
 
 		lineRows, err := pool.Query(ctx, `
 			SELECT
@@ -452,6 +484,7 @@ func updateHedgingProposalDocumentStatuses(
 	ids []string,
 	status string,
 	actor string,
+	userID string,
 	comments string,
 	actionType string,
 ) (int, error) {
@@ -478,26 +511,50 @@ func updateHedgingProposalDocumentStatuses(
 			continue
 		}
 		newSnap := documentSnapshot(ctx, pool, id)
-		auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{
-			TableName:    auditutil.TableHedgeProposalDocument,
-			ParentColumn: "proposal_id",
-			ParentID:     id,
-			ActionType:   actionType,
-			Status:       status,
-			Reason:       comments,
-			RequestedBy:  actor,
-			OldValues:    oldSnap,
-			NewValues:    newSnap,
-		})
+		var engineActed bool
 		if actionType == "CONFIRM" || actionType == "REJECT" {
-			auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{
+			userEmail := ""
+			for _, s := range auth.GetActiveSessions() {
+				if s.UserID == userID {
+					userEmail = s.Email
+					break
+				}
+			}
+			actionStr := "APPROVED"
+			if actionType == "REJECT" {
+				actionStr = "REJECTED"
+			}
+			res, err := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FX", RecordID: id, UserID: userID, UserEmail: userEmail,
+				Action: actionStr, Comment: comments,
+			})
+			if err == nil && res.Acted {
+				engineActed = true
+			}
+		}
+
+		if !engineActed {
+			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{
 				TableName:    auditutil.TableHedgeProposalDocument,
 				ParentColumn: "proposal_id",
 				ParentID:     id,
+				ActionType:   actionType,
 				Status:       status,
-				CheckerBy:    actor,
-				Comment:      comments,
+				Reason:       comments,
+				RequestedBy:  actor,
+				OldValues:    oldSnap,
+				NewValues:    newSnap,
 			})
+			if actionType == "CONFIRM" || actionType == "REJECT" {
+				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{
+					TableName:    auditutil.TableHedgeProposalDocument,
+					ParentColumn: "proposal_id",
+					ParentID:     id,
+					Status:       status,
+					CheckerBy:    actor,
+					Comment:      comments,
+				})
+			}
 		}
 		count++
 	}
@@ -522,7 +579,7 @@ func ApproveHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
-		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, req.ProposalIDs, constants.StatusApproved, actor, strings.TrimSpace(req.Comments), "CONFIRM")
+		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, req.ProposalIDs, constants.StatusApproved, actor, req.UserID, strings.TrimSpace(req.Comments), "CONFIRM")
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to approve hedging proposals")
 			return
@@ -549,7 +606,7 @@ func RejectHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
-		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, req.ProposalIDs, constants.StatusRejected, actor, strings.TrimSpace(req.Comments), "REJECT")
+		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, req.ProposalIDs, constants.StatusRejected, actor, req.UserID, strings.TrimSpace(req.Comments), "REJECT")
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to reject hedging proposals")
 			return
@@ -576,11 +633,32 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
-		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, req.ProposalIDs, constants.StatusPendingDeleteApproval, actor, strings.TrimSpace(req.Comments), "DELETE")
+		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, req.ProposalIDs, constants.StatusPendingDeleteApproval, actor, req.UserID, strings.TrimSpace(req.Comments), "DELETE")
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to delete hedging proposals")
 			return
 		}
+
+		makerEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				makerEmail = s.Email
+				break
+			}
+		}
+		go func(ids []string, email string) {
+			bgCtx := context.Background()
+			for _, id := range ids {
+				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+					ModuleCode:       "FX",
+					TransactionType:  "FX_HEDGE_PROPOSAL_DELETE",
+					RecordID:         id,
+					SubmittedByEmail: email,
+				})
+			}
+		}(req.ProposalIDs, makerEmail)
+
 		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d proposal(s) marked for delete", n), map[string]any{"count": n})
 	}
 }

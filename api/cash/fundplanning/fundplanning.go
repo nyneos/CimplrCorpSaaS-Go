@@ -21,7 +21,33 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"CimplrCorpSaas/api/approvalengine"
 )
+
+func submitFundPlanForApproval(pgxPool *pgxpool.Pool, groupID, entityName, submittedByUserID, actorEmail, actionType string, amount float64) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+			ModuleCode:       "CASH",
+			EntityCode:       entityName,
+			TransactionType:  actionType,
+			RecordID:         groupID,
+			RecordTable:      "fund_plan_groups",
+			AuditTable:       "public.auditaction_fund_plan_groups",
+			AuditIDColumn:    "group_id",
+			ActionType:       strings.Split(actionType, "_")[2], // FUND_PLANNING_CREATE -> CREATE
+			Amount:           amount,
+			SubmittedBy:      submittedByUserID,
+			SubmittedByEmail: actorEmail,
+		})
+		if err != nil {
+			api.LogError("[FundPlanning] Failed to create approval instance for %s %s: %v", actionType, groupID, err)
+		}
+	}()
+}
 
 func validateFundPlanScope(ctx context.Context, fields map[string]interface{}) string {
 	return validation.ValidateCashMasterReferences(ctx, fields)
@@ -1137,6 +1163,13 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 				return
 			}
+			
+			for i, group := range req.Groups {
+				if dbGroupID, ok := results[i]["group_id"].(string); ok {
+					submitFundPlanForApproval(pgxPool, dbGroupID, req.EntityName, req.UserID, userEmail, "FUND_PLANNING_CREATE", group.TotalAmount)
+				}
+			}
+
 			dmsevent.Fire(pgxPool, "CASH", "FUND_PLANNING", "POST_CREATE", []string{planID}, userEmail)
 		} else {
 			// Transaction will be rolled back by defer
@@ -1346,10 +1379,12 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				aa.checker_at,
 				aa.checker_ip,
 				aa.checker_comment,
-				aa.reason
+				aa.reason,
+				inst.instance_id,
+				inst.status as inst_status
 			FROM fund_plan_groups fpg
 			LEFT JOIN LATERAL (
-				SELECT actiontype, processing_status, requested_by, requested_at, requested_ip,
+				SELECT group_id, actiontype, processing_status, requested_by, requested_at, requested_ip,
 					   checker_by, checker_at, checker_ip, checker_comment, reason
 				FROM auditaction_fund_plan_groups aafpg
 				WHERE aafpg.group_id IN (
@@ -1358,9 +1393,17 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) aa ON TRUE
-			GROUP BY fpg.plan_id, fpg.entity_name, fpg.horizon, 
+			LEFT JOIN LATERAL (
+				SELECT ai.instance_id, ai.status
+				FROM uam.approval_instance ai
+				WHERE ai.record_id = aa.group_id::text AND ai.module_code = 'CASH'
+				  AND ai.status = 'PENDING' AND ai.is_deleted = false
+				ORDER BY ai.submitted_at DESC, ai.instance_id DESC LIMIT 1
+			) inst ON TRUE
+			GROUP BY fpg.plan_id, fpg.entity_name, fpg.horizon,
 					 aa.actiontype, aa.processing_status, aa.requested_by, aa.requested_at,
-					 aa.requested_ip, aa.checker_by, aa.checker_at, aa.checker_ip, aa.checker_comment, aa.reason
+					 aa.requested_ip, aa.checker_by, aa.checker_at, aa.checker_ip, aa.checker_comment, aa.reason,
+					 inst.instance_id, inst.status
 			ORDER BY fpg.plan_id`
 
 		rows, err := pgxPool.Query(ctx, query)
@@ -1379,10 +1422,12 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var actionType, processingStatus sql.NullString
 			var requestedBy, requestedIP, checkerBy, checkerIP, checkerComment, reason sql.NullString
 			var requestedAt, checkerAt sql.NullTime
+			var instID, instStatus sql.NullString
 
 			err := rows.Scan(&planID, &entityName, &horizon, &totalGroups, &totalAmount,
 				&currency, &primaryTypes, &primaryValues, &actionType, &processingStatus,
-				&requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason)
+				&requestedBy, &requestedAt, &requestedIP, &checkerBy, &checkerAt, &checkerIP, &checkerComment, &reason,
+				&instID, &instStatus)
 
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailed+err.Error())
@@ -1409,6 +1454,8 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"checker_ip":        nullableToString(checkerIP),
 				"checker_comment":   nullableToString(checkerComment),
 				"reason":            nullableToString(reason),
+				"pending_approval":  instID.Valid,
+				"instance_id":       nullableToString(instID),
 			}
 
 			if requestedAt.Valid {
@@ -1684,25 +1731,51 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Update all groups to APPROVED
-		updateQuery := `
-			UPDATE auditaction_fund_plan_groups 
-			SET processing_status = 'APPROVED',
-				checker_by = $1,
-				checker_at = now(),
-				checker_comment = $2,
-				checker_ip = $3
-			WHERE group_id = ANY($4) 
-			AND processing_status = 'PENDING_APPROVAL'
-			AND actiontype = 'CREATE'`
-
-		cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, nullIfEmpty(api.ClientIPFromRequest(r)), groupIDs)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to approve groups: "+err.Error())
-			return
+		// ── Approval-matrix engine: attempt engine-side approve first.
+		engineActed := make(map[string]bool)
+		for _, groupID := range groupIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "CASH", RecordID: groupID,
+				UserID: req.UserID, UserEmail: userEmail,
+				Action: approvalengine.ActionApproved, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[FundPlanning] ActOnPendingOrDiagnose approve failed for %s: %v", map[string]interface{}{"group_id": groupID, "error": actionErr.Error()})
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[groupID] = true
+			}
 		}
 
-		rowsAffected := cmdTag.RowsAffected()
+		var legacyGroupIDs []string
+		for _, id := range groupIDs {
+			if !engineActed[id] {
+				legacyGroupIDs = append(legacyGroupIDs, id)
+			}
+		}
+
+		rowsAffected := int64(len(groupIDs) - len(legacyGroupIDs))
+
+		if len(legacyGroupIDs) > 0 {
+			updateQuery := `
+				UPDATE auditaction_fund_plan_groups 
+				SET processing_status = 'APPROVED',
+					checker_by = $1,
+					checker_at = now(),
+					checker_comment = $2,
+					checker_ip = $3
+				WHERE group_id = ANY($4) 
+				AND processing_status = 'PENDING_APPROVAL'
+				AND actiontype = 'CREATE'`
+
+			cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, nullIfEmpty(api.ClientIPFromRequest(r)), legacyGroupIDs)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to approve groups: "+err.Error())
+				return
+			}
+			rowsAffected += cmdTag.RowsAffected()
+		}
 		if err = tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 			return
@@ -1818,25 +1891,51 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Update all groups to REJECTED
-		updateQuery := `
-			UPDATE auditaction_fund_plan_groups 
-			SET processing_status = 'REJECTED',
-				checker_by = $1,
-				checker_at = now(),
-				checker_comment = $2,
-				checker_ip = $3
-			WHERE group_id = ANY($4) 
-			AND processing_status = 'PENDING_APPROVAL'
-			AND actiontype = 'CREATE'`
-
-		cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, nullIfEmpty(api.ClientIPFromRequest(r)), groupIDs)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to reject groups: "+err.Error())
-			return
+		// ── Approval-matrix engine: attempt engine-side reject first.
+		engineActed := make(map[string]bool)
+		for _, groupID := range groupIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "CASH", RecordID: groupID,
+				UserID: req.UserID, UserEmail: userEmail,
+				Action: approvalengine.ActionRejected, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[FundPlanning] ActOnPendingOrDiagnose reject failed for %s: %v", map[string]interface{}{"group_id": groupID, "error": actionErr.Error()})
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[groupID] = true
+			}
 		}
 
-		rowsAffected := cmdTag.RowsAffected()
+		var legacyGroupIDs []string
+		for _, id := range groupIDs {
+			if !engineActed[id] {
+				legacyGroupIDs = append(legacyGroupIDs, id)
+			}
+		}
+
+		rowsAffected := int64(len(groupIDs) - len(legacyGroupIDs))
+
+		if len(legacyGroupIDs) > 0 {
+			updateQuery := `
+				UPDATE auditaction_fund_plan_groups 
+				SET processing_status = 'REJECTED',
+					checker_by = $1,
+					checker_at = now(),
+					checker_comment = $2,
+					checker_ip = $3
+				WHERE group_id = ANY($4) 
+				AND processing_status = 'PENDING_APPROVAL'
+				AND actiontype = 'CREATE'`
+
+			cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, nullIfEmpty(api.ClientIPFromRequest(r)), legacyGroupIDs)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to reject groups: "+err.Error())
+				return
+			}
+			rowsAffected += cmdTag.RowsAffected()
+		}
 		if err = tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 			return
@@ -1921,7 +2020,7 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Get all group IDs for the plan that are approved (can be deleted)
 		getGroupsQuery := `
-			SELECT fpg.group_id 
+			SELECT fpg.group_id, fpg.entity_name, fpg.total_amount 
 			FROM fund_plan_groups fpg
 			INNER JOIN auditaction_fund_plan_groups aa ON aa.group_id = fpg.group_id
 			WHERE fpg.plan_id = $1 
@@ -1941,15 +2040,23 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer rows.Close()
 
+		type delGroup struct {
+			groupID    string
+			entityName string
+			totalAmt   float64
+		}
+		var groupsToDelete []delGroup
 		var groupIDs []string
+
 		for rows.Next() {
-			var groupID string
-			err := rows.Scan(&groupID)
+			var g delGroup
+			err := rows.Scan(&g.groupID, &g.entityName, &g.totalAmt)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToScanGroupID+err.Error())
 				return
 			}
-			groupIDs = append(groupIDs, groupID)
+			groupsToDelete = append(groupsToDelete, g)
+			groupIDs = append(groupIDs, g.groupID)
 		}
 		rows.Close()
 
@@ -1960,16 +2067,20 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Create delete request audit actions for all groups
 		var actionIDs []string
-		for _, groupID := range groupIDs {
+		for _, g := range groupsToDelete {
+			if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", g.groupID, userEmail); err != nil {
+				api.LogError("[FundPlanning] CancelPendingInstances failed for delete on %s: %v", map[string]interface{}{"group_id": g.groupID, "error": err.Error()})
+			}
+
 			insertQuery := `
 				INSERT INTO auditaction_fund_plan_groups (group_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
 				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now(), $4)
 				RETURNING action_id`
 
 			var actionID string
-			err = tx.QueryRow(ctx, insertQuery, groupID, req.Reason, userEmail, nullIfEmpty(api.ClientIPFromRequest(r))).Scan(&actionID)
+			err = tx.QueryRow(ctx, insertQuery, g.groupID, req.Reason, userEmail, nullIfEmpty(api.ClientIPFromRequest(r))).Scan(&actionID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create delete request for group %s: %s", groupID, err.Error()))
+				api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create delete request for group %s: %s", g.groupID, err.Error()))
 				return
 			}
 			actionIDs = append(actionIDs, actionID)
@@ -1978,6 +2089,10 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err = tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 			return
+		}
+		
+		for _, g := range groupsToDelete {
+			submitFundPlanForApproval(pgxPool, g.groupID, g.entityName, req.UserID, userEmail, "FUND_PLANNING_DELETE", g.totalAmt)
 		}
 
 		result := map[string]interface{}{

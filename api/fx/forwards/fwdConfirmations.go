@@ -1,11 +1,14 @@
 package forwards
 
 import (
+	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/fx/auditutil"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
 	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -98,7 +101,7 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 			mergedFields[k] = v
 		}
 		entityCode, _ := oldValues["entity_level_0"].(string)
-		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+		ok, tID := runtime.EnforceWithMatrix(r.Context(), w, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleFX,
 			SubModule:           "FORWARD_BOOKING",
@@ -108,7 +111,8 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/fx/forwards/update-fields",
 			DefaultBlockMessage: "Forward booking edit blocked by policy",
 			Fields:              mergedFields,
-		}) {
+		})
+		if !ok {
 			return
 		}
 		// Build dynamic SET clause
@@ -138,8 +142,30 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 		if strings.TrimSpace(requestedBy) == "" {
 			requestedBy = auditutil.ActorFromContext(r.Context())
 		}
+		
+		makerEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				makerEmail = s.Email
+				break
+			}
+		}
+
 		auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: req.SystemTransactionID, ActionType: constants.FwdActionTypeEdit, Status: constants.FwdProcessingStatusPendingEditApproval, Reason: strings.TrimSpace(req.Reason), RequestedBy: requestedBy, OldValues: oldValues, NewValues: result})
 		triggerForwardBookingNotif(r.Context(), pool, routeForwardUpdateFields, "UPDATE", requestedBy, constants.FwdProcessingStatusPendingEditApproval, []string{req.SystemTransactionID})
+
+		go func(id, email, matrixID string) {
+			bgCtx := context.Background()
+			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "FX",
+				TransactionType:  "FX_FORWARD_EDIT",
+				RecordID:         id,
+				MatrixID:         matrixID,
+				SubmittedByEmail: email,
+			})
+		}(req.SystemTransactionID, makerEmail, tID)
+
 		respondEnvelopeSuccess(w, "Forward booking fields updated successfully", map[string]interface{}{
 			"updated": result,
 		})
@@ -200,6 +226,23 @@ func applyForwardBookingDecision(
 		return
 	}
 	actor := auditutil.Actor(req.UserID)
+	actorEmail := ""
+	for _, s := range auth.GetActiveSessions() {
+		if s.UserID == req.UserID {
+			actorEmail = s.Email
+			break
+		}
+	}
+	engineActedMap := make(map[string]bool)
+	for _, id := range req.SystemTransactionIDs {
+		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(r.Context(), pool, approvalengine.ActOnPendingRequest{
+			ModuleCode: "FX", RecordID: id, UserID: req.UserID, UserEmail: actorEmail,
+			Action: processingStatus, Comment: req.Comment,
+		})
+		if actionErr == nil && actionRes.Acted {
+			engineActedMap[id] = true
+		}
+	}
 	policyEvent := common.TriggerPreApprove
 	if processingStatus == constants.FwdProcessingStatusRejected {
 		policyEvent = common.TriggerPreReject
@@ -402,12 +445,16 @@ func applyForwardBookingDecision(
 		if id == "" {
 			continue
 		}
-		auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: id, Status: decisionStatus, CheckerBy: actor, Comment: decisionComment})
+		if !engineActedMap[id] {
+			auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: id, Status: decisionStatus, CheckerBy: actor, Comment: decisionComment})
+		}
 	}
 	for _, row := range updatedRows {
 		if id, ok := row["system_transaction_id"]; ok {
 			if normalizedID := normalizeForwardSystemTransactionID(id); normalizedID != "" {
-				auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: normalizedID, Status: decisionStatus, CheckerBy: actor, Comment: decisionComment})
+				if !engineActedMap[normalizedID] {
+					auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: normalizedID, Status: decisionStatus, CheckerBy: actor, Comment: decisionComment})
+				}
 			}
 		}
 	}
@@ -540,13 +587,15 @@ func BulkDeleteForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		oldValuesByID := make(map[string]map[string]interface{}, len(eligibleIds))
 		policyEligible := make([]string, 0, len(eligibleIds))
+		triggerMatrices := make(map[string]string)
 		for _, id := range eligibleIds {
 			row, err := loadForwardBookingRow(r.Context(), pool, id)
 			if err != nil {
 				respondEnvelopeError(w, http.StatusInternalServerError, "Failed to load forward booking for policy check: "+err.Error())
 				return
 			}
-			if ok, msg := runtime.EnforceInline(r.Context(), r, pool, runtime.EnforceInput{
+			var tID string
+			if ok, msg, matID := runtime.EnforceInlineWithMatrix(r.Context(), r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleFX,
 				SubModule:           "FORWARD_BOOKING",
@@ -559,9 +608,12 @@ func BulkDeleteForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 			}); !ok {
 				respondEnvelopeError(w, http.StatusForbidden, msg)
 				return
+			} else {
+				tID = matID
 			}
 			oldValuesByID[id] = auditutil.FetchRowSnapshotPGX(r.Context(), pool, "public.forward_bookings", "system_transaction_id", id)
 			policyEligible = append(policyEligible, id)
+			triggerMatrices[id] = tID
 		}
 		eligibleIds = policyEligible
 		updateQuery := `
@@ -607,6 +659,28 @@ func BulkDeleteForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		resultRows.Close()
 		triggerForwardBookingNotif(r.Context(), pool, routeForwardBulkDelete, "DELETE", auditutil.Actor(req.UserID), constants.FwdProcessingStatusPendingDeleteApproval, collectBookingIDsFromRows(updated))
+		
+		makerEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				makerEmail = s.Email
+				break
+			}
+		}
+		go func(ids []string, email string, matrices map[string]string) {
+			bgCtx := context.Background()
+			for _, id := range ids {
+				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+					ModuleCode:       "FX",
+					TransactionType:  "FX_FORWARD_DELETE",
+					RecordID:         id,
+					MatrixID:         matrices[id],
+					SubmittedByEmail: email,
+				})
+			}
+		}(collectBookingIDsFromRows(updated), makerEmail, triggerMatrices)
+
 		respondEnvelopeSuccess(w, "Forward bookings marked for deletion successfully", map[string]interface{}{
 			"updated": updated,
 		})

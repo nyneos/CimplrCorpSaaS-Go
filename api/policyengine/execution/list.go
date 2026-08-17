@@ -23,6 +23,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		page, pageSize, offset := common.NormalizePage(req)
 		search := common.SearchPattern(req.Search)
+		outcome := common.NormalizeOutcomeFilter(req.Outcome)
 
 		ctx := r.Context()
 		where := `WHERE 1=1`
@@ -34,6 +35,11 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 				OR COALESCE(handler_name, '') ILIKE $1 OR COALESCE(outcome, '') ILIKE $1
 			)`
 			countArgs = append(countArgs, search)
+		}
+		if outcome != "" {
+			argN := len(countArgs) + 1
+			where += ` AND outcome = $` + strconv.Itoa(argN)
+			countArgs = append(countArgs, outcome)
 		}
 
 		// Legacy execution_log rows remain accessible as one-row synthetic runs.

@@ -21,7 +21,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-)
+
+	"CimplrCorpSaas/api/approvalengine"
+	"context")
 
 const errLoadExposureBucketingRowForPolicyCheck = "Failed to load exposure_bucketing row for policy check: "
 
@@ -100,6 +102,7 @@ func mapColumns(fields map[string]interface{}, allowed map[string]string) (map[s
 func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		var triggerMatrixID string
 		var req struct {
 			UserID           string                 `json:"user_id"`
 			ExposureHeaderID string                 `json:"exposure_header_id"`
@@ -283,7 +286,7 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 				return
 			}
 			bucketingRow = applyExposureBucketingEdits(bucketingRow, req.BucketingFields)
-			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreEdit,
 				ModuleCode:          common.ModuleFX,
 				SubModule:           "EXPOSURE_BUCKETING",
@@ -296,6 +299,8 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 			}); !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
+			} else {
+				triggerMatrixID = tID
 			}
 
 			setParts := []string{}
@@ -408,6 +413,24 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 			SourceRoute: fxnotif.SourceRouteBucketingUpdate, Action: fxnotif.ActionUpdate, UserID: req.UserID, RequestedBy: actor, CheckerComment: reason,
 			ExposureIDs: []string{req.ExposureHeaderID}, ResultBuckets: nil,
 		})
+
+		makerEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				makerEmail = s.Email
+				break
+			}
+		}
+
+		go func(tID string) {
+			_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
+				ModuleCode:       "FX",
+				TransactionType:  "FX_BUCKETING_EDIT",
+				RecordID:         req.ExposureHeaderID,
+				MatrixID:         tID,
+				SubmittedByEmail: makerEmail,
+			})
+		}(triggerMatrixID)
 	}
 }
 
@@ -457,10 +480,35 @@ func GetExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFunc {
 			  )`, buNames)
 
 		// Join exposure_headers, exposure_line_items, exposure_bucketing
-		rows, err := pool.Query(ctx, `SELECT h.*, l.*, b.*
+		rows, err := pool.Query(ctx, `SELECT h.*, l.*, b.*,
+				COALESCE(ai.instance_id,'')         AS approval_instance_id,
+				COALESCE(ai.status,'')              AS approval_engine_status,
+				COALESCE(aie.instance_eye_id,'')    AS current_eye_id,
+				COALESCE(aie.position::text,'')     AS current_eye_position,
+				COALESCE(aie.approvals_required,0)  AS approvals_required,
+				COALESCE(aie.approvals_received,0)  AS approvals_received,
+				aie.sla_deadline                    AS sla_deadline,
+				COALESCE(aie.is_escalated,false)    AS is_escalated
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
 			LEFT JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id
+			LEFT JOIN LATERAL (
+				SELECT ai.* FROM uam.approval_instance ai
+				WHERE ai.record_id = h.exposure_header_id::text
+				  AND ai.module_code = 'FX'
+				  AND ai.transaction_type = 'FX_BUCKETING_EDIT'
+				  AND ai.status = 'PENDING'
+				  AND ai.is_deleted = false
+				ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+				LIMIT 1
+			) ai ON true
+			LEFT JOIN LATERAL (
+				SELECT aie.* FROM uam.approval_instance_eye aie
+				WHERE aie.instance_id = ai.instance_id
+				  AND aie.status = 'ACTIVE'
+				ORDER BY aie.position ASC, aie.instance_eye_id ASC
+				LIMIT 1
+			) aie ON true
 			WHERE h.entity = ANY($1)
 			  AND (h.approval_status = 'approved' OR h.approval_status = 'Approved')
 			  AND COALESCE(h.is_deleted, false) = false`, buNames)
@@ -573,13 +621,14 @@ func DeleteBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			deleteComment = strings.TrimSpace(req.Reason)
 		}
 
+		triggerMatrices := make(map[string]string)
 		for _, id := range req.ExposureHeaderIds {
 			bucketingRow, err := loadExposureBucketingRow(ctx, pool, id)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+err.Error())
 				return
 			}
-			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleFX,
 				SubModule:           "EXPOSURE_BUCKETING",
@@ -592,6 +641,8 @@ func DeleteBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			}); !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
+			} else {
+				triggerMatrices[id] = tID
 			}
 		}
 
@@ -654,6 +705,28 @@ func DeleteBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 				"deleted": deleted,
 			},
 		})
+
+		makerEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				makerEmail = s.Email
+				break
+			}
+		}
+
+		go func(ids []string, email string, matrices map[string]string) {
+			bgCtx := context.Background()
+			for _, id := range ids {
+				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+					ModuleCode:       "FX",
+					TransactionType:  "FX_BUCKETING_DELETE",
+					RecordID:         id,
+					MatrixID:         matrices[id],
+					SubmittedByEmail: email,
+				})
+			}
+		}(deleted, makerEmail, triggerMatrices)
 	}
 }
 

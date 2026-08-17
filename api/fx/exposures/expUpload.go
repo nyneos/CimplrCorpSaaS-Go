@@ -3,6 +3,7 @@ package exposures
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -278,7 +279,7 @@ const headersLineItemsSelectSQL = `
 				h.exposure_category,
 				h.currency,
 				h.document_date,
-				h.approval_status,
+				COALESCE(i.status, h.approval_status) AS approval_status,
 				h.total_original_amount,
 				h.total_open_amount,
 				h.amount_in_local_currency,
@@ -289,6 +290,15 @@ const headersLineItemsSelectSQL = `
 				l.line_item_amount
 			FROM exposure_headers h
 			LEFT JOIN exposure_line_items l ON l.exposure_header_id = h.exposure_header_id
+			LEFT JOIN LATERAL (
+				SELECT ie.status
+				FROM uam.approval_instance inst
+				JOIN uam.approval_instance_eye ie ON ie.instance_id = inst.instance_id AND ie.status = 'ACTIVE'
+				WHERE inst.record_id = h.exposure_header_id::text
+				  AND inst.module_code = 'FX'
+				  AND inst.status = 'PENDING'
+				ORDER BY inst.created_at DESC LIMIT 1
+			) i ON true
 `
 
 // pgxColumnNames returns the column names for a pgx.Rows result set, mirroring
@@ -350,7 +360,7 @@ func queryHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, buNames []st
 		args = append(args, strings.TrimSpace(batchID))
 	}
 	if pendingOnly {
-		query += ` AND upper(COALESCE(h.approval_status, '')) <> 'APPROVED'`
+		query += ` AND upper(COALESCE(i.status, h.approval_status, '')) <> 'APPROVED'`
 	}
 	query += ` ORDER BY h.document_id, l.line_number NULLS FIRST`
 
@@ -546,7 +556,8 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		creationRow = ApplyExposureCreationEdits(creationRow, req.Fields)
 		creationRow.ApprovalStatus = constants.StatusPendingEditApproval
-		if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+		var triggerMatrixID string
+		if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleFX,
 			SubModule:           "EXPOSURE_CREATION",
@@ -559,6 +570,8 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 		}); !ok {
 			respondWithError(w, http.StatusForbidden, msg)
 			return
+		} else {
+			triggerMatrixID = tID
 		}
 
 		oldValues := auditutil.FetchRowSnapshotPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", exposureHeaderID)
@@ -679,6 +692,24 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 			SourceRoute: fxnotif.SourceRouteLegacyEdit, Action: fxnotif.ActionEdit, UserID: req.UserID, RequestedBy: auditutil.Actor(req.UserID), CheckerComment: strings.TrimSpace(req.Reason),
 			ExposureIDs: []string{exposureHeaderID}, ResultBuckets: nil,
 		})
+
+		makerEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				makerEmail = s.Email
+				break
+			}
+		}
+
+		go func(tID string) {
+			_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
+				ModuleCode:       "FX",
+				TransactionType:  "FX_EXPOSURE_EDIT",
+				RecordID:         exposureHeaderID,
+				MatrixID:         tID,
+				SubmittedByEmail: makerEmail,
+			})
+		}(triggerMatrixID)
 	}
 }
 
@@ -819,10 +850,12 @@ func DeleteExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Get session info
 		var requestedBy string
+		var userEmail string
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
 				requestedBy = s.Name // or s.Email
+				userEmail = s.Email
 				break
 			}
 		}
@@ -837,13 +870,14 @@ func DeleteExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			deleteComment = req.Reason
 		}
 
+		triggerMatrices := make(map[string]string)
 		for _, id := range req.ExposureHeaderIds {
 			creationRow, err := LoadExposureCreationRow(ctx, pool, id)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleFX,
 				SubModule:           "EXPOSURE_CREATION",
@@ -856,6 +890,8 @@ func DeleteExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			}); !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
+			} else {
+				triggerMatrices[id] = tID
 			}
 		}
 
@@ -890,6 +926,20 @@ func DeleteExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 				"deleted": req.ExposureHeaderIds,
 			},
 		})
+
+		go func(ids []string, email string, matrices map[string]string) {
+			bgCtx := context.Background()
+			for _, id := range ids {
+				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+					ModuleCode:       "FX",
+					TransactionType:  "FX_EXPOSURE_DELETE",
+					RecordID:         id,
+					MatrixID:         matrices[id],
+					SubmittedByEmail: email,
+				})
+			}
+		}(req.ExposureHeaderIds, userEmail, triggerMatrices)
 	}
 }
 
@@ -909,11 +959,13 @@ func RejectMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get session info
-		var rejectedBy string
+		rejectedBy := ""
+		rejectedByEmail := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				rejectedBy = s.Name // or s.Email
+				rejectedBy = s.Name
+				rejectedByEmail = s.Email
 				break
 			}
 		}
@@ -945,6 +997,17 @@ func RejectMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			}); !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
+			}
+		}
+
+		engineActedMap := make(map[string]bool)
+		for _, id := range req.ExposureHeaderIds {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FX", RecordID: id, UserID: req.UserID, UserEmail: rejectedByEmail,
+				Action: approvalengine.ActionRejected, Comment: rejectionComment,
+			})
+			if actionErr == nil && actionRes.Acted {
+				engineActedMap[id] = true
 			}
 		}
 
@@ -989,8 +1052,10 @@ func RejectMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			rejected = append(rejected, rowMap)
 			if id, ok := rowMap["exposure_header_id"]; ok {
 				parentID := fmt.Sprint(id)
-				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: parentID, Status: constants.StatusRejected, CheckerBy: rejectedBy, Comment: rejectionComment})
-				auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: parentID, ActionType: "REJECT", Status: constants.StatusRejected, Reason: rejectionComment, RequestedBy: rejectedBy, OldValues: oldValuesByID[parentID], NewValues: rowMap})
+				if !engineActedMap[parentID] {
+					auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: parentID, Status: constants.StatusRejected, CheckerBy: rejectedBy, Comment: rejectionComment})
+					auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: parentID, ActionType: "REJECT", Status: constants.StatusRejected, Reason: rejectionComment, RequestedBy: rejectedBy, OldValues: oldValuesByID[parentID], NewValues: rowMap})
+				}
 			}
 		}
 		rejectedIDs := make([]string, 0, len(rejected))
@@ -1031,11 +1096,13 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get session info for ApprovedBy
-		var approvedBy string
+		approvedBy := ""
+		approvedByEmail := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				approvedBy = s.Name // or s.Email
+				approvedBy = s.Name
+				approvedByEmail = s.Email
 				break
 			}
 		}
@@ -1064,6 +1131,17 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			}); !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
+			}
+		}
+
+		engineActedMap := make(map[string]bool)
+		for _, id := range req.ExposureHeaderIds {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FX", RecordID: id, UserID: req.UserID, UserEmail: approvedByEmail,
+				Action: approvalengine.ActionApproved, Comment: approvalComment,
+			})
+			if actionErr == nil && actionRes.Acted {
+				engineActedMap[id] = true
 			}
 		}
 
@@ -1229,7 +1307,7 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Approve remaining headers
 		if len(toApprove) > 0 {
-			appRows, err := tx.Query(ctx, `UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approval_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, approvalComment, toApprove)
+			appRows, err := tx.Query(ctx, `UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approved_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, approvalComment, toApprove)
 			if err != nil {
 				logger.LogError("[WARN] approving exposure headers failed: %v", err)
 				approvalErr = err
@@ -1328,12 +1406,16 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, row := range results["approved"].([]map[string]interface{}) {
 			id := fmt.Sprint(row["exposure_header_id"])
 			// Update the existing pending audit row in place instead of creating a new APPROVE row.
-			auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
+			if !engineActedMap[id] {
+				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
+			}
 		}
 		for _, row := range results["deleted"].([]map[string]interface{}) {
 			id := fmt.Sprint(row["exposure_header_id"])
 			// Update the existing pending audit row in place instead of creating a new APPROVE row.
-			auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
+			if !engineActedMap[id] {
+				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: id, Status: constants.StatusApproved, CheckerBy: approvedBy, Comment: approvalComment})
+			}
 		}
 
 		approvedIDSet := map[string]struct{}{}
@@ -2382,6 +2464,18 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 						pool, "FX", "EXPOSURE_UPLOAD", "POST_UPLOAD",
 						createdExposureIDs, uploadedBy,
 					)
+
+					go func(ids []string, email string) {
+						bgCtx := context.Background()
+						for _, id := range ids {
+							_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+								ModuleCode:       "FX",
+								TransactionType:  "FX_EXPOSURE_CREATE",
+								RecordID:         id,
+								SubmittedByEmail: email,
+							})
+						}
+					}(createdExposureIDs, session.Email)
 				}
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: success,

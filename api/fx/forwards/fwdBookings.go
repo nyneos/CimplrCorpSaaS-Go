@@ -2,6 +2,7 @@ package forwards
 
 import (
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/fx/auditutil"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
@@ -457,6 +458,22 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: actor, OldValues: nil, NewValues: result})
 			triggerForwardBookingNotif(r.Context(), pool, routeForwardManualEntry, "CREATE", actor, "pending", []string{systemTransactionID})
 			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_CREATE", []string{systemTransactionID}, actor)
+			
+			makerEmail := ""
+			for _, s := range auth.GetActiveSessions() {
+				if s.UserID == req.UserID {
+					makerEmail = s.Email
+					break
+				}
+			}
+			go func(id, email string) {
+				_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
+					ModuleCode:       "FX",
+					TransactionType:  "FX_FORWARD_CREATE",
+					RecordID:         id,
+					SubmittedByEmail: email,
+				})
+			}(systemTransactionID, makerEmail)
 		}
 		respondEnvelopeSuccess(w, "Forward booking created successfully", result)
 	}
@@ -479,10 +496,19 @@ func GetEntityRelevantForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		rows, err := pool.Query(r.Context(), `
-			SELECT *
-			FROM forward_bookings
-			WHERE entity_level_0 = ANY($1)
-			  AND COALESCE(is_deleted, false) = false
+			SELECT f.*, i.status AS engine_status
+			FROM forward_bookings f
+			LEFT JOIN LATERAL (
+				SELECT ie.status
+				FROM uam.approval_instance inst
+				JOIN uam.approval_instance_eye ie ON ie.instance_id = inst.instance_id AND ie.status = 'ACTIVE'
+				WHERE inst.record_id = f.system_transaction_id::text
+				  AND inst.module_code = 'FX'
+				  AND inst.status = 'PENDING'
+				ORDER BY inst.created_at DESC LIMIT 1
+			) i ON true
+			WHERE f.entity_level_0 = ANY($1)
+			  AND COALESCE(f.is_deleted, false) = false
 		`, buNames)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
@@ -536,6 +562,10 @@ func GetEntityRelevantForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 						rowMap[col] = fmt.Sprintf("%v", val)
 					}
 				}
+				if engineStatus, ok := rowMap["engine_status"]; ok && engineStatus != nil {
+					rowMap["processing_status"] = engineStatus
+				}
+				delete(rowMap, "engine_status")
 				data = append(data, rowMap)
 			}
 		}
@@ -602,6 +632,25 @@ func UploadForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(uploadedIDs) > 0 {
 			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_UPLOAD", uploadedIDs, uploadedBy)
+
+			makerEmail := ""
+			for _, s := range auth.GetActiveSessions() {
+				if s.UserID == r.FormValue(constants.KeyUserID) {
+					makerEmail = s.Email
+					break
+				}
+			}
+			go func(ids []string, email string) {
+				bgCtx := context.Background()
+				for _, id := range ids {
+					_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+						ModuleCode:       "FX",
+						TransactionType:  "FX_FORWARD_CREATE",
+						RecordID:         id,
+						SubmittedByEmail: email,
+					})
+				}
+			}(uploadedIDs, makerEmail)
 		}
 		respondEnvelopeSuccess(w, "Forward bookings uploaded successfully", map[string]interface{}{
 			"results": results,

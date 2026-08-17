@@ -40,6 +40,17 @@ func CreateInstance(ctx context.Context, pool *pgxpool.Pool, req InstanceRequest
 		return "", nil
 	}
 
+	// Backfill audit metadata from the registry when callers omit it (common on FX paths).
+	if strings.TrimSpace(req.AuditTable) == "" || strings.TrimSpace(req.AuditIDColumn) == "" {
+		regAuditTable, regAuditIDColumn := LookupTxTableConfig(req.TransactionType)
+		if strings.TrimSpace(req.AuditTable) == "" {
+			req.AuditTable = regAuditTable
+		}
+		if strings.TrimSpace(req.AuditIDColumn) == "" {
+			req.AuditIDColumn = regAuditIDColumn
+		}
+	}
+
 	// Step 3: Begin transaction.
 	tx, err := pool.Begin(ctx)
 	if err != nil {

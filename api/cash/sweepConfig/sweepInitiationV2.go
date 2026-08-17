@@ -2,6 +2,7 @@ package sweepconfig
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
@@ -29,6 +30,50 @@ const (
 	errSweepInitiationCreateBlockedByPolicy       = "Sweep initiation create blocked by policy"
 	errFailedToFetchSweepInitiationForPolicyCheck = "failed to fetch sweep initiation for policy check: "
 )
+
+// resolveSweepInitiationAmount picks the amount used to route the approval
+// matrix: the initiation's own override wins, falling back to the parent
+// sweep's configured sweep_amount/buffer_amount when no override is set.
+func resolveSweepInitiationAmount(overridden, sweepAmount, bufferAmount *float64) float64 {
+	if overridden != nil {
+		return *overridden
+	}
+	if sweepAmount != nil {
+		return *sweepAmount
+	}
+	if bufferAmount != nil {
+		return *bufferAmount
+	}
+	return 0
+}
+
+// submitSweepInitiationForApproval fires the approval-matrix engine for a
+// newly created sweep initiation, asynchronously (mirrors the pattern used by
+// fdBookingWorkbench.CreateBookingSingle). No-ops safely if the CASH module
+// isn't enabled for the engine, or no matrix matches the entity/amount.
+// submittedByUserID must be the session's numeric user_id (matching
+// fdBookingWorkbench's uID) — approval_instance.submitted_by has an FK to
+// public.users, so a display name here fails the insert.
+func submitSweepInitiationForApproval(pgxPool *pgxpool.Pool, initiationID, sweepID, entityName, submittedByUserID, actorEmail string, amount float64) {
+	go func() {
+		bgCtx := context.Background()
+		if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+			ModuleCode:       "CASH",
+			EntityCode:       entityName,
+			TransactionType:  "SWEEP_INITIATION_CREATE",
+			RecordID:         initiationID,
+			RecordTable:      "cimplrcorpsaas.sweep_initiation",
+			AuditTable:       "cimplrcorpsaas.auditactionsweepinitiation",
+			AuditIDColumn:    "initiation_id",
+			ActionType:       "CREATE",
+			Amount:           amount,
+			SubmittedBy:      submittedByUserID,
+			SubmittedByEmail: actorEmail,
+		}); err != nil {
+			api.LogError("approvalengine.CreateInstance failed for sweep initiation %s (sweep %s): %v", initiationID, sweepID, err)
+		}
+	}()
+}
 
 func validateSweepCashScope(ctx context.Context, fields map[string]interface{}) string {
 	return validation.ValidateCashMasterReferences(ctx, fields)
@@ -349,6 +394,9 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_CREATE", []string{initiationID}, initiatedBy)
 
+			submitSweepInitiationForApproval(pgxPool, initiationID, sweepID, req.EntityName, req.UserID,
+				api.GetUserEmailFromCtx(ctx), resolveSweepInitiationAmount(req.OverriddenAmount, req.SweepAmount, req.BufferAmount))
+
 			// autoCreated = true (sweep was auto-created)
 
 			api.RespondWithPayload(w, true, "Sweep auto-created and initiation created successfully, pending approval", map[string]interface{}{
@@ -528,6 +576,9 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_CREATE", []string{initiationID}, initiatedBy)
 
+		submitSweepInitiationForApproval(pgxPool, initiationID, sweepID, entityName, req.UserID,
+			api.GetUserEmailFromCtx(ctx), resolveSweepInitiationAmount(req.OverriddenAmount, sweepPtr, bufPtr))
+
 		api.RespondWithPayload(w, true, "Sweep initiation created successfully, pending approval", map[string]interface{}{
 			"initiation_id":     initiationID,
 			"sweep_id":          req.SweepID,
@@ -604,7 +655,15 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				c.source_bank_account,
 				c.target_bank_name,
 				c.target_bank_account,
-				c.sweep_type
+				c.sweep_type,
+				COALESCE(ai.instance_id,'')        AS approval_instance_id,
+				COALESCE(ai.status,'')              AS approval_engine_status,
+				COALESCE(aie.instance_eye_id,'')    AS current_eye_id,
+				COALESCE(aie.position::text,'')     AS current_eye_position,
+				COALESCE(aie.approvals_required,0)  AS approvals_required,
+				COALESCE(aie.approvals_received,0)  AS approvals_received,
+				aie.sla_deadline                    AS sla_deadline,
+				COALESCE(aie.is_escalated,false)    AS is_escalated
 			FROM cimplrcorpsaas.sweep_initiation i
 			JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = i.sweep_id
 			LEFT JOIN LATERAL (
@@ -615,6 +674,22 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON true
+			LEFT JOIN LATERAL (
+				SELECT ai.* FROM uam.approval_instance ai
+				WHERE ai.record_id = i.initiation_id::text
+				  AND ai.module_code = 'CASH'
+				  AND ai.status = 'PENDING'
+				  AND ai.is_deleted = false
+				ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+				LIMIT 1
+			) ai ON true
+			LEFT JOIN LATERAL (
+				SELECT aie.* FROM uam.approval_instance_eye aie
+				WHERE aie.instance_id = ai.instance_id
+				  AND aie.status = 'ACTIVE'
+				ORDER BY aie.position ASC, aie.instance_eye_id ASC
+				LIMIT 1
+			) aie ON true
 			WHERE COALESCE(c.is_deleted, false) = false
 			  AND COALESCE(i.is_deleted, false) = false
 		`
@@ -659,6 +734,10 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var initiationTime time.Time
 			var overriddenAmount *float64
 			var overriddenExecutionTime, overriddenSourceAccount, overriddenTargetAccount *string
+			var approvalInstanceID, approvalEngineStatus, currentEyeID, currentEyePosition string
+			var approvalsRequired, approvalsReceived int
+			var slaDeadline *time.Time
+			var isEscalated bool
 
 			err := rows.Scan(
 				&initiationID, &sweepID, &initiatedBy, &initiationTime,
@@ -666,6 +745,8 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&overriddenSourceAccount, &overriddenTargetAccount,
 				&actiontype, &processingStatus, &requestedBy, &checkerBy, &checkerComment,
 				&entityName, &sourceBank, &sourceAccount, &targetBank, &targetAccount, &sweepType,
+				&approvalInstanceID, &approvalEngineStatus, &currentEyeID, &currentEyePosition,
+				&approvalsRequired, &approvalsReceived, &slaDeadline, &isEscalated,
 			)
 			if err != nil {
 				continue
@@ -705,6 +786,14 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"target_bank_name":               targetBank,
 				"target_bank_account":            targetAccount,
 				"sweep_type":                     sweepType,
+				"approval_instance_id":           approvalInstanceID,
+				"approval_engine_status":         approvalEngineStatus,
+				"current_eye_id":                 currentEyeID,
+				"current_eye_position":           currentEyePosition,
+				"approvals_required":             approvalsRequired,
+				"approvals_received":             approvalsReceived,
+				"sla_deadline":                   slaDeadline,
+				"is_escalated":                   isEscalated,
 			}
 
 			initiations = append(initiations, initiation)
@@ -1119,6 +1208,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if strings.TrimSpace(comment) == "" {
 			comment = req.Comment
 		}
+		checkerEmail := api.GetUserEmailFromCtx(ctx)
 
 		for _, initiationID := range req.InitiationIDs {
 			policyRow, perr := loadSweepInitiationRow(ctx, pgxPool, initiationID)
@@ -1142,81 +1232,123 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
-			return
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
+		// Route each initiation through the approval-matrix engine first; only
+		// fall back to the legacy direct-stamp path below for IDs where no
+		// matrix is configured for CASH/SWEEP_INITIATION_CREATE at that
+		// entity/amount (actionRes.Acted == false). Mirrors
+		// fdBookingWorkbench.BulkApproveBooking.
+		engineIDs := make([]string, 0, len(req.InitiationIDs))
+		legacyIDs := make([]string, 0, len(req.InitiationIDs))
+		var actErrs []string
+		for _, initiationID := range req.InitiationIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "CASH", RecordID: initiationID, UserID: req.UserID, UserEmail: checkerEmail,
+				Action: approvalengine.ActionApproved, Comment: comment,
+			})
+			if actionErr != nil {
+				api.LogError("[SweepInitiation] ActOnPendingOrDiagnose approve failed for %s: %v", initiationID, actionErr)
+				actErrs = append(actErrs, initiationID+": "+actionErr.Error())
+				continue
 			}
-		}()
-
-		rows, err := tx.Query(ctx, `
-			SELECT DISTINCT ON (initiation_id)
-				action_id, initiation_id, actiontype, processing_status
-			FROM cimplrcorpsaas.auditactionsweepinitiation
-			WHERE initiation_id = ANY($1)
-			  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
-			ORDER BY initiation_id, requested_at DESC, action_id DESC
-		`, req.InitiationIDs)
-		if err != nil {
-			api.RespondWithResult(w, false, "failed to fetch latest initiation audits: "+err.Error())
-			return
+			if actionRes.Acted {
+				engineIDs = append(engineIDs, initiationID)
+				continue
+			}
+			if actionRes.CancelledStale {
+				api.LogInfo("[SweepInitiation] cancelled stale approval instance for %s: %s", initiationID, actionRes.Reason)
+			} else if actionRes.Reason != "" {
+				actErrs = append(actErrs, initiationID+": "+actionRes.Reason)
+				continue
+			}
+			legacyIDs = append(legacyIDs, initiationID)
 		}
-		defer rows.Close()
 
-		actionIDs := make([]string, 0, len(req.InitiationIDs))
-		deleteIDs := make([]string, 0)
 		approvedIDs := make([]string, 0, len(req.InitiationIDs))
-		found := map[string]bool{}
-		for rows.Next() {
-			var actionID, id, actionType, status string
-			if err := rows.Scan(&actionID, &id, &actionType, &status); err != nil {
-				api.RespondWithResult(w, false, "failed to read latest initiation audits: "+err.Error())
+		deleteIDs := make([]string, 0)
+
+		if len(legacyIDs) > 0 {
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 				return
 			}
-			found[id] = true
-			if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
-				api.RespondWithResult(w, false, "cannot approve non-pending initiation: "+id)
+			committed := false
+			defer func() {
+				if !committed {
+					tx.Rollback(ctx)
+				}
+			}()
+
+			rows, err := tx.Query(ctx, `
+				SELECT DISTINCT ON (initiation_id)
+					action_id, initiation_id, actiontype, processing_status
+				FROM cimplrcorpsaas.auditactionsweepinitiation
+				WHERE initiation_id = ANY($1)
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+				ORDER BY initiation_id, requested_at DESC, action_id DESC
+			`, legacyIDs)
+			if err != nil {
+				api.RespondWithResult(w, false, "failed to fetch latest initiation audits: "+err.Error())
 				return
 			}
-			actionIDs = append(actionIDs, actionID)
-			approvedIDs = append(approvedIDs, id)
-			if actionType == constants.AuditActionDelete || status == constants.StatusPendingDeleteApproval {
-				deleteIDs = append(deleteIDs, id)
+
+			actionIDs := make([]string, 0, len(legacyIDs))
+			found := map[string]bool{}
+			for rows.Next() {
+				var actionID, id, actionType, status string
+				if err := rows.Scan(&actionID, &id, &actionType, &status); err != nil {
+					rows.Close()
+					api.RespondWithResult(w, false, "failed to read latest initiation audits: "+err.Error())
+					return
+				}
+				found[id] = true
+				if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
+					rows.Close()
+					api.RespondWithResult(w, false, "cannot approve non-pending initiation: "+id)
+					return
+				}
+				actionIDs = append(actionIDs, actionID)
+				approvedIDs = append(approvedIDs, id)
+				if actionType == constants.AuditActionDelete || status == constants.StatusPendingDeleteApproval {
+					deleteIDs = append(deleteIDs, id)
+				}
 			}
+			rows.Close()
+			for _, id := range legacyIDs {
+				if !found[id] {
+					api.RespondWithResult(w, false, constants.ErrMissingLatestAuditForInitiation+id)
+					return
+				}
+			}
+			upd := `UPDATE cimplrcorpsaas.auditactionsweepinitiation
+					SET processing_status = 'APPROVED',
+						checker_by = $1,
+						checker_at = now(),
+						checker_comment = $2,
+						checker_ip = $3
+					WHERE action_id = ANY($4)`
+			if _, err := tx.Exec(ctx, upd, checkerName, nullifyEmpty(comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
+				api.RespondWithResult(w, false, "failed to approve initiations: "+err.Error())
+				return
+			}
+			if len(deleteIDs) > 0 {
+				if _, err := tx.Exec(ctx, `UPDATE cimplrcorpsaas.sweep_initiation SET is_deleted = TRUE WHERE initiation_id = ANY($1)`, deleteIDs); err != nil {
+					api.RespondWithResult(w, false, "failed to soft delete initiations: "+err.Error())
+					return
+				}
+			}
+			if err := tx.Commit(ctx); err != nil {
+				api.RespondWithResult(w, false, "failed to commit approve: "+err.Error())
+				return
+			}
+			committed = true
 		}
-		for _, id := range req.InitiationIDs {
-			if !found[id] {
-				api.RespondWithResult(w, false, constants.ErrMissingLatestAuditForInitiation+id)
-				return
-			}
-		}
-		upd := `UPDATE cimplrcorpsaas.auditactionsweepinitiation 
-				SET processing_status = 'APPROVED', 
-					checker_by = $1, 
-					checker_at = now(), 
-					checker_comment = $2,
-					checker_ip = $3
-				WHERE action_id = ANY($4)`
-		if _, err := tx.Exec(ctx, upd, checkerName, nullifyEmpty(comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
-			api.RespondWithResult(w, false, "failed to approve initiations: "+err.Error())
+		approvedIDs = append(approvedIDs, engineIDs...)
+
+		if len(approvedIDs) == 0 {
+			api.RespondWithPayload(w, false, "No initiations were approved", map[string]interface{}{"errors": actErrs})
 			return
 		}
-		if len(deleteIDs) > 0 {
-			if _, err := tx.Exec(ctx, `UPDATE cimplrcorpsaas.sweep_initiation SET is_deleted = TRUE WHERE initiation_id = ANY($1)`, deleteIDs); err != nil {
-				api.RespondWithResult(w, false, "failed to soft delete initiations: "+err.Error())
-				return
-			}
-		}
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit approve: "+err.Error())
-			return
-		}
-		committed = true
 
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_APPROVE", approvedIDs, checkerName)
 		if len(deleteIDs) > 0 {
@@ -1226,6 +1358,9 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "Initiations approved successfully", map[string]interface{}{
 			"approved_initiation_ids": approvedIDs,
 			"total_approved":          len(approvedIDs),
+			"engine_acted":            len(engineIDs),
+			"direct_acted":            len(legacyIDs),
+			"errors":                  actErrs,
 		})
 		// Notify with FULL initiation data for rich templates
 		capturedIDs := approvedIDs
@@ -1282,6 +1417,7 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if strings.TrimSpace(comment) == "" {
 			comment = req.Comment
 		}
+		checkerEmail := api.GetUserEmailFromCtx(ctx)
 
 		for _, initiationID := range req.InitiationIDs {
 			policyRow, perr := loadSweepInitiationRow(ctx, pgxPool, initiationID)
@@ -1305,77 +1441,121 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
-			return
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
+		// Route each initiation through the approval-matrix engine first; only
+		// fall back to the legacy direct-stamp path for IDs with no matrix
+		// configured (actionRes.Acted == false). Mirrors
+		// fdBookingWorkbench.BulkRejectBooking.
+		engineIDs := make([]string, 0, len(req.InitiationIDs))
+		legacyIDs := make([]string, 0, len(req.InitiationIDs))
+		var actErrs []string
+		for _, initiationID := range req.InitiationIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "CASH", RecordID: initiationID, UserID: req.UserID, UserEmail: checkerEmail,
+				Action: approvalengine.ActionRejected, Comment: comment,
+			})
+			if actionErr != nil {
+				api.LogError("[SweepInitiation] ActOnPendingOrDiagnose reject failed for %s: %v", initiationID, actionErr)
+				actErrs = append(actErrs, initiationID+": "+actionErr.Error())
+				continue
 			}
-		}()
-
-		rows, err := tx.Query(ctx, `
-			SELECT DISTINCT ON (initiation_id)
-				action_id, initiation_id, processing_status
-			FROM cimplrcorpsaas.auditactionsweepinitiation
-			WHERE initiation_id = ANY($1)
-			  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
-			ORDER BY initiation_id, requested_at DESC, action_id DESC
-		`, req.InitiationIDs)
-		if err != nil {
-			api.RespondWithResult(w, false, "failed to fetch latest initiation audits: "+err.Error())
-			return
+			if actionRes.Acted {
+				engineIDs = append(engineIDs, initiationID)
+				continue
+			}
+			if actionRes.CancelledStale {
+				api.LogInfo("[SweepInitiation] cancelled stale approval instance for %s: %s", initiationID, actionRes.Reason)
+			} else if actionRes.Reason != "" {
+				actErrs = append(actErrs, initiationID+": "+actionRes.Reason)
+				continue
+			}
+			legacyIDs = append(legacyIDs, initiationID)
 		}
-		defer rows.Close()
 
-		actionIDs := make([]string, 0, len(req.InitiationIDs))
 		rejectedIDs := make([]string, 0, len(req.InitiationIDs))
-		found := map[string]bool{}
-		for rows.Next() {
-			var actionID, id, status string
-			if err := rows.Scan(&actionID, &id, &status); err != nil {
-				api.RespondWithResult(w, false, "failed to read latest initiation audits: "+err.Error())
+
+		if len(legacyIDs) > 0 {
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 				return
 			}
-			found[id] = true
-			if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
-				api.RespondWithResult(w, false, "cannot reject non-pending initiation: "+id)
+			committed := false
+			defer func() {
+				if !committed {
+					tx.Rollback(ctx)
+				}
+			}()
+
+			rows, err := tx.Query(ctx, `
+				SELECT DISTINCT ON (initiation_id)
+					action_id, initiation_id, processing_status
+				FROM cimplrcorpsaas.auditactionsweepinitiation
+				WHERE initiation_id = ANY($1)
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+				ORDER BY initiation_id, requested_at DESC, action_id DESC
+			`, legacyIDs)
+			if err != nil {
+				api.RespondWithResult(w, false, "failed to fetch latest initiation audits: "+err.Error())
 				return
 			}
-			actionIDs = append(actionIDs, actionID)
-			rejectedIDs = append(rejectedIDs, id)
+
+			actionIDs := make([]string, 0, len(legacyIDs))
+			found := map[string]bool{}
+			for rows.Next() {
+				var actionID, id, status string
+				if err := rows.Scan(&actionID, &id, &status); err != nil {
+					rows.Close()
+					api.RespondWithResult(w, false, "failed to read latest initiation audits: "+err.Error())
+					return
+				}
+				found[id] = true
+				if status != constants.StatusPendingApproval && status != constants.StatusPendingEditApproval && status != constants.StatusPendingDeleteApproval {
+					rows.Close()
+					api.RespondWithResult(w, false, "cannot reject non-pending initiation: "+id)
+					return
+				}
+				actionIDs = append(actionIDs, actionID)
+				rejectedIDs = append(rejectedIDs, id)
+			}
+			rows.Close()
+			for _, id := range legacyIDs {
+				if !found[id] {
+					api.RespondWithResult(w, false, constants.ErrMissingLatestAuditForInitiation+id)
+					return
+				}
+			}
+			upd := `UPDATE cimplrcorpsaas.auditactionsweepinitiation
+					SET processing_status = 'REJECTED',
+						checker_by = $1,
+						checker_at = now(),
+						checker_comment = $2,
+						checker_ip = $3
+					WHERE action_id = ANY($4)`
+			if _, err := tx.Exec(ctx, upd, checkerName, nullifyEmpty(comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
+				api.RespondWithResult(w, false, "failed to reject initiations: "+err.Error())
+				return
+			}
+			if err := tx.Commit(ctx); err != nil {
+				api.RespondWithResult(w, false, "failed to commit reject: "+err.Error())
+				return
+			}
+			committed = true
 		}
-		for _, id := range req.InitiationIDs {
-			if !found[id] {
-				api.RespondWithResult(w, false, constants.ErrMissingLatestAuditForInitiation+id)
-				return
-			}
-		}
-		upd := `UPDATE cimplrcorpsaas.auditactionsweepinitiation
-				SET processing_status = 'REJECTED',
-					checker_by = $1,
-					checker_at = now(),
-					checker_comment = $2,
-					checker_ip = $3
-				WHERE action_id = ANY($4)`
-		if _, err := tx.Exec(ctx, upd, checkerName, nullifyEmpty(comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
-			api.RespondWithResult(w, false, "failed to reject initiations: "+err.Error())
+		rejectedIDs = append(rejectedIDs, engineIDs...)
+
+		if len(rejectedIDs) == 0 {
+			api.RespondWithPayload(w, false, "No initiations were rejected", map[string]interface{}{"errors": actErrs})
 			return
 		}
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit reject: "+err.Error())
-			return
-		}
-		committed = true
 
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_REJECT", rejectedIDs, checkerName)
 
 		api.RespondWithPayload(w, true, "Initiations rejected successfully", map[string]interface{}{
 			"rejected_initiation_ids": rejectedIDs,
 			"total_rejected":          len(rejectedIDs),
+			"engine_acted":            len(engineIDs),
+			"direct_acted":            len(legacyIDs),
+			"errors":                  actErrs,
 		})
 		// Notify with FULL initiation data for rich templates
 		capturedIDs := rejectedIDs
@@ -1461,18 +1641,27 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
+		type deleteCandidate struct {
+			initiationID, sweepID, entityName string
+			amount                            float64
+		}
+		candidates := make([]deleteCandidate, 0, len(req.InitiationIDs))
+
 		for _, id := range req.InitiationIDs {
-			var sweepID, latestActionType, latestStatus string
+			var sweepID, latestActionType, latestStatus, entityName string
+			var overriddenAmount, sweepAmount, bufferAmount sqlNullFloat
 			latestErr := tx.QueryRow(ctx, `
-				SELECT si.sweep_id, asi.actiontype, asi.processing_status
+				SELECT si.sweep_id, asi.actiontype, asi.processing_status,
+				       sc.entity_name, si.overridden_amount, sc.sweep_amount, sc.buffer_amount
 				FROM cimplrcorpsaas.sweep_initiation si
 				JOIN cimplrcorpsaas.auditactionsweepinitiation asi ON asi.initiation_id = si.initiation_id
+				JOIN cimplrcorpsaas.sweepconfiguration sc ON sc.sweep_id = si.sweep_id
 				WHERE si.initiation_id = $1
 				  AND COALESCE(si.is_deleted, false) = false
 				  AND asi.actiontype IN ('CREATE', 'EDIT', 'DELETE')
 				ORDER BY asi.requested_at DESC, asi.action_id DESC
 				LIMIT 1
-			`, id).Scan(&sweepID, &latestActionType, &latestStatus)
+			`, id).Scan(&sweepID, &latestActionType, &latestStatus, &entityName, &overriddenAmount, &sweepAmount, &bufferAmount)
 			if latestErr != nil {
 				api.RespondWithResult(w, false, constants.ErrMissingLatestAuditForInitiation+id)
 				return
@@ -1489,12 +1678,54 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithResult(w, false, "failed to create delete request: "+err.Error())
 				return
 			}
+			var ovr, swp, buf *float64
+			if overriddenAmount.Valid {
+				v := overriddenAmount.F
+				ovr = &v
+			}
+			if sweepAmount.Valid {
+				v := sweepAmount.F
+				swp = &v
+			}
+			if bufferAmount.Valid {
+				v := bufferAmount.F
+				buf = &v
+			}
+			candidates = append(candidates, deleteCandidate{
+				initiationID: id, sweepID: sweepID, entityName: entityName,
+				amount: resolveSweepInitiationAmount(ovr, swp, buf),
+			})
 		}
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, "failed to commit delete request: "+err.Error())
 			return
 		}
 		committed = true
+
+		requestedByEmail := api.GetUserEmailFromCtx(ctx)
+		for _, c := range candidates {
+			go func(c deleteCandidate) {
+				bgCtx := context.Background()
+				if cerr := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "CASH", c.initiationID, requestedByEmail); cerr != nil {
+					api.LogError("[SweepInitiation] CancelPendingInstances failed for %s: %v", c.initiationID, cerr)
+				}
+				if _, cerr := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+					ModuleCode:       "CASH",
+					EntityCode:       c.entityName,
+					TransactionType:  "SWEEP_INITIATION_DELETE",
+					RecordID:         c.initiationID,
+					RecordTable:      "cimplrcorpsaas.sweep_initiation",
+					AuditTable:       "cimplrcorpsaas.auditactionsweepinitiation",
+					AuditIDColumn:    "initiation_id",
+					ActionType:       "DELETE",
+					Amount:           c.amount,
+					SubmittedBy:      req.UserID,
+					SubmittedByEmail: requestedByEmail,
+				}); cerr != nil {
+					api.LogError("[SweepInitiation] CreateInstance (DELETE) failed for %s: %v", c.initiationID, cerr)
+				}
+			}(c)
+		}
 
 		api.RespondWithPayload(w, true, "Deletion submitted for approval", map[string]interface{}{
 			"deleted_initiation_ids": req.InitiationIDs,
@@ -2033,7 +2264,15 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				sca.requested_by AS sweep_config_requested_by,
 				sca.checker_by AS sweep_config_checker_by,
 				sca.requested_at AS sweep_config_requested_at,
-				sca.checker_at AS sweep_config_checker_at
+				sca.checker_at AS sweep_config_checker_at,
+				COALESCE(ai.instance_id,'')        AS approval_instance_id,
+				COALESCE(ai.status,'')              AS approval_engine_status,
+				COALESCE(aie.instance_eye_id,'')    AS current_eye_id,
+				COALESCE(aie.position::text,'')     AS current_eye_position,
+				COALESCE(aie.approvals_required,0)  AS approvals_required,
+				COALESCE(aie.approvals_received,0)  AS approvals_received,
+				aie.sla_deadline                    AS sla_deadline,
+				COALESCE(aie.is_escalated,false)    AS is_escalated
 			FROM cimplrcorpsaas.sweep_initiation i
 			JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = i.sweep_id
 			LEFT JOIN LATERAL (
@@ -2051,6 +2290,22 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) sca ON true
+			LEFT JOIN LATERAL (
+				SELECT ai.* FROM uam.approval_instance ai
+				WHERE ai.record_id = i.initiation_id::text
+				  AND ai.module_code = 'CASH'
+				  AND ai.status = 'PENDING'
+				  AND ai.is_deleted = false
+				ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+				LIMIT 1
+			) ai ON true
+			LEFT JOIN LATERAL (
+				SELECT aie.* FROM uam.approval_instance_eye aie
+				WHERE aie.instance_id = ai.instance_id
+				  AND aie.status = 'ACTIVE'
+				ORDER BY aie.position ASC, aie.instance_eye_id ASC
+				LIMIT 1
+			) aie ON true
 			WHERE COALESCE(c.is_deleted, false) = false
 			  AND COALESCE(i.is_deleted, false) = false
 		`
@@ -2100,6 +2355,10 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var bufferAmount, sweepAmount *float64
 			var sweepConfigStatus, sweepConfigRequestedBy, sweepConfigCheckerBy *string
 			var sweepConfigRequestedAt, sweepConfigCheckerAt *time.Time
+			var approvalInstanceID, approvalEngineStatus, currentEyeID, currentEyePosition string
+			var approvalsRequired, approvalsReceived int
+			var slaDeadline *time.Time
+			var isEscalated bool
 
 			err := rows.Scan(
 				&initiationID, &sweepID, &initiatedBy, &initiationTime,
@@ -2111,6 +2370,8 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&bufferAmount, &sweepAmount,
 				&sweepConfigStatus, &sweepConfigRequestedBy, &sweepConfigCheckerBy,
 				&sweepConfigRequestedAt, &sweepConfigCheckerAt,
+				&approvalInstanceID, &approvalEngineStatus, &currentEyeID, &currentEyePosition,
+				&approvalsRequired, &approvalsReceived, &slaDeadline, &isEscalated,
 			)
 			if err != nil {
 				api.RespondWithResult(w, false, "scan error: "+err.Error())
@@ -2157,6 +2418,15 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"sweep_config_checker_by":        sweepConfigCheckerBy,
 				"sweep_config_requested_at":      sweepConfigRequestedAt,
 				"sweep_config_checker_at":        sweepConfigCheckerAt,
+				// Approval-matrix engine fields
+				"approval_instance_id":   approvalInstanceID,
+				"approval_engine_status": approvalEngineStatus,
+				"current_eye_id":         currentEyeID,
+				"current_eye_position":   currentEyePosition,
+				"approvals_required":     approvalsRequired,
+				"approvals_received":     approvalsReceived,
+				"sla_deadline":           slaDeadline,
+				"is_escalated":           isEscalated,
 			}
 
 			// Apply overrides: execution time, amount, and source/target accounts

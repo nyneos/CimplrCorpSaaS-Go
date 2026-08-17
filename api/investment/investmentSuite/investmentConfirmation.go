@@ -2,6 +2,7 @@ package investmentsuite
 
 import (
 	"CimplrCorpSaas/api"
+	approvalengine "CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/investment/uploadutil"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -25,6 +26,109 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// submitMFConfirmationForApproval fires the approval-matrix engine for a
+// newly created or edited MF investment confirmation, asynchronously.
+func submitMFConfirmationForApproval(pool *pgxpool.Pool, confirmationID, initiationID, submittedByUserID, actorEmail, txType string, amount float64) {
+	go func() {
+		bgCtx := context.Background()
+		var entityName string
+		_ = pool.QueryRow(bgCtx, "SELECT entity_name FROM investment.investment_initiation WHERE initiation_id = $1", initiationID).Scan(&entityName)
+		
+		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+			ModuleCode:       "INVESTMENT_MF",
+			EntityCode:       entityName,
+			TransactionType:  txType,
+			RecordID:         confirmationID,
+			RecordTable:      "investment.investment_confirmation",
+			AuditTable:       "investment.auditactioninvestmentconfirmation",
+			AuditIDColumn:    "confirmation_id",
+			ActionType:       strings.TrimPrefix(txType, "MF_CONFIRMATION_"),
+			Amount:           amount,
+			SubmittedBy:      submittedByUserID,
+			SubmittedByEmail: actorEmail,
+		}); err != nil {
+			api.LogError("[MFConfirmation] approvalengine.CreateInstance failed for confirmation %s (%s): %v", confirmationID, txType, err)
+		}
+	}()
+}
+
+// loadMFConfirmationApprovalWorkflow finds the most recent INVESTMENT_MF
+// approval-matrix instance for this confirmation and returns its rich detail
+// for the ApprovalWorkflowViewer UI. Self-heals if no instance exists yet but
+// a PENDING% audit row does. auditactioninvestmentconfirmation stores the
+// requester's real email in requested_by for CREATE/EDIT/DELETE rows.
+func loadMFConfirmationApprovalWorkflow(ctx context.Context, pool *pgxpool.Pool, confirmationID, viewerUserID string) interface{} {
+	if confirmationID == "" {
+		return nil
+	}
+
+	var instanceID string
+	_ = pool.QueryRow(ctx, `
+		SELECT instance_id
+		FROM uam.approval_instance
+		WHERE record_id = $1 AND module_code = 'INVESTMENT_MF' AND is_deleted = false
+		ORDER BY submitted_at DESC LIMIT 1`, confirmationID,
+	).Scan(&instanceID)
+
+	if instanceID == "" {
+		var pendingActionType, entityName, submittedByUserID, submittedByEmail string
+		var amount float64
+		scanErr := pool.QueryRow(ctx, `
+			SELECT a.actiontype, COALESCE(i.entity_name,''), COALESCE(u.id,''), COALESCE(a.requested_by,''),
+			       COALESCE(c.net_amount,0)
+			FROM investment.auditactioninvestmentconfirmation a
+			JOIN investment.investment_confirmation c ON c.confirmation_id = a.confirmation_id
+			JOIN investment.investment_initiation i ON i.initiation_id = c.initiation_id
+			LEFT JOIN public.users u ON u.email = a.requested_by
+			WHERE a.confirmation_id = $1
+			  AND a.processing_status LIKE 'PENDING%'
+			ORDER BY a.requested_at DESC LIMIT 1`, confirmationID,
+		).Scan(&pendingActionType, &entityName, &submittedByUserID, &submittedByEmail, &amount)
+
+		if scanErr == nil && pendingActionType != "" && submittedByUserID != "" {
+			txType := map[string]string{
+				"CREATE": "MF_CONFIRMATION_CREATE",
+				"EDIT":   "MF_CONFIRMATION_EDIT",
+				"DELETE": "MF_CONFIRMATION_DELETE",
+			}[pendingActionType]
+			if txType == "" {
+				txType = "MF_CONFIRMATION_CREATE"
+			}
+			newInstID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+				ModuleCode:       "INVESTMENT_MF",
+				EntityCode:       entityName,
+				TransactionType:  txType,
+				RecordID:         confirmationID,
+				RecordTable:      "investment.investment_confirmation",
+				AuditTable:       "investment.auditactioninvestmentconfirmation",
+				AuditIDColumn:    "confirmation_id",
+				ActionType:       pendingActionType,
+				Amount:           amount,
+				SubmittedBy:      submittedByUserID,
+				SubmittedByEmail: submittedByEmail,
+			})
+			if instErr != nil {
+				api.LogError("[MFConfirmation] Self-heal CreateInstance for %s: %v", confirmationID, instErr)
+			} else if newInstID != "" {
+				instanceID = newInstID
+				api.LogInfo("[MFConfirmation] Self-heal: created instance %s for confirmation %s", newInstID, confirmationID)
+			}
+		} else if scanErr == nil && pendingActionType != "" {
+			api.LogInfo("[MFConfirmation] Self-heal skipped for %s: requester email did not resolve to a unique user_id", confirmationID)
+		}
+	}
+
+	if instanceID == "" {
+		return nil
+	}
+	richDetail, richErr := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, viewerUserID)
+	if richErr != nil {
+		api.LogError("[MFConfirmation] GetRichInstanceDetail failed for instance=%s confirmation=%s: %v", instanceID, confirmationID, richErr)
+		return nil
+	}
+	return richDetail
+}
 
 // errLoadFailedSuffix is appended to a record id when a row load fails while
 // processing a bulk action, to build the per-item error message.
@@ -321,6 +425,9 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Fire approval-matrix engine instance (async, no-op if engine disabled or no matrix)
+		submitMFConfirmationForApproval(pgxPool, confirmationID, req.InitiationID, req.UserID, userEmail, "MF_CONFIRMATION_CREATE", req.NetAmount)
+
 		go func(cID, uID, uEmail string) {
 			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, []string{cID}, constants.AuditActionCreate, uEmail)
 			catalog.TriggerNotification(
@@ -513,6 +620,8 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 				continue
 			}
+
+			submitMFConfirmationForApproval(pgxPool, confirmationID, initiationID, req.UserID, userEmail, "MF_CONFIRMATION_CREATE", row.NetAmount)
 
 			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_CONFIRMATION", "POST_CREATE", []string{confirmationID}, userEmail)
 
@@ -928,6 +1037,15 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// ── Approval-matrix engine: cancel stale instances and create DELETE instances.
+		for _, id := range req.ConfirmationIDs {
+			if err := approvalengine.CancelPendingInstances(context.Background(), pgxPool, "INVESTMENT_MF", id, requestedBy); err != nil {
+				api.LogError("[MFConfirmation] CancelPendingInstances for delete failed for %s: %v", id, err)
+			}
+			confRow, _ := loadMFConfirmationRow(context.Background(), pgxPool, id)
+			submitMFConfirmationForApproval(pgxPool, id, confRow.InitiationID, req.UserID, requestedBy, "MF_CONFIRMATION_DELETE", confRow.NetAmount)
+		}
+
 		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
 		if err := jobs.RefreshPortfolioSnapshotsJob(context.Background(), pgxPool, nil); err != nil {
 			logger.LogError(constants.ErrPortfolioRefreshInvestmentApproval, err)
@@ -1045,6 +1163,42 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			return
 		}
+
+		// ── Approval-matrix engine: handle engine-managed records first.
+		// Records the engine handled (Acted==true) are skipped in legacy stamp below.
+		engineActed := map[string]bool{}
+		for _, cid := range req.ConfirmationIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "INVESTMENT_MF", RecordID: cid,
+				UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionApproved, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[MFConfirmation] ActOnPendingOrDiagnose approve failed for %s: %v", cid, actionErr)
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[cid] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[MFConfirmation] cancelled stale instance for %s", cid)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[MFConfirmation] engine skipped %s: %s", cid, actionRes.Reason)
+			}
+		}
+		// Remove engine-handled IDs from legacy stamp lists
+		filterEA := func(ids []string) []string {
+			out := ids[:0]
+			for _, id := range ids {
+				if !engineActed[id] {
+					out = append(out, id)
+				}
+			}
+			return out
+		}
+		toApprove = filterEA(toApprove)
+		toApproveConfirmations = filterEA(toApproveConfirmations)
+		toDeleteActionIDs = filterEA(toDeleteActionIDs)
+		deleteMasterIDs = filterEA(deleteMasterIDs)
 
 		if len(toApprove) > 0 {
 			if _, err := tx.Exec(ctx, `
@@ -1279,6 +1433,21 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// ── Approval-matrix engine: reject engine-managed records
+		for _, cid := range req.ConfirmationIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "INVESTMENT_MF", RecordID: cid,
+				UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionRejected, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[MFConfirmation] ActOnPendingOrDiagnose reject failed for %s: %v", cid, actionErr)
+			}
+			if actionRes.Acted {
+				api.LogInfo("[MFConfirmation] engine rejected %s", cid)
+			}
+		}
+
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
@@ -1418,7 +1587,16 @@ func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []str
 			COALESCE(h.edited_by,'') AS edited_by,
 			COALESCE(h.edited_at,'') AS edited_at,
 			COALESCE(h.deleted_by,'') AS deleted_by,
-			COALESCE(h.deleted_at,'') AS deleted_at
+			COALESCE(h.deleted_at,'') AS deleted_at,
+			-- ── Approval-engine columns ────────────────────────────────────────
+			COALESCE(ai.instance_id,'')        AS approval_instance_id,
+			COALESCE(ai.status,'')             AS approval_engine_status,
+			COALESCE(aie.instance_eye_id,'')   AS current_eye_id,
+			COALESCE(aie.position::text,'')    AS current_eye_position,
+			COALESCE(aie.approvals_required,0) AS approvals_required,
+			COALESCE(aie.approvals_received,0) AS approvals_received,
+			aie.sla_deadline                   AS sla_deadline,
+			COALESCE(aie.is_escalated,false)   AS is_escalated
 		FROM investment.investment_confirmation m
 		LEFT JOIN latest_audit l ON l.confirmation_id = m.confirmation_id
 		LEFT JOIN history h ON h.confirmation_id = m.confirmation_id
@@ -1430,6 +1608,22 @@ func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []str
 			d.default_settlement_account = i.demat_id OR
 			d.demat_account_number = i.demat_id
 		)
+		LEFT JOIN LATERAL (
+			SELECT ai.* FROM uam.approval_instance ai
+			WHERE ai.record_id = m.confirmation_id::text
+			  AND ai.module_code = 'INVESTMENT_MF'
+			  AND ai.status = 'PENDING'
+			  AND ai.is_deleted = false
+			ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+			LIMIT 1
+		) ai ON true
+		LEFT JOIN LATERAL (
+			SELECT aie.* FROM uam.approval_instance_eye aie
+			WHERE aie.instance_id = ai.instance_id
+			  AND aie.status = 'ACTIVE'
+			ORDER BY aie.position ASC, aie.instance_eye_id ASC
+			LIMIT 1
+		) aie ON true
 	`
 
 	var (
@@ -2153,6 +2347,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, "confirmation not found")
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"data": rows[0]})
+		approvalWorkflow := loadMFConfirmationApprovalWorkflow(r.Context(), pgxPool, req.ConfirmationID, api.GetUserIDFromCtx(r.Context()))
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"data": rows[0], "approval_workflow": approvalWorkflow})
 	}
 }

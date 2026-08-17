@@ -7,6 +7,7 @@ type PageRequest struct {
 	Page     int    `json:"page"`
 	PageSize int    `json:"page_size"`
 	Search   string `json:"search"`
+	Outcome  string `json:"outcome"`
 }
 
 // NormalizePage clamps page/page_size and returns SQL LIMIT/OFFSET values.
@@ -32,4 +33,17 @@ func SearchPattern(q string) string {
 		return ""
 	}
 	return "%" + q + "%"
+}
+
+// NormalizeOutcomeFilter maps UI labels onto execution_run.outcome values.
+// "Compliant" in the UI is stored as PASS.
+func NormalizeOutcomeFilter(q string) string {
+	switch strings.ToUpper(strings.TrimSpace(q)) {
+	case "", "ALL":
+		return ""
+	case "COMPLIANT":
+		return "PASS"
+	default:
+		return strings.ToUpper(strings.TrimSpace(q))
+	}
 }

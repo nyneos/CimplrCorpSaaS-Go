@@ -19,7 +19,7 @@ func IsApprovalModuleAllowed(ctx context.Context, pool *pgxpool.Pool, moduleCode
 	}
 	legacy := map[string]bool{
 		"FIXED_DEPOSIT": true, "PAYMENTS": true, "RECONCILIATION": true,
-		"VENDOR": true, "GENERAL": true, "EMAIL_INBOX": true,
+		"VENDOR": true, "GENERAL": true, "EMAIL_INBOX": true, "CASH": true, "INVESTMENT_MF": true,
 	}
 	if legacy[code] {
 		return true
