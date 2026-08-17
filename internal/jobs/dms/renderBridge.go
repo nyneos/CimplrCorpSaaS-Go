@@ -126,6 +126,7 @@ func toDocSvcPageDesign(pd pageDesignJSON) docsvc.PageDesignJSON {
 		BackgroundColor:   pd.BackgroundColor,
 		LogoAlign:         pd.LogoAlign,
 		HeaderAlign:       pd.HeaderAlign,
+		FooterAlign:       pd.FooterAlign,
 		PageSize:          pd.PageSize,
 		Orientation:       pd.Orientation,
 		MarginTop:         pd.MarginTop,

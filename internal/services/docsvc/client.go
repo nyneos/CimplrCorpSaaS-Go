@@ -145,6 +145,7 @@ type PageDesignJSON struct {
 	BackgroundColor   string  `json:"backgroundColor"`
 	LogoAlign         string  `json:"logoAlign"`
 	HeaderAlign       string  `json:"headerAlign"`
+	FooterAlign       string  `json:"footerAlign"`
 	PageSize          string  `json:"pageSize"`
 	Orientation       string  `json:"orientation"`
 	MarginTop         float64 `json:"marginTop"`
