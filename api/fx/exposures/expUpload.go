@@ -2,8 +2,8 @@ package exposures
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -34,8 +34,8 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 
-	"CimplrCorpSaas/internal/logger"
 	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
+	"CimplrCorpSaas/internal/logger"
 )
 
 var ErrExposureFileAlreadyUploaded = errors.New("exposure file already uploaded")
@@ -297,7 +297,7 @@ const headersLineItemsSelectSQL = `
 				WHERE inst.record_id = h.exposure_header_id::text
 				  AND inst.module_code = 'FX'
 				  AND inst.status = 'PENDING'
-				ORDER BY inst.created_at DESC LIMIT 1
+				ORDER BY inst.submitted_at DESC LIMIT 1
 			) i ON true
 `
 
@@ -775,6 +775,7 @@ func GetExposureHeadersLineItems(pool *pgxpool.Pool) http.HandlerFunc {
 
 		joinData, err := queryHeadersLineItems(ctx, pool, buNames, req.BatchID, false)
 		if err != nil {
+			logger.LogError("GetExposureHeadersLineItems query failed: %v", err)
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure headers/line items")
 			return
 		}
@@ -822,6 +823,7 @@ func GetPendingApprovalHeadersLineItems(pool *pgxpool.Pool) http.HandlerFunc {
 
 		joinData, err := queryHeadersLineItems(ctx, pool, buNames, req.BatchID, true)
 		if err != nil {
+			logger.LogError("GetPendingApprovalHeadersLineItems query failed: %v", err)
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch pending approval headers/line items")
 			return
 		}
