@@ -65,6 +65,47 @@ func requirePendingFree(ctx context.Context, tx pgx.Tx, ruleID string) error {
 	return nil
 }
 
+// requireDeletable allows a delete request from any state except APPROVED and a
+// delete already awaiting approval. Any other pending request (create/edit/new
+// version) is superseded — its audit row is closed out so the DELETE row becomes
+// the one a checker's decision acts on.
+func requireDeletable(ctx context.Context, tx pgx.Tx, ruleID, actor string) error {
+	var processingStatus string
+	err := tx.QueryRow(ctx, `
+		SELECT processing_status FROM dms_svc.generation_rule
+		WHERE rule_id = $1::uuid AND is_deleted = false
+		FOR UPDATE`, ruleID,
+	).Scan(&processingStatus)
+	if err != nil {
+		return err
+	}
+	if processingStatus == "APPROVED" {
+		return fmt.Errorf("approved rule cannot be deleted")
+	}
+	if processingStatus == "PENDING_DELETE_APPROVAL" {
+		return fmt.Errorf("rule is already awaiting delete approval")
+	}
+	if !common.IsPendingStatus(processingStatus) {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE dms_svc.generation_rule_version SET status = 'REJECTED'
+		WHERE version_id IN (
+			SELECT version_id FROM dms_svc.generation_rule_audit
+			WHERE rule_id = $1::uuid AND processing_status = ANY($2::text[])
+				AND version_id IS NOT NULL
+		)`, ruleID, common.PendingProcessingStatuses); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE dms_svc.generation_rule_audit
+		SET processing_status = 'REJECTED', checker_by = $1, checker_at = now(),
+			checker_comment = 'Superseded by delete request'
+		WHERE rule_id = $2::uuid AND processing_status = ANY($3::text[])`,
+		actor, ruleID, common.PendingProcessingStatuses)
+	return err
+}
+
 // pendingAmendableAudit returns the pending create/edit audit row a new version
 // should amend, or nil when the rule has no pending request in flight.
 func pendingAmendableAudit(ctx context.Context, tx pgx.Tx, ruleID string) (*ruleAuditRow, error) {

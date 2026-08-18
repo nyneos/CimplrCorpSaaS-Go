@@ -50,7 +50,7 @@ func HandleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			if id == "" {
 				continue
 			}
-			if err := requirePendingFree(r.Context(), tx, id); err != nil {
+			if err := requireDeletable(r.Context(), tx, id, actor); err != nil {
 				skipped = append(skipped, id)
 				continue
 			}

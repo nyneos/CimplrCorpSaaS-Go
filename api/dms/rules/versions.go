@@ -171,11 +171,18 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.Exec(r.Context(), `
 				UPDATE dms_svc.generation_rule_audit
 				SET version_id = $1::uuid, reason = COALESCE($2, reason), requested_by = $3,
-					requested_ip = $4, requested_at = now()
+					requested_ip = $4, requested_at = now(), processing_status = 'PENDING_EDIT_APPROVAL'
 				WHERE audit_id = $5::uuid`,
 				versionID, common.NullIfEmpty(req.Reason), actor, common.NullIfEmpty(ip), amend.AuditID); err != nil {
 				api.LogErrorForResponse(w, "dms rule version amend audit: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit rule version", "DMS_RULE_VERSION_FAILED")
+				return
+			}
+			if _, err := tx.Exec(r.Context(), `
+				UPDATE dms_svc.generation_rule SET processing_status = 'PENDING_EDIT_APPROVAL'
+				WHERE rule_id = $1::uuid`, req.RuleID); err != nil {
+				api.LogErrorForResponse(w, "dms rule version amend flag: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateRuleVersion, "DMS_RULE_VERSION_FAILED")
 				return
 			}
 			if err := tx.Commit(r.Context()); err != nil {

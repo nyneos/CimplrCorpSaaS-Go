@@ -89,7 +89,7 @@ func applyRejection(ctx context.Context, tx pgx.Tx, ruleID, actor, ip, checkerCo
 		}
 	case "EDIT", "DELETE":
 		if _, err := tx.Exec(ctx, `
-			UPDATE dms_svc.generation_rule SET processing_status = 'APPROVED',
+			UPDATE dms_svc.generation_rule SET processing_status = 'REJECTED',
 				last_modified_by = $1, last_modified_at = now()
 			WHERE rule_id = $2::uuid`, actor, ruleID); err != nil {
 			return err
@@ -104,7 +104,7 @@ func applyRejection(ctx context.Context, tx pgx.Tx, ruleID, actor, ip, checkerCo
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
-			UPDATE dms_svc.generation_rule SET processing_status = 'APPROVED',
+			UPDATE dms_svc.generation_rule SET processing_status = 'REJECTED',
 				last_modified_by = $1, last_modified_at = now()
 			WHERE rule_id = $2::uuid`, actor, ruleID); err != nil {
 			return err
