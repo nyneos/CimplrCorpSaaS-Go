@@ -1,8 +1,8 @@
 package forwards
 
 import (
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
@@ -458,7 +458,7 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: actor, OldValues: nil, NewValues: result})
 			triggerForwardBookingNotif(r.Context(), pool, routeForwardManualEntry, "CREATE", actor, "pending", []string{systemTransactionID})
 			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_CREATE", []string{systemTransactionID}, actor)
-			
+
 			makerEmail := ""
 			for _, s := range auth.GetActiveSessions() {
 				if s.UserID == req.UserID {
@@ -505,7 +505,7 @@ func GetEntityRelevantForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE inst.record_id = f.system_transaction_id::text
 				  AND inst.module_code = 'FX'
 				  AND inst.status = 'PENDING'
-				ORDER BY inst.created_at DESC LIMIT 1
+				ORDER BY inst.submitted_at DESC LIMIT 1
 			) i ON true
 			WHERE f.entity_level_0 = ANY($1)
 			  AND COALESCE(f.is_deleted, false) = false
