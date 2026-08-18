@@ -281,11 +281,11 @@ func renderBarChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	graph := chart.BarChart{
 		Title: " ",
 		Background: chart.Style{
-			Padding:   chart.Box{Top: 28, Left: 56, Right: 20, Bottom: 20},
+			Padding:   chart.Box{Top: 28, Left: 56, Right: 20, Bottom: 78},
 			FillColor: drawing.ColorWhite,
 		},
 		Width:    760,
-		Height:   380,
+		Height:   440,
 		BarWidth: 36,
 		XAxis: chart.Style{
 			FontSize:  9,

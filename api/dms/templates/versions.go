@@ -104,11 +104,18 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.Exec(r.Context(), `
 				UPDATE dms_svc.template_audit
 				SET version_id = $1::uuid, reason = COALESCE($2, reason), requested_by = $3,
-					requested_ip = $4, requested_at = now()
+					requested_ip = $4, requested_at = now(), processing_status = 'PENDING_EDIT_APPROVAL'
 				WHERE audit_id = $5::uuid`,
 				versionID, common.NullIfEmpty(req.Reason), actor, common.NullIfEmpty(ip), amend.AuditID); err != nil {
 				api.LogErrorForResponse(w, "dms template version amend audit: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit template version", "DMS_TEMPLATE_VERSION_FAILED")
+				return
+			}
+			if _, err := tx.Exec(r.Context(), `
+				UPDATE dms_svc.template SET processing_status = 'PENDING_EDIT_APPROVAL'
+				WHERE template_id = $1::uuid`, req.TemplateID); err != nil {
+				api.LogErrorForResponse(w, "dms template version amend flag: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateTemplateVersion, "DMS_TEMPLATE_VERSION_FAILED")
 				return
 			}
 		} else {

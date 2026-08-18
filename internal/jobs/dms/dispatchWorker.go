@@ -580,8 +580,10 @@ func loadEnabledDestChannels(ctx context.Context, pool *pgxpool.Pool, versionID 
 }
 
 // recordChannelDeliveries writes one generated_document_delivery row per
-// (doc × enabled destination). SFTP/WEBHOOK/SHAREPOINT stay PENDING until a
-// delivery worker ships them; S3/IN_APP/EMAIL are SUCCESS at queue time.
+// (doc × enabled destination) for FILES destinations, and a single row per ZIP
+// destination since a ZIP destination delivers one package, not one object per
+// document. SFTP/WEBHOOK/SHAREPOINT stay PENDING until a delivery worker ships
+// them; S3/IN_APP/EMAIL are SUCCESS at queue time.
 func recordChannelDeliveries(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -601,61 +603,81 @@ func recordChannelDeliveries(
 			channels = append(channels, destChannel{DestinationType: "EMAIL"})
 		}
 	}
-	for _, doc := range docs {
-		for _, ch := range channels {
-			status := "SUCCESS"
-			loc := doc.S3Key
-			detail := ""
-			switch strings.ToUpper(ch.DestinationType) {
-			case "S3_ARCHIVE", "IN_APP":
-				status = "SUCCESS"
-				loc = doc.S3Key
-			case "LOCAL":
-				status = "SUCCESS"
-				loc = doc.S3Key
+	insert := func(docID, destID, destType, loc, filename, status, detail string) error {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO dms_svc.generated_document_delivery
+				(doc_id, run_id, destination_id, destination_type, output_location, output_filename,
+				 status, error_detail, finished_at)
+			VALUES ($1::uuid, $2::uuid,
+			        CASE WHEN $3 = '' THEN NULL ELSE $3::uuid END,
+			        $4, $5, $6, $7::text, NULLIF($8,''),
+			        CASE WHEN $7::text IN ('SUCCESS','FAILED','SKIPPED') THEN now() ELSE NULL END)`,
+			docID, runID, destID, destType, loc, filename,
+			status, detail); err != nil {
+			return err
+		}
+		return nil
+	}
+	for _, ch := range channels {
+		status := "SUCCESS"
+		detail := ""
+		locFor := func(doc generatedDoc) string { return doc.S3Key }
+		switch strings.ToUpper(ch.DestinationType) {
+		case "S3_ARCHIVE", "IN_APP":
+			status = "SUCCESS"
+		case "LOCAL":
+			status = "SUCCESS"
+			locFor = func(doc generatedDoc) string {
 				if strings.HasPrefix(doc.S3Key, "local:") {
-					loc = strings.TrimPrefix(doc.S3Key, "local:")
+					return strings.TrimPrefix(doc.S3Key, "local:")
 				}
-				detail = "stored under DMS local output folder"
-			case "EMAIL":
-				if !wantEmail {
-					continue
-				}
-				status = "SUCCESS"
-				loc = "outbox:" + runID
-			case "SFTP":
-				status = "PENDING"
-				loc = strings.TrimSpace(ch.SftpHost)
-				if ch.SftpFolder != "" {
-					loc = loc + ":" + ch.SftpFolder
-				}
-				detail = "SFTP config stored — delivery worker not yet shipping files"
-			case "WEBHOOK":
-				status = "PENDING"
-				loc = ch.APIURL
-				detail = "WEBHOOK config stored — delivery worker not yet calling API"
-			case "SHAREPOINT":
-				status = "PENDING"
-				loc = ch.TargetURI
-				detail = "SHAREPOINT config stored — delivery worker not yet syncing"
-			default:
-				status = "SKIPPED"
-				detail = "unknown destination type"
+				return doc.S3Key
 			}
-			if ch.PackageMode == "ZIP" && runZip != nil {
-				loc = runZip.S3Key
+			detail = "stored under DMS local output folder"
+		case "EMAIL":
+			if !wantEmail {
+				continue
 			}
-			destID := strings.TrimSpace(ch.DestinationID)
-			if _, err := pool.Exec(ctx, `
-				INSERT INTO dms_svc.generated_document_delivery
-					(doc_id, run_id, destination_id, destination_type, output_location, output_filename,
-					 status, error_detail, finished_at)
-				VALUES ($1::uuid, $2::uuid,
-				        CASE WHEN $3 = '' THEN NULL ELSE $3::uuid END,
-				        $4, $5, $6, $7::text, NULLIF($8,''),
-				        CASE WHEN $7::text IN ('SUCCESS','FAILED','SKIPPED') THEN now() ELSE NULL END)`,
-				doc.DocID, runID, destID, ch.DestinationType, loc, filenameForDoc(doc, ""),
-				status, detail); err != nil {
+			status = "SUCCESS"
+			locFor = func(generatedDoc) string { return "outbox:" + runID }
+		case "SFTP":
+			status = "PENDING"
+			host := strings.TrimSpace(ch.SftpHost)
+			if ch.SftpFolder != "" {
+				host = host + ":" + ch.SftpFolder
+			}
+			locFor = func(generatedDoc) string { return host }
+			detail = "SFTP config stored — delivery worker not yet shipping files"
+		case "WEBHOOK":
+			status = "PENDING"
+			locFor = func(generatedDoc) string { return ch.APIURL }
+			detail = "WEBHOOK config stored — delivery worker not yet calling API"
+		case "SHAREPOINT":
+			status = "PENDING"
+			locFor = func(generatedDoc) string { return ch.TargetURI }
+			detail = "SHAREPOINT config stored — delivery worker not yet syncing"
+		default:
+			status = "SKIPPED"
+			detail = "unknown destination type"
+		}
+		destID := strings.TrimSpace(ch.DestinationID)
+
+		// A ZIP destination ships one package for the whole run — record it once,
+		// anchored to the first document, instead of one row per member file.
+		if ch.PackageMode == "ZIP" && runZip != nil {
+			if err := insert(docs[0].DocID, destID, ch.DestinationType,
+				runZip.S3Key, runZip.OutputFilename, status, detail); err != nil {
+				if strings.Contains(err.Error(), errFragDoesNotExist) {
+					return nil
+				}
+				return err
+			}
+			continue
+		}
+
+		for _, doc := range docs {
+			if err := insert(doc.DocID, destID, ch.DestinationType,
+				locFor(doc), filenameForDoc(doc, ""), status, detail); err != nil {
 				// Table may not exist on older DBs — don't fail the email path.
 				if strings.Contains(err.Error(), errFragDoesNotExist) {
 					return nil
