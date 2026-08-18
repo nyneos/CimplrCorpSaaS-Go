@@ -302,17 +302,23 @@ func ListHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, `
 			SELECT
-				proposal_id::text,
-				proposal_name,
-				processing_status,
-				created_by,
-				created_at,
-				updated_by,
-				updated_at,
-				comments
-			FROM public.hedging_proposal_document
-			WHERE COALESCE(is_deleted, false) = false
-			ORDER BY created_at DESC
+				d.proposal_id::text,
+				d.proposal_name,
+				d.processing_status,
+				d.created_by,
+				d.created_at,
+				d.updated_by,
+				d.updated_at,
+				d.comments,
+				COALESCE(l.line_count, 0) AS line_count
+			FROM public.hedging_proposal_document d
+			LEFT JOIN (
+				SELECT proposal_id, COUNT(*) AS line_count
+				FROM public.hedging_proposal_document_line
+				GROUP BY proposal_id
+			) l ON l.proposal_id = d.proposal_id
+			WHERE COALESCE(d.is_deleted, false) = false
+			ORDER BY d.created_at DESC
 		`)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to list hedging proposals")
@@ -328,8 +334,9 @@ func ListHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				createdAt                   time.Time
 				updatedAt                   *time.Time
 				comments                    *string
+				lineCount                   int64
 			)
-			if err := rows.Scan(&id, &name, &status, &createdBy, &createdAt, &updatedBy, &updatedAt, &comments); err != nil {
+			if err := rows.Scan(&id, &name, &status, &createdBy, &createdAt, &updatedBy, &updatedAt, &comments, &lineCount); err != nil {
 				continue
 			}
 			row := map[string]any{
@@ -338,6 +345,7 @@ func ListHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				"processing_status": status,
 				"created_by":        createdBy,
 				"created_at":        createdAt,
+				"line_count":        lineCount,
 			}
 			if updatedBy != nil {
 				row["updated_by"] = *updatedBy
