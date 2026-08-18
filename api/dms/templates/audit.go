@@ -68,6 +68,47 @@ func requirePendingFree(ctx context.Context, tx pgx.Tx, templateID string) error
 	return nil
 }
 
+// requireDeletable allows a delete request from any state except APPROVED and a
+// delete already awaiting approval. Any other pending request (create/edit/new
+// version) is superseded — its audit row is closed out so the DELETE row becomes
+// the one a checker's decision acts on.
+func requireDeletable(ctx context.Context, tx pgx.Tx, templateID, actor string) error {
+	var processingStatus string
+	err := tx.QueryRow(ctx, `
+		SELECT processing_status FROM dms_svc.template
+		WHERE template_id = $1::uuid AND is_deleted = false
+		FOR UPDATE`, templateID,
+	).Scan(&processingStatus)
+	if err != nil {
+		return err
+	}
+	if processingStatus == "APPROVED" {
+		return fmt.Errorf("approved template cannot be deleted")
+	}
+	if processingStatus == "PENDING_DELETE_APPROVAL" {
+		return fmt.Errorf("template is already awaiting delete approval")
+	}
+	if !common.IsPendingStatus(processingStatus) {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE dms_svc.template_version SET status = 'REJECTED'
+		WHERE version_id IN (
+			SELECT version_id FROM dms_svc.template_audit
+			WHERE template_id = $1::uuid AND processing_status = ANY($2::text[])
+				AND version_id IS NOT NULL
+		)`, templateID, common.PendingProcessingStatuses); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE dms_svc.template_audit
+		SET processing_status = 'REJECTED', checker_by = $1, checker_at = now(),
+			checker_comment = 'Superseded by delete request'
+		WHERE template_id = $2::uuid AND processing_status = ANY($3::text[])`,
+		actor, templateID, common.PendingProcessingStatuses)
+	return err
+}
+
 func pendingAmendableAudit(ctx context.Context, tx pgx.Tx, templateID string) (*templateAuditRow, error) {
 	var processingStatus string
 	err := tx.QueryRow(ctx, `

@@ -5,14 +5,21 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/golang/freetype"
+	"github.com/golang/freetype/truetype"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/wcharczuk/go-chart/v2"
 	"github.com/wcharczuk/go-chart/v2/drawing"
+	"golang.org/x/image/math/fixed"
 )
 
 // msgNoData is the placeholder caption rendered into an empty chart PNG
@@ -195,15 +202,22 @@ func truncateLabel(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
+// trimZeroDecimal renders one decimal place, dropping it when it is zero so
+// axis ticks read "11000 Cr" rather than "11000.0 Cr".
+func trimZeroDecimal(v float64) string {
+	s := fmt.Sprintf("%.1f", v)
+	return strings.TrimSuffix(s, ".0")
+}
+
 func formatAxisValue(v float64) string {
 	abs := math.Abs(v)
 	switch {
-	case abs >= 1_000_000_000:
-		return fmt.Sprintf("%.1fB", v/1_000_000_000)
-	case abs >= 1_000_000:
-		return fmt.Sprintf("%.1fM", v/1_000_000)
+	case abs >= 10_000_000:
+		return trimZeroDecimal(v/10_000_000) + " Cr"
+	case abs >= 100_000:
+		return trimZeroDecimal(v/100_000) + " L"
 	case abs >= 1_000:
-		return fmt.Sprintf("%.1fK", v/1_000)
+		return trimZeroDecimal(v/1_000) + " K"
 	case abs >= 100:
 		return fmt.Sprintf("%.0f", v)
 	default:
@@ -274,22 +288,20 @@ func renderBarChartPNG(series []chartSeriesPoint) ([]byte, error) {
 		}
 		bars = append(bars, chart.Value{
 			Value: v,
-			Label: truncateLabel(p.Label, 18),
 			Style: chart.Style{FillColor: palette[i%len(palette)], StrokeColor: palette[i%len(palette)]},
 		})
 	}
 	graph := chart.BarChart{
 		Title: " ",
 		Background: chart.Style{
-			Padding:   chart.Box{Top: 28, Left: 56, Right: 20, Bottom: 78},
+			Padding:   chart.Box{Top: 28, Left: 68, Right: 20, Bottom: 96},
 			FillColor: drawing.ColorWhite,
 		},
 		Width:    760,
-		Height:   440,
+		Height:   470,
 		BarWidth: 36,
 		XAxis: chart.Style{
-			FontSize:  9,
-			FontColor: drawing.ColorFromHex("334155"),
+			Hidden: true,
 		},
 		YAxis: chart.YAxis{
 			AxisType: chart.YAxisSecondary,
@@ -301,8 +313,14 @@ func renderBarChartPNG(series []chartSeriesPoint) ([]byte, error) {
 				return fmt.Sprint(v)
 			},
 			Style: chart.Style{
-				FontSize:  10,
-				FontColor: drawing.ColorFromHex("475569"),
+				FontSize:    10,
+				FontColor:   drawing.ColorFromHex("475569"),
+				StrokeColor: drawing.ColorFromHex("94a3b8"),
+				StrokeWidth: 1,
+			},
+			GridMajorStyle: chart.Style{
+				StrokeColor: drawing.ColorFromHex("e2e8f0"),
+				StrokeWidth: 1,
 			},
 		},
 		Bars: bars,
@@ -311,7 +329,292 @@ func renderBarChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	if err := graph.Render(chart.PNG, &buf); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	return drawBarCategoryLabels(buf.Bytes(), graph, series)
+}
+
+// barChartGeometry mirrors go-chart's internal canvas maths so category labels
+// can be painted at the exact centre of each bar.
+func barChartGeometry(graph chart.BarChart) (left, bottom, barW, spacing int) {
+	left = graph.Background.Padding.GetLeft(20)
+	right := graph.GetWidth() - graph.Background.Padding.GetRight(10)
+	bottom = graph.GetHeight() - graph.Background.Padding.GetBottom(50)
+
+	canvasW := right - left
+	n := len(graph.Bars)
+	if n == 0 {
+		return left, bottom, 0, 0
+	}
+	spacing = graph.GetBarSpacing()
+	if n*(graph.GetBarWidth()+spacing) > canvasW {
+		less := canvasW - (n * graph.GetBarWidth())
+		if less > 0 {
+			spacing = int(math.Ceil(float64(less) / float64(n)))
+		} else {
+			spacing = 0
+		}
+	}
+	barW = graph.GetBarWidth()
+	if n*(barW+spacing) > canvasW {
+		less := canvasW - (n * spacing)
+		if less > 0 {
+			barW = int(math.Ceil(float64(less) / float64(n)))
+		} else {
+			barW = 0
+		}
+	}
+	return left, bottom, barW, spacing
+}
+
+// detectBarBand locates the painted bars by their exact palette colours, so
+// label placement follows what go-chart actually drew rather than a re-derived
+// copy of its internal axis-fitting maths. Returns the first bar's left edge,
+// the plot floor, and the bar pitch.
+func detectBarBand(img *image.RGBA, palette []drawing.Color, n int) (firstLeft, floor, slot, barW int, ok bool) {
+	if n <= 0 {
+		return 0, 0, 0, 0, false
+	}
+	want := make(map[uint32]bool, len(palette))
+	for _, c := range palette {
+		want[uint32(c.R)<<16|uint32(c.G)<<8|uint32(c.B)] = true
+	}
+	b := img.Bounds()
+	isBar := func(x, y int) bool {
+		r, g, bb, a := img.At(x, y).RGBA()
+		if a == 0 {
+			return false
+		}
+		return want[uint32(r>>8)<<16|uint32(g>>8)<<8|uint32(bb>>8)]
+	}
+	// Runs on a row, keeping only those wide enough to be a bar rather than an
+	// antialiased glyph edge from the y-axis tick labels.
+	const minBarPx = 6
+	runs := func(y int) (starts, widths []int) {
+		runStart := -1
+		for x := b.Min.X; x <= b.Max.X; x++ {
+			cur := x < b.Max.X && isBar(x, y)
+			if cur && runStart < 0 {
+				runStart = x
+			} else if !cur && runStart >= 0 {
+				if x-runStart >= minBarPx {
+					starts = append(starts, runStart)
+					widths = append(widths, x-runStart)
+				}
+				runStart = -1
+			}
+		}
+		return starts, widths
+	}
+	// Lowest row carrying at least the expected number of bar-width runs is the
+	// plot floor; rows below it hold only axis text.
+	floor = -1
+	var starts, widths []int
+	for y := b.Max.Y - 1; y >= b.Min.Y; y-- {
+		st, wd := runs(y)
+		if len(st) >= n {
+			floor, starts, widths = y, st, wd
+			break
+		}
+	}
+	if floor < 0 {
+		return 0, 0, 0, 0, false
+	}
+	firstLeft = starts[0]
+	barW = widths[0]
+	if len(starts) > 1 {
+		slot = int(math.Round(float64(starts[len(starts)-1]-starts[0]) / float64(len(starts)-1)))
+	} else {
+		slot = barW
+	}
+	return firstLeft, floor, slot, barW, true
+}
+
+// drawBarCategoryLabels paints the dimension label under each bar. go-chart's
+// own x-axis is unusable here: getAdjustedCanvasBox clamps the label band with
+// MinInt against a 5px seed, so labels land outside the image and disappear.
+func drawBarCategoryLabels(pngBytes []byte, graph chart.BarChart, series []chartSeriesPoint) ([]byte, error) {
+	src, err := png.Decode(bytes.NewReader(pngBytes))
+	if err != nil {
+		return pngBytes, nil
+	}
+	canvas := image.NewRGBA(src.Bounds())
+	draw.Draw(canvas, src.Bounds(), src, src.Bounds().Min, draw.Src)
+
+	ttf, err := chart.GetDefaultFont()
+	if err != nil {
+		return pngBytes, nil
+	}
+	const fontPx = 9.0
+	fc := freetype.NewContext()
+	fc.SetDPI(92)
+	fc.SetFont(ttf)
+	fc.SetFontSize(fontPx)
+	fc.SetClip(canvas.Bounds())
+	fc.SetDst(canvas)
+	fc.SetSrc(image.NewUniform(color.RGBA{R: 0x33, G: 0x41, B: 0x55, A: 0xff}))
+
+	left, bottom, barW, spacing := barChartGeometry(graph)
+	if barW <= 0 {
+		return pngBytes, nil
+	}
+	slot := barW + spacing
+	// go-chart grows the canvas to fit the y-axis, so the drawn bars sit well
+	// right of the raw padding. Read their true positions off the rendered
+	// image rather than re-deriving that adjustment.
+	if fl, fy, sl, bw, ok := detectBarBand(canvas, chartBrandPalette(), len(series)); ok {
+		left, bottom = fl, fy
+		if sl > 0 {
+			slot = sl
+		}
+		if bw > 0 {
+			barW = bw
+		}
+	}
+	// Widest label decides whether horizontal labels fit; if any would be
+	// clipped, every label turns 90° so the full id is always readable.
+	widest := 0
+	for _, p := range series {
+		if w := measureTextPx(fc, p.Label); w > widest {
+			widest = w
+		}
+	}
+	avail := canvas.Bounds().Dy() - bottom - 8
+
+	if widest <= slot-4 {
+		for i, p := range series {
+			w := measureTextPx(fc, p.Label)
+			tx := left + i*slot + (barW-w)/2
+			if tx < 2 {
+				tx = 2
+			}
+			fc.DrawString(p.Label, fixed.P(tx, bottom+14))
+		}
+	} else {
+		for i, p := range series {
+			strip, sw, sh := renderTextStrip(ttf, fontPx, p.Label,
+				color.RGBA{R: 0x33, G: 0x41, B: 0x55, A: 0xff})
+			if strip == nil {
+				continue
+			}
+			if sw > avail {
+				continue
+			}
+			// Rotated 90° CCW: strip width becomes vertical extent.
+			dx := left + i*slot + (barW-sh)/2
+			blitRotated90(canvas, strip, dx, bottom+6, sw, sh)
+		}
+	}
+
+	var out bytes.Buffer
+	if err := png.Encode(&out, canvas); err != nil {
+		return pngBytes, nil
+	}
+	return out.Bytes(), nil
+}
+
+func maxLabelChars(slot int, fontPx float64) int {
+	// 0.58em is the average advance of the default sans face at these sizes;
+	// leave 2px of gutter so neighbouring labels never touch.
+	n := int(float64(slot-2) / (fontPx * 0.58))
+	if n < 3 {
+		return 3
+	}
+	return n
+}
+
+// renderTextStrip draws s horizontally onto a transparent image sized to the
+// glyphs, returning the strip plus its used width and height. Rotating a
+// finished strip keeps glyph rasterisation identical to the horizontal case.
+func renderTextStrip(ttf *truetype.Font, fontPx float64, s string, col color.RGBA) (*image.RGBA, int, int) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, 0, 0
+	}
+	h := int(math.Ceil(fontPx * 1.6))
+	w := int(math.Ceil(float64(len([]rune(s)))*fontPx)) + 16
+	strip := image.NewRGBA(image.Rect(0, 0, w, h))
+
+	fc := freetype.NewContext()
+	fc.SetDPI(92)
+	fc.SetFont(ttf)
+	fc.SetFontSize(fontPx)
+	fc.SetClip(strip.Bounds())
+	fc.SetDst(strip)
+	fc.SetSrc(image.NewUniform(col))
+	baseline := int(math.Round(fontPx * 1.15))
+	end, err := fc.DrawString(s, fixed.P(1, baseline))
+	if err != nil {
+		return nil, 0, 0
+	}
+	used := end.X.Round() + 1
+	if used > w {
+		used = w
+	}
+	return strip, used, h
+}
+
+// blitRotated90 copies the strip onto dst rotated 90° clockwise, so the text
+// reads top-to-bottom starting at (dx, dy).
+func blitRotated90(dst *image.RGBA, strip *image.RGBA, dx, dy, sw, sh int) {
+	for sx := 0; sx < sw; sx++ {
+		for sy := 0; sy < sh; sy++ {
+			c := strip.RGBAAt(sx, sy)
+			if c.A == 0 {
+				continue
+			}
+			tx := dx + (sh - 1 - sy)
+			ty := dy + sx
+			if !(image.Point{tx, ty}.In(dst.Bounds())) {
+				continue
+			}
+			dst.Set(tx, ty, c)
+		}
+	}
+}
+
+func measureTextPx(fc *freetype.Context, s string) int {
+	p, err := fc.DrawString(s, fixed.P(0, -1000))
+	if err != nil {
+		return len(s) * 5
+	}
+	return p.X.Round()
+}
+
+// wrapLabelLines splits a category label into at most maxLines chunks of
+// perLine runes, ellipsising whatever will not fit. Labels that carry a
+// separator (FDBR-8A3ABE2, FREQ_721B589) break there first so the identifying
+// tail survives instead of being chopped mid-token.
+func wrapLabelLines(s string, perLine, maxLines int) []string {
+	s = strings.TrimSpace(s)
+	if s == "" || perLine <= 0 {
+		return nil
+	}
+	if maxLines >= 2 && len([]rune(s)) > perLine {
+		if i := strings.LastIndexAny(s, "-_ /"); i > 0 && i < len(s)-1 {
+			head, tail := strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:])
+			if hr, tr := []rune(head), []rune(tail); len(hr) <= perLine && len(tr) <= perLine {
+				return []string{head, tail}
+			}
+		}
+	}
+	r := []rune(s)
+	var lines []string
+	for len(r) > 0 && len(lines) < maxLines {
+		n := perLine
+		if n > len(r) {
+			n = len(r)
+		}
+		if len(lines) == maxLines-1 && len(r) > n {
+			if n > 1 {
+				lines = append(lines, string(r[:n-1])+"…")
+			} else {
+				lines = append(lines, "…")
+			}
+			return lines
+		}
+		lines = append(lines, string(r[:n]))
+		r = r[n:]
+	}
+	return lines
 }
 
 func renderLineChartPNG(series []chartSeriesPoint) ([]byte, error) {
