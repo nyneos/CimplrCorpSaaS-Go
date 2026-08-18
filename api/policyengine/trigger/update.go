@@ -44,6 +44,12 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "event_code, timing_category, description are required", "VALIDATION_ERROR")
 			return
 		}
+		if req.AllowsTriggerApproval && common.ForbidsTriggerApproval(req.EventCode) {
+			api.RespondEnvelopeError(w, http.StatusBadRequest,
+				"TriggerApproval is not allowed on approve/reject events (that would loop approvals)",
+				"VALIDATION_ERROR")
+			return
+		}
 		actor := common.RequestActor(r, req.ActorID)
 		ip := common.RequestIP(r)
 

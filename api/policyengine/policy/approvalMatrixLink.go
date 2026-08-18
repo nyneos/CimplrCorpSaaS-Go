@@ -55,7 +55,7 @@ func HandleApprovalMatrixOptions(pool *pgxpool.Pool) http.HandlerFunc {
 			SubModule string `json:"sub_module"`
 		}
 		_ = common.DecodeJSON(r, &req)
-		subModule := strings.TrimSpace(req.SubModule)
+		prefixes := matrixTxnTypePrefixes(req.SubModule)
 
 		rows, err := pool.Query(r.Context(), `
 			SELECT m.matrix_id, m.module_code, m.transaction_type, m.approval_order,
@@ -63,8 +63,14 @@ func HandleApprovalMatrixOptions(pool *pgxpool.Pool) http.HandlerFunc {
 			         WHERE e.matrix_id = m.matrix_id AND e.is_active = true AND e.is_deleted = false)
 			FROM uam.approval_matrix_master m`+latestMatrixAudit+`
 			WHERE`+approvedActiveMatrixWhere+`
-			  AND ($1 = '' OR m.transaction_type LIKE $1 || '%')
-			ORDER BY m.module_code, m.transaction_type`, subModule)
+			  AND (
+			        cardinality($1::text[]) = 0
+			        OR EXISTS (
+			          SELECT 1 FROM unnest($1::text[]) p
+			          WHERE m.transaction_type LIKE p || '%'
+			        )
+			      )
+			ORDER BY m.module_code, m.transaction_type`, prefixes)
 		if err != nil {
 			api.LogErrorForResponse(w, "approval matrix options: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to load approval matrices", "MATRIX_LOAD_FAILED")
@@ -115,4 +121,19 @@ func validateTriggerApprovalMatrix(ctx context.Context, pool *pgxpool.Pool, acti
 		return errors.New("approval_matrix_id does not match an approved, active approval matrix")
 	}
 	return nil
+}
+
+// matrixTxnTypePrefixes maps a policy catalog sub-module onto approval-matrix
+// transaction_type prefixes. Most sub-modules match 1:1 (BANK_BALANCE →
+// BANK_BALANCE_CREATE). PAYABLE_RECEIVABLE is one catalog code covering two
+// ledgers, so matrices are stored split as PAYABLE_* / RECEIVABLE_*.
+func matrixTxnTypePrefixes(subModule string) []string {
+	code := strings.ToUpper(strings.TrimSpace(subModule))
+	if code == "" {
+		return []string{}
+	}
+	if code == "PAYABLE_RECEIVABLE" {
+		return []string{"PAYABLE_", "RECEIVABLE_", "PAYABLE_RECEIVABLE"}
+	}
+	return []string{code}
 }

@@ -244,6 +244,18 @@ func runGeneration(
 		UPDATE dms_svc.generation_run SET source_row_count = $2 WHERE run_id = $1::uuid`,
 		runID, len(rows))
 
+	// Guardrail for business events: never render docs when the event payload
+	// source IDs cannot resolve to dashboard rows. This avoids "successful"
+	// blank/zero documents and makes bad trigger/source mappings visible.
+	if strings.EqualFold(strings.TrimSpace(triggerType), "EVENT") && len(sourceIDs) > 0 && len(rows) == 0 {
+		return runID, finishRunFailed(ctx, pool, runID, fmt.Errorf(
+			"event source rows not found for sub_module=%s source_id_field=%s source_ids=%s",
+			rule.SubModuleCode,
+			strings.TrimSpace(sourceIDField),
+			strings.Join(sourceIDs, ","),
+		))
+	}
+
 	var firstRow map[string]any
 	if len(rows) > 0 {
 		firstRow = rows[0]

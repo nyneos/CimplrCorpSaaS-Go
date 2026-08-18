@@ -426,6 +426,8 @@ const (
 	QuerryAuditBookingRequest             = "investment.fd_audit_booking_request"
 	QuerryAuditInterestReceipt            = "investment.fd_interest_receipt_audit"
 	QuerryBookingRequest                  = "investment.fd_booking_request"
+	QuerryRateNegotiation                 = "investment.fd_rate_negotiation"
+	QuerryAuditRateNegotiation            = "investment.fd_audit_rate_negotiation"
 	QuerryConfirmation                    = "investment.fd_confirmation"
 	QuerryAuditConfirmation               = "investment.fd_audit_confirmation"
 	QuerryMaster                          = "investment.fd_master"

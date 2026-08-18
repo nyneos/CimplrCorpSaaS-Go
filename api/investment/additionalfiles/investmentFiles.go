@@ -107,6 +107,14 @@ var (
 		ParentTable:   "investment.fd_booking_request",
 		ParentFilter:  constants.FormatDeletedFilter,
 	}
+	fdRateNegotiationFilesDefinition = investmentFileDefinition{
+		Module:        "fd-rate-negotiation-additional",
+		ParentIDField: "rate_request_id",
+		TableName:     "investment.fd_rate_negotiation_files",
+		ParentColumn:  "rate_request_id",
+		ParentTable:   "investment.fd_rate_negotiation",
+		ParentFilter:  constants.FormatDeletedFilter,
+	}
 	fdConfirmationFilesDefinition = investmentFileDefinition{
 		Module:        "fd-confirmation-additional",
 		ParentIDField: "confirmation_id",
@@ -503,6 +511,10 @@ func recordFDBookingMainUploadAudit(ctx context.Context, tx pgx.Tx, bookingID st
 	return recordDynamicInvestmentMainUploadAudit(ctx, tx, "investment.fd_audit_booking_request", []string{"booking_id"}, bookingID, payload, nil)
 }
 
+func recordFDRateNegotiationMainUploadAudit(ctx context.Context, tx pgx.Tx, rateRequestID string, payload cashfiles.MainUploadAuditPayload) error {
+	return recordDynamicInvestmentMainUploadAudit(ctx, tx, "investment.fd_audit_rate_negotiation", []string{"rate_request_id"}, rateRequestID, payload, nil)
+}
+
 func recordFDConfirmationMainUploadAudit(ctx context.Context, tx pgx.Tx, confirmationID string, payload cashfiles.MainUploadAuditPayload) error {
 	return recordDynamicInvestmentMainUploadAudit(ctx, tx, "investment.fd_audit_confirmation", []string{"confirmation_id"}, confirmationID, payload, nil)
 }
@@ -687,6 +699,10 @@ func recordAccountingActivityMainDownloadAudit(ctx context.Context, exec cashfil
 
 func recordFDBookingMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, bookingID string, payload cashfiles.MainUploadAuditPayload) error {
 	return recordDynamicInvestmentMainDownloadAudit(ctx, exec, "investment.fd_audit_booking_request", []string{"booking_id"}, bookingID, payload, nil)
+}
+
+func recordFDRateNegotiationMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, rateRequestID string, payload cashfiles.MainUploadAuditPayload) error {
+	return recordDynamicInvestmentMainDownloadAudit(ctx, exec, "investment.fd_audit_rate_negotiation", []string{"rate_request_id"}, rateRequestID, payload, nil)
 }
 
 func recordFDConfirmationMainDownloadAudit(ctx context.Context, exec cashfiles.AuditExecutor, confirmationID string, payload cashfiles.MainUploadAuditPayload) error {
@@ -1095,6 +1111,38 @@ func ApproveDeleteFDBookingAdditionalFileHandler(pool *pgxpool.Pool) http.Handle
 
 func RejectDeleteFDBookingAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdBookingFilesDefinition))
+}
+
+func ListFDRateNegotiationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewListHandler(pool, investmentAdditionalFilesConfig(fdRateNegotiationFilesDefinition))
+}
+
+func UploadFDRateNegotiationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewUploadHandler(pool, investmentAdditionalFilesConfig(fdRateNegotiationFilesDefinition))
+}
+
+func DownloadFDRateNegotiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadHandler(pool, investmentAdditionalFilesConfig(fdRateNegotiationFilesDefinition))
+}
+
+func DownloadSelectedFDRateNegotiationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDownloadSelectedHandler(pool, investmentAdditionalFilesConfig(fdRateNegotiationFilesDefinition))
+}
+
+func DeleteFDRateNegotiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewDeleteHandler(pool, investmentAdditionalFilesConfig(fdRateNegotiationFilesDefinition))
+}
+
+func AuditFDRateNegotiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewAuditHandler(pool, investmentAdditionalFilesConfig(fdRateNegotiationFilesDefinition))
+}
+
+func ApproveDeleteFDRateNegotiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewApproveDeleteHandler(pool, investmentAdditionalFilesConfig(fdRateNegotiationFilesDefinition))
+}
+
+func RejectDeleteFDRateNegotiationAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return cashfiles.NewRejectDeleteHandler(pool, investmentAdditionalFilesConfig(fdRateNegotiationFilesDefinition))
 }
 
 func ListFDConfirmationAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
@@ -2156,6 +2204,8 @@ func investmentFilesPolicyScope(module string) (moduleCode, subModule, apiPath s
 		return common.ModuleInvestmentMF, "MF_ACCOUNTING", "/investment/accounting/additional-files/upload"
 	case fdBookingFilesDefinition.Module:
 		return common.ModuleInvestmentFD, "FD_BOOKING", "/investment/fd/booking/additional-files/upload"
+	case fdRateNegotiationFilesDefinition.Module:
+		return common.ModuleInvestmentFD, "FD_RATE_NEGOTIATION", "/investment/fd/rate-negotiation/additional-files/upload"
 	case fdConfirmationFilesDefinition.Module:
 		return common.ModuleInvestmentFD, "FD_CONFIRMATION", "/investment/fd/confirmation/additional-files/upload"
 	case fdMasterFilesDefinition.Module:
@@ -2236,6 +2286,9 @@ func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Con
 	case fdBookingFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDBookingMainUploadAudit
 		cfg.RecordMainDownloadAudit = recordFDBookingMainDownloadAudit
+	case fdRateNegotiationFilesDefinition.Module:
+		cfg.RecordMainUploadAudit = recordFDRateNegotiationMainUploadAudit
+		cfg.RecordMainDownloadAudit = recordFDRateNegotiationMainDownloadAudit
 	case fdConfirmationFilesDefinition.Module:
 		cfg.RecordMainUploadAudit = recordFDConfirmationMainUploadAudit
 		cfg.RecordMainDownloadAudit = recordFDConfirmationMainDownloadAudit

@@ -357,13 +357,16 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 		Results:                 resp.Results,
 		DurationMS:              duration,
 		ConflictReport:          conflictReport,
-		TriggerApprovalMatrixID: breachedTriggerApprovalMatrix(policies, resp.Results),
+		TriggerApprovalMatrixID: breachedTriggerApprovalMatrix(req.EventCode, policies, resp.Results),
 	}, nil
 }
 
 // breachedTriggerApprovalMatrix returns the approval matrix pinned on the first
 // breached TriggerApproval policy, or "" when none applies.
-func breachedTriggerApprovalMatrix(policies []map[string]interface{}, results []policysvc.PolicyResult) string {
+func breachedTriggerApprovalMatrix(eventCode string, policies []map[string]interface{}, results []policysvc.PolicyResult) string {
+	if common.ForbidsTriggerApproval(eventCode) {
+		return ""
+	}
 	matrixByPolicy := make(map[string]string, len(policies))
 	for _, p := range policies {
 		id, _ := p["policy_id"].(string)

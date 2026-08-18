@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -71,6 +72,10 @@ func validatePolicyScope(ctx context.Context, pool *pgxpool.Pool, in policyScope
 		return err
 	}
 	for eventCode := range triggerSet {
+		if strings.EqualFold(strings.TrimSpace(actionOnBreach), common.BreachTriggerApproval) &&
+			common.ForbidsTriggerApproval(eventCode) {
+			return fmt.Errorf("trigger %q cannot use action_on_breach TriggerApproval (approve/reject would loop)", eventCode)
+		}
 		var exists, allowed bool
 		query := fmt.Sprintf(`
 			SELECT true, %s
@@ -83,6 +88,16 @@ func validatePolicyScope(ctx context.Context, pool *pgxpool.Pool, in policyScope
 		}
 		if !allowed {
 			return fmt.Errorf("trigger %q does not allow action_on_breach %q", eventCode, actionOnBreach)
+		}
+	}
+	for i, row := range rf.SlabRows {
+		if !strings.EqualFold(strings.TrimSpace(row.Action), common.BreachTriggerApproval) {
+			continue
+		}
+		for eventCode := range triggerSet {
+			if common.ForbidsTriggerApproval(eventCode) {
+				return fmt.Errorf("slabs: row %d cannot use TriggerApproval on trigger %q (approve/reject would loop)", i+1, eventCode)
+			}
 		}
 	}
 

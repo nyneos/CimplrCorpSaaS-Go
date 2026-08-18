@@ -1,5 +1,7 @@
 package common
 
+import "strings"
+
 // Trigger event vocabulary — single Go source of truth.
 // Mirror: CimplrCorpSaaS-Web/src/features/policyEngine/triggerConstants.ts
 // DB seeds must stay ⊆ this set (policyengine_svc.trigger_event).
@@ -79,6 +81,17 @@ var NonBlockingTriggers = map[string]struct{}{
 func IsNonBlockingTrigger(code string) bool {
 	_, ok := NonBlockingTriggers[code]
 	return ok
+}
+
+// ForbidsTriggerApproval reports whether TriggerApproval would loop: a PRE_APPROVE
+// (or PRE_REJECT) policy that itself queues another approval never completes.
+// Matches PRE_/POST_ APPROVE and REJECT, plus any future *_APPROVE / *_REJECT code.
+func ForbidsTriggerApproval(code string) bool {
+	u := strings.ToUpper(strings.TrimSpace(code))
+	if u == "" {
+		return false
+	}
+	return strings.HasSuffix(u, "_APPROVE") || strings.HasSuffix(u, "_REJECT") || u == "APPROVE" || u == "REJECT"
 }
 
 // AllSystemTriggerCodes is the closed vocabulary (CRUD + BRD semantic).

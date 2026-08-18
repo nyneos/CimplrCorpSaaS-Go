@@ -31,6 +31,11 @@ var txTypeRegistry = map[string]txTableConfig{
 	"FD_BOOKING_EDIT":   {AuditTable: constants.QuerryAuditBookingRequest, AuditIDColumn: "booking_id"},
 	"FD_BOOKING_DELETE": {AuditTable: constants.QuerryAuditBookingRequest, AuditIDColumn: "booking_id"},
 
+	// ── FD Rate Negotiation ───────────────────────────────────────────────
+	"FD_RATE_NEGOTIATION_CREATE": {AuditTable: constants.QuerryAuditRateNegotiation, AuditIDColumn: "rate_request_id"},
+	"FD_RATE_NEGOTIATION_EDIT":   {AuditTable: constants.QuerryAuditRateNegotiation, AuditIDColumn: "rate_request_id"},
+	"FD_RATE_NEGOTIATION_DELETE": {AuditTable: constants.QuerryAuditRateNegotiation, AuditIDColumn: "rate_request_id"},
+
 	// ── FD Confirmation ───────────────────────────────────────────────────
 	"FD_CONFIRMATION_CREATE":           {AuditTable: constants.QuerryAuditConfirmation, AuditIDColumn: "confirmation_id"},
 	"FD_CONFIRMATION_EDIT":             {AuditTable: constants.QuerryAuditConfirmation, AuditIDColumn: "confirmation_id"},
