@@ -13,6 +13,12 @@ func respondEnvelopeSuccess(w http.ResponseWriter, message string, data interfac
 	api.RespondEnvelopeSuccess(w, message, data)
 }
 
+// respondEnvelopeSuccessCompat nests fields under data and also flattens them
+// onto the top-level body for legacy frontend readers (e.g. response.bookings).
+func respondEnvelopeSuccessCompat(w http.ResponseWriter, message string, fields map[string]interface{}) {
+	api.RespondEnvelopeSuccessCompat(w, message, fields)
+}
+
 func respondEnvelopeFailureWithData(w http.ResponseWriter, status int, message string, data interface{}) {
 	api.RespondEnvelopeFailureWithData(w, status, message, api.EnvelopeErrorCode(status), data)
 }

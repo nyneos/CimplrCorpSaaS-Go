@@ -480,6 +480,7 @@ func (a *AuthService) LoginViaSSO(ctx context.Context, email string, clientIP st
 		IsLoggedIn:      true,
 		CreatedEntities: a.loadCreatedEntities(ctx, dbUserID, primaryRole, primaryRoleCode),
 	}
+	session.Touch()
 
 	// Check MFA — only pending if BOTH enabled AND secret is configured
 	var mfaEnabled sql.NullBool

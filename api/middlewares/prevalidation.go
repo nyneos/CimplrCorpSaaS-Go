@@ -53,6 +53,8 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 				return
 			}
+			// Reset the idle timer — see SessionMiddleware.
+			session.Touch()
 
 			validationResult, err := validation.PreValidateRequest(ctx, db, userID)
 			if err != nil {
@@ -61,6 +63,11 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 					api.RespondEnvelopeFailureCompat(w, http.StatusForbidden, "No accessible business units found for this user", "NO_ACCESS_ENTITIES", map[string]interface{}{
 						"help": "Contact your administrator to grant access to business units or set up entities for your account.",
 					})
+					return
+				}
+				if isInfraError(err) {
+					logger.LogError("Session validation unavailable for user_id=%s: %v", userID, err)
+					api.RespondWithError(w, http.StatusServiceUnavailable, "Service temporarily unavailable, please retry")
 					return
 				}
 				api.RespondWithError(w, http.StatusUnauthorized, "Validation failed: "+err.Error())

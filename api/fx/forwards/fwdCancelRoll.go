@@ -637,7 +637,7 @@ func GetPendingCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			bookings = append(bookings, rowMap)
 		}
-		respondEnvelopeSuccess(w, "Success", map[string]interface{}{
+		respondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"bookings": bookings,
 		})
 	}
@@ -781,7 +781,7 @@ func GetAllCancellationRollovers(pool *pgxpool.Pool) http.HandlerFunc {
 			bookings = append(bookings, rowMap)
 		}
 
-		respondEnvelopeSuccess(w, "Success", map[string]interface{}{
+		respondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"bookings": bookings,
 		})
 	}
@@ -1793,7 +1793,7 @@ func GetPendingRollovers(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			bookings = append(bookings, rowMap)
 		}
-		respondEnvelopeSuccess(w, "Success", map[string]interface{}{
+		respondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"bookings": bookings,
 		})
 	}

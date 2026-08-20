@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,16 +33,21 @@ type SessionEntity struct {
 }
 
 type UserSession struct {
-	SessionID       string
-	UserID          string
-	Name            string
-	Email           string
-	Role            string
-	RoleCode        string
-	LastLoginTime   string
-	ClientIP        string
-	IsLoggedIn      bool
-	CreatedEntities []SessionEntity `json:"created_entities,omitempty"`
+	SessionID     string
+	UserID        string
+	Name          string
+	Email         string
+	Role          string
+	RoleCode      string
+	LastLoginTime string
+	// lastActivityUnix is refreshed on every authenticated request so the session
+	// cleaner enforces an idle timeout rather than a hard cap from login. Accessed
+	// via sync/atomic: sessions are handed out as shared pointers, so the cleaner
+	// and concurrent requests touch this field without holding the service lock.
+	lastActivityUnix int64
+	ClientIP         string
+	IsLoggedIn       bool
+	CreatedEntities  []SessionEntity `json:"created_entities,omitempty"`
 }
 
 type failedAttempt struct {
@@ -214,16 +220,17 @@ func (a *AuthService) Login(ctx context.Context, username, password string, clie
 		return nil, false, errors.New("internal error")
 	}
 	session := &UserSession{
-		SessionID:       sessionID,
-		UserID:          dbUserID,
-		Name:            dbName,
-		Email:           dbEmail,
-		Role:            roleName.String,
-		RoleCode:        roleCode.String,
-		LastLoginTime:   time.Now().Format(time.RFC3339),
-		ClientIP:        clientIP,
-		IsLoggedIn:      true,
-		CreatedEntities: a.loadCreatedEntities(ctx, dbUserID, roleName.String, roleCode.String),
+		SessionID:        sessionID,
+		UserID:           dbUserID,
+		Name:             dbName,
+		Email:            dbEmail,
+		Role:             roleName.String,
+		RoleCode:         roleCode.String,
+		LastLoginTime:    time.Now().Format(time.RFC3339),
+		lastActivityUnix: time.Now().Unix(),
+		ClientIP:         clientIP,
+		IsLoggedIn:       true,
+		CreatedEntities:  a.loadCreatedEntities(ctx, dbUserID, roleName.String, roleCode.String),
 	}
 
 	// Check MFA — only gate login if BOTH enabled AND secret is configured
@@ -489,6 +496,30 @@ func (a *AuthService) GetActiveSessions() []*UserSession {
 	return sessions
 }
 
+// Touch marks the session as active now, resetting its idle timer.
+func (s *UserSession) Touch() {
+	if s == nil {
+		return
+	}
+	atomic.StoreInt64(&s.lastActivityUnix, time.Now().Unix())
+}
+
+// lastSeen returns the session's last activity time, falling back to its login
+// time for sessions created before idle tracking was in place.
+func (s *UserSession) lastSeen() (time.Time, bool) {
+	if ts := atomic.LoadInt64(&s.lastActivityUnix); ts > 0 {
+		return time.Unix(ts, 0), true
+	}
+	if s.LastLoginTime == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, s.LastLoginTime)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 func (a *AuthService) sessionCleaner() {
 	period := time.Duration(a.SessionCleanerPeriod) * time.Minute
 	if period <= 0 {
@@ -505,21 +536,19 @@ func (a *AuthService) sessionCleaner() {
 				cutoff := time.Now().Add(-time.Duration(a.SessionTimeout) * time.Minute)
 				a.mu.Lock()
 				for sid, sess := range a.users {
-					if sess.LastLoginTime != "" {
-						if t, err := time.Parse(time.RFC3339, sess.LastLoginTime); err == nil {
-							if t.Before(cutoff) {
-								// Send SSE notification before removing session
-								go func(userID string) {
-									dashboard.SendToUser(userID, []byte(`{"type":"session_expired","reason":"session_expired"}`))
-								}(sess.UserID)
+					t, ok := sess.lastSeen()
+					if !ok || !t.Before(cutoff) {
+						continue
+					}
+					// Send SSE notification before removing session
+					go func(userID string) {
+						dashboard.SendToUser(userID, []byte(`{"type":"session_expired","reason":"session_expired"}`))
+					}(sess.UserID)
 
-								delete(a.users, sid)
-								delete(a.userPointers, sess.UserID)
-								if logger.GlobalLogger != nil {
-									logger.GlobalLogger.LogAudit(fmt.Sprintf("Session expired and removed: %s (user: %s)", sid, sess.Email))
-								}
-							}
-						}
+					delete(a.users, sid)
+					delete(a.userPointers, sess.UserID)
+					if logger.GlobalLogger != nil {
+						logger.GlobalLogger.LogAudit(fmt.Sprintf("Session expired and removed: %s (user: %s)", sid, sess.Email))
 					}
 				}
 				a.mu.Unlock()

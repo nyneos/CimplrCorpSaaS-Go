@@ -298,6 +298,7 @@ const headersLineItemsSelectSQL = `
 				  AND inst.module_code = 'FX'
 				  AND inst.status = 'PENDING'
 				ORDER BY inst.submitted_at DESC LIMIT 1
+				ORDER BY inst.submitted_at DESC LIMIT 1
 			) i ON true
 `
 
@@ -775,7 +776,7 @@ func GetExposureHeadersLineItems(pool *pgxpool.Pool) http.HandlerFunc {
 
 		joinData, err := queryHeadersLineItems(ctx, pool, buNames, req.BatchID, false)
 		if err != nil {
-			logger.LogError("GetExposureHeadersLineItems query failed: %v", err)
+			logger.LogError("[FX] GetExposureHeadersLineItems failed (user=%s, batch=%q, bu=%v): %v", req.UserID, req.BatchID, buNames, err)
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure headers/line items")
 			return
 		}
@@ -823,7 +824,7 @@ func GetPendingApprovalHeadersLineItems(pool *pgxpool.Pool) http.HandlerFunc {
 
 		joinData, err := queryHeadersLineItems(ctx, pool, buNames, req.BatchID, true)
 		if err != nil {
-			logger.LogError("GetPendingApprovalHeadersLineItems query failed: %v", err)
+			logger.LogError("[FX] GetPendingApprovalHeadersLineItems failed (user=%s, batch=%q, bu=%v): %v", req.UserID, req.BatchID, buNames, err)
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch pending approval headers/line items")
 			return
 		}

@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/validation"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -719,6 +722,43 @@ func loadApprovedHolidayCalendars(ctx context.Context, db *pgxpool.Pool) ([]map[
 	return res, nil
 }
 
+// isInfraError reports whether err is a backend/infrastructure failure (database
+// unreachable, connection slots exhausted, query timeout) rather than a genuine
+// authorization failure. These must NOT surface as 401: the web client treats
+// every 401 as an expired session and force-logs the user out, so a transient
+// database hiccup would otherwise eject an authenticated user mid-page.
+func isInfraError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code[:2] {
+		case "53", // insufficient_resources (includes 53300 too_many_connections)
+			"08", // connection_exception
+			"57": // operator_intervention (admin shutdown, query canceled)
+			return true
+		}
+	}
+	var connErr *pgconn.ConnectError
+	if errors.As(err, &connErr) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	// pgx wraps some pool/dial failures in plain errors.
+	le := strings.ToLower(err.Error())
+	return strings.Contains(le, "failed to connect") ||
+		strings.Contains(le, "connection refused") ||
+		strings.Contains(le, "connection reset") ||
+		strings.Contains(le, "timeout")
+}
+
 // SessionMiddleware validates the user session and loads allowed entities.
 func SessionMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -751,6 +791,10 @@ func SessionMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 				return
 			}
+			// Reset the idle timer: the session cleaner expires sessions that have
+			// gone quiet, not ones that have merely been open a long time.
+			session.Touch()
+
 			clientIP := api.ClientIPFromRequest(r)
 			sessionIP := api.NormalizeClientIP(session.ClientIP)
 			if strings.TrimSpace(sessionIP) != "" && strings.TrimSpace(clientIP) != "" && sessionIP != clientIP {
@@ -771,6 +815,11 @@ func SessionMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 					api.RespondEnvelopeFailureCompat(w, http.StatusForbidden, "No accessible business units found for this user", "NO_ACCESS_ENTITIES", map[string]interface{}{
 						"help": "Contact your administrator to grant access to business units or set up entities for your account.",
 					})
+					return
+				}
+				if isInfraError(err) {
+					logger.LogError("Session validation unavailable for user_id=%s: %v", userID, err)
+					api.RespondWithError(w, http.StatusServiceUnavailable, "Service temporarily unavailable, please retry")
 					return
 				}
 				api.RespondWithError(w, http.StatusUnauthorized, "Validation failed: "+err.Error())
