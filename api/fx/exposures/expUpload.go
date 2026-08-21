@@ -1004,14 +1004,26 @@ func RejectMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		engineActedMap := make(map[string]bool)
+		// See ApproveMultipleExposureHeaders — same eye-ordering contract on the
+		// reject side, so an approver acting out of turn is refused rather than
+		// falling through to the direct status update.
+		actionableIDs := make([]string, 0, len(req.ExposureHeaderIds))
 		for _, id := range req.ExposureHeaderIds {
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+			gate := approvalengine.Gate(ctx, pool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "FX", RecordID: id, UserID: req.UserID, UserEmail: rejectedByEmail,
 				Action: approvalengine.ActionRejected, Comment: rejectionComment,
 			})
-			if actionErr == nil && actionRes.Acted {
-				engineActedMap[id] = true
+			if gate.Blocked {
+				respondWithError(w, http.StatusUnprocessableEntity, gate.Reason)
+				return
 			}
+			if gate.Acted {
+				engineActedMap[id] = true
+				if !gate.Finalized {
+					continue
+				}
+			}
+			actionableIDs = append(actionableIDs, id)
 		}
 
 		oldValuesByID := make(map[string]map[string]interface{}, len(req.ExposureHeaderIds))
@@ -1030,7 +1042,7 @@ func RejectMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			 RETURNING *`,
 			rejectedBy,
 			rejectionComment,
-			req.ExposureHeaderIds,
+			actionableIDs,
 		)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -1138,13 +1150,21 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		engineActedMap := make(map[string]bool)
+		engineAwaitingMap := make(map[string]bool)
 		for _, id := range req.ExposureHeaderIds {
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+			gate := approvalengine.Gate(ctx, pool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "FX", RecordID: id, UserID: req.UserID, UserEmail: approvedByEmail,
 				Action: approvalengine.ActionApproved, Comment: approvalComment,
 			})
-			if actionErr == nil && actionRes.Acted {
+			if gate.Blocked {
+				respondWithError(w, http.StatusUnprocessableEntity, gate.Reason)
+				return
+			}
+			if gate.Acted {
 				engineActedMap[id] = true
+				if !gate.Finalized {
+					engineAwaitingMap[id] = true
+				}
 			}
 		}
 
@@ -1199,6 +1219,9 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		toEditApprove := []string{}
 		skipped := []string{}
 		for _, h := range headers {
+			if engineAwaitingMap[h.ExposureHeaderId] {
+				continue
+			}
 			status := strings.ToLower(h.ApprovalStatus)
 			if status == "pending_delete_approval" || strings.Contains(status, "delete-approval") {
 				toDelete = append(toDelete, h.ExposureHeaderId)
@@ -2468,17 +2491,52 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 						createdExposureIDs, uploadedBy,
 					)
 
-					go func(ids []string, email string) {
+					// Evaluate the EXPOSURE_CREATION create policy per header so a
+					// TriggerApproval rule (e.g. Exposure Amount) can pin the approval
+					// matrix its breach selected. Headers are already committed in
+					// PENDING_APPROVAL at this point, so this cannot block the upload —
+					// it exists to carry the matrix into CreateInstance, which
+					// previously received none and, with no entity code either,
+					// resolved no matrix and so created no instance at all.
+					createMatrices := make(map[string]string, len(createdExposureIDs))
+					createEntities := make(map[string]string, len(createdExposureIDs))
+					for _, exposureHeaderID := range createdExposureIDs {
+						creationRow, rowErr := LoadExposureCreationRow(ctx, pool, exposureHeaderID)
+						if rowErr != nil {
+							logger.LogError("[FX-STAGING] exposure create policy load failed for %s: %v", exposureHeaderID, rowErr)
+							continue
+						}
+						createEntities[exposureHeaderID] = creationRow.Entity
+						okPolicy, msgPolicy, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+							EventCode:           common.TriggerPreCreate,
+							ModuleCode:          common.ModuleFX,
+							SubModule:           "EXPOSURE_CREATION",
+							EntityCode:          creationRow.Entity,
+							ActorUserID:         session.UserID,
+							HandlerName:         "BatchUploadStagingData",
+							APIPath:             "/fx/exposures/batch-upload-staging",
+							DefaultBlockMessage: "Exposure creation blocked by policy",
+							Fields:              BuildExposureCreationPolicyFields(creationRow),
+						})
+						if !okPolicy {
+							logger.LogError("[FX-STAGING] exposure create policy breach for %s: %s", exposureHeaderID, msgPolicy)
+							continue
+						}
+						createMatrices[exposureHeaderID] = tID
+					}
+					go func(ids []string, email string, matrices, entities map[string]string) {
 						bgCtx := context.Background()
 						for _, id := range ids {
 							_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 								ModuleCode:       "FX",
+								EntityCode:       entities[id],
 								TransactionType:  "FX_EXPOSURE_CREATE",
 								RecordID:         id,
+								MatrixID:         matrices[id],
 								SubmittedByEmail: email,
 							})
 						}
-					}(createdExposureIDs, session.Email)
+					}(createdExposureIDs, session.Email, createMatrices, createEntities)
 				}
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: success,

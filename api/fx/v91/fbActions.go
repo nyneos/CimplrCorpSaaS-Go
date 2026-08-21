@@ -276,15 +276,26 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		engineActedMap := make(map[string]bool)
+		
+		engineAwaitingMap := make(map[string]bool)
 		for _, id := range req.ExposureIDs {
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+			gate := approvalengine.Gate(ctx, pool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "FX", RecordID: id, UserID: req.UserID, UserEmail: approverEmail,
 				Action: approvalengine.ActionApproved, Comment: req.Comment,
 			})
-			if actionErr == nil && actionRes.Acted {
+			if gate.Blocked {
+				respondEnvelopeError(w, http.StatusUnprocessableEntity, gate.Reason, v91ErrorCode(http.StatusUnprocessableEntity))
+				return
+			}
+			if gate.Acted {
 				engineActedMap[id] = true
+				if !gate.Finalized {
+					engineAwaitingMap[id] = true
+				}
 			}
 		}
+		toApprove = filterOutAwaitingExposures(toApprove, engineAwaitingMap)
+		toDelete = filterOutAwaitingExposures(toDelete, engineAwaitingMap)
 
 		approvedIDs := []string{}
 		deletedIDs := []string{}
@@ -402,15 +413,25 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		engineActedMap := make(map[string]bool)
+		// Same eye-ordering contract as BulkApproveExposures, on the reject side.
+		engineAwaitingMap := make(map[string]bool)
 		for _, id := range req.ExposureIDs {
-			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+			gate := approvalengine.Gate(ctx, pool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "FX", RecordID: id, UserID: req.UserID, UserEmail: rejectorEmail,
 				Action: approvalengine.ActionRejected, Comment: req.Comment,
 			})
-			if actionErr == nil && actionRes.Acted {
+			if gate.Blocked {
+				respondEnvelopeError(w, http.StatusUnprocessableEntity, gate.Reason, v91ErrorCode(http.StatusUnprocessableEntity))
+				return
+			}
+			if gate.Acted {
 				engineActedMap[id] = true
+				if !gate.Finalized {
+					engineAwaitingMap[id] = true
+				}
 			}
 		}
+		rejectableIDs := filterOutAwaitingExposures(req.ExposureIDs, engineAwaitingMap)
 
 		// q := `UPDATE public.exposure_headers SET approval_status='Rejected', rejection_comment=$1, rejected_by=$2, rejected_at=now(), updated_at=now() WHERE exposure_header_id = ANY($3) RETURNING exposure_header_id`
 		// rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), rejector, req.ExposureIDs)
@@ -421,7 +442,7 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE exposure_header_id = ANY($1)
 			RETURNING exposure_header_id
 		`
-		rows, err := pool.Query(ctx, q, req.ExposureIDs)
+		rows, err := pool.Query(ctx, q, rejectableIDs)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error(), v91ErrorCode(http.StatusInternalServerError))
 			return
@@ -559,6 +580,23 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}(deleted, makerEmail, triggerMatrices)
 	}
+}
+
+// filterOutAwaitingExposures drops records whose approval/rejection was recorded
+// on the approval instance but whose remaining eyes have not acted yet, so the
+// legacy status update below skips them and they stay pending.
+func filterOutAwaitingExposures(ids []string, awaiting map[string]bool) []string {
+	if len(awaiting) == 0 {
+		return ids
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if awaiting[id] {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 func v91ExposurePolicySubModule(r *http.Request) string {
