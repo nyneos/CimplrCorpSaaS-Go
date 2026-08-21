@@ -298,7 +298,6 @@ const headersLineItemsSelectSQL = `
 				  AND inst.module_code = 'FX'
 				  AND inst.status = 'PENDING'
 				ORDER BY inst.submitted_at DESC LIMIT 1
-				ORDER BY inst.submitted_at DESC LIMIT 1
 			) i ON true
 `
 
