@@ -234,13 +234,18 @@ func applyForwardBookingDecision(
 		}
 	}
 	engineActedMap := make(map[string]bool)
+	engineAwaitingMap := make(map[string]bool)
 	for _, id := range req.SystemTransactionIDs {
-		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(r.Context(), pool, approvalengine.ActOnPendingRequest{
-			ModuleCode: "FX", RecordID: id, UserID: req.UserID, UserEmail: actorEmail,
-			Action: processingStatus, Comment: req.Comment,
-		})
-		if actionErr == nil && actionRes.Acted {
+		gate := fxApprovalGate(r.Context(), pool, req.UserID, actorEmail, id, processingStatus, req.Comment)
+		if gate.Blocked {
+			respondEnvelopeError(w, http.StatusUnprocessableEntity, gate.Reason)
+			return
+		}
+		if gate.Acted {
 			engineActedMap[id] = true
+			if !gate.Finalized {
+				engineAwaitingMap[id] = true
+			}
 		}
 	}
 	policyEvent := common.TriggerPreApprove
@@ -292,6 +297,9 @@ func applyForwardBookingDecision(
 	for delRows.Next() {
 		var id, entityLevel0 string
 		if err := delRows.Scan(&id, &entityLevel0); err == nil {
+			if engineAwaitingMap[id] {
+				continue
+			}
 			for _, bu := range buNames {
 				if bu == entityLevel0 {
 					deletedIds = append(deletedIds, id)
@@ -393,6 +401,9 @@ func applyForwardBookingDecision(
 		for rows.Next() {
 			var id, entityLevel0 string
 			if err := rows.Scan(&id, &entityLevel0); err == nil {
+				if engineAwaitingMap[id] {
+					continue
+				}
 				for _, bu := range buNames {
 					if bu == entityLevel0 {
 						eligibleIds = append(eligibleIds, id)
@@ -430,7 +441,7 @@ func applyForwardBookingDecision(
 		}
 	}
 
-	if len(updatedRows) == 0 && len(deletedIds) == 0 {
+	if len(updatedRows) == 0 && len(deletedIds) == 0 && len(engineAwaitingMap) == 0 {
 		respondEnvelopeError(w, http.StatusNotFound, "No matching forward bookings found")
 		return
 	}

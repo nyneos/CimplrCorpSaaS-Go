@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
+	fxexposures "CimplrCorpSaas/api/fx/exposures"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/api/policyengine/common"
 	policyruntime "CimplrCorpSaas/api/policyengine/runtime"
@@ -1379,18 +1380,51 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 		fxnotif.NotifyExposureUpload(ctx, pool, fxnotif.SourceRouteV91Upload, batchID.String(), userID, userName)
 
+		// Evaluate the EXPOSURE_CREATION create policy per header so a
+		// TriggerApproval rule (e.g. Exposure Amount) can pin the approval matrix
+		// its breach selected. Headers are already committed here, so this cannot
+		// block the upload — it exists to carry the matrix into CreateInstance,
+		// which previously received none and so created no instance at all.
+		createMatrices := make(map[string]string, len(docToID))
+		createEntities := make(map[string]string, len(docToID))
+		for _, hidStr := range docToID {
+			creationRow, rowErr := fxexposures.LoadExposureCreationRow(ctx, pool, hidStr)
+			if rowErr != nil {
+				logger.LogError("[FBUP] exposure create policy load failed for %s: %v", hidStr, rowErr)
+				continue
+			}
+			createEntities[hidStr] = creationRow.Entity
+			okPolicy, msgPolicy, tID := policyruntime.EnforceInlineWithMatrix(ctx, r, pool, policyruntime.EnforceInput{
+				EventCode:           common.TriggerPreCreate,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "EXPOSURE_CREATION",
+				EntityCode:          creationRow.Entity,
+				ActorUserID:         userID,
+				HandlerName:         "BatchUploadStagingData",
+				APIPath:             "/fx/exposures/v91/upload",
+				DefaultBlockMessage: "Exposure creation blocked by policy",
+				Fields:              fxexposures.BuildExposureCreationPolicyFields(creationRow),
+			})
+			if !okPolicy {
+				logger.LogError("[FBUP] exposure create policy breach for %s: %s", hidStr, msgPolicy)
+				continue
+			}
+			createMatrices[hidStr] = tID
+		}
 		// Create approval instances for all new headers
-		go func(docs map[string]string, email string) {
+		go func(docs map[string]string, email string, matrices, entities map[string]string) {
 			bgCtx := context.Background()
 			for _, hidStr := range docs {
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 					ModuleCode:       "FX",
+					EntityCode:       entities[hidStr],
 					TransactionType:  "FX_EXPOSURE_CREATE",
 					RecordID:         hidStr,
+					MatrixID:         matrices[hidStr],
 					SubmittedByEmail: email,
 				})
 			}
-		}(docToID, makerEmail)
+		}(docToID, makerEmail, createMatrices, createEntities)
 
 		// Authoritative preview: use DB-driven preview builder instead of in-memory approximation.
 		// The old in-memory preview (based on canonicals) is intentionally removed to ensure

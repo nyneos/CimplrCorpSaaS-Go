@@ -373,7 +373,7 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			Status:                      constants.FwdStatusDraft,
 			ProcessingStatus:            "", // processing_status starts after confirmation submit
 		}
-		if !runtime.Enforce(r.Context(), w, r, pool, runtime.EnforceInput{
+		ok, tID := runtime.EnforceWithMatrix(r.Context(), w, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleFX,
 			SubModule:           "FORWARD_BOOKING",
@@ -383,7 +383,8 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/fx/forwards/manual-entry",
 			DefaultBlockMessage: "Forward booking create blocked by policy",
 			Fields:              buildForwardBookingPolicyFields(createRow),
-		}) {
+		})
+		if !ok {
 			return
 		}
 		query := `INSERT INTO forward_bookings (
@@ -466,14 +467,16 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 					break
 				}
 			}
-			go func(id, email string) {
+			go func(id, email, matrixID string) {
 				_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
 					ModuleCode:       "FX",
+					EntityCode:       req.EntityLevel0,
 					TransactionType:  "FX_FORWARD_CREATE",
 					RecordID:         id,
+					MatrixID:         matrixID,
 					SubmittedByEmail: email,
 				})
-			}(systemTransactionID, makerEmail)
+			}(systemTransactionID, makerEmail, tID)
 		}
 		respondEnvelopeSuccess(w, "Forward booking created successfully", result)
 	}

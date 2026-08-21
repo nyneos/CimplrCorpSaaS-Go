@@ -200,6 +200,24 @@ func recordCancelRollStatusAction(ctx context.Context, pool *pgxpool.Pool, param
 	})
 }
 
+type fxApprovalOutcome = approvalengine.GateOutcome
+
+func fxActorEmail(userID string) string {
+	for _, s := range auth.GetActiveSessions() {
+		if s.UserID == userID {
+			return s.Email
+		}
+	}
+	return ""
+}
+
+func fxApprovalGate(ctx context.Context, pool *pgxpool.Pool, userID, userEmail, bookingID, engineAction, comment string) fxApprovalOutcome {
+	return approvalengine.Gate(ctx, pool, approvalengine.ActOnPendingRequest{
+		ModuleCode: "FX", RecordID: bookingID, UserID: userID, UserEmail: userEmail,
+		Action: engineAction, Comment: comment,
+	})
+}
+
 func executeCancellationApproval(ctx context.Context, pool *pgxpool.Pool, userID, bookingID, requestDate, comment string) error {
 	var amountCancelled, cancellationRate, realizedGainLoss float64
 	var cancellationReason string
@@ -407,6 +425,11 @@ func CancellationStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		}) {
 			return
 		}
+		engineAction := approvalengine.ActionApproved
+		if strings.EqualFold(requestedStatus, "Rejected") {
+			engineAction = approvalengine.ActionRejected
+		}
+		actorEmail := fxActorEmail(req.UserID)
 		notifItems := make([]fxnotification.CancelRollItem, 0, len(req.BookingAmounts))
 		for bid, amtCancelled := range req.BookingAmounts {
 			cancellationDate := strings.TrimSpace(req.CancellationDates[bid])
@@ -432,6 +455,18 @@ func CancellationStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				respondEnvelopeError(w, http.StatusBadRequest, "Booking not in pending cancellation state")
 				return
 			}
+			// Route the decision through the approval matrix instance first. The
+			// engine owns eye ordering, so an approver whose eye is not yet active
+			// is rejected here instead of mutating the record out of sequence, and
+			// an intermediate eye leaves the request Pending for the next eye.
+			gate := fxApprovalGate(r.Context(), pool, req.UserID, actorEmail, bid, engineAction, strings.TrimSpace(req.Comment))
+			if gate.Blocked {
+				respondEnvelopeError(w, http.StatusUnprocessableEntity, gate.Reason)
+				return
+			}
+			if gate.Acted && !gate.Finalized {
+				continue
+			}
 			if strings.EqualFold(requestedStatus, "Rejected") {
 				result, err := pool.Exec(r.Context(), `UPDATE forward_cancellations SET status = 'Rejected' WHERE booking_id = $1 AND cancellation_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bid, cancellationDate)
 				if err != nil {
@@ -447,7 +482,9 @@ func CancellationStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				if decisionComment == "" {
 					decisionComment = strings.TrimSpace(req.CancellationReason)
 				}
-				auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
+				if !gate.Acted {
+					auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
+				}
 				recordCancelRollStatusAction(r.Context(), pool, cancelRollStatusActionParams{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: decisionComment})
 				notifItems = append(notifItems, fxnotification.CancelRollItem{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate})
 				continue
@@ -490,7 +527,9 @@ func CancellationStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				respondEnvelopeError(w, http.StatusBadRequest, constants.ErrPendingCancellationNotUpdated)
 				return
 			}
-			auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: req.CancellationReason})
+			if !gate.Acted {
+				auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardCancellation, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: req.CancellationReason})
+			}
 			recordCancelRollStatusAction(r.Context(), pool, cancelRollStatusActionParams{RequestType: cancelRollTypeCancellation, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(req.UserID), Comment: req.CancellationReason})
 			// If fully cancelled, update booking status to Cancelled and processing_status to Approved
 			if newOpenAmount == 0 {
@@ -824,6 +863,7 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 		// Same per-item pattern BulkUpdateForwardBookingProcessingStatus already
 		// uses for FORWARD_BOOKING in this package.
 
+		actorEmail := fxActorEmail(req.UserID)
 		processed := 0
 		notifItems := make([]fxnotification.CancelRollItem, 0, len(req.Items))
 		deleteApprovedBySub := map[string][]string{
@@ -877,6 +917,26 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
+			// APPROVE/REJECT are decisions on a matrix instance — let the approval
+			// engine own eye ordering. DELETE here is a delete *request*, not a
+			// decision, so it stays outside the gate.
+			var gate fxApprovalOutcome
+			if action == constants.AuditActionApprove || action == constants.AuditActionReject {
+				engineAction := approvalengine.ActionApproved
+				if action == constants.AuditActionReject {
+					engineAction = approvalengine.ActionRejected
+				}
+				gate = fxApprovalGate(r.Context(), pool, req.UserID, actorEmail, bookingID, engineAction, strings.TrimSpace(req.Comment))
+				if gate.Blocked {
+					respondWithError(w, http.StatusUnprocessableEntity, gate.Reason)
+					return
+				}
+				if gate.Acted && !gate.Finalized {
+					processed++
+					continue
+				}
+			}
+
 			switch action {
 			case constants.AuditActionDelete:
 				if strings.EqualFold(currentStatus, constants.StatusPendingDeleteApproval) || strings.EqualFold(currentStatus, cancelRollStatusDeleted) {
@@ -898,7 +958,9 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 						respondWithError(w, http.StatusInternalServerError, "failed to approve delete")
 						return
 					}
-					auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
+					if !gate.Acted {
+						auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
+					}
 					subModule := "FORWARD_CANCELLATION"
 					if requestType == cancelRollTypeRollover {
 						subModule = "FORWARD_ROLLOVER"
@@ -932,7 +994,9 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 						respondWithError(w, http.StatusInternalServerError, "failed to reject delete")
 						return
 					}
-					auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
+					if !gate.Acted {
+						auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
+					}
 					recordCancelRollStatusAction(r.Context(), pool, cancelRollStatusActionParams{RequestType: requestType, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: req.Comment})
 				} else if strings.EqualFold(currentStatus, "Pending") {
 					updateQuery := fmt.Sprintf(`UPDATE %s SET status = 'Rejected' WHERE booking_id = $1 AND %s = $2 AND COALESCE(is_deleted, false) = false`, tableName, dateColumn)
@@ -945,7 +1009,9 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 						parentPendingStatus = "Pending Rollover"
 					}
 					_, _ = pool.Exec(r.Context(), `UPDATE forward_bookings SET status = $1, processing_status = $2 WHERE system_transaction_id = $3 AND status = $4`, constants.FwdStatusConfirmed, constants.FwdProcessingStatusApproved, bookingID, parentPendingStatus)
-					auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
+					if !gate.Acted {
+						auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditTable, ParentColumn: "booking_id", ParentID: bookingID, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: req.Comment})
+					}
 					recordCancelRollStatusAction(r.Context(), pool, cancelRollStatusActionParams{RequestType: requestType, BookingID: bookingID, RequestDate: requestDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: req.Comment})
 				} else {
 					respondWithError(w, http.StatusBadRequest, "reject is only allowed for Pending or PENDING_DELETE_APPROVAL rows")
@@ -1038,38 +1104,45 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 		// forward_rollovers as rollover_cost below (see the INSERT a few lines
 		// down), and forward_rollovers has no cancellation_reason column at
 		// all. Canonicalized to the real column/field_code names.
-		rolloverCreateFields := buildForwardRolloverPolicyFields(fwdRolloverRow{
-			RolloverDate:              req.CancellationDate,
-			OriginalMaturityDate:      req.CancellationDate,
-			NewMaturityDate:           req.NewForward.MaturityDate,
-			RolloverCost:              &req.RealizedGainLoss,
-			Status:                    "Pending",
-			FXPair:                    req.NewForward.FXPair,
-			OrderType:                 req.NewForward.OrderType,
-			NewForwardAmount:          parseFloatPtr(req.NewForward.Amount),
-			NewForwardSpotRate:        parseFloatPtr(req.NewForward.SpotRate),
-			NewForwardPremiumDiscount: parseFloatPtr(req.NewForward.PremiumDiscount),
-			NewForwardMarginRate:      parseFloatPtr(req.NewForward.MarginRate),
-			NewForwardNetRate:         parseFloatPtr(req.NewForward.NetRate),
-		})
-		rolloverCreateFields["booking_count"] = len(req.BookingAmounts)
-		ok, tID := runtime.EnforceWithMatrix(r.Context(), w, r, pool, runtime.EnforceInput{
-			EventCode:           common.TriggerPreCreate,
-			ModuleCode:          common.ModuleFX,
-			SubModule:           "FORWARD_ROLLOVER",
-			EntityCode:          lookupEntityForBookings(r.Context(), pool, bookingIDsFromAmounts(req.BookingAmounts)),
-			ActorUserID:         req.UserID,
-			HandlerName:         "RolloverForwardBooking",
-			APIPath:             "/fx/forwards/create-forward-rollover",
-			DefaultBlockMessage: "Forward rollover request blocked by policy",
-			Fields:              rolloverCreateFields,
-		})
-		if !ok {
-			return
-		}
-
 		createdBookingIDs := make([]string, 0, len(req.BookingAmounts))
+		matrixByBooking := make(map[string]string, len(req.BookingAmounts))
 		for bid, amtCancelled := range req.BookingAmounts {
+			// Enforce per booking, not once for the batch — see the same note in
+			// CreateForwardCancellations: amount_rolled_over is the field that
+			// varies across BookingAmounts and the one policies key off, so a
+			// batch-level check left it unset and could never breach.
+			rolloverCreateFields := buildForwardRolloverPolicyFields(fwdRolloverRow{
+				BookingID:                 bid,
+				AmountRolledOver:          &amtCancelled,
+				RolloverDate:              req.CancellationDate,
+				OriginalMaturityDate:      req.CancellationDate,
+				NewMaturityDate:           req.NewForward.MaturityDate,
+				RolloverCost:              &req.RealizedGainLoss,
+				Status:                    "Pending",
+				FXPair:                    req.NewForward.FXPair,
+				OrderType:                 req.NewForward.OrderType,
+				NewForwardAmount:          parseFloatPtr(req.NewForward.Amount),
+				NewForwardSpotRate:        parseFloatPtr(req.NewForward.SpotRate),
+				NewForwardPremiumDiscount: parseFloatPtr(req.NewForward.PremiumDiscount),
+				NewForwardMarginRate:      parseFloatPtr(req.NewForward.MarginRate),
+				NewForwardNetRate:         parseFloatPtr(req.NewForward.NetRate),
+			})
+			rolloverCreateFields["booking_count"] = len(req.BookingAmounts)
+			ok, tID := runtime.EnforceWithMatrix(r.Context(), w, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreCreate,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "FORWARD_ROLLOVER",
+				EntityCode:          lookupEntityForBookings(r.Context(), pool, []string{bid}),
+				ActorUserID:         req.UserID,
+				HandlerName:         "RolloverForwardBooking",
+				APIPath:             "/fx/forwards/create-forward-rollover",
+				DefaultBlockMessage: "Forward rollover request blocked by policy",
+				Fields:              rolloverCreateFields,
+			})
+			if !ok {
+				return
+			}
+			matrixByBooking[bid] = tID
 			// Save rollover request as pending, including new forward details
 			_, err := pool.Exec(r.Context(), `INSERT INTO forward_rollovers (
 				   booking_id, amount_rolled_over, rollover_date, original_maturity_date, new_maturity_date, rollover_cost, status,
@@ -1105,7 +1178,7 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
-		go func(ids []string, email string, matrixID string) {
+		go func(ids []string, email string, matrixIDs map[string]string) {
 			bgCtx := context.Background()
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
@@ -1113,11 +1186,11 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 					ModuleCode:       "FX",
 					TransactionType:  "FX_FORWARD_ROLLOVER",
 					RecordID:         id,
-					MatrixID:         matrixID,
+					MatrixID:         matrixIDs[id],
 					SubmittedByEmail: email,
 				})
 			}
-		}(createdBookingIDs, makerEmail, tID)
+		}(createdBookingIDs, makerEmail, matrixByBooking)
 
 		respondEnvelopeSuccess(w, "Forward rollover request submitted for approval", nil)
 	}
@@ -1399,34 +1472,9 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		buNames, _ := r.Context().Value(api.BusinessUnitsKey).([]string)
-		// Pre-insert batch create: same rationale as CancellationStatusRequest —
-		// one common cancellation_date/rate/reason applies to every booking in
-		// the map, so build Fields from those via the shared row builder rather
-		// than per-booking data.
-		createFields := buildForwardCancellationPolicyFields(fwdCancellationRow{
-			CancellationDate:   req.CancellationDate,
-			CancellationRate:   &req.CancellationRate,
-			RealizedGainLoss:   &req.RealizedGainLoss,
-			CancellationReason: req.CancellationReason,
-			Status:             "Pending",
-		})
-		createFields["booking_count"] = len(req.BookingAmounts)
-		ok, tID := runtime.EnforceWithMatrix(r.Context(), w, r, pool, runtime.EnforceInput{
-			EventCode:           common.TriggerPreCreate,
-			ModuleCode:          common.ModuleFX,
-			SubModule:           "FORWARD_CANCELLATION",
-			EntityCode:          lookupEntityForBookings(r.Context(), pool, bookingIDsFromAmounts(req.BookingAmounts)),
-			ActorUserID:         req.UserID,
-			HandlerName:         "CreateForwardCancellations",
-			APIPath:             "/fx/forwards/create-forward-cancellations",
-			DefaultBlockMessage: "Forward cancellation request blocked by policy",
-			Fields:              createFields,
-		})
-		if !ok {
-			return
-		}
 		// Save cancellation request as pending
 		createdBookingIDs := make([]string, 0, len(req.BookingAmounts))
+		matrixByBooking := make(map[string]string, len(req.BookingAmounts))
 		for bookingOrReferenceID, amtCancelled := range req.BookingAmounts {
 			bookingID, err := resolveForwardBookingID(r.Context(), pool, bookingOrReferenceID, buNames)
 			if err != nil {
@@ -1437,6 +1485,37 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 				respondWithError(w, http.StatusInternalServerError, "Failed to validate forward booking: "+err.Error())
 				return
 			}
+			// Enforce per booking, not once for the batch: amount_cancelled is the
+			// one field that varies across BookingAmounts, and it is the field
+			// policies are actually written against (e.g. FX Cancellation &
+			// Rollover → Cancellation Amount). A batch-level check has no amount to
+			// evaluate, so such a policy could never breach and its TriggerApproval
+			// matrix was never pinned.
+			createFields := buildForwardCancellationPolicyFields(fwdCancellationRow{
+				BookingID:          bookingID,
+				AmountCancelled:    &amtCancelled,
+				CancellationDate:   req.CancellationDate,
+				CancellationRate:   &req.CancellationRate,
+				RealizedGainLoss:   &req.RealizedGainLoss,
+				CancellationReason: req.CancellationReason,
+				Status:             "Pending",
+			})
+			createFields["booking_count"] = len(req.BookingAmounts)
+			ok, tID := runtime.EnforceWithMatrix(r.Context(), w, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreCreate,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "FORWARD_CANCELLATION",
+				EntityCode:          lookupEntityForBookings(r.Context(), pool, []string{bookingID}),
+				ActorUserID:         req.UserID,
+				HandlerName:         "CreateForwardCancellations",
+				APIPath:             "/fx/forwards/create-forward-cancellations",
+				DefaultBlockMessage: "Forward cancellation request blocked by policy",
+				Fields:              createFields,
+			})
+			if !ok {
+				return
+			}
+			matrixByBooking[bookingID] = tID
 			_, err = pool.Exec(r.Context(), `INSERT INTO forward_cancellations (booking_id, amount_cancelled, cancellation_date, cancellation_rate, realized_gain_loss, cancellation_reason, status) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 				bookingID, amtCancelled, req.CancellationDate, req.CancellationRate, req.RealizedGainLoss, req.CancellationReason, "Pending")
 			if err != nil {
@@ -1463,7 +1542,7 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
-		go func(ids []string, email string, matrixID string) {
+		go func(ids []string, email string, matrixIDs map[string]string) {
 			bgCtx := context.Background()
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
@@ -1471,11 +1550,11 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 					ModuleCode:       "FX",
 					TransactionType:  "FX_FORWARD_CANCELLATION",
 					RecordID:         id,
-					MatrixID:         matrixID,
+					MatrixID:         matrixIDs[id],
 					SubmittedByEmail: email,
 				})
 			}
-		}(createdBookingIDs, makerEmail, tID)
+		}(createdBookingIDs, makerEmail, matrixByBooking)
 
 		respondEnvelopeSuccess(w, "Forward cancellation requests submitted for approval", nil)
 	}
@@ -1523,6 +1602,11 @@ func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		}) {
 			return
 		}
+		engineAction := approvalengine.ActionApproved
+		if strings.EqualFold(requestedStatus, "Rejected") {
+			engineAction = approvalengine.ActionRejected
+		}
+		actorEmail := fxActorEmail(req.UserID)
 		notifItems := make([]fxnotification.CancelRollItem, 0, len(req.BookingAmounts))
 		for bid, amtCancelled := range req.BookingAmounts {
 			// Fetch rollover details (including new forward) from DB
@@ -1544,6 +1628,16 @@ func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				respondWithError(w, http.StatusBadRequest, "booking not in pending rollover state")
 				return
 			}
+			// Same approval-matrix routing as CancellationStatusRequest — the
+			// engine decides whether this approver's eye is the active one.
+			gate := fxApprovalGate(r.Context(), pool, req.UserID, actorEmail, bid, engineAction, strings.TrimSpace(req.Comment))
+			if gate.Blocked {
+				respondWithError(w, http.StatusUnprocessableEntity, gate.Reason)
+				return
+			}
+			if gate.Acted && !gate.Finalized {
+				continue
+			}
 			if strings.EqualFold(requestedStatus, "Rejected") {
 				result, err := pool.Exec(r.Context(), `UPDATE forward_rollovers SET status = 'Rejected' WHERE booking_id = $1 AND rollover_date = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false`, bid, cancellationDate)
 				if err != nil {
@@ -1559,7 +1653,9 @@ func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				if decisionComment == "" {
 					decisionComment = strings.TrimSpace(req.RejectionComment)
 				}
-				auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
+				if !gate.Acted {
+					auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusRejected, CheckerBy: auditutil.Actor(req.UserID), Comment: decisionComment})
+				}
 				recordCancelRollStatusAction(r.Context(), pool, cancelRollStatusActionParams{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionReject, Status: constants.StatusRejected, Actor: auditutil.Actor(req.UserID), Comment: decisionComment})
 				notifItems = append(notifItems, fxnotification.CancelRollItem{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate})
 				continue
@@ -1610,7 +1706,9 @@ func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				respondWithError(w, http.StatusBadRequest, constants.ErrPendingRolloverNotUpdated)
 				return
 			}
-			auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: ""})
+			if !gate.Acted {
+				auditutil.RecordDecisionPGX(r.Context(), pool, auditutil.DecisionParams{TableName: auditutil.TableForwardRollover, ParentColumn: "booking_id", ParentID: bid, Status: constants.StatusApproved, CheckerBy: auditutil.Actor(req.UserID), Comment: ""})
+			}
 			recordCancelRollStatusAction(r.Context(), pool, cancelRollStatusActionParams{RequestType: cancelRollTypeRollover, BookingID: bid, RequestDate: cancellationDate, Action: constants.AuditActionApprove, Status: constants.StatusApproved, Actor: auditutil.Actor(req.UserID), Comment: strings.TrimSpace(req.Comment)})
 			// If fully rolled over, update booking status to Rolled Over and processing_status to Approved
 			if newOpenAmount == 0 {
