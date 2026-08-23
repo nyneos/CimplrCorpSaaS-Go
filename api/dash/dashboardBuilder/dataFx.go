@@ -11,58 +11,87 @@ import (
 // Same row set as /fx/exposures/headers-line-items (queryHeadersLineItems):
 // entity scope + exposure_creation_status = Approved + not deleted.
 // Fields aligned with FX All Exposure Request table + expand/edit config.
+// queryFXExposureHeadersLineItems joins each approved exposure header to its
+// line items, so a header with N line items produces N rows.
+//
+// Header-level amounts (total_original_amount, total_open_amount,
+// hedged_amount, unhedged_amount, amount_in_local_currency) are emitted only on
+// the FIRST line-item row of each header and 0 on the rest. Without this
+// de-duplication a dashboard SUM() over any header-level grouping multiplies
+// the header amount by its line-item count — a header of 10,00,000 with three
+// line items plotted as 30,00,000. line_item_amount and quantity are genuinely
+// per-line and so are left untouched on every row.
 func queryFXExposureHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "h", "entity")
 
 	q := fmt.Sprintf(`
-		SELECT
-			COALESCE(h.exposure_header_id::text, '') AS exposure_header_id,
-			COALESCE(h.document_id, '') AS document_id,
-			COALESCE(h.exposure_type, '') AS exposure_type,
-			COALESCE(h.entity, '') AS entity,
-			COALESCE(h.counterparty_code, '') AS counterparty_code,
-			COALESCE(h.counterparty_name, '') AS counterparty_name,
-			COALESCE(h.exposure_category, '') AS exposure_category,
-			COALESCE(h.currency, '') AS currency,
-			h.document_date,
-			COALESCE(h.approval_status, '') AS approval_status,
-			COALESCE(h.total_original_amount, 0) AS total_original_amount,
-			COALESCE((
-				SELECT SUM(ehl.hedged_amount)
-				FROM public.exposure_hedge_links ehl
-				WHERE ehl.exposure_header_id = h.exposure_header_id
-				  AND COALESCE(ehl.is_active, true) = true
-			), 0) AS hedged_amount,
-			GREATEST(
-				COALESCE(h.total_open_amount, 0) - COALESCE((
+		WITH joined AS (
+			SELECT
+				h.exposure_header_id,
+				h.document_id,
+				h.exposure_type,
+				h.entity,
+				h.counterparty_code,
+				h.counterparty_name,
+				h.exposure_category,
+				h.currency,
+				h.document_date,
+				h.approval_status,
+				h.total_original_amount,
+				h.total_open_amount,
+				h.amount_in_local_currency,
+				h.value_date,
+				h.status,
+				l.product_id,
+				l.quantity,
+				l.line_item_amount,
+				l.line_number,
+				COALESCE((
 					SELECT SUM(ehl.hedged_amount)
 					FROM public.exposure_hedge_links ehl
 					WHERE ehl.exposure_header_id = h.exposure_header_id
 					  AND COALESCE(ehl.is_active, true) = true
-				), 0),
-				0
-			) AS unhedged_amount,
-			h.value_date,
-			COALESCE(h.status, '') AS status,
-			COALESCE(l.product_id, '') AS product_id,
-			COALESCE(l.quantity, 0) AS quantity,
-			COALESCE(l.line_item_amount, 0) AS line_item_amount,
-			COALESCE(h.amount_in_local_currency, 0) AS amount_in_local_currency
-		FROM public.exposure_headers h
-		LEFT JOIN public.exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
-		WHERE h.exposure_creation_status = 'Approved'
-		  AND h.is_deleted IS NOT TRUE %s
-		ORDER BY h.document_id, l.line_number NULLS FIRST
+				), 0) AS hedged_amount_raw,
+				ROW_NUMBER() OVER (
+					PARTITION BY h.exposure_header_id
+					ORDER BY l.line_number NULLS FIRST, l.line_item_id NULLS FIRST
+				) AS header_row_seq
+			FROM public.exposure_headers h
+			LEFT JOIN public.exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
+			WHERE h.exposure_creation_status = 'Approved'
+			  AND h.is_deleted IS NOT TRUE %s
+		)
+		SELECT
+			COALESCE(j.exposure_header_id::text, '') AS exposure_header_id,
+			COALESCE(j.document_id, '') AS document_id,
+			COALESCE(j.exposure_type, '') AS exposure_type,
+			COALESCE(j.entity, '') AS entity,
+			COALESCE(j.counterparty_code, '') AS counterparty_code,
+			COALESCE(j.counterparty_name, '') AS counterparty_name,
+			COALESCE(j.exposure_category, '') AS exposure_category,
+			COALESCE(j.currency, '') AS currency,
+			j.document_date,
+			COALESCE(j.approval_status, '') AS approval_status,
+			CASE WHEN j.header_row_seq = 1 THEN COALESCE(j.total_original_amount, 0) ELSE 0 END AS total_original_amount,
+			CASE WHEN j.header_row_seq = 1 THEN COALESCE(j.total_open_amount, 0) ELSE 0 END AS total_open_amount,
+			CASE WHEN j.header_row_seq = 1 THEN j.hedged_amount_raw ELSE 0 END AS hedged_amount,
+			CASE WHEN j.header_row_seq = 1
+				THEN GREATEST(COALESCE(j.total_open_amount, 0) - j.hedged_amount_raw, 0)
+				ELSE 0 END AS unhedged_amount,
+			CASE WHEN j.header_row_seq = 1 THEN COALESCE(j.amount_in_local_currency, 0) ELSE 0 END AS amount_in_local_currency,
+			j.value_date,
+			COALESCE(j.status, '') AS status,
+			COALESCE(j.product_id, '') AS product_id,
+			COALESCE(j.quantity, 0) AS quantity,
+			COALESCE(j.line_item_amount, 0) AS line_item_amount
+		FROM joined j
+		ORDER BY j.document_id, j.line_number NULLS FIRST
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)
 
 	return runSourceQuery(ctx, pool, q, args)
 }
 
-// ── Exposure Bucketing ─────────────────────────────────────────────────────
-// Same row set as /fx/exposures/get-bucketing:
-// approved headers + not deleted + entity scope + join line items.
-// Fields aligned with ExposureBucketing table columns.
 func queryFXExposureBucketing(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "h", "entity")
 
@@ -228,7 +257,13 @@ func queryFXMtmManagement(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 			COALESCE(fm.entity, '') AS entity_id,
 			COALESCE(fm.entity, '') AS entity,
 			COALESCE(fm.internal_reference_id, '') AS internal_reference_id,
-			COALESCE(fm.days_to_maturity, 0) AS days_to_maturity,
+			-- Days REMAINING as of today, not the stored column: forward_mtm.days_to_maturity
+			-- is frozen at upload time as (maturity_date - deal_date), i.e. the contract
+			-- tenor, so a long-matured contract kept reporting its original tenor forever.
+			-- Matured contracts clamp to 0. Matches how every other dashboard derives this
+			-- (dash/cfo/fwdDashCfo.go, dash/investmentDashboards/fdTreasuryDashboard.go).
+			COALESCE(GREATEST(fm.maturity_date::date - CURRENT_DATE, 0), 0)::int AS days_to_maturity,
+			COALESCE(fm.days_to_maturity, 0) AS contract_tenor_days,
 			fm.calculated_at,
 			COALESCE(fm.upload_s3_key, '') AS upload_s3_key,
 			fm.deal_date,
@@ -327,7 +362,7 @@ func queryFXCancellation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			COALESCE(fc.cancellation_rate, 0) AS cancellation_rate,
 			COALESCE(fc.realized_gain_loss, 0) AS realized_gain_loss,
 			COALESCE(fc.cancellation_reason, '') AS cancellation_reason,
-			NULL::numeric AS rollover_cost,
+			0::numeric AS rollover_cost,
 			-- forward_cancellations carries no currency column; the pair lives on the booking.
 			COALESCE(fb.currency_pair, '') AS fx_pair
 		FROM public.forward_cancellations fc
@@ -351,9 +386,9 @@ func queryFXRollover(ctx context.Context, pool *pgxpool.Pool, entityIDs []string
 			COALESCE(fr.amount_rolled_over, 0) AS amount,
 			fr.rollover_date AS request_date,
 			COALESCE(fr.status, '') AS status,
-			NULL::numeric AS cancellation_rate,
-			NULL::numeric AS realized_gain_loss,
-			NULL::text AS cancellation_reason,
+			0::numeric AS cancellation_rate,
+			0::numeric AS realized_gain_loss,
+			'' AS cancellation_reason,
 			COALESCE(fr.rollover_cost, 0) AS rollover_cost,
 			COALESCE(NULLIF(fr.fx_pair, ''), fb.currency_pair, '') AS fx_pair
 		FROM public.forward_rollovers fr
@@ -382,7 +417,7 @@ func queryFXCancellationRollover(ctx context.Context, pool *pgxpool.Pool, entity
 				COALESCE(fc.cancellation_rate, 0) AS cancellation_rate,
 				COALESCE(fc.realized_gain_loss, 0) AS realized_gain_loss,
 				COALESCE(fc.cancellation_reason, '') AS cancellation_reason,
-				NULL::numeric AS rollover_cost,
+				0::numeric AS rollover_cost,
 				-- forward_cancellations carries no currency column; the pair lives on the booking.
 				COALESCE(fb.currency_pair, '') AS fx_pair
 			FROM public.forward_cancellations fc
@@ -397,9 +432,9 @@ func queryFXCancellationRollover(ctx context.Context, pool *pgxpool.Pool, entity
 				COALESCE(fr.amount_rolled_over, 0) AS amount,
 				fr.rollover_date AS request_date,
 				COALESCE(fr.status, '') AS status,
-				NULL::numeric AS cancellation_rate,
-				NULL::numeric AS realized_gain_loss,
-				NULL::text AS cancellation_reason,
+				0::numeric AS cancellation_rate,
+				0::numeric AS realized_gain_loss,
+				'' AS cancellation_reason,
 				COALESCE(fr.rollover_cost, 0) AS rollover_cost,
 				COALESCE(NULLIF(fr.fx_pair, ''), fb.currency_pair, '') AS fx_pair
 			FROM public.forward_rollovers fr
