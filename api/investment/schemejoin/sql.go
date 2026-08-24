@@ -68,7 +68,6 @@ AND (
 }
 
 // LatestNavByAMFICTE resolves current NAV from amfi_nav_staging by AMFI scheme code.
-// Prefer NavLateralJoin for per-row resolution (supports name fallback when amfi_scheme_code is blank).
 const LatestNavByAMFICTE = `
 latest_nav AS (
   SELECT DISTINCT ON (scheme_code)
@@ -77,11 +76,12 @@ latest_nav AS (
     nav_date
   FROM investment.amfi_nav_staging
   WHERE NULLIF(TRIM(scheme_code::text), '') IS NOT NULL
-  ORDER BY scheme_code, nav_date DESC
+  ORDER BY scheme_code, nav_date DESC, file_date DESC NULLS LAST
 )`
 
-// NavLateralJoin attaches ln.nav_value / ln.nav_date from investment.amfi_nav_staging.
-// optionalAmfiCol is e.g. "ts.amfi_scheme_code"; pass "" when the row has no AMFI column (snapshot ps).
+// NavLateralJoin attaches ln.nav_value / ln.nav_date from investment.amfi_nav_staging
+// by AMFI scheme_code only (indexable). Name/ISIN OR-matching forced a seq scan of
+// amfi_nav_staging per holding row and blew AUM dashboards to 60s+.
 func NavLateralJoin(rowAlias, optionalAmfiCol string) string {
 	amfiExpr := "NULLIF(TRIM(ms_nav.amfi_scheme_code), '')"
 	if optionalAmfiCol != "" {
@@ -96,25 +96,9 @@ LEFT JOIN investment.masterscheme ms_nav ON (
 LEFT JOIN LATERAL (
   SELECT ans.nav_value, ans.nav_date, ans.raw_category_header
   FROM investment.amfi_nav_staging ans
-  WHERE (
-    ` + amfiExpr + ` IS NOT NULL
+  WHERE ` + amfiExpr + ` IS NOT NULL
     AND ans.scheme_code::text = ` + amfiExpr + `
-  ) OR (
-    LOWER(TRIM(ans.scheme_name)) = LOWER(TRIM(` + rowAlias + `.scheme_name))
-  ) OR (
-    NULLIF(TRIM(` + rowAlias + `.isin), '') IS NOT NULL
-    AND NULLIF(TRIM(ans.isin_div_payout_growth), '') = TRIM(` + rowAlias + `.isin)
-  )
-  ORDER BY
-    CASE
-      WHEN ` + amfiExpr + ` IS NOT NULL AND ans.scheme_code::text = ` + amfiExpr + ` THEN 0
-      WHEN LOWER(TRIM(ans.scheme_name)) = LOWER(TRIM(` + rowAlias + `.scheme_name)) THEN 1
-      WHEN NULLIF(TRIM(` + rowAlias + `.isin), '') IS NOT NULL
-       AND NULLIF(TRIM(ans.isin_div_payout_growth), '') = TRIM(` + rowAlias + `.isin) THEN 2
-      ELSE 3
-    END,
-    ans.nav_date DESC,
-    ans.file_date DESC NULLS LAST
+  ORDER BY ans.nav_date DESC, ans.file_date DESC NULLS LAST
   LIMIT 1
 ) ln ON true`
 }

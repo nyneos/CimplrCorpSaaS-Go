@@ -8,45 +8,51 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// WithAdvisoryLock acquires a PostgreSQL session-level advisory lock keyed by
-// lockName before calling fn. If another connection already holds the lock,
-// fn is skipped and the caller returns immediately (non-blocking).
+// WithAdvisoryLock runs fn only if this process wins a Postgres advisory lock.
 //
-// The lock is released in a defer before the dedicated connection is returned
-// to the pool, so it is never left held on a recycled pool connection.
+// Uses pg_try_advisory_xact_lock inside an open transaction on a held connection.
+// That stays correct on Supabase/PgBouncer transaction poolers (port 6543), where
+// session-level pg_try_advisory_lock does not reliably stick across statements.
 //
-// Usage — wrap any cron/ticker body:
+// fn may use other pool connections; the lock connection stays checked out with
+// an open transaction until fn returns, then the lock is released on rollback.
 //
-//	err := jobs.WithAdvisoryLock(ctx, pool, "amfi-data-downloader", func() {
-//	    // only one pod in the cluster runs this at a time
-//	    processNAVData(...)
-//	})
-//
-// Returns true if fn was executed, false if the lock was already held elsewhere.
+// Returns true if fn ran, false if the lock was already held elsewhere.
 func WithAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, lockName string, fn func()) (ran bool) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		logger.LogError("[advisory-lock] acquire connection for lock=%q: %v", lockName, err)
 		return false
 	}
-	defer func() {
-		// Always release the advisory lock before returning the connection.
-		conn.QueryRow(ctx, `SELECT pg_advisory_unlock(hashtext($1))`, lockName).Scan(new(bool)) //nolint:errcheck
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
 		conn.Release()
-	}()
+		logger.LogError("[advisory-lock] begin for lock=%q: %v", lockName, err)
+		return false
+	}
 
 	var acquired bool
-	if err := conn.QueryRow(ctx,
-		`SELECT pg_try_advisory_lock(hashtext($1))`, lockName,
+	if err := tx.QueryRow(ctx,
+		`SELECT pg_try_advisory_xact_lock(hashtext($1))`, lockName,
 	).Scan(&acquired); err != nil {
-		logger.LogError("[advisory-lock] pg_try_advisory_lock for lock=%q: %v", lockName, err)
+		_ = tx.Rollback(ctx)
+		conn.Release()
+		logger.LogError("[advisory-lock] pg_try_advisory_xact_lock for lock=%q: %v", lockName, err)
 		return false
 	}
 
 	if !acquired {
+		_ = tx.Rollback(ctx)
+		conn.Release()
 		logger.LogInfo("[advisory-lock] lock=%q already held by another instance — skipping", lockName)
 		return false
 	}
+
+	defer func() {
+		_ = tx.Rollback(ctx) // ends tx → releases xact advisory lock
+		conn.Release()
+	}()
 
 	fn()
 	return true

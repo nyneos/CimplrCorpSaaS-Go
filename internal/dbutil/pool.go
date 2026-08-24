@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -29,6 +30,7 @@ func NewTracedPool(ctx context.Context, dsn, service string) (*pgxpool.Pool, err
 		return nil, err
 	}
 	applyPoolLimits(cfg, service)
+	ApplyPoolerSafeQueryMode(cfg)
 	return pgxpool.NewWithConfig(ctx, cfg)
 }
 
@@ -50,4 +52,17 @@ func applyPoolLimits(cfg *pgxpool.Config, service string) {
 		}
 		cfg.ConnConfig.RuntimeParams["application_name"] = "cimplr-" + service
 	}
+}
+
+// ApplyPoolerSafeQueryMode disables pgx prepared-statement caching.
+// Required for Supabase/PgBouncer transaction pooler (port 6543): prepared
+// statements are connection-scoped, so reuse across clients yields
+// SQLSTATE 42P05 "prepared statement ... already exists".
+func ApplyPoolerSafeQueryMode(cfg *pgxpool.Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	cfg.ConnConfig.StatementCacheCapacity = 0
+	cfg.ConnConfig.DescriptionCacheCapacity = 0
 }

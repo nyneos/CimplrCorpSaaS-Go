@@ -232,9 +232,15 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
+	conn, err := db.Acquire(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("acquire connection for NAV staging: %w", err)
+	}
+	defer conn.Release()
+
 	// Drop and create temp table for bulk operations
-	_, _ = db.Exec(ctx, "DROP TABLE IF EXISTS temp_nav_staging")
-	_, err := db.Exec(ctx, `
+	_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS temp_nav_staging")
+	_, err = conn.Exec(ctx, `
 		CREATE TEMP TABLE temp_nav_staging (
 			scheme_code TEXT,
 			isin_div_payout_growth TEXT,
@@ -269,7 +275,7 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 	}
 
 	// Bulk copy to temp table
-	_, err = db.CopyFrom(ctx, pgx.Identifier{"temp_nav_staging"},
+	_, err = conn.CopyFrom(ctx, pgx.Identifier{"temp_nav_staging"},
 		[]string{"scheme_code", "isin_div_payout_growth", "isin_div_reinvestment", "scheme_name", "nav_value", "nav_date", "amc_name"},
 		pgx.CopyFromRows(validRecords))
 	if err != nil {
@@ -278,7 +284,7 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 
 	// STEP 1: Check for new schemes and insert them into amfi_scheme_master_staging
 	var newSchemesCount int
-	err = db.QueryRow(ctx, `
+	err = conn.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT t.scheme_code)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.scheme_code::bigint = s.scheme_code
@@ -289,7 +295,7 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 
 	if newSchemesCount > 0 {
 		// Insert new schemes into amfi_scheme_master_staging
-		schemeResult, err := db.Exec(ctx, `
+		schemeResult, err := conn.Exec(ctx, `
 			INSERT INTO investment.amfi_scheme_master_staging
 			(amc_name, scheme_code, scheme_name, isin_div_payout_growth, isin_div_reinvestment, file_date)
 			SELECT DISTINCT
@@ -327,7 +333,7 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 
 	// Count distinct AMCs for reporting (but they're stored in scheme master, not separate table)
 	var newAmcCount int
-	err = db.QueryRow(ctx, `
+	err = conn.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT t.amc_name)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.amc_name = s.amc_name
@@ -345,7 +351,7 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 
 	// STEP 2: Now process NAV data for all schemes (existing + newly added)
 	// Insert NAV records for all schemes that now exist in the master (including newly added ones)
-	result, err := db.Exec(ctx, `
+	result, err := conn.Exec(ctx, `
 		INSERT INTO investment.amfi_nav_staging
 		(scheme_code, isin_div_payout_growth, isin_div_reinvestment,
 		scheme_name, nav_value, nav_date, amc_name, file_date)
@@ -379,7 +385,7 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 
 	// Count unmatched records (should be minimal or zero now)
 	var unmatchedCount int
-	err = db.QueryRow(ctx, `
+	err = conn.QueryRow(ctx, `
 		SELECT COUNT(*)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.scheme_code::bigint = s.scheme_code
@@ -402,7 +408,7 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 	}
 
 	// Clean up temp table
-	_, err = db.Exec(ctx, "DROP TABLE IF EXISTS temp_nav_staging")
+	_, err = conn.Exec(ctx, "DROP TABLE IF EXISTS temp_nav_staging")
 	if err != nil {
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("Warning: Failed to drop temp table: %v", err))
 	}

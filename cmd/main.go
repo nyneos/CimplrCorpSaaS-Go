@@ -16,6 +16,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/appmanager"
+	"CimplrCorpSaas/internal/dbutil"
 	// "CimplrCorpSaas/internal/logger"
 )
 
@@ -67,6 +68,7 @@ func main() {
 		pgxConfig.ConnConfig.RuntimeParams = map[string]string{}
 	}
 	pgxConfig.ConnConfig.RuntimeParams["application_name"] = "cimplr-core"
+	dbutil.ApplyPoolerSafeQueryMode(pgxConfig)
 	// pgxConfig.ConnConfig.Tracer = logger.NewDBTracer("core")
 
 	pgxPool, err := pgxpool.NewWithConfig(ctx, pgxConfig)

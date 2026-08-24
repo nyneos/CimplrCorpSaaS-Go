@@ -277,10 +277,18 @@ func processSchemeBatches(records [][]string, db *pgxpool.Pool, batchSize int) e
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	// Drop temp table if it exists, then create new one
-	_, _ = db.Exec(ctx, "DROP TABLE IF EXISTS temp_scheme_staging")
+	// TEMP tables are session-scoped. Hold one pool connection for CREATE/COPY/upsert
+	// so this works on Supabase transaction pooler (6543). Same bulk COPY path — not slower.
+	conn, err := db.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for scheme staging: %w", err)
+	}
+	defer conn.Release()
 
-	_, err := db.Exec(ctx, `
+	// Drop temp table if it exists, then create new one
+	_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS temp_scheme_staging")
+
+	_, err = conn.Exec(ctx, `
 		CREATE TEMP TABLE temp_scheme_staging (
 			amc_name TEXT,
 			scheme_code TEXT,
@@ -369,7 +377,7 @@ func processSchemeBatches(records [][]string, db *pgxpool.Pool, batchSize int) e
 
 	// Bulk copy to temp table
 	start := time.Now()
-	_, err = db.CopyFrom(ctx, pgx.Identifier{"temp_scheme_staging"},
+	_, err = conn.CopyFrom(ctx, pgx.Identifier{"temp_scheme_staging"},
 		[]string{"amc_name", "scheme_code", "scheme_name", "scheme_type", "scheme_category", "scheme_sub_category",
 			"scheme_nav_name", "scheme_minimum_amount", "launch_date", "closure_date",
 			"isin_div_payout_growth", "isin_div_reinvestment"},
@@ -384,7 +392,7 @@ func processSchemeBatches(records [][]string, db *pgxpool.Pool, batchSize int) e
 
 	// Now perform upsert from temp table to main table
 	start = time.Now()
-	result, err := db.Exec(ctx, `
+	result, err := conn.Exec(ctx, `
 		INSERT INTO investment.amfi_scheme_master_staging
 		(amc_name, scheme_code, scheme_name, scheme_type, scheme_category, scheme_sub_category,
 		scheme_nav_name, scheme_minimum_amount, launch_date, closure_date,
@@ -432,7 +440,7 @@ func processSchemeBatches(records [][]string, db *pgxpool.Pool, batchSize int) e
 	logger.GlobalLogger.LogAudit(fmt.Sprintf("Total scheme processing time: %v", copyDuration+upsertDuration))
 
 	// Drop temp table
-	_, err = db.Exec(ctx, "DROP TABLE IF EXISTS temp_scheme_staging")
+	_, err = conn.Exec(ctx, "DROP TABLE IF EXISTS temp_scheme_staging")
 	if err != nil {
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("Warning: Failed to drop temp scheme table: %v", err))
 	}
@@ -538,10 +546,17 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	// Drop temp table if it exists, then create new one
-	_, _ = db.Exec(ctx, "DROP TABLE IF EXISTS temp_nav_staging")
+	// Hold one connection for TEMP + COPY + upsert (required on transaction pooler).
+	conn, err := db.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for NAV staging: %w", err)
+	}
+	defer conn.Release()
 
-	_, err := db.Exec(ctx, `
+	// Drop temp table if it exists, then create new one
+	_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS temp_nav_staging")
+
+	_, err = conn.Exec(ctx, `
 		CREATE TEMP TABLE temp_nav_staging (
 			scheme_code TEXT,
 			isin_div_payout_growth TEXT,
@@ -579,7 +594,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 
 	// Bulk copy to temp table
 	start := time.Now()
-	_, err = db.CopyFrom(ctx, pgx.Identifier{"temp_nav_staging"},
+	_, err = conn.CopyFrom(ctx, pgx.Identifier{"temp_nav_staging"},
 		[]string{"scheme_code", "isin_div_payout_growth", "isin_div_reinvestment", "scheme_name", "nav_value", "nav_date", "amc_name"},
 		pgx.CopyFromRows(validRecords))
 
@@ -594,7 +609,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 	logger.GlobalLogger.LogAudit("Checking for new schemes not in master database...")
 
 	var newSchemesCount int
-	err = db.QueryRow(ctx, `
+	err = conn.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT t.scheme_code)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.scheme_code::bigint = s.scheme_code
@@ -607,7 +622,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("Found %d new schemes, adding to scheme master...", newSchemesCount))
 
 		// Insert new schemes into amfi_scheme_master_staging
-		schemeResult, err := db.Exec(ctx, `
+		schemeResult, err := conn.Exec(ctx, `
 			INSERT INTO investment.amfi_scheme_master_staging
 			(amc_name, scheme_code, scheme_name, isin_div_payout_growth, isin_div_reinvestment, file_date)
 			SELECT DISTINCT
@@ -637,7 +652,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 
 	// Count distinct new AMCs for reporting
 	var newAmcCount int
-	err = db.QueryRow(ctx, `
+	err = conn.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT t.amc_name)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.amc_name = s.amc_name
@@ -655,7 +670,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 	logger.GlobalLogger.LogAudit("Processing NAV data for all matched schemes...")
 
 	// Insert NAV records for all schemes that now exist in the master (including newly added ones)
-	result, err := db.Exec(ctx, `
+	result, err := conn.Exec(ctx, `
 		INSERT INTO investment.amfi_nav_staging
 		(scheme_code, isin_div_payout_growth, isin_div_reinvestment,
 		scheme_name, nav_value, nav_date, amc_name, file_date)
@@ -690,7 +705,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 
 	// Count unmatched records
 	var unmatchedCount int
-	err = db.QueryRow(ctx, `
+	err = conn.QueryRow(ctx, `
 		SELECT COUNT(*)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.scheme_code::bigint = s.scheme_code
@@ -706,7 +721,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 	logger.GlobalLogger.LogAudit(fmt.Sprintf("Total NAV processing time: %v", copyDuration+upsertDuration))
 
 	// Drop temp table
-	_, err = db.Exec(ctx, "DROP TABLE IF EXISTS temp_nav_staging")
+	_, err = conn.Exec(ctx, "DROP TABLE IF EXISTS temp_nav_staging")
 	if err != nil {
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("Warning: Failed to drop temp table: %v", err))
 	}
