@@ -20,16 +20,36 @@ func HandleAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		var req struct {
-			PolicyID string `json:"policy_id"`
+			PolicyID   string `json:"policy_id"`
+			ModuleCode string `json:"module_code"`
+			FromDate   string `json:"from_date"`
+			ToDate     string `json:"to_date"`
+			Limit      int    `json:"limit"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid JSON body", "BAD_REQUEST")
 			return
 		}
 		policyID := strings.TrimSpace(req.PolicyID)
-		if policyID == "" {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "policy_id is required", "BAD_REQUEST")
+		moduleCode := strings.TrimSpace(req.ModuleCode)
+		fromDate := strings.TrimSpace(req.FromDate)
+		toDate := strings.TrimSpace(req.ToDate)
+		if policyID == "" && moduleCode == "" && fromDate == "" && toDate == "" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "policy_id, module_code or a date range is required", "BAD_REQUEST")
 			return
+		}
+		for _, d := range []string{fromDate, toDate} {
+			if d == "" {
+				continue
+			}
+			if _, err := time.Parse("2006-01-02", d); err != nil {
+				api.RespondEnvelopeError(w, http.StatusBadRequest, "from_date and to_date must be yyyy-mm-dd", "BAD_REQUEST")
+				return
+			}
+		}
+		limit := req.Limit
+		if limit <= 0 || limit > 5000 {
+			limit = 1000
 		}
 
 		// Explicit columns (uuid::text) — SELECT * JSON-encoded poorly for the FE audit mapper.
@@ -108,11 +128,19 @@ func HandleAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 				old_comp_buckets, new_comp_buckets,
 				old_notification_template_ids, new_notification_template_ids
 			FROM policyengine_svc.policy_master_audit
-			WHERE policy_id = $1::uuid
+			WHERE ($1 = '' OR policy_id = NULLIF($1,'')::uuid)
+			  AND ($2 = '' OR EXISTS (
+			        SELECT 1 FROM policyengine_svc.policy_module pmod
+			        WHERE pmod.policy_id = policy_master_audit.policy_id
+			          AND pmod.is_deleted = false
+			          AND pmod.module_code = $2))
+			  AND ($3 = '' OR COALESCE(requested_at, checker_at) >= $3::date)
+			  AND ($4 = '' OR COALESCE(requested_at, checker_at) < ($4::date + 1))
 			ORDER BY GREATEST(
 				COALESCE(requested_at, '1970-01-01'::timestamptz),
 				COALESCE(checker_at, '1970-01-01'::timestamptz)
-			) DESC`, policyID)
+			) DESC
+			LIMIT $5`, policyID, moduleCode, fromDate, toDate, limit)
 		if err != nil {
 			api.LogErrorForResponse(w, "policy audit-log: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to load policy audit", "POLICY_AUDIT_FAILED")
