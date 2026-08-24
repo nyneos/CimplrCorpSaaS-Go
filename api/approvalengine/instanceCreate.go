@@ -23,19 +23,42 @@ func CreateInstance(ctx context.Context, pool *pgxpool.Pool, req InstanceRequest
 		return "", nil
 	}
 
+	if existing, existErr := LookupLatestInstanceID(ctx, pool, req.ModuleCode, req.RecordID); existErr == nil && existing != "" {
+		var st string
+		_ = pool.QueryRow(ctx,
+			`SELECT status FROM uam.approval_instance WHERE instance_id=$1 AND is_deleted=false`,
+			existing,
+		).Scan(&st)
+		if st == InstStatusPending {
+			api.LogInfo("[ApprovalEngine] Reusing pending instance %s for %s/%s", existing, req.ModuleCode, req.RecordID)
+			return existing, nil
+		}
+	}
+
 	// Step 2: Resolve matrix — pinned when the caller supplied one, else by scope.
+	// A pin that is deleted, inactive, unapproved, or latest-audit DELETE is
+	// treated as dead: never attach it to a new instance; resolve a live matrix
+	// instead (or skip if none exists).
 	var matrix *MatrixResult
 	var err error
-	if strings.TrimSpace(req.MatrixID) != "" {
-		matrix, err = LoadMatrixByID(ctx, pool, strings.TrimSpace(req.MatrixID))
-	} else {
-		matrix, err = ResolveMatrix(ctx, pool, req.ModuleCode, req.EntityCode, req.TransactionType, req.Amount)
-	}
-	if err != nil {
-		return "", err
+	if pin := strings.TrimSpace(req.MatrixID); pin != "" {
+		matrix, err = LoadMatrixByID(ctx, pool, pin)
+		if err != nil {
+			return "", err
+		}
+		if matrix == nil {
+			api.LogInfo("[ApprovalEngine] Pinned matrix %s is dead/unusable — resolving a live matrix for %s/%s/%s",
+				pin, req.ModuleCode, req.EntityCode, req.TransactionType)
+		}
 	}
 	if matrix == nil {
-		api.LogInfo("[ApprovalEngine] No matrix configured for %s/%s/%s — skipping",
+		matrix, err = ResolveMatrix(ctx, pool, req.ModuleCode, req.EntityCode, req.TransactionType, req.Amount)
+		if err != nil {
+			return "", err
+		}
+	}
+	if matrix == nil {
+		api.LogInfo("[ApprovalEngine] No live matrix configured for %s/%s/%s — skipping",
 			req.ModuleCode, req.EntityCode, req.TransactionType)
 		return "", nil
 	}
@@ -51,6 +74,8 @@ func CreateInstance(ctx context.Context, pool *pgxpool.Pool, req InstanceRequest
 		}
 	}
 
+	submittedByID, submittedByEmail := resolveSubmitter(ctx, pool, req.SubmittedBy, req.SubmittedByEmail)
+
 	// Step 3: Begin transaction.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -62,6 +87,7 @@ func CreateInstance(ctx context.Context, pool *pgxpool.Pool, req InstanceRequest
 	// NOTE: audit_table IS a real column on uam.approval_instance.
 	// audit_id_column does NOT exist — it is looked up at runtime via
 	// LookupTxTableConfig(transactionType) wherever finalizeRecord needs it.
+	// submitted_by has FK to public.users(id): never insert email/blank.
 	var instanceID string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO uam.approval_instance (
@@ -83,7 +109,7 @@ func CreateInstance(ctx context.Context, pool *pgxpool.Pool, req InstanceRequest
 		) RETURNING instance_id`,
 		matrix.MatrixID, req.ModuleCode, req.EntityCode, req.TransactionType,
 		req.RecordID, req.RecordTable, req.AuditTable,
-		req.ActionType, req.SubmittedBy, req.SubmittedByEmail, matrix.SlaHours,
+		req.ActionType, submittedByID, submittedByEmail, matrix.SlaHours,
 	).Scan(&instanceID)
 	if err != nil {
 		return "", fmt.Errorf("CreateInstance insert instance: %w", err)
@@ -138,6 +164,50 @@ func CreateInstance(ctx context.Context, pool *pgxpool.Pool, req InstanceRequest
 		instanceID, req.ModuleCode, req.RecordID, req.ActionType, len(matrix.Eyes))
 
 	return instanceID, nil
+}
+
+func resolveSubmitter(ctx context.Context, pool *pgxpool.Pool, submittedBy, submittedByEmail string) (*string, string) {
+	submittedBy = strings.TrimSpace(submittedBy)
+	submittedByEmail = strings.TrimSpace(submittedByEmail)
+	email := submittedByEmail
+
+	var id, em string
+	err := pool.QueryRow(ctx, `
+		SELECT u.id::text, COALESCE(NULLIF(u.email, ''), $2)
+		FROM public.users u
+		WHERE (
+			($1 <> '' AND u.id::text = $1)
+			OR ($1 <> '' AND lower(u.email) = lower($1))
+			OR ($2 <> '' AND lower(u.email) = lower($2))
+			OR (
+				$1 <> '' AND position('@' in $1) = 0
+				AND lower(u.employee_name) = lower($1)
+				AND (SELECT COUNT(*) FROM public.users u2 WHERE lower(u2.employee_name) = lower($1)) = 1
+			)
+		)
+		ORDER BY
+			CASE
+				WHEN $1 <> '' AND u.id::text = $1 THEN 0
+				WHEN $1 <> '' AND lower(u.email) = lower($1) THEN 1
+				WHEN $2 <> '' AND lower(u.email) = lower($2) THEN 2
+				ELSE 3
+			END
+		LIMIT 1`,
+		submittedBy, submittedByEmail,
+	).Scan(&id, &em)
+	if err != nil || strings.TrimSpace(id) == "" {
+		if submittedBy != "" || submittedByEmail != "" {
+			api.LogInfo("[ApprovalEngine] submitted_by %q / email %q did not match public.users — storing NULL", submittedBy, submittedByEmail)
+		}
+		if email == "" {
+			email = submittedBy
+		}
+		return nil, email
+	}
+	if strings.TrimSpace(em) != "" {
+		email = em
+	}
+	return &id, email
 }
 
 type PendingInstanceDiagnosis struct {
@@ -325,6 +395,10 @@ type ActOnPendingRequest struct {
 }
 
 func ActOnPendingOrDiagnose(ctx context.Context, pool *pgxpool.Pool, req ActOnPendingRequest) (ActOnPendingResult, error) {
+	return actOnPendingOrDiagnose(ctx, pool, req, false)
+}
+
+func actOnPendingOrDiagnose(ctx context.Context, pool *pgxpool.Pool, req ActOnPendingRequest, healed bool) (ActOnPendingResult, error) {
 	moduleCode := req.ModuleCode
 	recordID := req.RecordID
 	userID := req.UserID
@@ -419,7 +493,7 @@ func ActOnPendingOrDiagnose(ctx context.Context, pool *pgxpool.Pool, req ActOnPe
 	}
 	result.Diagnosis = diag
 	if !diag.HasPending {
-		return result, nil
+		return applyNoPendingMatrixGate(ctx, pool, req, &result, healed)
 	}
 	result.InstanceID = diag.InstanceID
 	if diag.IsStale() {

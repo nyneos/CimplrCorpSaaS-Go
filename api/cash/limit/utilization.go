@@ -674,7 +674,7 @@ func QueryAllUtilizations(ctx context.Context, pgxPool *pgxpool.Pool, rowLimit i
 				FROM cimplrcorpsaas.auditactionbanklimitutilization
 				WHERE utilization_id = u.utilization_id
 				  AND action_type IN ('CREATE','EDIT','DELETE')
-				ORDER BY requested_at DESC
+				ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC
 				LIMIT 1
 			) a ON TRUE
 			LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
@@ -898,7 +898,7 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM cimplrcorpsaas.auditactionbanklimitutilization
 				WHERE utilization_id = u.utilization_id
 				  AND action_type IN ('CREATE','EDIT','DELETE')
-				ORDER BY requested_at DESC
+				ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC
 				LIMIT 1
 			) a ON a.processing_status = 'APPROVED'
 			LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
@@ -1031,7 +1031,7 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM cimplrcorpsaas.auditactionbanklimitutilization
 				WHERE utilization_id = u.utilization_id
 				  AND action_type IN ('CREATE','EDIT','DELETE')
-				ORDER BY requested_at DESC
+				ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC
 				LIMIT 1
 			) a ON a.processing_status = 'APPROVED'
 			LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
@@ -1214,7 +1214,7 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `SELECT DISTINCT ON (utilization_id) action_id, utilization_id, action_type
 			FROM cimplrcorpsaas.auditactionbanklimitutilization
 			WHERE utilization_id = ANY($1) AND action_type IN ('CREATE','EDIT','DELETE')
-			ORDER BY utilization_id, requested_at DESC`
+			ORDER BY utilization_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC`
 
 		rows, err := pgxPool.Query(ctx, sel, req.UtilizationIDs)
 		if err != nil {
@@ -1419,7 +1419,7 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `SELECT DISTINCT ON (utilization_id) action_id, utilization_id
 			FROM cimplrcorpsaas.auditactionbanklimitutilization
 			WHERE utilization_id = ANY($1) AND action_type IN ('CREATE','EDIT','DELETE')
-			ORDER BY utilization_id, requested_at DESC`
+			ORDER BY utilization_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC`
 
 		rows, err := pgxPool.Query(ctx, sel, req.UtilizationIDs)
 		if err != nil {
@@ -2081,32 +2081,30 @@ func DownloadSelectedUtilizationUploadFiles(pgxPool *pgxpool.Pool) http.HandlerF
 }
 
 func submitLimitUtilizationForApproval(pool *pgxpool.Pool, utilID, limitID, submittedByUserID, actorEmail, txType string, amount float64, matrixID string) {
-	go func() {
-		bgCtx := context.Background()
-		
-		// Need entity_name to route to correct approval matrix
-		var entityName string
-		err := pool.QueryRow(bgCtx, `SELECT entity_name FROM cimplrcorpsaas.bank_limit WHERE limit_id = $1`, limitID).Scan(&entityName)
-		if err != nil {
-			api.LogError("[LimitUtilization] failed to fetch entity_name for limit %s: %v", map[string]interface{}{"limit_id": limitID, "error": err.Error()})
-			return
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 
-		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "CASH",
-			EntityCode:       entityName,
-			TransactionType:  txType,
-			RecordID:         utilID,
-			RecordTable:      "cimplrcorpsaas.bank_limit_utilization",
-			AuditTable:       "cimplrcorpsaas.auditactionbanklimitutilization",
-			AuditIDColumn:    "utilization_id",
-			ActionType:       strings.TrimPrefix(txType, "LIMIT_UTILIZATION_"),
-			Amount:           amount,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-			MatrixID:         matrixID,
-		}); err != nil {
-			api.LogError("[LimitUtilization] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"utilization_id": utilID, "tx_type": txType, "error": err.Error()})
-		}
-	}()
+	var entityName string
+	err := pool.QueryRow(ctx, `SELECT entity_name FROM cimplrcorpsaas.bank_limit WHERE limit_id = $1`, limitID).Scan(&entityName)
+	if err != nil {
+		api.LogError("[LimitUtilization] failed to fetch entity_name for limit %s: %v", map[string]interface{}{"limit_id": limitID, "error": err.Error()})
+		return
+	}
+
+	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:       "CASH",
+		EntityCode:       entityName,
+		TransactionType:  txType,
+		RecordID:         utilID,
+		RecordTable:      "cimplrcorpsaas.bank_limit_utilization",
+		AuditTable:       "cimplrcorpsaas.auditactionbanklimitutilization",
+		AuditIDColumn:    "utilization_id",
+		ActionType:       strings.TrimPrefix(txType, "LIMIT_UTILIZATION_"),
+		Amount:           amount,
+		SubmittedBy:      submittedByUserID,
+		SubmittedByEmail: actorEmail,
+		MatrixID:         matrixID,
+	}); err != nil {
+		api.LogError("[LimitUtilization] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"utilization_id": utilID, "tx_type": txType, "error": err.Error()})
+	}
 }

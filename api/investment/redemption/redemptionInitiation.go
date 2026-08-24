@@ -30,29 +30,28 @@ import (
 // submittedByUserID must be the session's numeric user_id (hard FK to
 // public.users(id) — never a display name or email).
 func submitMFRedemptionForApproval(pool *pgxpool.Pool, redemptionID, entityName, submittedByUserID, actorEmail, txType, matrixID string, amount *float64) {
-	go func() {
-		bgCtx := context.Background()
-		var amt float64
-		if amount != nil {
-			amt = *amount
-		}
-		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "INVESTMENT_MF",
-			EntityCode:       entityName,
-			TransactionType:  txType,
-			RecordID:         redemptionID,
-			RecordTable:      "investment.redemption_initiation",
-			AuditTable:       "investment.auditactionredemption",
-			AuditIDColumn:    "redemption_id",
-			ActionType:       strings.TrimPrefix(txType, "MF_REDEMPTION_INITIATION_"),
-			Amount:           amt,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-			MatrixID:         matrixID,
-		}); err != nil {
-			api.LogError("[MFRedemptionInitiation] approvalengine.CreateInstance failed for redemption %s (%s): %v", redemptionID, txType, err)
-		}
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var amt float64
+	if amount != nil {
+		amt = *amount
+	}
+	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:       "INVESTMENT_MF",
+		EntityCode:       entityName,
+		TransactionType:  txType,
+		RecordID:         redemptionID,
+		RecordTable:      "investment.redemption_initiation",
+		AuditTable:       "investment.auditactionredemption",
+		AuditIDColumn:    "redemption_id",
+		ActionType:       strings.TrimPrefix(txType, "MF_REDEMPTION_INITIATION_"),
+		Amount:           amt,
+		SubmittedBy:      submittedByUserID,
+		SubmittedByEmail: actorEmail,
+		MatrixID:         matrixID,
+	}); err != nil {
+		api.LogError("[MFRedemptionInitiation] approvalengine.CreateInstance failed for redemption %s (%s): %v", redemptionID, txType, err)
+	}
 }
 
 // loadMFRedemptionApprovalWorkflow finds the most recent INVESTMENT_MF
@@ -1251,6 +1250,7 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── Approval-matrix engine: handle engine-managed records first.
 		// Records the engine handled (Acted==true) are skipped in legacy stamp below.
 		engineActed := map[string]bool{}
+		engineBlocked := map[string]bool{}
 		for _, rid := range req.RedemptionIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "INVESTMENT_MF", RecordID: rid,
@@ -1259,6 +1259,7 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[MFRedemptionInitiation] ActOnPendingOrDiagnose approve failed for %s: %v", rid, actionErr)
+				engineBlocked[rid] = true
 				continue
 			}
 			if actionRes.Acted {
@@ -1266,14 +1267,14 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else if actionRes.CancelledStale {
 				api.LogInfo("[MFRedemptionInitiation] cancelled stale instance for %s", rid)
 			} else if actionRes.Reason != "" {
-				api.LogInfo("[MFRedemptionInitiation] engine skipped %s: %s", rid, actionRes.Reason)
+				api.LogInfo("[MFRedemptionInitiation] engine blocked %s: %s", rid, actionRes.Reason)
+				engineBlocked[rid] = true
 			}
 		}
-		// Remove engine-handled IDs from legacy stamp lists
 		filterEA := func(ids []string) []string {
 			out := ids[:0]
 			for _, id := range ids {
-				if !engineActed[id] {
+				if !engineActed[id] && !engineBlocked[id] {
 					out = append(out, id)
 				}
 			}

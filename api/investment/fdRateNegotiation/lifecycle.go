@@ -64,40 +64,33 @@ func txTypeForAction(actionType string) string {
 }
 
 func fireRateNegotiationInstance(pool *pgxpool.Pool, recordID, userID, userEmail, actionType, matrixID string, amount float64) {
-	go func() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				api.LogError("[FDRateNeg] CreateInstance panic record=%s: %v", recordID, rec)
-			}
-		}()
-		bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		if err := approvalengine.CancelPendingInstances(bgCtx, pool, rateNegModule, recordID, userEmail); err != nil {
-			api.LogError("[FDRateNeg] CancelPendingInstances %s: %v", recordID, err)
-			return
-		}
-		instID, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       rateNegModule,
-			EntityCode:       "",
-			TransactionType:  txTypeForAction(actionType),
-			RecordID:         recordID,
-			RecordTable:      rateNegRecordTable,
-			AuditTable:       rateNegAuditTable,
-			AuditIDColumn:    rateNegPK,
-			ActionType:       strings.ToUpper(actionType),
-			Amount:           amount,
-			SubmittedBy:      userID,
-			SubmittedByEmail: userEmail,
-			MatrixID:         matrixID,
-		})
-		if err != nil {
-			api.LogError("[FDRateNeg] CreateInstance(%s) %s: %v", actionType, recordID, err)
-			return
-		}
-		if instID != "" {
-			api.LogInfo("[FDRateNeg] CreateInstance(%s) %s → %s", actionType, instID, recordID)
-		}
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := approvalengine.CancelPendingInstances(ctx, pool, rateNegModule, recordID, userEmail); err != nil {
+		api.LogError("[FDRateNeg] CancelPendingInstances %s: %v", recordID, err)
+		return
+	}
+	instID, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:       rateNegModule,
+		EntityCode:       "",
+		TransactionType:  txTypeForAction(actionType),
+		RecordID:         recordID,
+		RecordTable:      rateNegRecordTable,
+		AuditTable:       rateNegAuditTable,
+		AuditIDColumn:    rateNegPK,
+		ActionType:       strings.ToUpper(actionType),
+		Amount:           amount,
+		SubmittedBy:      userID,
+		SubmittedByEmail: userEmail,
+		MatrixID:         matrixID,
+	})
+	if err != nil {
+		api.LogError("[FDRateNeg] CreateInstance(%s) %s: %v", actionType, recordID, err)
+		return
+	}
+	if instID != "" {
+		api.LogInfo("[FDRateNeg] CreateInstance(%s) %s → %s", actionType, instID, recordID)
+	}
 }
 
 func stampPendingAudits(ctx context.Context, tx pgx.Tx, ids []string, status, checker, comment, ip string) (int64, error) {

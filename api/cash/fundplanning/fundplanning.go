@@ -26,28 +26,26 @@ import (
 )
 
 func submitFundPlanForApproval(pgxPool *pgxpool.Pool, groupID, entityName, submittedByUserID, actorEmail, actionType string, amount float64, matrixID string) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-		_, err := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-			ModuleCode:       "CASH",
-			EntityCode:       entityName,
-			TransactionType:  actionType,
-			RecordID:         groupID,
-			RecordTable:      "fund_plan_groups",
-			AuditTable:       "public.auditaction_fund_plan_groups",
-			AuditIDColumn:    "group_id",
-			ActionType:       strings.Split(actionType, "_")[2], // FUND_PLANNING_CREATE -> CREATE
-			Amount:           amount,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-			MatrixID:         matrixID,
-		})
-		if err != nil {
-			api.LogError("[FundPlanning] Failed to create approval instance for %s %s: %v", actionType, groupID, err)
-		}
-	}()
+	_, err := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+		ModuleCode:       "CASH",
+		EntityCode:       entityName,
+		TransactionType:  actionType,
+		RecordID:         groupID,
+		RecordTable:      "fund_plan_groups",
+		AuditTable:       "public.auditaction_fund_plan_groups",
+		AuditIDColumn:    "group_id",
+		ActionType:       strings.Split(actionType, "_")[2], // FUND_PLANNING_CREATE -> CREATE
+		Amount:           amount,
+		SubmittedBy:      submittedByUserID,
+		SubmittedByEmail: actorEmail,
+		MatrixID:         matrixID,
+	})
+	if err != nil {
+		api.LogError("[FundPlanning] Failed to create approval instance for %s %s: %v", actionType, groupID, err)
+	}
 }
 
 func validateFundPlanScope(ctx context.Context, fields map[string]interface{}) string {
@@ -1165,7 +1163,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 				return
 			}
-			
+
 			for i, group := range req.Groups {
 				if dbGroupID, ok := results[i]["group_id"].(string); ok {
 					submitFundPlanForApproval(pgxPool, dbGroupID, req.EntityName, req.UserID, userEmail, "FUND_PLANNING_CREATE", group.TotalAmount, triggerMatrixID)
@@ -1735,6 +1733,7 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Approval-matrix engine: attempt engine-side approve first.
 		engineActed := make(map[string]bool)
+		blocked := make(map[string]string)
 		for _, groupID := range groupIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "CASH", RecordID: groupID,
@@ -1743,16 +1742,22 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[FundPlanning] ActOnPendingOrDiagnose approve failed for %s: %v", map[string]interface{}{"group_id": groupID, "error": actionErr.Error()})
+				blocked[groupID] = actionErr.Error()
 				continue
 			}
 			if actionRes.Acted {
 				engineActed[groupID] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[FundPlanning] cancelled stale approval instance for group %s", groupID)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[FundPlanning] engine blocked group %s: %s", groupID, actionRes.Reason)
+				blocked[groupID] = actionRes.Reason
 			}
 		}
 
 		var legacyGroupIDs []string
 		for _, id := range groupIDs {
-			if !engineActed[id] {
+			if !engineActed[id] && blocked[id] == "" {
 				legacyGroupIDs = append(legacyGroupIDs, id)
 			}
 		}
@@ -1895,6 +1900,7 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Approval-matrix engine: attempt engine-side reject first.
 		engineActed := make(map[string]bool)
+		blocked := make(map[string]string)
 		for _, groupID := range groupIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "CASH", RecordID: groupID,
@@ -1903,16 +1909,22 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[FundPlanning] ActOnPendingOrDiagnose reject failed for %s: %v", map[string]interface{}{"group_id": groupID, "error": actionErr.Error()})
+				blocked[groupID] = actionErr.Error()
 				continue
 			}
 			if actionRes.Acted {
 				engineActed[groupID] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[FundPlanning] cancelled stale approval instance for group %s", groupID)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[FundPlanning] engine blocked group %s: %s", groupID, actionRes.Reason)
+				blocked[groupID] = actionRes.Reason
 			}
 		}
 
 		var legacyGroupIDs []string
 		for _, id := range groupIDs {
-			if !engineActed[id] {
+			if !engineActed[id] && blocked[id] == "" {
 				legacyGroupIDs = append(legacyGroupIDs, id)
 			}
 		}
@@ -2093,7 +2105,7 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
-		
+
 		for _, g := range groupsToDelete {
 			submitFundPlanForApproval(pgxPool, g.groupID, g.entityName, req.UserID, userEmail, "FUND_PLANNING_DELETE", g.totalAmt, triggerMatrixID)
 		}

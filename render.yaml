@@ -14,8 +14,10 @@ services:
         value: NyneOS@1234$
       - key: DB_HOST
         value: aws-0-ap-south-1.pooler.supabase.com
+      # Transaction pooler (6543) — do not use session 5432; multi-module
+      # pools exhaust Supabase max_connections and starve everyone.
       - key: DB_PORT
-        value: "5432"
+        value: "6543"
       - key: DB_NAME
         value: postgres
     autoDeploy: true

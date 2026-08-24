@@ -219,13 +219,19 @@ func GetInstanceDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			resolved, lookupErr := approvalengine.LookupLatestInstanceID(ctx, pgxPool, moduleCode, recordID)
 			if lookupErr != nil {
 				if strings.Contains(lookupErr.Error(), "not found") {
-					api.RespondWithError(w, http.StatusNotFound, lookupErr.Error())
+					if ensured := approvalengine.EnsureInstanceForRecord(ctx, pgxPool, moduleCode, recordID); ensured != "" {
+						instanceID = ensured
+					} else {
+						api.RespondWithError(w, http.StatusNotFound, lookupErr.Error())
+						return
+					}
+				} else {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve instance: "+lookupErr.Error())
 					return
 				}
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve instance: "+lookupErr.Error())
-				return
+			} else {
+				instanceID = resolved
 			}
-			instanceID = resolved
 		}
 
 		detail, err := approvalengine.GetRichInstanceDetail(ctx, pgxPool, instanceID, viewerUserID)

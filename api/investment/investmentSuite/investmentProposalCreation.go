@@ -32,25 +32,24 @@ const amountTolerance = 0.01
 // submittedByUserID must be the session's numeric user_id (hard FK to
 // public.users(id) — never a display name or email).
 func submitMFProposalForApproval(pool *pgxpool.Pool, proposalID, entityName, submittedByUserID, actorEmail, txType, matrixID string, amount float64) {
-	go func() {
-		bgCtx := context.Background()
-		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "INVESTMENT_MF",
-			EntityCode:       entityName,
-			TransactionType:  txType,
-			RecordID:         proposalID,
-			RecordTable:      "investment.investment_proposal",
-			AuditTable:       "investment.auditactionproposal",
-			AuditIDColumn:    "proposal_id",
-			ActionType:       strings.TrimPrefix(txType, "MF_PROPOSAL_"),
-			Amount:           amount,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-			MatrixID:         matrixID,
-		}); err != nil {
-			api.LogError("[MFProposal] approvalengine.CreateInstance failed for proposal %s (%s): %v", proposalID, txType, err)
-		}
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:       "INVESTMENT_MF",
+		EntityCode:       entityName,
+		TransactionType:  txType,
+		RecordID:         proposalID,
+		RecordTable:      "investment.investment_proposal",
+		AuditTable:       "investment.auditactionproposal",
+		AuditIDColumn:    "proposal_id",
+		ActionType:       strings.TrimPrefix(txType, "MF_PROPOSAL_"),
+		Amount:           amount,
+		SubmittedBy:      submittedByUserID,
+		SubmittedByEmail: actorEmail,
+		MatrixID:         matrixID,
+	}); err != nil {
+		api.LogError("[MFProposal] approvalengine.CreateInstance failed for proposal %s (%s): %v", proposalID, txType, err)
+	}
 }
 
 // loadMFProposalApprovalWorkflow finds the most recent INVESTMENT_MF approval-
@@ -530,7 +529,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 		const latestAuditSQL = `
 			WITH ranked AS (
 				SELECT action_id, proposal_id, actiontype, processing_status,
-					ROW_NUMBER() OVER (PARTITION BY proposal_id ORDER BY requested_at DESC) AS rn
+					ROW_NUMBER() OVER (PARTITION BY proposal_id ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST) AS rn
 				FROM investment.auditactionproposal
 				WHERE proposal_id = ANY($1)
 				  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
@@ -639,6 +638,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 		// the legacy stamp lists below. IDs where no matrix is configured fall
 		// through to the existing direct-stamp SQL unchanged.
 		engineActed := make(map[string]bool)
+		engineBlocked := make(map[string]bool)
 		engineAction := approvalengine.ActionApproved
 		if action != constants.AuditActionApprove {
 			engineAction = approvalengine.ActionRejected
@@ -653,6 +653,7 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[MFProposal] ActOnPendingOrDiagnose %s failed for %s: %v", action, proposalID, actionErr)
+				engineBlocked[proposalID] = true
 				continue
 			}
 			if actionRes.Acted {
@@ -660,14 +661,14 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			} else if actionRes.CancelledStale {
 				api.LogInfo("[MFProposal] cancelled stale approval instance for proposal %s", proposalID)
 			} else if actionRes.Reason != "" {
-				api.LogInfo("[MFProposal] engine skipped proposal %s: %s", proposalID, actionRes.Reason)
+				api.LogInfo("[MFProposal] engine blocked proposal %s: %s", proposalID, actionRes.Reason)
+				engineBlocked[proposalID] = true
 			}
 		}
-		// Filter out engine-handled IDs from legacy stamp lists
 		filterEngineActed := func(ids []string) []string {
 			out := ids[:0]
 			for _, id := range ids {
-				if !engineActed[id] {
+				if !engineActed[id] && !engineBlocked[id] {
 					out = append(out, id)
 				}
 			}
@@ -855,7 +856,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 		const pendingDeleteSQL = `
 			WITH ranked AS (
 				SELECT proposal_id,
-					ROW_NUMBER() OVER (PARTITION BY proposal_id ORDER BY requested_at DESC) AS rn,
+					ROW_NUMBER() OVER (PARTITION BY proposal_id ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST) AS rn,
 					processing_status
 				FROM investment.auditactionproposal
 				WHERE proposal_id = ANY($1)

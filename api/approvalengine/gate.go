@@ -46,12 +46,14 @@ func Gate(ctx context.Context, pool *pgxpool.Pool, req ActOnPendingRequest) Gate
 	if res.Acted {
 		return GateOutcome{Acted: true, Finalized: res.InstanceStatus != InstStatusPending}
 	}
-	if res.Diagnosis.HasPending && !res.CancelledStale {
-		reason := strings.TrimSpace(res.Reason)
-		if reason == "" {
-			reason = "not your turn in the configured approval sequence"
-		}
+	if res.CancelledStale {
+		return GateOutcome{}
+	}
+	if reason := strings.TrimSpace(res.Reason); reason != "" {
 		return GateOutcome{Blocked: true, Reason: reason}
+	}
+	if res.Diagnosis.HasPending {
+		return GateOutcome{Blocked: true, Reason: "not your turn in the configured approval sequence"}
 	}
 	return GateOutcome{}
 }

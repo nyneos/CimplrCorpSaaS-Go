@@ -31,25 +31,24 @@ import (
 // submittedByUserID must be the session's numeric user_id (hard FK to
 // public.users(id) — never a display name or email).
 func submitMFInitiationForApproval(pool *pgxpool.Pool, initiationID, entityName, submittedByUserID, actorEmail, txType, matrixID string, amount float64) {
-	go func() {
-		bgCtx := context.Background()
-		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "INVESTMENT_MF",
-			EntityCode:       entityName,
-			TransactionType:  txType,
-			RecordID:         initiationID,
-			RecordTable:      "investment.investment_initiation",
-			AuditTable:       "investment.auditactioninitiation",
-			AuditIDColumn:    "initiation_id",
-			ActionType:       strings.TrimPrefix(txType, "MF_INITIATION_"),
-			Amount:           amount,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-			MatrixID:         matrixID,
-		}); err != nil {
-			api.LogError("[MFInitiation] approvalengine.CreateInstance failed for initiation %s (%s): %v", initiationID, txType, err)
-		}
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:       "INVESTMENT_MF",
+		EntityCode:       entityName,
+		TransactionType:  txType,
+		RecordID:         initiationID,
+		RecordTable:      "investment.investment_initiation",
+		AuditTable:       "investment.auditactioninitiation",
+		AuditIDColumn:    "initiation_id",
+		ActionType:       strings.TrimPrefix(txType, "MF_INITIATION_"),
+		Amount:           amount,
+		SubmittedBy:      submittedByUserID,
+		SubmittedByEmail: actorEmail,
+		MatrixID:         matrixID,
+	}); err != nil {
+		api.LogError("[MFInitiation] approvalengine.CreateInstance failed for initiation %s (%s): %v", initiationID, txType, err)
+	}
 }
 
 // loadMFInitiationApprovalWorkflow finds the most recent INVESTMENT_MF
@@ -1030,6 +1029,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── Approval-matrix engine: handle engine-managed records first.
 		// Records the engine handled (Acted==true) are skipped in legacy stamp below.
 		engineActed := map[string]bool{}
+		engineBlocked := map[string]bool{}
 		for _, iid := range req.InitiationIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "INVESTMENT_MF", RecordID: iid,
@@ -1038,6 +1038,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[MFInitiation] ActOnPendingOrDiagnose approve failed for %s: %v", iid, actionErr)
+				engineBlocked[iid] = true
 				continue
 			}
 			if actionRes.Acted {
@@ -1045,14 +1046,14 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else if actionRes.CancelledStale {
 				api.LogInfo("[MFInitiation] cancelled stale instance for %s", iid)
 			} else if actionRes.Reason != "" {
-				api.LogInfo("[MFInitiation] engine skipped %s: %s", iid, actionRes.Reason)
+				api.LogInfo("[MFInitiation] engine blocked %s: %s", iid, actionRes.Reason)
+				engineBlocked[iid] = true
 			}
 		}
-		// Remove engine-handled IDs from legacy stamp lists
 		filterEA := func(ids []string) []string {
 			out := ids[:0]
 			for _, id := range ids {
-				if !engineActed[id] {
+				if !engineActed[id] && !engineBlocked[id] {
 					out = append(out, id)
 				}
 			}

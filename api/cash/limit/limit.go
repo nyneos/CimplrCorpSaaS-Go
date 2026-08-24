@@ -912,7 +912,7 @@ func GetAllBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM cimplrcorpsaas.auditactionbanklimit
 				WHERE limit_id = l.limit_id
 				  AND action_type IN ('CREATE','EDIT','DELETE')
-				ORDER BY requested_at DESC
+				ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC
 				LIMIT 1
 		) a ON TRUE
 		LEFT JOIN LATERAL (
@@ -1150,7 +1150,7 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `SELECT DISTINCT ON (limit_id) action_id, limit_id, action_type
 			FROM cimplrcorpsaas.auditactionbanklimit
 			WHERE limit_id = ANY($1) AND action_type IN ('CREATE','EDIT','DELETE')
-			ORDER BY limit_id, requested_at DESC`
+			ORDER BY limit_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC`
 
 		rows, err := pgxPool.Query(ctx, sel, req.LimitIDs)
 		if err != nil {
@@ -1357,7 +1357,7 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `SELECT DISTINCT ON (limit_id) action_id, limit_id
 			FROM cimplrcorpsaas.auditactionbanklimit
 			WHERE limit_id = ANY($1) AND action_type IN ('CREATE','EDIT','DELETE')
-			ORDER BY limit_id, requested_at DESC`
+			ORDER BY limit_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC`
 
 		rows, err := pgxPool.Query(ctx, sel, req.LimitIDs)
 		if err != nil {
@@ -1534,23 +1534,22 @@ func auditTimeOrEmpty(t *time.Time) string {
 }
 
 func submitBankLimitForApproval(pool *pgxpool.Pool, limitID, entityName, submittedByUserID, actorEmail, txType string, amount float64, matrixID string) {
-	go func() {
-		bgCtx := context.Background()
-		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "CASH",
-			EntityCode:       entityName, // limit has EntityName directly
-			TransactionType:  txType,
-			RecordID:         limitID,
-			RecordTable:      "cimplrcorpsaas.bank_limit",
-			AuditTable:       "cimplrcorpsaas.auditactionbanklimit",
-			AuditIDColumn:    "limit_id",
-			ActionType:       strings.TrimPrefix(txType, "BANK_LIMIT_"),
-			Amount:           amount,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-			MatrixID:         matrixID,
-		}); err != nil {
-			api.LogError("[BankLimit] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"limit_id": limitID, "tx_type": txType, "error": err.Error()})
-		}
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:       "CASH",
+		EntityCode:       entityName, // limit has EntityName directly
+		TransactionType:  txType,
+		RecordID:         limitID,
+		RecordTable:      "cimplrcorpsaas.bank_limit",
+		AuditTable:       "cimplrcorpsaas.auditactionbanklimit",
+		AuditIDColumn:    "limit_id",
+		ActionType:       strings.TrimPrefix(txType, "BANK_LIMIT_"),
+		Amount:           amount,
+		SubmittedBy:      submittedByUserID,
+		SubmittedByEmail: actorEmail,
+		MatrixID:         matrixID,
+	}); err != nil {
+		api.LogError("[BankLimit] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"limit_id": limitID, "tx_type": txType, "error": err.Error()})
+	}
 }

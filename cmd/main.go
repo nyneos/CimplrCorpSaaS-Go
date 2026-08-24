@@ -16,6 +16,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/appmanager"
+	// "CimplrCorpSaas/internal/logger"
 )
 
 func main() {
@@ -54,11 +55,19 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to parse pgx config:", err)
 	}
-	pgxConfig.MaxConns = 20
-	pgxConfig.MinConns = 5
-	pgxConfig.MaxConnIdleTime = 5 * time.Minute
+	// Keep the shared core pool small: each module also opens its own pool
+	// (see dbutil.NewTracedPool). Together they must fit under Supabase
+	// max_connections (~90 on small plans, with slots reserved for SUPERUSER).
+	pgxConfig.MaxConns = 8
+	pgxConfig.MinConns = 1
+	pgxConfig.MaxConnIdleTime = 2 * time.Minute
 	pgxConfig.MaxConnLifetime = 30 * time.Minute
 	pgxConfig.HealthCheckPeriod = 1 * time.Minute
+	if pgxConfig.ConnConfig.RuntimeParams == nil {
+		pgxConfig.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	pgxConfig.ConnConfig.RuntimeParams["application_name"] = "cimplr-core"
+	// pgxConfig.ConnConfig.Tracer = logger.NewDBTracer("core")
 
 	pgxPool, err := pgxpool.NewWithConfig(ctx, pgxConfig)
 	if err != nil {

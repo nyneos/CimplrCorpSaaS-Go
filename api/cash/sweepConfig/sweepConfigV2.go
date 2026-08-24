@@ -34,25 +34,24 @@ func resolveSweepConfigAmount(sweepAmount, bufferAmount *float64) float64 {
 }
 
 func submitSweepConfigForApproval(pgxPool *pgxpool.Pool, sweepID, entityName, submittedByUserID, actorEmail, actionType string, amount float64, matrixID string) {
-	go func() {
-		bgCtx := context.Background()
-		if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-			ModuleCode:       "CASH",
-			EntityCode:       entityName,
-			TransactionType:  actionType,
-			RecordID:         sweepID,
-			RecordTable:      "cimplrcorpsaas.sweepconfiguration",
-			AuditTable:       "cimplrcorpsaas.auditactionsweepconfiguration",
-			AuditIDColumn:    "sweep_id",
-			ActionType:       strings.Split(actionType, "_")[2],
-			Amount:           amount,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-			MatrixID:         matrixID,
-		}); err != nil {
-			api.LogError("approvalengine.CreateInstance failed for sweep config %s: %v", sweepID, err)
-		}
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+		ModuleCode:       "CASH",
+		EntityCode:       entityName,
+		TransactionType:  actionType,
+		RecordID:         sweepID,
+		RecordTable:      "cimplrcorpsaas.sweepconfiguration",
+		AuditTable:       "cimplrcorpsaas.auditactionsweepconfiguration",
+		AuditIDColumn:    "sweep_id",
+		ActionType:       strings.Split(actionType, "_")[2],
+		Amount:           amount,
+		SubmittedBy:      submittedByUserID,
+		SubmittedByEmail: actorEmail,
+		MatrixID:         matrixID,
+	}); err != nil {
+		api.LogError("approvalengine.CreateInstance failed for sweep config %s: %v", sweepID, err)
+	}
 }
 
 const errFailedToFetchSweepConfigForPolicyCheck = "failed to fetch sweep config for policy check: "
@@ -282,7 +281,7 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		var createdIDs []string
-		
+
 		type pendingConfig struct {
 			sweepID    string
 			entityName string
@@ -927,7 +926,7 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			auditLatest := `SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM cimplrcorpsaas.auditactionsweepconfiguration WHERE sweep_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC, action_id DESC LIMIT 1`
+			auditLatest := `SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM cimplrcorpsaas.auditactionsweepconfiguration WHERE sweep_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC LIMIT 1`
 			var processingStatusPtr, requestedByPtr, actionTypePtr, actionIDPtr, checkerByPtr, checkerCommentPtr, reasonPtr *string
 			var requestedAtPtr, checkerAtPtr *time.Time
 			_ = pgxPool.QueryRow(ctx, auditLatest, sweepID).Scan(&processingStatusPtr, &requestedByPtr, &requestedAtPtr, &actionTypePtr, &actionIDPtr, &checkerByPtr, &checkerAtPtr, &checkerCommentPtr, &reasonPtr)
@@ -1097,7 +1096,7 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		sel := `SELECT DISTINCT ON (sweep_id) action_id, sweep_id, actiontype, processing_status FROM cimplrcorpsaas.auditactionsweepconfiguration WHERE sweep_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY sweep_id, requested_at DESC, action_id DESC`
+		sel := `SELECT DISTINCT ON (sweep_id) action_id, sweep_id, actiontype, processing_status FROM cimplrcorpsaas.auditactionsweepconfiguration WHERE sweep_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY sweep_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.SweepIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to fetch latest audits: "+err.Error())
@@ -1175,6 +1174,7 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Approval-matrix engine: attempt engine-side approve first.
 		engineActed := make(map[string]bool)
+		blocked := make(map[string]string)
 		for _, sweepID := range req.SweepIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "CASH", RecordID: sweepID,
@@ -1183,10 +1183,16 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[SweepConfig] ActOnPendingOrDiagnose approve failed for %s: %v", map[string]interface{}{"sweep_id": sweepID, "error": actionErr.Error()})
+				blocked[sweepID] = actionErr.Error()
 				continue
 			}
 			if actionRes.Acted {
 				engineActed[sweepID] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[SweepConfig] cancelled stale approval instance for sweep %s", sweepID)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[SweepConfig] engine blocked sweep %s: %s", sweepID, actionRes.Reason)
+				blocked[sweepID] = actionRes.Reason
 			}
 		}
 
@@ -1194,12 +1200,12 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var legacyDeleteIDs []string
 		for _, id := range actionIDs {
 			sID := actionToSweepMap[id]
-			if !engineActed[sID] {
+			if !engineActed[sID] && blocked[sID] == "" {
 				legacyActionIDs = append(legacyActionIDs, id)
 			}
 		}
 		for _, id := range deleteSweepIDs {
-			if !engineActed[id] {
+			if !engineActed[id] && blocked[id] == "" {
 				legacyDeleteIDs = append(legacyDeleteIDs, id)
 			}
 		}
@@ -1290,7 +1296,7 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		sel := `SELECT DISTINCT ON (sweep_id) action_id, sweep_id, processing_status FROM cimplrcorpsaas.auditactionsweepconfiguration WHERE sweep_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY sweep_id, requested_at DESC, action_id DESC`
+		sel := `SELECT DISTINCT ON (sweep_id) action_id, sweep_id, processing_status FROM cimplrcorpsaas.auditactionsweepconfiguration WHERE sweep_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY sweep_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.SweepIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to fetch latest audits: "+err.Error())
@@ -1362,6 +1368,7 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Approval-matrix engine: attempt engine-side reject first.
 		engineActed := make(map[string]bool)
+		blocked := make(map[string]string)
 		for _, sweepID := range req.SweepIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "CASH", RecordID: sweepID,
@@ -1370,17 +1377,23 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[SweepConfig] ActOnPendingOrDiagnose reject failed for %s: %v", map[string]interface{}{"sweep_id": sweepID, "error": actionErr.Error()})
+				blocked[sweepID] = actionErr.Error()
 				continue
 			}
 			if actionRes.Acted {
 				engineActed[sweepID] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[SweepConfig] cancelled stale approval instance for sweep %s", sweepID)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[SweepConfig] engine blocked sweep %s: %s", sweepID, actionRes.Reason)
+				blocked[sweepID] = actionRes.Reason
 			}
 		}
 
 		var legacyActionIDs []string
 		for _, id := range actionIDs {
 			sID := actionToSweepMap[id]
-			if !engineActed[sID] {
+			if !engineActed[sID] && blocked[sID] == "" {
 				legacyActionIDs = append(legacyActionIDs, id)
 			}
 		}

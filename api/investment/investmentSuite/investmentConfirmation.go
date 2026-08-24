@@ -30,28 +30,27 @@ import (
 // submitMFConfirmationForApproval fires the approval-matrix engine for a
 // newly created or edited MF investment confirmation, asynchronously.
 func submitMFConfirmationForApproval(pool *pgxpool.Pool, confirmationID, initiationID, submittedByUserID, actorEmail, txType, matrixID string, amount float64) {
-	go func() {
-		bgCtx := context.Background()
-		var entityName string
-		_ = pool.QueryRow(bgCtx, "SELECT entity_name FROM investment.investment_initiation WHERE initiation_id = $1", initiationID).Scan(&entityName)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var entityName string
+	_ = pool.QueryRow(ctx, "SELECT entity_name FROM investment.investment_initiation WHERE initiation_id = $1", initiationID).Scan(&entityName)
 
-		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "INVESTMENT_MF",
-			EntityCode:       entityName,
-			TransactionType:  txType,
-			RecordID:         confirmationID,
-			RecordTable:      "investment.investment_confirmation",
-			AuditTable:       "investment.auditactioninvestmentconfirmation",
-			AuditIDColumn:    "confirmation_id",
-			ActionType:       strings.TrimPrefix(txType, "MF_CONFIRMATION_"),
-			Amount:           amount,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-			MatrixID:         matrixID,
-		}); err != nil {
-			api.LogError("[MFConfirmation] approvalengine.CreateInstance failed for confirmation %s (%s): %v", confirmationID, txType, err)
-		}
-	}()
+	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:       "INVESTMENT_MF",
+		EntityCode:       entityName,
+		TransactionType:  txType,
+		RecordID:         confirmationID,
+		RecordTable:      "investment.investment_confirmation",
+		AuditTable:       "investment.auditactioninvestmentconfirmation",
+		AuditIDColumn:    "confirmation_id",
+		ActionType:       strings.TrimPrefix(txType, "MF_CONFIRMATION_"),
+		Amount:           amount,
+		SubmittedBy:      submittedByUserID,
+		SubmittedByEmail: actorEmail,
+		MatrixID:         matrixID,
+	}); err != nil {
+		api.LogError("[MFConfirmation] approvalengine.CreateInstance failed for confirmation %s (%s): %v", confirmationID, txType, err)
+	}
 }
 
 // loadMFConfirmationApprovalWorkflow finds the most recent INVESTMENT_MF
@@ -1175,6 +1174,7 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── Approval-matrix engine: handle engine-managed records first.
 		// Records the engine handled (Acted==true) are skipped in legacy stamp below.
 		engineActed := map[string]bool{}
+		engineBlocked := map[string]bool{}
 		for _, cid := range req.ConfirmationIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "INVESTMENT_MF", RecordID: cid,
@@ -1183,6 +1183,7 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[MFConfirmation] ActOnPendingOrDiagnose approve failed for %s: %v", cid, actionErr)
+				engineBlocked[cid] = true
 				continue
 			}
 			if actionRes.Acted {
@@ -1190,14 +1191,14 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else if actionRes.CancelledStale {
 				api.LogInfo("[MFConfirmation] cancelled stale instance for %s", cid)
 			} else if actionRes.Reason != "" {
-				api.LogInfo("[MFConfirmation] engine skipped %s: %s", cid, actionRes.Reason)
+				api.LogInfo("[MFConfirmation] engine blocked %s: %s", cid, actionRes.Reason)
+				engineBlocked[cid] = true
 			}
 		}
-		// Remove engine-handled IDs from legacy stamp lists
 		filterEA := func(ids []string) []string {
 			out := ids[:0]
 			for _, id := range ids {
-				if !engineActed[id] {
+				if !engineActed[id] && !engineBlocked[id] {
 					out = append(out, id)
 				}
 			}

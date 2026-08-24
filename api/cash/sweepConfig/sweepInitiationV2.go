@@ -55,25 +55,24 @@ func resolveSweepInitiationAmount(overridden, sweepAmount, bufferAmount *float64
 // fdBookingWorkbench's uID) — approval_instance.submitted_by has an FK to
 // public.users, so a display name here fails the insert.
 func submitSweepInitiationForApproval(pgxPool *pgxpool.Pool, initiationID, sweepID, entityName, submittedByUserID, actorEmail, matrixID string, amount float64) {
-	go func() {
-		bgCtx := context.Background()
-		if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-			ModuleCode:       "CASH",
-			EntityCode:       entityName,
-			TransactionType:  "SWEEP_INITIATION_CREATE",
-			RecordID:         initiationID,
-			RecordTable:      "cimplrcorpsaas.sweep_initiation",
-			AuditTable:       "cimplrcorpsaas.auditactionsweepinitiation",
-			AuditIDColumn:    "initiation_id",
-			ActionType:       "CREATE",
-			Amount:           amount,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-			MatrixID:         matrixID,
-		}); err != nil {
-			api.LogError("approvalengine.CreateInstance failed for sweep initiation %s (sweep %s): %v", initiationID, sweepID, err)
-		}
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+		ModuleCode:       "CASH",
+		EntityCode:       entityName,
+		TransactionType:  "SWEEP_INITIATION_CREATE",
+		RecordID:         initiationID,
+		RecordTable:      "cimplrcorpsaas.sweep_initiation",
+		AuditTable:       "cimplrcorpsaas.auditactionsweepinitiation",
+		AuditIDColumn:    "initiation_id",
+		ActionType:       "CREATE",
+		Amount:           amount,
+		SubmittedBy:      submittedByUserID,
+		SubmittedByEmail: actorEmail,
+		MatrixID:         matrixID,
+	}); err != nil {
+		api.LogError("approvalengine.CreateInstance failed for sweep initiation %s (sweep %s): %v", initiationID, sweepID, err)
+	}
 }
 
 func validateSweepCashScope(ctx context.Context, fields map[string]interface{}) string {

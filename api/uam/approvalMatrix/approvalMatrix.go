@@ -284,6 +284,26 @@ func resolveUserEmail(ctx context.Context) string {
 	return ""
 }
 
+// rejectIfMakerIsChecker fails when the checker is the same person as the
+// pending requested_by on any of the given matrices (maker ≠ checker).
+func rejectIfMakerIsChecker(ctx context.Context, tx pgx.Tx, matrixIDs []string, userEmail string) error {
+	var n int
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM uam.audit_approval_matrix_master
+		WHERE matrix_id = ANY($1)
+		  AND processing_status LIKE 'PENDING%'
+		  AND lower(btrim(requested_by)) = lower(btrim($2::text))`,
+		matrixIDs, userEmail,
+	).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return errors.New(constants.ErrMakerCheckerSamePerson)
+	}
+	return nil
+}
+
 // validateUserIDsExist checks that every user_id in the supplied list actually
 // exists in public.users. Returns an error listing all unknown IDs.
 func validateUserIDsExist(ctx context.Context, pool *pgxpool.Pool, userIDs []string) error {
@@ -1036,6 +1056,15 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
+		if err := rejectIfMakerIsChecker(ctx, tx, req.MatrixIDs, userEmail); err != nil {
+			if err.Error() == constants.ErrMakerCheckerSamePerson {
+				api.RespondWithError(w, http.StatusForbidden, constants.ErrMakerCheckerSamePerson)
+				return
+			}
+			api.RespondWithError(w, http.StatusInternalServerError, "Maker-checker lookup failed: "+err.Error())
+			return
+		}
+
 		// Step 1: Capture DELETE-pending matrix IDs BEFORE approving (still PENDING here)
 		deleteRows, err := tx.Query(ctx, `
 			SELECT DISTINCT matrix_id FROM uam.audit_approval_matrix_master
@@ -1163,6 +1192,15 @@ func BulkRejectMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		if err := rejectIfMakerIsChecker(ctx, tx, req.MatrixIDs, userEmail); err != nil {
+			if err.Error() == constants.ErrMakerCheckerSamePerson {
+				api.RespondWithError(w, http.StatusForbidden, constants.ErrMakerCheckerSamePerson)
+				return
+			}
+			api.RespondWithError(w, http.StatusInternalServerError, "Maker-checker lookup failed: "+err.Error())
+			return
+		}
 
 		// Reject master audit rows
 		masterTag, err := tx.Exec(ctx, `

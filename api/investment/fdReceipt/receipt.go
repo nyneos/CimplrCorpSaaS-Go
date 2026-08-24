@@ -962,29 +962,25 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		go func() {
-			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer bgCancel()
-			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       entityID,
-				TransactionType:  "FD_RECEIPT_EDIT",
-				RecordID:         req.ReceiptID,
-				RecordTable:      constants.QuerryInterestReceipt,
-				AuditTable:       constants.QuerryAuditInterestReceipt,
-				AuditIDColumn:    "receipt_id",
-				ActionType:       "EDIT",
-				Amount:           newGross,
-				SubmittedBy:      req.UserID,
-				SubmittedByEmail: userEmail,
-				MatrixID:         editMatrixID,
-			})
-			if instErr != nil {
-				api.LogError("[FDReceipt] CreateInstance EDIT failed: %v", instErr)
-			} else if instID != "" {
-				api.LogInfo("[FDReceipt] CreateInstance EDIT created instance=%s", instID)
-			}
-		}()
+		instID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+			ModuleCode:       "FIXED_DEPOSIT",
+			EntityCode:       entityID,
+			TransactionType:  "FD_RECEIPT_EDIT",
+			RecordID:         req.ReceiptID,
+			RecordTable:      constants.QuerryInterestReceipt,
+			AuditTable:       constants.QuerryAuditInterestReceipt,
+			AuditIDColumn:    "receipt_id",
+			ActionType:       "EDIT",
+			Amount:           newGross,
+			SubmittedBy:      req.UserID,
+			SubmittedByEmail: userEmail,
+			MatrixID:         editMatrixID,
+		})
+		if instErr != nil {
+			api.LogError("[FDReceipt] CreateInstance EDIT failed: %v", instErr)
+		} else if instID != "" {
+			api.LogInfo("[FDReceipt] CreateInstance EDIT created instance=%s", instID)
+		}
 
 		go func(rID, uEmail string, amount float64) {
 			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/update", rID, map[string]interface{}{
@@ -1088,33 +1084,28 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			for _, rid := range validIDs {
 				rid := rid
 				matrixID := deleteMatrixByID[rid]
-				go func() {
-					bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-					defer bgCancel()
-					// Fetch entity_id for this receipt
-					var eID string
-					var amount float64
-					pool.QueryRow(bgCtx, `SELECT COALESCE(entity_id,''), COALESCE(gross_interest_received, 0) FROM investment.fd_interest_receipt WHERE receipt_id=$1`, rid).Scan(&eID, &amount) //nolint:errcheck
-					instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-						ModuleCode:       "FIXED_DEPOSIT",
-						EntityCode:       eID,
-						TransactionType:  "FD_RECEIPT_DELETE",
-						RecordID:         rid,
-						RecordTable:      constants.QuerryInterestReceipt,
-						AuditTable:       constants.QuerryAuditInterestReceipt,
-						AuditIDColumn:    "receipt_id",
-						ActionType:       "DELETE",
-						Amount:           amount,
-						SubmittedBy:      req.UserID,
-						SubmittedByEmail: userEmail,
-						MatrixID:         matrixID,
-					})
-					if instErr != nil {
-						api.LogError("[FDReceipt] CreateInstance DELETE failed: %v", instErr)
-					} else if instID != "" {
-						api.LogInfo("[FDReceipt] CreateInstance DELETE created instance=%s", instID)
-					}
-				}()
+				var eID string
+				var amount float64
+				pool.QueryRow(ctx, `SELECT COALESCE(entity_id,''), COALESCE(gross_interest_received, 0) FROM investment.fd_interest_receipt WHERE receipt_id=$1`, rid).Scan(&eID, &amount) //nolint:errcheck
+				instID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+					ModuleCode:       "FIXED_DEPOSIT",
+					EntityCode:       eID,
+					TransactionType:  "FD_RECEIPT_DELETE",
+					RecordID:         rid,
+					RecordTable:      constants.QuerryInterestReceipt,
+					AuditTable:       constants.QuerryAuditInterestReceipt,
+					AuditIDColumn:    "receipt_id",
+					ActionType:       "DELETE",
+					Amount:           amount,
+					SubmittedBy:      req.UserID,
+					SubmittedByEmail: userEmail,
+					MatrixID:         matrixID,
+				})
+				if instErr != nil {
+					api.LogError("[FDReceipt] CreateInstance DELETE failed: %v", instErr)
+				} else if instID != "" {
+					api.LogInfo("[FDReceipt] CreateInstance DELETE created instance=%s", instID)
+				}
 
 				go func(rID, uEmail string) {
 					notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/delete", rID, map[string]interface{}{

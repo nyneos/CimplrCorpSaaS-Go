@@ -2,8 +2,8 @@ package projection
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
@@ -251,21 +251,19 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		logger.LogInfo("[DeleteCashFlowProposalV2] Processed %d proposals in %v", len(req.ProposalIDs), elapsed)
 		for _, proposalID := range req.ProposalIDs {
 			approvalengine.CancelPendingInstances(ctx, pgxPool, common.ModuleCash, proposalID, requestedBy)
-			go func(pID, matrixID string) {
-				approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
-					ModuleCode:       common.ModuleCash,
-					TransactionType:  "CASH_FLOW_PROJECTION_DELETE",
-					RecordID:         pID,
-					RecordTable:      "cimplrcorpsaas.cashflow_proposal",
-					AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
-					AuditIDColumn:    "proposal_id",
-					ActionType:       "DELETE",
-					Amount:           0,
-					SubmittedBy:      req.UserID,
-					SubmittedByEmail: requestedBy,
-					MatrixID:         matrixID,
-				})
-			}(proposalID, deleteMatrixByID[proposalID])
+			approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+				ModuleCode:       common.ModuleCash,
+				TransactionType:  "CASH_FLOW_PROJECTION_DELETE",
+				RecordID:         proposalID,
+				RecordTable:      "cimplrcorpsaas.cashflow_proposal",
+				AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
+				AuditIDColumn:    "proposal_id",
+				ActionType:       "DELETE",
+				Amount:           0,
+				SubmittedBy:      req.UserID,
+				SubmittedByEmail: requestedBy,
+				MatrixID:         deleteMatrixByID[proposalID],
+			})
 		}
 		api.RespondWithResult(w, true, fmt.Sprintf("Marked %d proposals for deletion in %v", len(req.ProposalIDs), elapsed))
 		// Notify: FULL proposal data for rich templates
@@ -366,71 +364,71 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 				return
 			}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
+			committed := false
+			defer func() {
+				if !committed {
+					tx.Rollback(ctx)
+				}
+			}()
 
-		// OPTIMIZED: Use DISTINCT ON with ANY($1) - single query instead of per-proposal query
-		sel := `
+			// OPTIMIZED: Use DISTINCT ON with ANY($1) - single query instead of per-proposal query
+			sel := `
 			SELECT DISTINCT ON (proposal_id) 
 				action_id, proposal_id, processing_status 
 			FROM cimplrcorpsaas.audit_action_cashflow_proposal 
 			WHERE proposal_id = ANY($1)
 			  AND action_type IN ('CREATE', 'EDIT', 'DELETE')
-			ORDER BY proposal_id, requested_at DESC, action_id DESC
+			ORDER BY proposal_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC
 		`
-		rows, err := tx.Query(ctx, sel, legacyIDs)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
-			return
-		}
-		defer rows.Close()
-
-		actionIDs := make([]string, 0, len(legacyIDs))
-		foundProposals := make(map[string]bool, len(legacyIDs))
-		cannotReject := make([]string, 0)
-
-		for rows.Next() {
-			var actionID, proposalID, status string
-			if err := rows.Scan(&actionID, &proposalID, &status); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to read latest proposal audits: "+err.Error())
+			rows, err := tx.Query(ctx, sel, legacyIDs)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 				return
 			}
-			foundProposals[proposalID] = true
-			if status == constants.StatusPendingApproval || status == constants.StatusPendingEditApproval || status == constants.StatusPendingDeleteApproval {
-				actionIDs = append(actionIDs, actionID)
-			} else {
-				cannotReject = append(cannotReject, proposalID)
-			}
-		}
+			defer rows.Close()
 
-		// Check for missing or cannot reject
-		missing := make([]string, 0)
-		for _, pid := range legacyIDs {
-			if !foundProposals[pid] {
-				missing = append(missing, pid)
-			}
-		}
-		if len(missing) > 0 || len(cannotReject) > 0 {
-			msg := ""
-			if len(missing) > 0 {
-				msg = "Missing audit for: " + strings.Join(missing, ",")
-			}
-			if len(cannotReject) > 0 {
-				if msg != "" {
-					msg += "; "
+			actionIDs := make([]string, 0, len(legacyIDs))
+			foundProposals := make(map[string]bool, len(legacyIDs))
+			cannotReject := make([]string, 0)
+
+			for rows.Next() {
+				var actionID, proposalID, status string
+				if err := rows.Scan(&actionID, &proposalID, &status); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to read latest proposal audits: "+err.Error())
+					return
 				}
-				msg += "Cannot reject (not pending): " + strings.Join(cannotReject, ",")
+				foundProposals[proposalID] = true
+				if status == constants.StatusPendingApproval || status == constants.StatusPendingEditApproval || status == constants.StatusPendingDeleteApproval {
+					actionIDs = append(actionIDs, actionID)
+				} else {
+					cannotReject = append(cannotReject, proposalID)
+				}
 			}
-			api.RespondWithError(w, http.StatusBadRequest, msg)
-			return
-		}
 
-		// OPTIMIZED: Single UPDATE using ANY($3) instead of loop
-		upd := `
+			// Check for missing or cannot reject
+			missing := make([]string, 0)
+			for _, pid := range legacyIDs {
+				if !foundProposals[pid] {
+					missing = append(missing, pid)
+				}
+			}
+			if len(missing) > 0 || len(cannotReject) > 0 {
+				msg := ""
+				if len(missing) > 0 {
+					msg = "Missing audit for: " + strings.Join(missing, ",")
+				}
+				if len(cannotReject) > 0 {
+					if msg != "" {
+						msg += "; "
+					}
+					msg += "Cannot reject (not pending): " + strings.Join(cannotReject, ",")
+				}
+				api.RespondWithError(w, http.StatusBadRequest, msg)
+				return
+			}
+
+			// OPTIMIZED: Single UPDATE using ANY($3) instead of loop
+			upd := `
 			UPDATE cimplrcorpsaas.audit_action_cashflow_proposal 
 			SET processing_status='REJECTED', 
 				checker_by=$1, 
@@ -439,38 +437,38 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 				checker_ip=$3
 			WHERE action_id = ANY($4)
 		`
-		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, projectionNullIfEmpty(checkerIP), actionIDs); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
-			return
+			if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, projectionNullIfEmpty(checkerIP), actionIDs); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				return
+			}
+			committed = true
+
+			dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_REJECT", legacyIDs, checkerBy)
+
+			elapsed := time.Since(start)
+			logger.LogInfo("[BulkRejectCashFlowProposalActionsV2] Rejected %d proposals in %v", len(actionIDs), elapsed)
+			api.RespondWithResult(w, true, fmt.Sprintf("Rejected %d proposals in %v", len(actionIDs), elapsed))
+			// Notify: FULL proposal data for rich templates
+			capturedIDs := legacyIDs
+			capturedUser := req.UserID
+			capturedComment := req.Comment
+			notifyCtx := context.WithoutCancel(ctx)
+			payload := BuildProjectionNotifPayload(notifyCtx, pgxPool, capturedIDs, "REJECT", capturedUser)
+			payloadMap := payload.ToMap()
+			payloadMap["CheckerComment"] = capturedComment
+			go catalog.TriggerNotification(
+				notifyCtx, pgxPool,
+				"/cash/projection/v2/reject",
+				fmt.Sprintf("PROJ_REJECT/%s/%d", capturedUser, time.Now().UnixMilli()),
+				payloadMap,
+			)
 		}
 
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
-			return
-		}
-		committed = true
-
-		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_REJECT", legacyIDs, checkerBy)
-
-		elapsed := time.Since(start)
-		logger.LogInfo("[BulkRejectCashFlowProposalActionsV2] Rejected %d proposals in %v", len(actionIDs), elapsed)
-		api.RespondWithResult(w, true, fmt.Sprintf("Rejected %d proposals in %v", len(actionIDs), elapsed))
-		// Notify: FULL proposal data for rich templates
-		capturedIDs := legacyIDs
-		capturedUser := req.UserID
-		capturedComment := req.Comment
-		notifyCtx := context.WithoutCancel(ctx)
-		payload := BuildProjectionNotifPayload(notifyCtx, pgxPool, capturedIDs, "REJECT", capturedUser)
-		payloadMap := payload.ToMap()
-		payloadMap["CheckerComment"] = capturedComment
-		go catalog.TriggerNotification(
-			notifyCtx, pgxPool,
-			"/cash/projection/v2/reject",
-			fmt.Sprintf("PROJ_REJECT/%s/%d", capturedUser, time.Now().UnixMilli()),
-			payloadMap,
-		)
-		}
-		
 		if len(legacyIDs) == 0 && len(engineIDs) > 0 {
 			api.RespondWithResult(w, true, fmt.Sprintf("Rejected %d proposals via matrix", len(engineIDs)))
 		}
@@ -554,7 +552,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 			FROM cimplrcorpsaas.audit_action_cashflow_proposal 
 			WHERE proposal_id = ANY($1)
 			  AND action_type IN ('CREATE', 'EDIT', 'DELETE')
-			ORDER BY proposal_id, requested_at DESC, action_id DESC
+			ORDER BY proposal_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
 		if err != nil {
@@ -564,6 +562,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 		defer rows.Close()
 
 		actionIDs := make([]string, 0, len(req.ProposalIDs))
+		actionToProposal := make(map[string]string, len(req.ProposalIDs))
 		foundProposals := make(map[string]bool, len(req.ProposalIDs))
 		cannotApprove := make([]string, 0)
 		deleteProposalIDs := make([]string, 0)
@@ -578,6 +577,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 			foundProposals[proposalID] = true
 			if status == constants.StatusPendingApproval || status == constants.StatusPendingEditApproval || status == constants.StatusPendingDeleteApproval {
 				actionIDs = append(actionIDs, actionID)
+				actionToProposal[actionID] = proposalID
 				if actionType == "DELETE" {
 					deleteProposalIDs = append(deleteProposalIDs, proposalID)
 					deleteActionIDs = append(deleteActionIDs, actionID)
@@ -609,6 +609,47 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 			return
 		}
 
+		engineActed := make(map[string]bool)
+		blocked := make(map[string]string)
+		for _, proposalID := range req.ProposalIDs {
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
+				ModuleCode: common.ModuleCash, RecordID: proposalID, UserID: req.UserID, UserEmail: checkerBy,
+				Action: approvalengine.ActionApproved, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				api.LogError("[CashFlowProjection] ActOnPendingOrDiagnose approve failed for %s: %v", proposalID, actionErr)
+				blocked[proposalID] = actionErr.Error()
+				continue
+			}
+			if actionRes.Acted {
+				engineActed[proposalID] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[CashFlowProjection] cancelled stale approval instance for %s", proposalID)
+			} else if actionRes.Reason != "" {
+				blocked[proposalID] = actionRes.Reason
+			}
+		}
+		var legacyActionIDs []string
+		var legacyDeleteActionIDs []string
+		var legacyDeleteProposalIDs []string
+		for _, actionID := range actionIDs {
+			pid := actionToProposal[actionID]
+			if engineActed[pid] || blocked[pid] != "" {
+				continue
+			}
+			legacyActionIDs = append(legacyActionIDs, actionID)
+		}
+		for i, pid := range deleteProposalIDs {
+			if engineActed[pid] || blocked[pid] != "" {
+				continue
+			}
+			legacyDeleteProposalIDs = append(legacyDeleteProposalIDs, pid)
+			legacyDeleteActionIDs = append(legacyDeleteActionIDs, deleteActionIDs[i])
+		}
+		actionIDs = legacyActionIDs
+		deleteActionIDs = legacyDeleteActionIDs
+		deleteProposalIDs = legacyDeleteProposalIDs
+
 		// OPTIMIZED: Single UPDATE using ANY($3)
 		upd := `
 			UPDATE cimplrcorpsaas.audit_action_cashflow_proposal 
@@ -619,9 +660,11 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 				checker_ip=$3
 			WHERE action_id = ANY($4)
 		`
-		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, projectionNullIfEmpty(checkerIP), actionIDs); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
-			return
+		if len(actionIDs) > 0 {
+			if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, projectionNullIfEmpty(checkerIP), actionIDs); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
+			}
 		}
 
 		// delQ := `DELETE FROM cimplrcorpsaas.cashflow_proposal WHERE proposal_id = ANY($1)`
@@ -891,21 +934,19 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_CREATE", []string{proposalID}, createdBy)
 
-		go func(pID, matrixID string) {
-			approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       common.ModuleCash,
-				TransactionType:  "CASH_FLOW_PROJECTION_CREATE",
-				RecordID:         pID,
-				RecordTable:      "cimplrcorpsaas.cashflow_proposal",
-				AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
-				AuditIDColumn:    "proposal_id",
-				ActionType:       "CREATE",
-				Amount:           0,
-				SubmittedBy:      req.UserID,
-				SubmittedByEmail: createdBy,
-				MatrixID:         matrixID,
-			})
-		}(proposalID, createMatrixID)
+		approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+			ModuleCode:       common.ModuleCash,
+			TransactionType:  "CASH_FLOW_PROJECTION_CREATE",
+			RecordID:         proposalID,
+			RecordTable:      "cimplrcorpsaas.cashflow_proposal",
+			AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
+			AuditIDColumn:    "proposal_id",
+			ActionType:       "CREATE",
+			Amount:           0,
+			SubmittedBy:      req.UserID,
+			SubmittedByEmail: createdBy,
+			MatrixID:         createMatrixID,
+		})
 
 		// Notify: FULL proposal data for rich templates
 		capturedProposalID := proposalID
@@ -1686,21 +1727,19 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_EDIT", []string{req.ProposalID}, requestedBy)
 
-		go func(pID, matrixID string) {
-			approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       common.ModuleCash,
-				TransactionType:  "CASH_FLOW_PROJECTION_EDIT",
-				RecordID:         pID,
-				RecordTable:      "cimplrcorpsaas.cashflow_proposal",
-				AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
-				AuditIDColumn:    "proposal_id",
-				ActionType:       "EDIT",
-				Amount:           0,
-				SubmittedBy:      req.UserID,
-				SubmittedByEmail: requestedBy,
-				MatrixID:         matrixID,
-			})
-		}(req.ProposalID, editMatrixID)
+		approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+			ModuleCode:       common.ModuleCash,
+			TransactionType:  "CASH_FLOW_PROJECTION_EDIT",
+			RecordID:         req.ProposalID,
+			RecordTable:      "cimplrcorpsaas.cashflow_proposal",
+			AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
+			AuditIDColumn:    "proposal_id",
+			ActionType:       "EDIT",
+			Amount:           0,
+			SubmittedBy:      req.UserID,
+			SubmittedByEmail: requestedBy,
+			MatrixID:         editMatrixID,
+		})
 
 		elapsed := time.Since(start)
 		logger.LogInfo("[UpdateCashFlowProposalV2] Updated proposal %s with %d items in %v", req.ProposalID, updated, elapsed)
