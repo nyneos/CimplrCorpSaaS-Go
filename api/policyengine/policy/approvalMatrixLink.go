@@ -135,5 +135,8 @@ func matrixTxnTypePrefixes(subModule string) []string {
 	if code == "PAYABLE_RECEIVABLE" {
 		return []string{"PAYABLE_", "RECEIVABLE_", "PAYABLE_RECEIVABLE"}
 	}
+	if code == "FORWARD_BOOKING" {
+		return []string{"FX_FORWARD"}
+	}
 	return []string{code}
 }

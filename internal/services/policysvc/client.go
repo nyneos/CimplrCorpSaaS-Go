@@ -70,6 +70,7 @@ type PolicyResult struct {
 	Comparisons []Comparison `json:"comparisons,omitempty"`
 	Message     string       `json:"message,omitempty"`
 	UserMessage string       `json:"user_message,omitempty"`
+	ApprovalRef string       `json:"approval_ref,omitempty"`
 }
 
 type EvaluateResponse struct {
