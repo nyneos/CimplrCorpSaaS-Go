@@ -3,6 +3,7 @@ package fdRateNegotiation
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/policyengine/common"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -241,6 +242,29 @@ func CreateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		createOK, createMatrixID := fdEnforceMatrix(r.Context(), w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreCreate,
+			HandlerName: "CreateRateRequest",
+			APIPath:     "/investment/fd/rate-negotiation/create",
+			EntityCode:  strings.TrimSpace(req.EntityID),
+			Actor:       userEmail,
+		}, map[string]interface{}{
+			"entity_id":              strings.TrimSpace(req.EntityID),
+			"entity_code":            strings.TrimSpace(req.EntityID),
+			"entity_name":            strings.TrimSpace(req.EntityName),
+			"proposed_fd_amount":     req.ProposedFDAmount,
+			"currency_code":          strings.ToUpper(strings.TrimSpace(req.CurrencyCode)),
+			"tenure_type":            normalizeTenureType(req.TenureType),
+			"tenure_value":           req.TenureValue,
+			"expected_start_date":    req.ExpectedStartDate,
+			"expected_maturity_date": req.ExpectedMaturityDate,
+			"interest_type":          normalizeInterestType(req.InterestType),
+			"interest_payout_mode":   normalizePayoutMode(req.InterestPayoutMode),
+		})
+		if !createOK {
+			return
+		}
+
 		tenureType := normalizeTenureType(req.TenureType)
 		interestType := normalizeInterestType(req.InterestType)
 		payoutMode := normalizePayoutMode(req.InterestPayoutMode)
@@ -320,7 +344,7 @@ func CreateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if userID == "" {
 			userID = api.GetUserIDFromCtx(r.Context())
 		}
-		fireRateNegotiationInstance(pgxPool, id, userID, userEmail, "CREATE", req.ProposedFDAmount)
+		fireRateNegotiationInstance(pgxPool, id, userID, userEmail, "CREATE", createMatrixID, req.ProposedFDAmount)
 		fireRateNegotiationNotification(pgxPool, id, userEmail, "CREATE")
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -389,8 +413,33 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, "Rate request not found")
 			return
 		}
-		if oldStatus != "PENDING_APPROVAL" && oldStatus != "REJECTED" && oldStatus != "APPROVED" {
+		if oldStatus == "DELETED" || oldStatus == "CONVERTED_TO_FD" {
 			api.RespondWithError(w, http.StatusBadRequest, "Rate request cannot be edited in current status")
+			return
+		}
+
+		editOK, editMatrixID := fdEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "UpdateRateRequest",
+			APIPath:     "/investment/fd/rate-negotiation/update",
+			EntityCode:  strings.TrimSpace(req.EntityID),
+			Actor:       userEmail,
+		}, map[string]interface{}{
+			"rate_request_id":        req.RateRequestID,
+			"entity_id":              strings.TrimSpace(req.EntityID),
+			"entity_code":            strings.TrimSpace(req.EntityID),
+			"entity_name":            strings.TrimSpace(req.EntityName),
+			"proposed_fd_amount":     req.ProposedFDAmount,
+			"currency_code":          strings.ToUpper(strings.TrimSpace(req.CurrencyCode)),
+			"tenure_type":            normalizeTenureType(req.TenureType),
+			"tenure_value":           req.TenureValue,
+			"expected_start_date":    req.ExpectedStartDate,
+			"expected_maturity_date": req.ExpectedMaturityDate,
+			"interest_type":          normalizeInterestType(req.InterestType),
+			"interest_payout_mode":   normalizePayoutMode(req.InterestPayoutMode),
+			"request_status":         oldStatus,
+		})
+		if !editOK {
 			return
 		}
 
@@ -515,7 +564,7 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if userID == "" {
 			userID = api.GetUserIDFromCtx(r.Context())
 		}
-		fireRateNegotiationInstance(pgxPool, req.RateRequestID, userID, userEmail, "EDIT", req.ProposedFDAmount)
+		fireRateNegotiationInstance(pgxPool, req.RateRequestID, userID, userEmail, "EDIT", editMatrixID, req.ProposedFDAmount)
 		fireRateNegotiationNotification(pgxPool, req.RateRequestID, userEmail, "EDIT")
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -675,7 +724,7 @@ const rateRequestSelect = `
 		m.booking_id
 	FROM investment.fd_rate_negotiation m
 	LEFT JOIN LATERAL (
-		SELECT a.processing_status, a.action_type
+		SELECT a.processing_status, a.action_type, a.requested_at
 		FROM investment.fd_audit_rate_negotiation a
 		WHERE a.rate_request_id = m.rate_request_id
 		ORDER BY a.requested_at DESC, a.audit_id DESC
@@ -689,7 +738,7 @@ func ListRateRequests(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		rows, err := pgxPool.Query(ctx, rateRequestSelect+`
 			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY m.created_at DESC, m.rate_request_id DESC`)
+			ORDER BY GREATEST(m.created_at, COALESCE(la.requested_at, m.created_at)) DESC, m.rate_request_id DESC`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to list rate requests")
 			return
@@ -706,6 +755,55 @@ func ListRateRequests(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"results": results,
+		})
+	}
+}
+
+const comparableRateRequestFilter = `
+			WHERE COALESCE(m.is_deleted,false)=false
+			  AND EXISTS (
+				SELECT 1
+				FROM investment.fd_rate_offer o
+				WHERE o.rate_request_id = m.rate_request_id
+				  AND COALESCE(o.is_deleted,false)=false
+				  AND UPPER(COALESCE(o.offer_status,'')) = 'APPROVED'
+			  )
+			  AND UPPER(COALESCE(m.request_status,'')) NOT IN (
+				'PENDING_APPROVAL',
+				'PENDING_EDIT_APPROVAL',
+				'PENDING_DELETE_APPROVAL',
+				'REJECTED',
+				'CANCELLED',
+				'DELETED'
+			  )
+			ORDER BY GREATEST(m.created_at, COALESCE(la.requested_at, m.created_at)) DESC, m.rate_request_id DESC`
+
+// ListComparableRateRequests is the Rate Comparison feed: only requests that
+// already have a checker-approved captured offer. Create/edit/delete pendings
+// stay on the Rate Request page — including PENDING_EDIT_APPROVAL after an
+// offer was approved. Remaining statuses (OFFERS_RECEIVED, PENDING_RATE_APPROVAL,
+// APPROVED, CONVERTED_TO_FD, …) are returned as stored.
+func ListComparableRateRequests(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		rows, err := pgxPool.Query(ctx, rateRequestSelect+comparableRateRequestFilter)
+		if err != nil {
+			api.LogErrorForResponse(w, "Failed to list comparable rate requests: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to list comparable rate requests", "")
+			return
+		}
+		defer rows.Close()
+
+		results := make([]map[string]interface{}, 0)
+		for rows.Next() {
+			item, err := scanRateRequest(rows)
+			if err != nil {
+				continue
+			}
+			results = append(results, item)
+		}
+		api.RespondEnvelopeSuccess(w, "Comparable rate requests fetched successfully", map[string]interface{}{
+			"rows": results,
 		})
 	}
 }

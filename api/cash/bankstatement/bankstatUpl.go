@@ -7,6 +7,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -192,6 +193,20 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		uploadOK, uploadMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreUpload,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "BANK_STATEMENT",
+			ActorUserID:         userID,
+			HandlerName:         "UploadBankStatement",
+			APIPath:             "/cash/upload-bank-statement",
+			DefaultBlockMessage: "Bank statement upload blocked by policy",
+			Fields:              map[string]interface{}{"upload_type": "file"},
+		})
+		if !uploadOK {
+			return
+		}
+
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			api.RespondWithPayload(w, false, constants.ErrFailedToParseMultipartForm, nil)
 			return
@@ -302,7 +317,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			requestedIP := nullIfBlank(api.ClientIPFromRequest(r))
 			for _, bsid := range newIDs {
 				if _, aerr := pgxPool.Exec(ctx, `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now(),$3)`, bsid, userName, requestedIP); aerr == nil {
-					go func(bID string) {
+					go func(bID, matrixID string) {
 						approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
 							ModuleCode:       common.ModuleCash,
 							TransactionType:  "BANK_STATEMENT_CREATE",
@@ -314,8 +329,9 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							Amount:           0,
 							SubmittedBy:      userID,
 							SubmittedByEmail: userName,
+							MatrixID:         matrixID,
 						})
-					}(bsid)
+					}(bsid, uploadMatrixID)
 				} else {
 					// log but don't fail the entire upload for audit insert error
 					// (could collect and return these later if desired)
@@ -1158,6 +1174,31 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+		deleteMatrixByID := map[string]string{}
+		for _, id := range req.IDs {
+			if strings.TrimSpace(id) == "" {
+				api.RespondWithPayload(w, false, "empty bankstatement id provided", nil)
+				return
+			}
+			var entityID string
+			_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entityid,'') FROM bank_statement WHERE bankstatementid=$1`, id).Scan(&entityID)
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_STATEMENT",
+				EntityCode:          entityID,
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkDeleteBankStatements",
+				APIPath:             "/cash/bank-statements/bulk-delete",
+				DefaultBlockMessage: "Bank statement delete blocked by policy",
+				Fields:              loadBankStatementPolicyFields(ctx, pgxPool, id, entityID, "DELETE"),
+			}); !ok {
+				api.RespondWithPayload(w, false, msg, nil)
+				return
+			} else {
+				deleteMatrixByID[id] = tID
+			}
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
@@ -1208,7 +1249,7 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 		for _, id := range req.IDs {
-			go func(bID string) {
+			go func(bID, matrixID string) {
 				approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
 					ModuleCode:       common.ModuleCash,
 					TransactionType:  "BANK_STATEMENT_DELETE",
@@ -1220,8 +1261,9 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					Amount:           0,
 					SubmittedBy:      req.UserID,
 					SubmittedByEmail: requestedBy,
+					MatrixID:         matrixID,
 				})
-			}(id)
+			}(id, deleteMatrixByID[id])
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true})
 	}
@@ -1692,6 +1734,7 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		created := make([]string, 0, len(req.Rows))
+		createMatrixByID := map[string]string{}
 
 		insertSQL := `INSERT INTO bank_statement (
 			entityid, account_number, statementdate, openingbalance, closingbalance,
@@ -1720,6 +1763,28 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if len(missing) > 0 {
 				api.RespondWithPayload(w, false, "Missing required fields: "+strings.Join(missing, ","), nil)
 				return
+			}
+			var rowMatrixID string
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreCreate,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_STATEMENT",
+				EntityCode:          row.EntityID,
+				ActorUserID:         req.UserID,
+				HandlerName:         "CreateBankStatements",
+				APIPath:             "/cash/bank-statements/create",
+				DefaultBlockMessage: "Bank statement create blocked by policy",
+				Fields: buildBankStatementPolicyFields(bankStatementRow{
+					EntityID:       row.EntityID,
+					AccountNumber:  row.AccountNumber,
+					OpeningBalance: row.OpeningBalance,
+					ClosingBalance: row.ClosingBalance,
+				}, "CREATE"),
+			}); !ok {
+				api.RespondWithPayload(w, false, msg, nil)
+				return
+			} else {
+				rowMatrixID = tID
 			}
 
 			var id string
@@ -1791,6 +1856,7 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			created = append(created, id)
+			createMatrixByID[id] = rowMatrixID
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -1800,7 +1866,7 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		for _, id := range created {
-			go func(bID string) {
+			go func(bID, matrixID string) {
 				approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
 					ModuleCode:       common.ModuleCash,
 					TransactionType:  "BANK_STATEMENT_CREATE",
@@ -1812,8 +1878,9 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					Amount:           0,
 					SubmittedBy:      req.UserID,
 					SubmittedByEmail: createdBy,
+					MatrixID:         matrixID,
 				})
-			}(id)
+			}(id, createMatrixByID[id])
 		}
 
 		// respond with created ids and overall success
@@ -1880,6 +1947,23 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if requestedBy == "" {
 			api.RespondWithPayload(w, false, constants.ErrInvalidSession, nil)
+			return
+		}
+
+		var entityID string
+		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entityid,'') FROM bank_statement WHERE bankstatementid=$1`, req.BankStatementID).Scan(&entityID)
+		editOK, editMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "BANK_STATEMENT",
+			EntityCode:          entityID,
+			ActorUserID:         req.UserID,
+			HandlerName:         "UpdateBankStatement",
+			APIPath:             "/cash/bank-statements/update",
+			DefaultBlockMessage: "Bank statement update blocked by policy",
+			Fields:              loadBankStatementPolicyFields(ctx, pgxPool, req.BankStatementID, entityID, "EDIT"),
+		})
+		if !editOK {
 			return
 		}
 
@@ -2058,7 +2142,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_STATEMENT", "POST_EDIT", []string{req.BankStatementID}, requestedBy)
 
-		go func(bID string) {
+		go func(bID, matrixID string) {
 			approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       common.ModuleCash,
 				TransactionType:  "BANK_STATEMENT_EDIT",
@@ -2070,8 +2154,9 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Amount:           0,
 				SubmittedBy:      req.UserID,
 				SubmittedByEmail: requestedBy,
+				MatrixID:         matrixID,
 			})
-		}(req.BankStatementID)
+		}(req.BankStatementID, editMatrixID)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"bankstatementid": req.BankStatementID})
 	}

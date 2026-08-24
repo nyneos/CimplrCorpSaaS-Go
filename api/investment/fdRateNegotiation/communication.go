@@ -37,6 +37,8 @@ type communicationPayload struct {
 	ResponseSource       string                         `json:"response_source,omitempty"`
 	ResponseDate         string                         `json:"response_date,omitempty"`
 	EmailMessageID       string                         `json:"email_message_id,omitempty"`
+	BankID               string                         `json:"bank_id,omitempty"`
+	BankName             string                         `json:"bank_name,omitempty"`
 	Action               string                         `json:"action,omitempty"` // CREATE | SEND | EDIT
 	SendImmediately      bool                           `json:"send_immediately,omitempty"`
 	Intent               string                         `json:"intent,omitempty"` // SEND | RECEIVE
@@ -231,6 +233,10 @@ type communicationAuditValues struct {
 	NewResponseDate   interface{}
 	OldEmailMessageID interface{}
 	NewEmailMessageID interface{}
+	OldBankID         interface{}
+	NewBankID         interface{}
+	OldBankName       interface{}
+	NewBankName       interface{}
 }
 
 func insertCommunicationAudit(ctx context.Context, tx pgx.Tx, v communicationAuditValues) error {
@@ -244,7 +250,8 @@ func insertCommunicationAudit(ctx context.Context, tx pgx.Tx, v communicationAud
 			old_email_content, new_email_content,
 			old_response_source, new_response_source,
 			old_response_date, new_response_date,
-			old_email_message_id, new_email_message_id
+			old_email_message_id, new_email_message_id,
+			old_bank_id, new_bank_id, old_bank_name, new_bank_name
 		) VALUES (
 			$1::uuid, $2::uuid, $3, $4,
 			$5, now(), $6,
@@ -254,7 +261,8 @@ func insertCommunicationAudit(ctx context.Context, tx pgx.Tx, v communicationAud
 			$13, $14,
 			$15, $16,
 			$17, $18,
-			NULLIF($19,'')::uuid, NULLIF($20,'')::uuid
+			NULLIF($19,'')::uuid, NULLIF($20,'')::uuid,
+			$21, $22, $23, $24
 		)`,
 		v.CommunicationID, v.RateRequestID, v.ActionType, v.ProcessingStatus,
 		api.SystemIfBlank(v.RequestedBy), api.SystemIfBlank(v.RequestedIP),
@@ -265,6 +273,7 @@ func insertCommunicationAudit(ctx context.Context, tx pgx.Tx, v communicationAud
 		v.OldResponseSource, v.NewResponseSource,
 		v.OldResponseDate, v.NewResponseDate,
 		stringifyAuditUUID(v.OldEmailMessageID), stringifyAuditUUID(v.NewEmailMessageID),
+		v.OldBankID, v.NewBankID, v.OldBankName, v.NewBankName,
 	)
 	return err
 }
@@ -349,7 +358,7 @@ func derefOrEmpty(p *string) string {
 func communicationRowMap(
 	id, rateRequestID, mode, status string,
 	templateID, templateName, templateVersion, content, responseSource, responseDate, emailMessageID *string,
-	sentBy, sentAt, createdBy, createdAt, updatedBy, updatedAt *string,
+	sentBy, sentAt, createdBy, createdAt, updatedBy, updatedAt, bankID, bankName *string,
 	recipients []map[string]interface{},
 ) map[string]interface{} {
 	if recipients == nil {
@@ -374,6 +383,8 @@ func communicationRowMap(
 		"created_at":             derefOrEmpty(createdAt),
 		"updated_by":             derefOrEmpty(updatedBy),
 		"updated_at":             derefOrEmpty(updatedAt),
+		"bank_id":                derefOrEmpty(bankID),
+		"bank_name":              derefOrEmpty(bankName),
 		"recipients":             recipients,
 		"email_to":               emailTo,
 		"email_cc":               emailCC,
@@ -398,7 +409,9 @@ const communicationSelect = `
 		created_by,
 		TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 		updated_by,
-		COALESCE(TO_CHAR(updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')
+		COALESCE(TO_CHAR(updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
+		bank_id,
+		bank_name
 	FROM investment.fd_rate_communication
 `
 
@@ -407,6 +420,7 @@ type scannedCommunication struct {
 	templateID, templateName, templateVersion, content         *string
 	responseSource, responseDate, emailMessageID               *string
 	sentBy, sentAt, createdBy, createdAt, updatedBy, updatedAt *string
+	bankID, bankName                                           *string
 }
 
 func scanCommunication(row pgx.Row) (scannedCommunication, error) {
@@ -418,6 +432,7 @@ func scanCommunication(row pgx.Row) (scannedCommunication, error) {
 		&it.templateID, &it.templateName, &it.templateVersion, &it.content,
 		&it.responseSource, &respDate, &it.emailMessageID,
 		&it.sentBy, &sentAt, &createdByVal, &createdAtVal, &it.updatedBy, &updatedAt,
+		&it.bankID, &it.bankName,
 	)
 	if err != nil {
 		return it, err
@@ -442,6 +457,7 @@ func (it scannedCommunication) asMap(recipients []map[string]interface{}) map[st
 		it.templateID, it.templateName, it.templateVersion, it.content,
 		it.responseSource, it.responseDate, it.emailMessageID,
 		it.sentBy, it.sentAt, it.createdBy, it.createdAt, it.updatedBy, it.updatedAt,
+		it.bankID, it.bankName,
 		recipients,
 	)
 }
@@ -552,17 +568,20 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rate_request_id, communication_mode, communication_status,
 				email_template_id, email_template_name, email_template_version, email_content,
 				response_source, response_date, email_message_id,
-				sent_by, sent_at, is_deleted, created_by, created_at
+				sent_by, sent_at, is_deleted, created_by, created_at,
+				bank_id, bank_name
 			) VALUES (
 				$1::uuid, $2, $3,
 				NULLIF($4,''), NULLIF($5,''), NULLIF($6,''), NULLIF($7,''),
 				NULLIF($8,''), $9, NULLIF($10,'')::uuid,
-				$11, $12, false, $13, now()
+				$11, $12, false, $13, now(),
+				NULLIF($14,''), NULLIF($15,'')
 			) RETURNING communication_id::text`,
 			req.RateRequestID, mode, status,
 			templateID, strings.TrimSpace(req.EmailTemplateName), strings.TrimSpace(req.EmailTemplateVersion),
 			req.EmailContent, responseSource, responseDate, strings.TrimSpace(req.EmailMessageID),
 			sentBy, sentAt, userEmail,
+			strings.TrimSpace(req.BankID), strings.TrimSpace(req.BankName),
 		).Scan(&id)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Create failed: %v", err))
@@ -593,6 +612,8 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			NewResponseSource: nullIfEmpty(responseSource),
 			NewResponseDate:   responseDate,
 			NewEmailMessageID: nullIfEmpty(strings.TrimSpace(req.EmailMessageID)),
+			NewBankID:         nullIfEmpty(strings.TrimSpace(req.BankID)),
+			NewBankName:       nullIfEmpty(strings.TrimSpace(req.BankName)),
 		}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed")
 			return
@@ -748,19 +769,20 @@ func UpdateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			oldEmailMessageID                    *string
 			oldSentBy                            *string
 			oldSentAt                            *time.Time
+			oldBankID, oldBankName               *string
 		)
 		err = tx.QueryRow(ctx, `
 			SELECT rate_request_id::text, communication_mode, communication_status,
 				email_template_id, email_template_name, email_template_version, email_content,
 				response_source, response_date, email_message_id::text,
-				sent_by, sent_at
+				sent_by, sent_at, bank_id, bank_name
 			FROM investment.fd_rate_communication
 			WHERE communication_id = $1::uuid AND is_deleted = false
 			FOR UPDATE`, req.CommunicationID).Scan(
 			&oldRateRequestID, &oldMode, &oldStatus,
 			&oldTemplateID, &oldTemplateName, &oldTemplateVersion, &oldContent,
 			&oldResponseSource, &oldResponseDate, &oldEmailMessageID,
-			&oldSentBy, &oldSentAt,
+			&oldSentBy, &oldSentAt, &oldBankID, &oldBankName,
 		)
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, "Communication not found")
@@ -827,6 +849,8 @@ func UpdateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		newEmailMessageID := keepOrReplace(derefOrEmpty(oldEmailMessageID), req.EmailMessageID)
+		newBankID := keepOrReplace(derefOrEmpty(oldBankID), req.BankID)
+		newBankName := keepOrReplace(derefOrEmpty(oldBankName), req.BankName)
 
 		if req.recipientsProvided() {
 			recs := collectRecipients(req)
@@ -862,13 +886,16 @@ func UpdateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				sent_by = $11,
 				sent_at = $12,
 				updated_by = $13,
-				updated_at = now()
+				updated_at = now(),
+				bank_id = NULLIF($14,''),
+				bank_name = NULLIF($15,'')
 			WHERE communication_id = $1::uuid`,
 			req.CommunicationID,
 			newMode, newStatus,
 			newTemplateID, newTemplateName, newTemplateVersion, newContent,
 			newResponseSource, newResponseDate, newEmailMessageID,
 			sentBy, sentAt, userEmail,
+			newBankID, newBankName,
 		)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Update failed: %v", err))
@@ -901,6 +928,10 @@ func UpdateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			NewResponseDate:   newResponseDate,
 			OldEmailMessageID: nullIfEmpty(derefOrEmpty(oldEmailMessageID)),
 			NewEmailMessageID: nullIfEmpty(newEmailMessageID),
+			OldBankID:         nullIfEmpty(derefOrEmpty(oldBankID)),
+			NewBankID:         nullIfEmpty(newBankID),
+			OldBankName:       nullIfEmpty(derefOrEmpty(oldBankName)),
+			NewBankName:       nullIfEmpty(newBankName),
 		}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed")
 			return

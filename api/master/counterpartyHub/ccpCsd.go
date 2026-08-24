@@ -141,7 +141,7 @@ func CreateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "CCP_CSD_CREATE",
 				RecordID: id, RecordTable: "apibox.ccp_csd_master",
 				AuditTable: "apibox.audit_ccp_csd", AuditIDColumn: "ccp_csd_id",
-				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail,
+				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 			})
 		}(ccpID, req.UserID, userEmail)
 

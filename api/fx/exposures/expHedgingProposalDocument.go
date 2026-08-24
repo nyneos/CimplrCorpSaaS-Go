@@ -8,10 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
-	"CimplrCorpSaas/api/auth"
-	"CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -196,6 +198,38 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 
 		proposalID := strings.TrimSpace(req.ProposalID)
 		var oldSnap map[string]any
+		var triggerMatrixID string
+		if req.Submit {
+			eventCode := common.TriggerPreCreate
+			if proposalID != "" {
+				eventCode = common.TriggerPreEdit
+			}
+			entity := ""
+			if len(req.Proposals) > 0 {
+				entity = strings.TrimSpace(req.Proposals[0].BusinessUnit)
+			}
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           eventCode,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "HEDGE_PROPOSAL",
+				EntityCode:          entity,
+				ActorUserID:         req.UserID,
+				HandlerName:         "SaveHedgingProposalDocument",
+				APIPath:             "/fx/exposures/hedging-proposals/save",
+				DefaultBlockMessage: "Hedging proposal submit blocked by policy",
+				Fields: map[string]interface{}{
+					"proposal_id":   proposalID,
+					"proposal_name": name,
+					"comments":      strings.TrimSpace(req.Comments),
+					"entity":        entity,
+				},
+			}); !ok {
+				respondWithError(w, http.StatusForbidden, msg)
+				return
+			} else {
+				triggerMatrixID = tID
+			}
+		}
 
 		if proposalID == "" {
 			err := pool.QueryRow(ctx, `
@@ -267,16 +301,17 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			if oldSnap == nil {
 				txnType = "FX_HEDGE_PROPOSAL_CREATE"
 			}
-			go func(id, email, tType string) {
+			go func(id, email, tType, tID string) {
 				bgCtx := context.Background()
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 					ModuleCode:       "FX",
 					TransactionType:  tType,
 					RecordID:         id,
+					MatrixID:         tID,
 					SubmittedByEmail: email,
 				})
-			}(proposalID, makerEmail, txnType)
+			}(proposalID, makerEmail, txnType, triggerMatrixID)
 		}
 
 		respondWithSuccess(w, http.StatusOK, "Hedging proposal saved", map[string]any{
@@ -399,10 +434,12 @@ func GetHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "hedging proposal not found")
 			return
 		}
-		
-		if detail, dErr := approvalengine.GetRichInstanceDetail(ctx, pool, "FX", proposalID); dErr == nil {
-			if detail != nil && detail.Status == "PENDING" && len(detail.Eyes) > 0 {
-				status = detail.Eyes[0].Status
+
+		if instanceID, lookupErr := approvalengine.LookupLatestInstanceID(ctx, pool, "FX", proposalID); lookupErr == nil && instanceID != "" {
+			if detail, dErr := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, req.UserID); dErr == nil {
+				if detail != nil && detail.Status == "PENDING" && len(detail.Eyes) > 0 {
+					status = detail.Eyes[0].Status
+				}
 			}
 		}
 
@@ -641,6 +678,25 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
+		triggerMatrices := make(map[string]string, len(req.ProposalIDs))
+		for _, id := range req.ProposalIDs {
+			snap := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.hedging_proposal_document", "proposal_id", id)
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "HEDGE_PROPOSAL",
+				ActorUserID:         req.UserID,
+				HandlerName:         "DeleteHedgingProposalDocuments",
+				APIPath:             "/fx/exposures/hedging-proposals/delete",
+				DefaultBlockMessage: "Hedging proposal delete blocked by policy",
+				Fields:              snap,
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			} else {
+				triggerMatrices[id] = tID
+			}
+		}
 		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, req.ProposalIDs, constants.StatusPendingDeleteApproval, actor, req.UserID, strings.TrimSpace(req.Comments), "DELETE")
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to delete hedging proposals")
@@ -654,7 +710,7 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
-		go func(ids []string, email string) {
+		go func(ids []string, email string, matrices map[string]string) {
 			bgCtx := context.Background()
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
@@ -662,10 +718,11 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 					ModuleCode:       "FX",
 					TransactionType:  "FX_HEDGE_PROPOSAL_DELETE",
 					RecordID:         id,
+					MatrixID:         matrices[id],
 					SubmittedByEmail: email,
 				})
 			}
-		}(req.ProposalIDs, makerEmail)
+		}(req.ProposalIDs, makerEmail, triggerMatrices)
 
 		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d proposal(s) marked for delete", n), map[string]any{"count": n})
 	}

@@ -11,11 +11,13 @@ import (
 	"CimplrCorpSaas/internal/validation"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -59,6 +61,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ResetType            string  `json:"reset_type"` // AT_MATURITY | AT_EACH_PAYOUT
 			PayoutFrequencyID    string  `json:"payout_frequency_id"`
 			CorrelationID        string  `json:"correlation_id"`
+			RateRequestID        string  `json:"rate_request_id"` // optional link to FD rate negotiation
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -170,6 +173,38 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ────────────────────────────────────────────────────────────────────
 
 		ctx := r.Context()
+
+		rateRequestID := strings.TrimSpace(req.RateRequestID)
+		if rateRequestID != "" {
+			var negStatus string
+			var selectedOfferID *string
+			err := pgxPool.QueryRow(ctx, `
+				SELECT COALESCE(request_status,''), selected_offer_id::text
+				FROM investment.fd_rate_negotiation
+				WHERE rate_request_id = $1::uuid AND COALESCE(is_deleted,false)=false`,
+				rateRequestID,
+			).Scan(&negStatus, &selectedOfferID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					api.RespondWithError(w, http.StatusBadRequest, "rate_request_id not found")
+					return
+				}
+				api.RespondWithError(w, http.StatusInternalServerError, "Validate rate_request_id failed: "+err.Error())
+				return
+			}
+			if selectedOfferID == nil || strings.TrimSpace(*selectedOfferID) == "" {
+				api.RespondWithError(w, http.StatusBadRequest, "rate request has no selected offer — complete rate selection first")
+				return
+			}
+			st := strings.ToUpper(strings.TrimSpace(negStatus))
+			// Selection done: pending rate approval, or checker-approved (ready to book).
+			if st != "PENDING_RATE_APPROVAL" && st != "APPROVED" {
+				api.RespondWithError(w, http.StatusBadRequest,
+					fmt.Sprintf("rate request status must be PENDING_RATE_APPROVAL or APPROVED (got %s)", st))
+				return
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrTransactionFailed)
@@ -266,6 +301,9 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"booking_status":         "DRAFT",
 			"created_by":             userEmail,
 		}
+		if rateRequestID != "" {
+			insertValues["rate_request_id"] = rateRequestID
+		}
 		preferredCols := []string{
 			"entity_id", "entity_name", "bank_id", "bank_name", accountColumn,
 			"source_account_number", "bank_config_id",
@@ -275,6 +313,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"frequency_id", "day_count_code", "tds_plan_id", "product_code",
 			"auto_renewal", "booking_remarks", "offer_valid_till",
 			"accrual_frequency_code", "reset_type", "payout_frequency_id",
+			"rate_request_id",
 			"booking_status", "created_by",
 		}
 		insertQ, insertArgs, returningColumn, ok := buildFDDynamicInsert(
@@ -1853,6 +1892,8 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_booking_remarks,
 					a.old_auto_renewal
 				FROM investment.fd_audit_booking_request a
+				-- DMS_TRIGGER / file actions must not override maker-checker status
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE','APPROVE','REJECT')
 				ORDER BY a.booking_id,
 				         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),
 				                  COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
@@ -2204,6 +2245,7 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					JOIN investment.fd_booking_request b ON b.booking_id = a.booking_id
 					WHERE a.booking_id = $1
 					  AND a.processing_status LIKE '%PENDING%'
+					  AND a.action_type IN ('CREATE','EDIT','DELETE')
 					ORDER BY a.requested_at DESC LIMIT 1`, bookingID,
 				).Scan(&pendingActionType, &submittedBy, &entityID, &principalAmount)
 
@@ -2389,7 +2431,14 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.source_account_number,'')                           AS bank_account_number,
 				COALESCE(m.principal_amount,0)                                 AS principal_amount,
 				COALESCE(NULLIF(m.value_type,''),'Actual')                     AS value_type,
-				COALESCE(m.interest_rate,0)                                    AS interest_rate,
+				CASE
+					WHEN m.rate_request_id IS NOT NULL
+						AND COALESCE(NULLIF(o.effective_yield,0), o.offered_interest_rate, 0) > 0
+					THEN COALESCE(NULLIF(o.effective_yield,0), o.offered_interest_rate)
+					ELSE COALESCE(m.interest_rate,0)
+				END                                                            AS interest_rate,
+				COALESCE(m.rate_request_id::text,'')                           AS rate_request_id,
+				COALESCE(NULLIF(o.effective_yield,0), o.offered_interest_rate, 0) AS negotiated_rate,
 				COALESCE(m.interest_type_code,'')                              AS interest_type,
 				COALESCE(m.interest_type_id,'')                                AS interest_type_id,
 				COALESCE(m.tenure_days,0)                                      AS tenor_days,
@@ -2464,10 +2513,18 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ON fm.booking_id = m.booking_id AND COALESCE(fm.is_deleted,false) = false
 			LEFT JOIN investment.fd_bank_config_master bc
 				ON bc.config_id = m.bank_config_id AND COALESCE(bc.is_deleted,false) = false
+			LEFT JOIN investment.fd_rate_negotiation rn
+				ON rn.rate_request_id = m.rate_request_id
+				AND COALESCE(rn.is_deleted, false) = false
+			LEFT JOIN investment.fd_rate_offer o
+				ON o.offer_id = rn.selected_offer_id
+				AND COALESCE(o.is_deleted, false) = false
 			LEFT JOIN LATERAL (
 				SELECT requested_by, requested_at, checker_by, checker_at
 				FROM investment.fd_audit_booking_request
-				WHERE booking_id = m.booking_id AND processing_status = 'APPROVED'
+				WHERE booking_id = m.booking_id
+				  AND processing_status = 'APPROVED'
+				  AND action_type IN ('CREATE','EDIT','DELETE','APPROVE','REJECT')
 				ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
 				LIMIT 1
 			) aud ON true

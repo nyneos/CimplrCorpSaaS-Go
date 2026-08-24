@@ -33,7 +33,7 @@ func resolveSweepConfigAmount(sweepAmount, bufferAmount *float64) float64 {
 	return 0
 }
 
-func submitSweepConfigForApproval(pgxPool *pgxpool.Pool, sweepID, entityName, submittedByUserID, actorEmail, actionType string, amount float64) {
+func submitSweepConfigForApproval(pgxPool *pgxpool.Pool, sweepID, entityName, submittedByUserID, actorEmail, actionType string, amount float64, matrixID string) {
 	go func() {
 		bgCtx := context.Background()
 		if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
@@ -48,6 +48,7 @@ func submitSweepConfigForApproval(pgxPool *pgxpool.Pool, sweepID, entityName, su
 			Amount:           amount,
 			SubmittedBy:      submittedByUserID,
 			SubmittedByEmail: actorEmail,
+			MatrixID:         matrixID,
 		}); err != nil {
 			api.LogError("approvalengine.CreateInstance failed for sweep config %s: %v", sweepID, err)
 		}
@@ -138,7 +139,7 @@ func CreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		ok, triggerMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "SWEEP_CONFIG",
@@ -161,7 +162,8 @@ func CreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SweepAmount:        req.SweepAmount,
 				RequiresInitiation: req.RequiresInitiation == nil || *req.RequiresInitiation,
 			}),
-		}) {
+		})
+		if !ok {
 			return
 		}
 
@@ -200,7 +202,7 @@ func CreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		submitSweepConfigForApproval(
 			pgxPool, sweepID, req.EntityName, req.UserID, requestedBy,
-			"SWEEP_CONFIG_CREATE", resolveSweepConfigAmount(req.SweepAmount, req.BufferAmount),
+			"SWEEP_CONFIG_CREATE", resolveSweepConfigAmount(req.SweepAmount, req.BufferAmount), triggerMatrixID,
 		)
 
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_CREATE", []string{sweepID}, requestedBy)
@@ -285,6 +287,7 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			sweepID    string
 			entityName string
 			amount     float64
+			matrixID   string
 		}
 		var pendingConfigs []pendingConfig
 
@@ -315,7 +318,7 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+			ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreCreate,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "SWEEP_CONFIG",
@@ -338,7 +341,8 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					SweepAmount:        cfg.SweepAmount,
 					RequiresInitiation: cfg.RequiresInitiation == nil || *cfg.RequiresInitiation,
 				}),
-			}); !ok {
+			})
+			if !ok {
 				api.RespondWithResult(w, false, msg)
 				return
 			}
@@ -380,6 +384,7 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				sweepID:    sweepID,
 				entityName: cfg.EntityName,
 				amount:     resolveSweepConfigAmount(cfg.SweepAmount, cfg.BufferAmount),
+				matrixID:   tID,
 			})
 
 			createdIDs = append(createdIDs, sweepID)
@@ -395,7 +400,7 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, p := range pendingConfigs {
 			submitSweepConfigForApproval(
 				pgxPool, p.sweepID, p.entityName, req.UserID, requestedBy,
-				"SWEEP_CONFIG_CREATE", p.amount,
+				"SWEEP_CONFIG_CREATE", p.amount, p.matrixID,
 			)
 		}
 
@@ -462,7 +467,7 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		updatedRow := applySweepConfigEdits(currentRow, req.Fields)
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		ok, triggerMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "SWEEP_CONFIG",
@@ -472,7 +477,8 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/cash/sweep-config-v2/update",
 			DefaultBlockMessage: "Sweep configuration update blocked by policy",
 			Fields:              buildSweepConfigPolicyFields(updatedRow),
-		}) {
+		})
+		if !ok {
 			return
 		}
 
@@ -708,7 +714,7 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		submitSweepConfigForApproval(
 			pgxPool, req.SweepID, finalEntity, req.UserID, requestedBy,
-			"SWEEP_CONFIG_EDIT", resolveSweepConfigAmount(currentSweepAmount, currentBufferAmount),
+			"SWEEP_CONFIG_EDIT", resolveSweepConfigAmount(currentSweepAmount, currentBufferAmount), triggerMatrixID,
 		)
 
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_EDIT", []string{req.SweepID}, requestedBy)
@@ -1437,13 +1443,14 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 			return
 		}
 
+		deleteMatrixByID := map[string]string{}
 		for _, sweepID := range req.SweepIDs {
 			policyRow, perr := loadSweepConfigRow(ctx, pgxPool, sweepID)
 			if perr != nil {
 				api.RespondWithResult(w, false, errFailedToFetchSweepConfigForPolicyCheck+perr.Error())
 				return
 			}
-			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "SWEEP_CONFIG",
@@ -1456,6 +1463,8 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
+			} else {
+				deleteMatrixByID[sweepID] = tID
 			}
 		}
 
@@ -1522,7 +1531,7 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 			}
 			submitSweepConfigForApproval(
 				pgxPool, p.sweepID, p.entityName, req.UserID, requestedBy,
-				"SWEEP_CONFIG_DELETE", p.amount,
+				"SWEEP_CONFIG_DELETE", p.amount, deleteMatrixByID[p.sweepID],
 			)
 		}
 

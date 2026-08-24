@@ -54,7 +54,7 @@ func resolveSweepInitiationAmount(overridden, sweepAmount, bufferAmount *float64
 // submittedByUserID must be the session's numeric user_id (matching
 // fdBookingWorkbench's uID) — approval_instance.submitted_by has an FK to
 // public.users, so a display name here fails the insert.
-func submitSweepInitiationForApproval(pgxPool *pgxpool.Pool, initiationID, sweepID, entityName, submittedByUserID, actorEmail string, amount float64) {
+func submitSweepInitiationForApproval(pgxPool *pgxpool.Pool, initiationID, sweepID, entityName, submittedByUserID, actorEmail, matrixID string, amount float64) {
 	go func() {
 		bgCtx := context.Background()
 		if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
@@ -69,6 +69,7 @@ func submitSweepInitiationForApproval(pgxPool *pgxpool.Pool, initiationID, sweep
 			Amount:           amount,
 			SubmittedBy:      submittedByUserID,
 			SubmittedByEmail: actorEmail,
+			MatrixID:         matrixID,
 		}); err != nil {
 			api.LogError("approvalengine.CreateInstance failed for sweep initiation %s (sweep %s): %v", initiationID, sweepID, err)
 		}
@@ -246,7 +247,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				executionTime = "10:00"
 			}
 
-			if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+			autoCreateOK, autoCreateMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreCreate,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "SWEEP_INITIATION",
@@ -269,7 +270,8 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					OverriddenTargetBankAccount: derefStr(req.OverriddenTargetBankAccount),
 					AutoCreateSweep:             true,
 				}),
-			}) {
+			})
+			if !autoCreateOK {
 				return
 			}
 
@@ -395,7 +397,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_CREATE", []string{initiationID}, initiatedBy)
 
 			submitSweepInitiationForApproval(pgxPool, initiationID, sweepID, req.EntityName, req.UserID,
-				api.GetUserEmailFromCtx(ctx), resolveSweepInitiationAmount(req.OverriddenAmount, req.SweepAmount, req.BufferAmount))
+				api.GetUserEmailFromCtx(ctx), autoCreateMatrixID, resolveSweepInitiationAmount(req.OverriddenAmount, req.SweepAmount, req.BufferAmount))
 
 			// autoCreated = true (sweep was auto-created)
 
@@ -483,7 +485,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			sweepPtr = &v
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		createOK, createMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "SWEEP_INITIATION",
@@ -506,7 +508,8 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				OverriddenTargetBankAccount: derefStr(req.OverriddenTargetBankAccount),
 				AutoCreateSweep:             false,
 			}),
-		}) {
+		})
+		if !createOK {
 			return
 		}
 
@@ -577,7 +580,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_CREATE", []string{initiationID}, initiatedBy)
 
 		submitSweepInitiationForApproval(pgxPool, initiationID, sweepID, entityName, req.UserID,
-			api.GetUserEmailFromCtx(ctx), resolveSweepInitiationAmount(req.OverriddenAmount, sweepPtr, bufPtr))
+			api.GetUserEmailFromCtx(ctx), createMatrixID, resolveSweepInitiationAmount(req.OverriddenAmount, sweepPtr, bufPtr))
 
 		api.RespondWithPayload(w, true, "Sweep initiation created successfully, pending approval", map[string]interface{}{
 			"initiation_id":     initiationID,
@@ -1607,13 +1610,14 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		deleteMatrixByID := map[string]string{}
 		for _, initiationID := range req.InitiationIDs {
 			policyRow, perr := loadSweepInitiationRow(ctx, pgxPool, initiationID)
 			if perr != nil {
 				api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+perr.Error())
 				return
 			}
-			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "SWEEP_INITIATION",
@@ -1626,6 +1630,8 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
+			} else {
+				deleteMatrixByID[initiationID] = tID
 			}
 		}
 
@@ -1642,8 +1648,8 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		type deleteCandidate struct {
-			initiationID, sweepID, entityName string
-			amount                            float64
+			initiationID, sweepID, entityName, matrixID string
+			amount                                      float64
 		}
 		candidates := make([]deleteCandidate, 0, len(req.InitiationIDs))
 
@@ -1693,7 +1699,8 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			candidates = append(candidates, deleteCandidate{
 				initiationID: id, sweepID: sweepID, entityName: entityName,
-				amount: resolveSweepInitiationAmount(ovr, swp, buf),
+				matrixID: deleteMatrixByID[id],
+				amount:   resolveSweepInitiationAmount(ovr, swp, buf),
 			})
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -1721,6 +1728,7 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					Amount:           c.amount,
 					SubmittedBy:      req.UserID,
 					SubmittedByEmail: requestedByEmail,
+					MatrixID:         c.matrixID,
 				}); cerr != nil {
 					api.LogError("[SweepInitiation] CreateInstance (DELETE) failed for %s: %v", c.initiationID, cerr)
 				}
@@ -1804,7 +1812,8 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		for _, item := range req.Initiations {
+		createMatrixIDs := make([]string, len(req.Initiations))
+		for i, item := range req.Initiations {
 			entityCode := strings.TrimSpace(item.EntityName)
 
 			policyRow := sweepInitiationRow{
@@ -1845,7 +1854,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreCreate,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "SWEEP_INITIATION",
@@ -1858,6 +1867,8 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}); !ok {
 				api.RespondWithResult(w, false, msg)
 				return
+			} else {
+				createMatrixIDs[i] = tID
 			}
 		}
 
@@ -2153,6 +2164,18 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
+		}
+
+		actorEmail := api.GetUserEmailFromCtx(ctx)
+		for i, init := range createdInitiations {
+			initID, _ := init["initiation_id"].(string)
+			sid, _ := init["sweep_id"].(string)
+			if initID == "" {
+				continue
+			}
+			reqItem := req.Initiations[i]
+			submitSweepInitiationForApproval(pgxPool, initID, sid, reqItem.EntityName, req.UserID, actorEmail, createMatrixIDs[i],
+				resolveSweepInitiationAmount(reqItem.OverriddenAmount, reqItem.SweepAmount, reqItem.BufferAmount))
 		}
 
 		api.RespondWithPayload(w, true, "Bulk initiations created successfully", map[string]interface{}{
@@ -2875,7 +2898,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		updatedRow := applySweepInitiationEdits(currentRow, edits)
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		editOK, _ := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "SWEEP_INITIATION",
@@ -2885,7 +2908,8 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/cash/sweep-initiation/update",
 			DefaultBlockMessage: "Sweep initiation update blocked by policy",
 			Fields:              buildSweepInitiationPolicyFields(updatedRow),
-		}) {
+		})
+		if !editOK {
 			return
 		}
 

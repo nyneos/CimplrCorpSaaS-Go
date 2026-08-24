@@ -176,13 +176,14 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		deleteMatrixByID := map[string]string{}
 		for _, proposalID := range req.ProposalIDs {
 			row, rowErr := loadCashflowProjectionRow(ctx, pgxPool, proposalID)
 			if rowErr != nil {
 				api.RespondWithError(w, http.StatusNotFound, errProposalNotFound+rowErr.Error())
 				return
 			}
-			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "CASHFLOW_PROJECTION",
@@ -194,6 +195,8 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}); !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
+			} else {
+				deleteMatrixByID[proposalID] = tID
 			}
 		}
 		tx, err := pgxPool.Begin(ctx)
@@ -248,7 +251,7 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		logger.LogInfo("[DeleteCashFlowProposalV2] Processed %d proposals in %v", len(req.ProposalIDs), elapsed)
 		for _, proposalID := range req.ProposalIDs {
 			approvalengine.CancelPendingInstances(ctx, pgxPool, common.ModuleCash, proposalID, requestedBy)
-			go func(pID string) {
+			go func(pID, matrixID string) {
 				approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
 					ModuleCode:       common.ModuleCash,
 					TransactionType:  "CASH_FLOW_PROJECTION_DELETE",
@@ -260,8 +263,9 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					Amount:           0,
 					SubmittedBy:      req.UserID,
 					SubmittedByEmail: requestedBy,
+					MatrixID:         matrixID,
 				})
-			}(proposalID)
+			}(proposalID, deleteMatrixByID[proposalID])
 		}
 		api.RespondWithResult(w, true, fmt.Sprintf("Marked %d proposals for deletion in %v", len(req.ProposalIDs), elapsed))
 		// Notify: FULL proposal data for rich templates
@@ -763,7 +767,7 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		policyRow := buildCashflowProjectionRowFromRequest("", req.Proposal.ProposalName, req.Proposal.BaseCurrencyCode, req.Proposal.EffectiveDate, policyItems)
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		createOK, createMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "CASHFLOW_PROJECTION",
@@ -773,7 +777,8 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/cash/projection/v2/create",
 			DefaultBlockMessage: "Cash flow projection create blocked by policy",
 			Fields:              buildCashflowProjectionPolicyFields(policyRow),
-		}) {
+		})
+		if !createOK {
 			return
 		}
 		tx, err := pgxPool.Begin(ctx)
@@ -885,6 +890,22 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_CREATE", []string{proposalID}, createdBy)
+
+		go func(pID, matrixID string) {
+			approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
+				ModuleCode:       common.ModuleCash,
+				TransactionType:  "CASH_FLOW_PROJECTION_CREATE",
+				RecordID:         pID,
+				RecordTable:      "cimplrcorpsaas.cashflow_proposal",
+				AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
+				AuditIDColumn:    "proposal_id",
+				ActionType:       "CREATE",
+				Amount:           0,
+				SubmittedBy:      req.UserID,
+				SubmittedByEmail: createdBy,
+				MatrixID:         matrixID,
+			})
+		}(proposalID, createMatrixID)
 
 		// Notify: FULL proposal data for rich templates
 		capturedProposalID := proposalID
@@ -1515,7 +1536,7 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		policyRow := buildCashflowProjectionRowFromRequest(req.ProposalID, req.Proposal.ProposalName, req.Proposal.BaseCurrencyCode, req.Proposal.EffectiveDate, policyItems)
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		editOK, editMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "CASHFLOW_PROJECTION",
@@ -1525,7 +1546,8 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/cash/projection/v2/update",
 			DefaultBlockMessage: "Cash flow projection update blocked by policy",
 			Fields:              buildCashflowProjectionPolicyFields(policyRow),
-		}) {
+		})
+		if !editOK {
 			return
 		}
 		tx, err := pgxPool.Begin(ctx)
@@ -1663,6 +1685,22 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_EDIT", []string{req.ProposalID}, requestedBy)
+
+		go func(pID, matrixID string) {
+			approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
+				ModuleCode:       common.ModuleCash,
+				TransactionType:  "CASH_FLOW_PROJECTION_EDIT",
+				RecordID:         pID,
+				RecordTable:      "cimplrcorpsaas.cashflow_proposal",
+				AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
+				AuditIDColumn:    "proposal_id",
+				ActionType:       "EDIT",
+				Amount:           0,
+				SubmittedBy:      req.UserID,
+				SubmittedByEmail: requestedBy,
+				MatrixID:         matrixID,
+			})
+		}(req.ProposalID, editMatrixID)
 
 		elapsed := time.Since(start)
 		logger.LogInfo("[UpdateCashFlowProposalV2] Updated proposal %s with %d items in %v", req.ProposalID, updated, elapsed)

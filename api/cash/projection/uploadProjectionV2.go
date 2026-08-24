@@ -2,6 +2,7 @@ package projection
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/cash/additionalfiles"
 	"CimplrCorpSaas/api/constants"
@@ -179,7 +180,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		uploadOK, uploadMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreUpload,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "CASHFLOW_PROJECTION",
@@ -192,7 +193,8 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"base_currency_code": baseCurrencyCode,
 				"filename":           fh.Filename,
 			},
-		}) {
+		})
+		if !uploadOK {
 			return
 		}
 
@@ -478,6 +480,22 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		go func(pID, matrixID string) {
+			approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
+				ModuleCode:       common.ModuleCash,
+				TransactionType:  "CASH_FLOW_PROJECTION_CREATE",
+				RecordID:         pID,
+				RecordTable:      "cimplrcorpsaas.cashflow_proposal",
+				AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
+				AuditIDColumn:    "proposal_id",
+				ActionType:       "CREATE",
+				Amount:           0,
+				SubmittedBy:      userID,
+				SubmittedByEmail: requestedBy,
+				MatrixID:         matrixID,
+			})
+		}(proposalID, uploadMatrixID)
 
 		api.RespondEnvelopeSuccessCompat(w, "V2 Proposal, items, projections & audit committed successfully", map[string]interface{}{
 			"proposal_id":   proposalID,

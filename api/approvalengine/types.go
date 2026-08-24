@@ -115,13 +115,13 @@ type InstanceSummary struct {
 
 // EyeActionDetail is one approve/reject/escalate event within an eye.
 type EyeActionDetail struct {
-	ActionID    string
-	ActorEmail  string
-	ActorRoleID string
-	ActionType  string
-	Comment     string
-	ActedAt     time.Time
-	IsSystem    bool
+	ActionID    string    `json:"action_id"`
+	ActorEmail  string    `json:"actor_email"`
+	ActorRoleID string    `json:"actor_role_id"`
+	ActionType  string    `json:"action_type"`
+	Comment     string    `json:"comment"`
+	ActedAt     time.Time `json:"acted_at"`
+	IsSystem    bool      `json:"is_system"`
 }
 
 // EyeDetail is the full state of one eye including all actions taken.

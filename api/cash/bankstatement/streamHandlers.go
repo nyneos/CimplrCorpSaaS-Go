@@ -1071,7 +1071,7 @@ func CommitHandler(pool *pgxpool.Pool) http.Handler {
 			commitPeriodEnd = strings.TrimSpace(*payload.Clean.Metadata.PeriodEnd)
 		}
 		commitEntityID := lookupEntityIDForAccount(ctx, pool, accountNumber)
-		if !runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
+		if ok, _ := runtime.EnforceWithMatrix(ctx, w, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "BANK_STATEMENT",
@@ -1089,7 +1089,7 @@ func CommitHandler(pool *pgxpool.Pool) http.Handler {
 				ClosingBalance:       payload.Clean.Metadata.ClosingBalance,
 				TotalTransactions:    len(payload.Clean.Transactions),
 			}, "CREATE"),
-		}) {
+		}); !ok {
 			return
 		}
 

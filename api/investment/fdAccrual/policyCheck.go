@@ -42,6 +42,27 @@ func fdAccrualEnforce(
 	})
 }
 
+func fdAccrualEnforceMatrix(
+	ctx context.Context,
+	w http.ResponseWriter,
+	r *http.Request,
+	pool *pgxpool.Pool,
+	cc enforceCtx,
+	fields map[string]interface{},
+) (bool, string) {
+	return runtime.EnforceWithMatrix(ctx, w, r, pool, runtime.EnforceInput{
+		EventCode:        cc.EventCode,
+		ModuleCode:       common.ModuleInvestmentFD,
+		SubModule:        fdSubAccrual,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
+		Fields:           fields,
+		RequireVariables: false,
+	})
+}
+
 func fdAccrualEnforceInline(
 	ctx context.Context,
 	r *http.Request,
@@ -71,6 +92,27 @@ func fdAccrualSchedEnforce(
 	fields map[string]interface{},
 ) bool {
 	return runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
+		EventCode:        cc.EventCode,
+		ModuleCode:       common.ModuleInvestmentFD,
+		SubModule:        fdSubAccrualSched,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
+		Fields:           fields,
+		RequireVariables: false,
+	})
+}
+
+func fdAccrualSchedEnforceMatrix(
+	ctx context.Context,
+	w http.ResponseWriter,
+	r *http.Request,
+	pool *pgxpool.Pool,
+	cc enforceCtx,
+	fields map[string]interface{},
+) (bool, string) {
+	return runtime.EnforceWithMatrix(ctx, w, r, pool, runtime.EnforceInput{
 		EventCode:        cc.EventCode,
 		ModuleCode:       common.ModuleInvestmentFD,
 		SubModule:        fdSubAccrualSched,

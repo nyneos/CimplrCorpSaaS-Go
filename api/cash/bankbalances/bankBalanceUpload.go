@@ -485,7 +485,7 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		if ok, _ := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreUpload,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "BANK_BALANCE",
@@ -494,7 +494,7 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/cash/bank-balances/upload",
 			DefaultBlockMessage: "Bank balance upload blocked by policy",
 			Fields:              map[string]interface{}{"file_count": len(r.MultipartForm.File)},
-		}) {
+		}); !ok {
 			return
 		}
 

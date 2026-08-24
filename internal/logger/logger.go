@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -182,7 +181,6 @@ type LoggerService struct {
 	maxFileBytes  int64
 	retentionDays int
 	folderPath    string
-	dbLogger      *log.Logger
 }
 
 func NewLoggerService(config map[string]interface{}) *LoggerService {
@@ -236,10 +234,15 @@ func (l *LoggerService) Start() error {
 	l.file = file
 	l.dbFile = dbFile
 	l.currentLog = logFile
+	l.currentDBLog = dbLogFile
 
 	multiWriter := io.MultiWriter(file, os.Stdout)
 	instance.SetOutput(multiWriter)
 	instance.WithField("log_file", logFile).Info("[LoggerService] Started")
+
+	// db_*.log gets structured JSON only (no stdout) — console visibility for
+	// DB queries comes from DBTracer's separate colorized print, not this file.
+	SetDBOutput(dbFile)
 
 	l.wg.Add(1)
 	go l.backgroundWorker()
@@ -256,6 +259,10 @@ func (l *LoggerService) Stop() error {
 		instance.Info("[LoggerService] Stopping")
 		// Fall back to stdout before closing so late-running goroutines don't hit a closed fd.
 		instance.SetOutput(os.Stdout)
+		SetDBOutput(io.Discard)
+		if l.dbFile != nil {
+			l.dbFile.Close()
+		}
 		return l.file.Close()
 	}
 	return nil
@@ -277,11 +284,12 @@ func (l *LoggerService) rotateIfNeeded() error {
 	if l.file == nil {
 		return nil
 	}
-	info, err := l.file.Stat()
-	if err != nil {
-		return err
+	if l.maxFileBytes <= 0 {
+		return nil
 	}
-	if info.Size() >= l.maxFileBytes && l.maxFileBytes > 0 {
+	if info, err := l.file.Stat(); err != nil {
+		return err
+	} else if info.Size() >= l.maxFileBytes {
 		newLog := l.nextLogFileName()
 		file, err := os.OpenFile(newLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 		if err != nil {
@@ -294,6 +302,25 @@ func (l *LoggerService) rotateIfNeeded() error {
 		l.currentLog = newLog
 		old.Close()
 		instance.WithField("log_file", newLog).Info("[LoggerService] Rotated log file")
+	}
+
+	if l.dbFile == nil {
+		return nil
+	}
+	if info, err := l.dbFile.Stat(); err != nil {
+		return err
+	} else if info.Size() >= l.maxFileBytes {
+		newDBLog := l.nextDBLogFileName()
+		dbFile, err := os.OpenFile(newDBLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		SetDBOutput(dbFile)
+		old := l.dbFile
+		l.dbFile = dbFile
+		l.currentDBLog = newDBLog
+		old.Close()
+		instance.WithField("db_log_file", newDBLog).Info("[LoggerService] Rotated db log file")
 	}
 	return nil
 }
@@ -360,16 +387,6 @@ func (l *LoggerService) zipAndCleanOldLogs() {
 
 func (l *LoggerService) LogAudit(msg string) {
 	LogAudit("%s", msg)
-}
-
-func (l *LoggerService) LogDBf(format string, args ...interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.dbLogger != nil {
-		l.dbLogger.Printf(format, args...)
-		return
-	}
-	log.Printf(format, args...)
 }
 
 var GlobalLogger *LoggerService

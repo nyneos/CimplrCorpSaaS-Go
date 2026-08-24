@@ -3,6 +3,7 @@ package fdRateNegotiation
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/policyengine/common"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,9 +22,10 @@ const selectionAuditAction = "EDIT"
 const selectionAuditStatus = "PENDING_EDIT_APPROVAL"
 
 type selectionPayload struct {
-	RateRequestID    string `json:"rate_request_id"`
-	SelectedOfferID  string `json:"selected_offer_id"`
-	SelectionRemarks string `json:"selection_remarks"`
+	RateRequestID    string   `json:"rate_request_id"`
+	SelectedOfferID  string   `json:"selected_offer_id"`
+	SelectionRemarks string   `json:"selection_remarks"`
+	ComparedOfferIDs []string `json:"compared_offer_ids,omitempty"`
 }
 
 type linkBookingPayload struct {
@@ -68,16 +70,18 @@ func SubmitSelection(pool *pgxpool.Pool) http.HandlerFunc {
 			oldOfferID *string
 			oldRemarks *string
 			amount     float64
+			entityID   string
 		)
 		err = tx.QueryRow(ctx, `
 			SELECT request_status,
 				selected_offer_id::text,
 				selection_remarks,
-				COALESCE(proposed_fd_amount,0)
+				COALESCE(proposed_fd_amount,0),
+				COALESCE(entity_id,'')
 			FROM investment.fd_rate_negotiation
 			WHERE rate_request_id = $1::uuid AND COALESCE(is_deleted,false)=false
 			FOR UPDATE`, req.RateRequestID).Scan(
-			&oldStatus, &oldOfferID, &oldRemarks, &amount,
+			&oldStatus, &oldOfferID, &oldRemarks, &amount, &entityID,
 		)
 		if err != nil {
 			if err == pgx.ErrNoRows {
@@ -113,6 +117,24 @@ func SubmitSelection(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if strings.ToUpper(strings.TrimSpace(offerStatus)) != "APPROVED" {
 			api.RespondWithError(w, http.StatusBadRequest, "Only APPROVED offers can be selected for comparison")
+			return
+		}
+
+		selOK, selMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "SubmitSelection",
+			APIPath:     "/investment/fd/rate-negotiation/selection/submit",
+			EntityCode:  entityID,
+			Actor:       userEmail,
+		}, map[string]interface{}{
+			"rate_request_id":    req.RateRequestID,
+			"entity_id":          entityID,
+			"entity_code":        entityID,
+			"proposed_fd_amount": amount,
+			"selected_offer_id":  req.SelectedOfferID,
+			"request_status":     oldStatus,
+		})
+		if !selOK {
 			return
 		}
 
@@ -183,13 +205,47 @@ func SubmitSelection(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		comparedSet := map[string]struct{}{}
+		for _, id := range req.ComparedOfferIDs {
+			if id = strings.TrimSpace(id); id != "" {
+				comparedSet[id] = struct{}{}
+			}
+		}
+		comparedSet[req.SelectedOfferID] = struct{}{}
+		comparedIDs := make([]string, 0, len(comparedSet))
+		for id := range comparedSet {
+			comparedIDs = append(comparedIDs, id)
+		}
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO investment.fd_rate_selection_comparison (
+				selection_rate_request_id, selected_offer_id, compared_offer_id,
+				compared_rate_request_id, bank_id, bank_name,
+				offered_interest_rate, effective_yield, is_selected,
+				created_by
+			)
+			SELECT
+				$1::uuid, $2::uuid, o.offer_id,
+				o.rate_request_id, o.bank_id, o.bank_name,
+				o.offered_interest_rate, o.effective_yield, (o.offer_id = $2::uuid),
+				$3
+			FROM investment.fd_rate_offer o
+			WHERE o.offer_id = ANY($4::uuid[])
+			  AND COALESCE(o.is_deleted,false) = false`,
+			req.RateRequestID, req.SelectedOfferID, userEmail, comparedIDs,
+		)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Comparison trail insert failed")
+			return
+		}
+
 		if err = tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed")
 			return
 		}
 
 		userID := api.GetUserIDFromCtx(r.Context())
-		fireRateNegotiationInstance(pool, req.RateRequestID, userID, userEmail, "EDIT", amount)
+		fireRateNegotiationInstance(pool, req.RateRequestID, userID, userEmail, "EDIT", selMatrixID, amount)
 
 		outBankID, outBankName := "", ""
 		if bankID != nil {
@@ -273,6 +329,18 @@ func LinkBooking(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Booking link failed: %v", err))
+			return
+		}
+
+		// Stamp bidirectional link: booking → rate request (demo conversion path).
+		if _, err = tx.Exec(ctx, `
+			UPDATE investment.fd_booking_request
+			SET rate_request_id = $1::uuid
+			WHERE booking_id = $2
+			  AND COALESCE(is_deleted, false) = false`,
+			req.RateRequestID, strings.TrimSpace(req.BookingID),
+		); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Stamp booking rate_request_id failed: %v", err))
 			return
 		}
 

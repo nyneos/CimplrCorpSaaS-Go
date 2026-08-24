@@ -281,7 +281,7 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_MASTER_CREATE",
 				RecordID: cpID, RecordTable: constants.ErrCounterpartyMasterTable,
 				AuditTable: constants.ErrAuditCounterpartyMasterTable, AuditIDColumn: "counterparty_id",
-				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail,
+				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 			})
 		}(counterpartyID, req.UserID, userEmail)
 
@@ -420,7 +420,7 @@ func CreateCounterpartyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_MASTER_CREATE",
 					RecordID: id, RecordTable: constants.ErrCounterpartyMasterTable,
 					AuditTable: constants.ErrAuditCounterpartyMasterTable, AuditIDColumn: "counterparty_id",
-					ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail,
+					ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 				})
 			}(cpID, req.UserID, userEmail)
 		}
@@ -594,7 +594,7 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_MASTER_EDIT",
 				RecordID: cpID, RecordTable: constants.ErrCounterpartyMasterTable,
 				AuditTable: constants.ErrAuditCounterpartyMasterTable, AuditIDColumn: "counterparty_id",
-				ActionType: "EDIT", SubmittedBy: uID, SubmittedByEmail: uEmail,
+				ActionType: "EDIT", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 			})
 		}(req.CounterpartyID, req.UserID, userEmail)
 

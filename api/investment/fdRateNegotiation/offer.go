@@ -171,10 +171,10 @@ func CreateOffer(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, "only RESPONSE_RECEIVED communications can be wired to an offer")
 				return
 			}
-		} else {
-			api.RespondWithError(w, http.StatusBadRequest, "communication_id is required — pick a received bank response")
-			return
 		}
+		// communication_id is optional: an offer can be captured purely manually
+		// (bank told the user the rate directly) without a prior Bank Communication
+		// receive step. communication_source still records how the offer was learned.
 
 		ref, err := nextOfferRef(ctx, tx)
 		if err != nil {

@@ -31,7 +31,7 @@ const amountTolerance = 0.01
 // newly created or edited MF investment proposal, asynchronously.
 // submittedByUserID must be the session's numeric user_id (hard FK to
 // public.users(id) — never a display name or email).
-func submitMFProposalForApproval(pool *pgxpool.Pool, proposalID, entityName, submittedByUserID, actorEmail, txType string, amount float64) {
+func submitMFProposalForApproval(pool *pgxpool.Pool, proposalID, entityName, submittedByUserID, actorEmail, txType, matrixID string, amount float64) {
 	go func() {
 		bgCtx := context.Background()
 		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
@@ -46,6 +46,7 @@ func submitMFProposalForApproval(pool *pgxpool.Pool, proposalID, entityName, sub
 			Amount:           amount,
 			SubmittedBy:      submittedByUserID,
 			SubmittedByEmail: actorEmail,
+			MatrixID:         matrixID,
 		}); err != nil {
 			api.LogError("[MFProposal] approvalengine.CreateInstance failed for proposal %s (%s): %v", proposalID, txType, err)
 		}
@@ -107,6 +108,7 @@ func loadMFProposalApprovalWorkflow(ctx context.Context, pool *pgxpool.Pool, pro
 				Amount:           totalAmount,
 				SubmittedBy:      submittedByUserID,
 				SubmittedByEmail: submittedByEmail,
+				MatrixID:         "",
 			})
 			if instErr != nil {
 				api.LogError("[MFProposal] Self-heal CreateInstance for %s: %v", proposalID, instErr)
@@ -323,14 +325,15 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !mfEnforce(ctx, w, r, pool, enforceCtx{
+		ok, createMatrixID := mfEnforceMatrix(ctx, w, r, pool, enforceCtx{
 			EventCode:   common.TriggerPreCreate,
 			HandlerName: "CreateInvestmentProposal",
 			APIPath:     "/investment/proposal/create",
 			SubModule:   mfSubProposal,
 			EntityCode:  req.EntityName,
 			Actor:       userEmail,
-		}, buildMFProposalPolicyFields(mfProposalRowFromCreate(&req))) {
+		}, buildMFProposalPolicyFields(mfProposalRowFromCreate(&req)))
+		if !ok {
 			return
 		}
 
@@ -364,7 +367,7 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Fire approval-matrix engine instance (async, no-op if engine disabled or no matrix)
-		submitMFProposalForApproval(pool, proposalID, req.EntityName, req.UserID, userEmail, "MF_PROPOSAL_CREATE", req.TotalAmount)
+		submitMFProposalForApproval(pool, proposalID, req.EntityName, req.UserID, userEmail, "MF_PROPOSAL_CREATE", createMatrixID, req.TotalAmount)
 
 		go func() {
 			payload := BuildProposalNotifPayload(context.Background(), pool, []string{proposalID}, constants.AuditActionCreate, userEmail)
@@ -421,14 +424,14 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !mfEnforce(ctx, w, r, pool, enforceCtx{
+		if ok, _ := mfEnforceMatrix(ctx, w, r, pool, enforceCtx{
 			EventCode:   common.TriggerPreEdit,
 			HandlerName: "UpdateInvestmentProposal",
 			APIPath:     "/investment/proposal/update",
 			SubModule:   mfSubProposal,
 			EntityCode:  req.ProposalID,
 			Actor:       userEmail,
-		}, buildMFProposalPolicyFields(mfProposalRowFromUpdate(&req))) {
+		}, buildMFProposalPolicyFields(mfProposalRowFromUpdate(&req))); !ok {
 			return
 		}
 
@@ -898,23 +901,26 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		deleteMatrixByID := map[string]string{}
 		for _, id := range readyForDelete {
 			proposalRow, loadErr := loadMFProposalRow(ctx, pool, id)
 			if loadErr != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, id+": load failed: "+loadErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pool, enforceCtx{
+			ok, pmsg, tID := mfEnforceInlineWithMatrix(ctx, r, pool, enforceCtx{
 				EventCode:   common.TriggerPreDelete,
 				HandlerName: "BulkDeleteProposals",
 				APIPath:     "/investment/proposal/delete-request",
 				SubModule:   mfSubProposal,
 				EntityCode:  id,
 				Actor:       userEmail,
-			}, buildMFProposalPolicyFields(proposalRow)); !ok {
+			}, buildMFProposalPolicyFields(proposalRow))
+			if !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
+			deleteMatrixByID[id] = tID
 		}
 
 		if _, err := tx.Exec(ctx, `
@@ -944,7 +950,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[MFProposal] CancelPendingInstances for delete failed for %s: %v", id, err)
 			}
 			proposalRow, _ := loadMFProposalRow(context.Background(), pool, id)
-			submitMFProposalForApproval(pool, id, proposalRow.EntityName, req.UserID, userEmail, "MF_PROPOSAL_DELETE", proposalRow.TotalAmount)
+			submitMFProposalForApproval(pool, id, proposalRow.EntityName, req.UserID, userEmail, "MF_PROPOSAL_DELETE", deleteMatrixByID[id], proposalRow.TotalAmount)
 		}
 
 		response := ProposalBulkDeleteResponse{

@@ -26,6 +26,53 @@ const (
 	amountTolerance = 1.0  // ₹1
 )
 
+// resolveConfirmationRateBaseline prefers the negotiated selected-offer rate when the
+// booking is linked via rate_request_id. Falls back to bookedRate when no link or rate.
+func resolveConfirmationRateBaseline(ctx context.Context, pool *pgxpool.Pool, bookingID string, bookedRate float64) float64 {
+	if pool == nil || strings.TrimSpace(bookingID) == "" {
+		return bookedRate
+	}
+	var rateRequestID *string
+	var negotiated float64
+	err := pool.QueryRow(ctx, `
+		SELECT br.rate_request_id::text,
+			COALESCE(NULLIF(o.effective_yield, 0), o.offered_interest_rate, 0)
+		FROM investment.fd_booking_request br
+		LEFT JOIN investment.fd_rate_negotiation n
+			ON n.rate_request_id = br.rate_request_id
+			AND COALESCE(n.is_deleted, false) = false
+		LEFT JOIN investment.fd_rate_offer o
+			ON o.offer_id = n.selected_offer_id
+			AND COALESCE(o.is_deleted, false) = false
+		WHERE br.booking_id = $1 AND COALESCE(br.is_deleted, false) = false`,
+		bookingID,
+	).Scan(&rateRequestID, &negotiated)
+	if err != nil || rateRequestID == nil || strings.TrimSpace(*rateRequestID) == "" || negotiated <= 0 {
+		return bookedRate
+	}
+	return negotiated
+}
+
+func asFloat64(v interface{}) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int32:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case string:
+		f, _ := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		return f
+	default:
+		return 0
+	}
+}
+
 // ─── coerceDateValue ──────────────────────────────────────────────────────────
 
 // coerceDateValue converts various date input representations to either

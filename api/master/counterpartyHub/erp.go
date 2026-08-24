@@ -205,7 +205,7 @@ func CreateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "ERP_SYSTEM_CREATE",
 				RecordID: id, RecordTable: "apibox.erp_system_master",
 				AuditTable: "apibox.audit_erp_system", AuditIDColumn: "erp_system_id",
-				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail,
+				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 			})
 		}(erpID, req.UserID, userEmail)
 

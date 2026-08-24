@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -247,6 +248,38 @@ func GetInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID strin
 	}
 
 	return &d, nil
+}
+
+// LookupLatestInstanceID returns the newest non-deleted approval instance for a
+// business record. moduleCode is optional — when empty, any module matches.
+// Used by GET /uam/instance/detail when the caller has record_id (cash/fd/mf/fx)
+// instead of instance_id.
+func LookupLatestInstanceID(ctx context.Context, pool *pgxpool.Pool, moduleCode, recordID string) (string, error) {
+	recordID = strings.TrimSpace(recordID)
+	if recordID == "" {
+		return "", fmt.Errorf("record_id is required")
+	}
+	q := `
+		SELECT instance_id
+		FROM uam.approval_instance
+		WHERE record_id = $1
+		  AND is_deleted = false`
+	args := []any{recordID}
+	if code := strings.TrimSpace(moduleCode); code != "" {
+		q += ` AND module_code = $2`
+		args = append(args, code)
+	}
+	q += ` ORDER BY submitted_at DESC NULLS LAST, instance_id DESC LIMIT 1`
+
+	var instanceID string
+	err := pool.QueryRow(ctx, q, args...).Scan(&instanceID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", fmt.Errorf("instance not found for record_id=%s", recordID)
+		}
+		return "", fmt.Errorf("LookupLatestInstanceID: %w", err)
+	}
+	return instanceID, nil
 }
 
 // ─── GetRichInstanceDetail ────────────────────────────────────────────────────

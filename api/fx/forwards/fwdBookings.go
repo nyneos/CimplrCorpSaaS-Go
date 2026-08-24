@@ -637,23 +637,50 @@ func UploadForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_UPLOAD", uploadedIDs, uploadedBy)
 
 			makerEmail := ""
+			userID := r.FormValue(constants.KeyUserID)
 			for _, s := range auth.GetActiveSessions() {
-				if s.UserID == r.FormValue(constants.KeyUserID) {
+				if s.UserID == userID {
 					makerEmail = s.Email
 					break
 				}
 			}
-			go func(ids []string, email string) {
+			createMatrices := make(map[string]string, len(uploadedIDs))
+			createEntities := make(map[string]string, len(uploadedIDs))
+			for _, id := range uploadedIDs {
+				row, rowErr := loadForwardBookingRow(ctx, pool, id)
+				if rowErr != nil {
+					continue
+				}
+				createEntities[id] = row.EntityLevel0
+				okPolicy, _, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+					EventCode:           common.TriggerPreCreate,
+					ModuleCode:          common.ModuleFX,
+					SubModule:           "FORWARD_BOOKING",
+					EntityCode:          row.EntityLevel0,
+					ActorUserID:         userID,
+					HandlerName:         "UploadForwardBookingsMulti",
+					APIPath:             "/fx/forwards/upload-multi",
+					DefaultBlockMessage: "Forward booking create blocked by policy",
+					Fields:              buildForwardBookingPolicyFields(row),
+				})
+				if !okPolicy {
+					continue
+				}
+				createMatrices[id] = tID
+			}
+			go func(ids []string, email string, matrices, entities map[string]string) {
 				bgCtx := context.Background()
 				for _, id := range ids {
 					_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 						ModuleCode:       "FX",
+						EntityCode:       entities[id],
 						TransactionType:  "FX_FORWARD_CREATE",
 						RecordID:         id,
+						MatrixID:         matrices[id],
 						SubmittedByEmail: email,
 					})
 				}
-			}(uploadedIDs, makerEmail)
+			}(uploadedIDs, makerEmail, createMatrices, createEntities)
 		}
 		respondEnvelopeSuccess(w, "Forward bookings uploaded successfully", map[string]interface{}{
 			"results": results,

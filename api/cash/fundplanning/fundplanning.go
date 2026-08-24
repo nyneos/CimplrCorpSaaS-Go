@@ -25,7 +25,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 )
 
-func submitFundPlanForApproval(pgxPool *pgxpool.Pool, groupID, entityName, submittedByUserID, actorEmail, actionType string, amount float64) {
+func submitFundPlanForApproval(pgxPool *pgxpool.Pool, groupID, entityName, submittedByUserID, actorEmail, actionType string, amount float64, matrixID string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -42,6 +42,7 @@ func submitFundPlanForApproval(pgxPool *pgxpool.Pool, groupID, entityName, submi
 			Amount:           amount,
 			SubmittedBy:      submittedByUserID,
 			SubmittedByEmail: actorEmail,
+			MatrixID:         matrixID,
 		})
 		if err != nil {
 			api.LogError("[FundPlanning] Failed to create approval instance for %s %s: %v", actionType, groupID, err)
@@ -1112,7 +1113,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		ok, triggerMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "FUND_PLANNING",
@@ -1122,7 +1123,8 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/cash/fund-planning/create",
 			DefaultBlockMessage: "Fund plan create blocked by policy",
 			Fields:              buildFundPlanningPolicyFields(fundPlanningRowFromCreateRequest(planID, req)),
-		}) {
+		})
+		if !ok {
 			return
 		}
 
@@ -1166,7 +1168,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			
 			for i, group := range req.Groups {
 				if dbGroupID, ok := results[i]["group_id"].(string); ok {
-					submitFundPlanForApproval(pgxPool, dbGroupID, req.EntityName, req.UserID, userEmail, "FUND_PLANNING_CREATE", group.TotalAmount)
+					submitFundPlanForApproval(pgxPool, dbGroupID, req.EntityName, req.UserID, userEmail, "FUND_PLANNING_CREATE", group.TotalAmount, triggerMatrixID)
 				}
 			}
 
@@ -1998,7 +2000,7 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		ok, triggerMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreDelete,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "FUND_PLANNING",
@@ -2007,7 +2009,8 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/cash/fund-planning/bulk-delete",
 			DefaultBlockMessage: "Fund plan delete blocked by policy",
 			Fields:              buildFundPlanningPolicyFields(fundPlanRow),
-		}) {
+		})
+		if !ok {
 			return
 		}
 
@@ -2092,7 +2095,7 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		
 		for _, g := range groupsToDelete {
-			submitFundPlanForApproval(pgxPool, g.groupID, g.entityName, req.UserID, userEmail, "FUND_PLANNING_DELETE", g.totalAmt)
+			submitFundPlanForApproval(pgxPool, g.groupID, g.entityName, req.UserID, userEmail, "FUND_PLANNING_DELETE", g.totalAmt, triggerMatrixID)
 		}
 
 		result := map[string]interface{}{

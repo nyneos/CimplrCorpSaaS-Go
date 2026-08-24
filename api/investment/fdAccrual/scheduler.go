@@ -158,13 +158,14 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			PeriodCoverage:        req.PeriodCoverage,
 			CreatedBy:             userEmail,
 		}
-		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, enforceCtx{
+		schedCreateOK, schedCreateMatrixID := fdAccrualSchedEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{
 			EventCode:   common.TriggerPreCreate,
 			HandlerName: "CreateScheduleConfig",
 			APIPath:     "/investment/fd/accrual/schedule/create",
 			EntityCode:  req.EntityID,
 			Actor:       userEmail,
-		}, buildFDAccrualSchedulePolicyFields(schedDraftRow)) {
+		}, buildFDAccrualSchedulePolicyFields(schedDraftRow))
+		if !schedCreateOK {
 			return
 		}
 
@@ -213,7 +214,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"is_active":          false,
 			"processing_status":  constants.StatusPendingApproval,
 		})
-		go func(cfgID, entID, uID, email string) {
+		go func(cfgID, entID, uID, email, matrixID string) {
 			defer func() { recover() }() //nolint:errcheck
 			bg := context.Background()
 			notifcatalog.TriggerNotification(bg, pgxPool, "/investment/fd/accrual/schedule/create", cfgID, map[string]interface{}{
@@ -231,8 +232,9 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ActionType:       "CREATE",
 				SubmittedBy:      uID,
 				SubmittedByEmail: email,
+				MatrixID:         matrixID,
 			})
-		}(configID, req.EntityID, req.UserID, userEmail)
+		}(configID, req.EntityID, req.UserID, userEmail, schedCreateMatrixID)
 		api.LogInfo("[FDAccrual] CreateScheduleConfig: config_id=%s entity=%s freq=%s", configID, req.EntityID, req.ScheduleFrequency)
 	}
 }
@@ -329,13 +331,14 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		updatedRow := applyFDAccrualScheduleEdits(updateBaseRow, req.Fields)
-		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, enforceCtx{
+		schedEditOK, schedEditMatrixID := fdAccrualSchedEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{
 			EventCode:   common.TriggerPreEdit,
 			HandlerName: "UpdateScheduleConfig",
 			APIPath:     "/investment/fd/accrual/schedule/update",
 			EntityCode:  entityID,
 			Actor:       userEmail,
-		}, buildFDAccrualSchedulePolicyFields(updatedRow)) {
+		}, buildFDAccrualSchedulePolicyFields(updatedRow))
+		if !schedEditOK {
 			return
 		}
 
@@ -403,7 +406,7 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"updated":           true,
 			"processing_status": constants.StatusPendingEditApproval,
 		})
-		go func(cfgID, entID, uID, email string) {
+		go func(cfgID, entID, uID, email, matrixID string) {
 			defer func() { recover() }() //nolint:errcheck
 			bg := context.Background()
 			notifcatalog.TriggerNotification(bg, pgxPool, "/investment/fd/accrual/schedule/update", cfgID, map[string]interface{}{
@@ -420,8 +423,9 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ActionType:       "EDIT",
 				SubmittedBy:      uID,
 				SubmittedByEmail: email,
+				MatrixID:         matrixID,
 			})
-		}(req.ConfigID, entityID, req.UserID, userEmail)
+		}(req.ConfigID, entityID, req.UserID, userEmail, schedEditMatrixID)
 		api.LogInfo("[FDAccrual] UpdateScheduleConfig: config_id=%s by=%s", req.ConfigID, userEmail)
 	}
 }
@@ -1137,13 +1141,14 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+pfErr.Error())
 			return
 		}
-		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, enforceCtx{
+		schedDeleteOK, schedDeleteMatrixID := fdAccrualSchedEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{
 			EventCode:   common.TriggerPreDelete,
 			HandlerName: "DeleteScheduleConfig",
 			APIPath:     "/investment/fd/accrual/schedule/delete",
 			EntityCode:  entityID,
 			Actor:       userEmail,
-		}, buildFDAccrualSchedulePolicyFields(deleteRow)) {
+		}, buildFDAccrualSchedulePolicyFields(deleteRow))
+		if !schedDeleteOK {
 			return
 		}
 
@@ -1167,7 +1172,7 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"config_id":         req.ConfigID,
 			"processing_status": constants.StatusPendingDeleteApproval,
 		})
-		go func(cfgID, entID, uID, email string) {
+		go func(cfgID, entID, uID, email, matrixID string) {
 			defer func() { recover() }() //nolint:errcheck
 			bg := context.Background()
 			notifcatalog.TriggerNotification(bg, pgxPool, "/investment/fd/accrual/schedule/delete", cfgID, map[string]interface{}{
@@ -1184,8 +1189,9 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ActionType:       "DELETE",
 				SubmittedBy:      uID,
 				SubmittedByEmail: email,
+				MatrixID:         matrixID,
 			})
-		}(req.ConfigID, entityID, req.UserID, userEmail)
+		}(req.ConfigID, entityID, req.UserID, userEmail, schedDeleteMatrixID)
 		api.LogInfo("[FDAccrual] DeleteScheduleConfig: config_id=%s by=%s", req.ConfigID, userEmail)
 	}
 }

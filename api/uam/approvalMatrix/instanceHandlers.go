@@ -166,6 +166,11 @@ func GetMySubmissions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // ─── GetInstanceDetail ────────────────────────────────────────────────────────
 // GET /uam/instance/detail?instance_id=INST-...&user_id=USR-...
+// GET /uam/instance/detail?record_id=...&module_code=CASH|FIXED_DEPOSIT|INVESTMENT_MF|FX
+//
+// instance_id is preferred. When it is omitted, the newest matching instance is
+// resolved from record_id (optionally scoped by module_code) so cash / FD / MF /
+// FX audit pages can load the matrix without a pre-joined instance id.
 //
 // Returns the full approval workflow enriched with per-eye approver identities:
 //
@@ -200,14 +205,29 @@ func GetInstanceDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		instanceID := r.URL.Query().Get("instance_id")
-		if instanceID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "instance_id is required")
-			return
-		}
+		instanceID := strings.TrimSpace(r.URL.Query().Get("instance_id"))
+		recordID := strings.TrimSpace(r.URL.Query().Get("record_id"))
+		moduleCode := strings.TrimSpace(r.URL.Query().Get("module_code"))
 		viewerUserID := r.URL.Query().Get("user_id") // optional
 
 		ctx := r.Context()
+		if instanceID == "" {
+			if recordID == "" {
+				api.RespondWithError(w, http.StatusBadRequest, "instance_id or record_id is required")
+				return
+			}
+			resolved, lookupErr := approvalengine.LookupLatestInstanceID(ctx, pgxPool, moduleCode, recordID)
+			if lookupErr != nil {
+				if strings.Contains(lookupErr.Error(), "not found") {
+					api.RespondWithError(w, http.StatusNotFound, lookupErr.Error())
+					return
+				}
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve instance: "+lookupErr.Error())
+				return
+			}
+			instanceID = resolved
+		}
+
 		detail, err := approvalengine.GetRichInstanceDetail(ctx, pgxPool, instanceID, viewerUserID)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
@@ -218,6 +238,6 @@ func GetInstanceDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", detail)
+		api.RespondEnvelopeSuccess(w, "Instance detail fetched", detail)
 	}
 }

@@ -72,6 +72,7 @@ func HedgeLinksDetails(pool *pgxpool.Pool) http.HandlerFunc {
 					FROM public.auditactionhedgelink a
 					WHERE a.exposure_header_id = l.exposure_header_id::text
 					  AND a.booking_id = l.booking_id::text
+					  AND a.actiontype IN ('CREATE','EDIT','DELETE')
 					ORDER BY a.requested_at DESC NULLS LAST
 					LIMIT 1
 				), CASE WHEN COALESCE(l.is_active, false) THEN 'APPROVED' ELSE 'PENDING_APPROVAL' END) AS processing_status,

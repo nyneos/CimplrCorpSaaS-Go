@@ -26,6 +26,8 @@ func RegisterFDRateNegotiationRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
 		mid(http.HandlerFunc(UpdateRateRequest(pool))))
 	mux.Handle("/investment/fd/rate-negotiation/all",
 		mid(http.HandlerFunc(ListRateRequests(pool))))
+	mux.Handle("/investment/fd/rate-negotiation/list-comparable",
+		mid(http.HandlerFunc(ListComparableRateRequests(pool))))
 	mux.Handle("/investment/fd/rate-negotiation/detail",
 		mid(http.HandlerFunc(GetRateRequestDetail(pool))))
 	mux.Handle("/investment/fd/rate-negotiation/audit",
@@ -78,4 +80,10 @@ func RegisterFDRateNegotiationRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
 		mid(http.HandlerFunc(DeleteOffers(pool))))
 	mux.Handle("/investment/fd/rate-negotiation/bank-exposure",
 		mid(http.HandlerFunc(BankExposure(pool))))
+	mux.Handle("/investment/fd/rate-negotiation/offer/list-approved",
+		mid(http.HandlerFunc(ListApprovedOffersByEntityBank(pool))))
+	mux.Handle("/investment/fd/rate-negotiation/communication/email/detail",
+		mid(http.HandlerFunc(GetCommunicationSentEmail(pool))))
+	mux.Handle("/investment/fd/rate-negotiation/selection/comparison-trail",
+		mid(http.HandlerFunc(ListSelectionComparisonTrail(pool))))
 }

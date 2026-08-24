@@ -197,7 +197,7 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "EXCHANGE_MASTER_CREATE",
 				RecordID: eid, RecordTable: "apibox.exchange_master",
 				AuditTable: "apibox.audit_exchange_master", AuditIDColumn: "exchange_id",
-				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail,
+				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 			})
 		}(exchangeID, req.UserID, userEmail)
 

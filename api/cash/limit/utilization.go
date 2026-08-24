@@ -82,7 +82,7 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "failed to load limit for policy check: "+perr.Error())
 			return
 		}
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		ok, triggerMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "LIMIT_UTILIZATION",
@@ -102,7 +102,8 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntryMode:       req.EntryMode,
 				Status:          "DRAFT",
 			}),
-		}) {
+		})
+		if !ok {
 			return
 		}
 
@@ -140,7 +141,7 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		submitLimitUtilizationForApproval(pgxPool, utilizationID, req.LimitID, req.UserID, requestedBy, "LIMIT_UTILIZATION_CREATE", req.UtilizedAmount)
+		submitLimitUtilizationForApproval(pgxPool, utilizationID, req.LimitID, req.UserID, requestedBy, "LIMIT_UTILIZATION_CREATE", req.UtilizedAmount, triggerMatrixID)
 
 		dmsevent.Fire(pgxPool, "CASH", "LIMIT_UTILIZATION", "POST_CREATE", []string{utilizationID}, requestedBy)
 
@@ -243,7 +244,7 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, result)
 				continue
 			}
-			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+			ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreCreate,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "LIMIT_UTILIZATION",
@@ -263,7 +264,8 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					EntryMode:       entryMode,
 					Status:          "DRAFT",
 				}), i),
-			}); !ok {
+			})
+			if !ok {
 				result["success"] = false
 				result["error"] = msg
 				results = append(results, result)
@@ -305,7 +307,7 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			submitLimitUtilizationForApproval(pgxPool, utilizationID, util.LimitID, req.UserID, requestedBy, "LIMIT_UTILIZATION_CREATE", util.UtilizedAmount)
+			submitLimitUtilizationForApproval(pgxPool, utilizationID, util.LimitID, req.UserID, requestedBy, "LIMIT_UTILIZATION_CREATE", util.UtilizedAmount, tID)
 
 			result["success"] = true
 			result["utilization_id"] = utilizationID
@@ -381,7 +383,7 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		mergedRow := applyLimitUtilizationEdits(existingRow, req.Fields)
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		ok, triggerMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "LIMIT_UTILIZATION",
@@ -390,7 +392,8 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/cash/utilization/update",
 			DefaultBlockMessage: "Limit utilization update blocked by policy",
 			Fields:              buildLimitUtilizationPolicyFields(mergedRow),
-		}) {
+		})
+		if !ok {
 			return
 		}
 
@@ -513,7 +516,7 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		submitLimitUtilizationForApproval(pgxPool, req.UtilizationID, limitForAudit, req.UserID, requestedBy, "LIMIT_UTILIZATION_EDIT", curUtilizedAmount)
+		submitLimitUtilizationForApproval(pgxPool, req.UtilizationID, limitForAudit, req.UserID, requestedBy, "LIMIT_UTILIZATION_EDIT", curUtilizedAmount, triggerMatrixID)
 
 		dmsevent.Fire(pgxPool, "CASH", "LIMIT_UTILIZATION", "POST_EDIT", []string{req.UtilizationID}, requestedBy)
 
@@ -576,7 +579,7 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+			ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "LIMIT_UTILIZATION",
@@ -585,7 +588,8 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				APIPath:             "/cash/utilization/delete",
 				DefaultBlockMessage: "Limit utilization delete blocked by policy",
 				Fields:              buildLimitUtilizationPolicyFields(policyRow),
-			}); !ok {
+			})
+			if !ok {
 				result["success"] = false
 				result["error"] = msg
 				results = append(results, result)
@@ -623,7 +627,7 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			submitLimitUtilizationForApproval(pgxPool, utilizationID, limitID, req.UserID, requestedBy, "LIMIT_UTILIZATION_DELETE", utilizedAmount)
+			submitLimitUtilizationForApproval(pgxPool, utilizationID, limitID, req.UserID, requestedBy, "LIMIT_UTILIZATION_DELETE", utilizedAmount, tID)
 
 			result["success"] = true
 			results = append(results, result)
@@ -669,6 +673,7 @@ func QueryAllUtilizations(ctx context.Context, pgxPool *pgxpool.Pool, rowLimit i
 				SELECT action_type, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment, reason
 				FROM cimplrcorpsaas.auditactionbanklimitutilization
 				WHERE utilization_id = u.utilization_id
+				  AND action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
@@ -677,6 +682,7 @@ func QueryAllUtilizations(ctx context.Context, pgxPool *pgxpool.Pool, rowLimit i
 				SELECT action_type, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment, reason
 				FROM cimplrcorpsaas.auditactionbanklimit
 				WHERE limit_id = l.limit_id
+				  AND action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) la ON TRUE
@@ -891,6 +897,7 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM cimplrcorpsaas.auditactionbanklimitutilization
 				WHERE utilization_id = u.utilization_id
+				  AND action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON a.processing_status = 'APPROVED'
@@ -899,6 +906,7 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM cimplrcorpsaas.auditactionbanklimit
 				WHERE limit_id = l.limit_id
+				  AND action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) la ON TRUE
@@ -1022,6 +1030,7 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM cimplrcorpsaas.auditactionbanklimitutilization
 				WHERE utilization_id = u.utilization_id
+				  AND action_type IN ('CREATE','EDIT','DELETE')
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON a.processing_status = 'APPROVED'
@@ -1202,9 +1211,9 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		sel := `SELECT DISTINCT ON (utilization_id) action_id, utilization_id, action_type 
-			FROM cimplrcorpsaas.auditactionbanklimitutilization 
-			WHERE utilization_id = ANY($1) 
+		sel := `SELECT DISTINCT ON (utilization_id) action_id, utilization_id, action_type
+			FROM cimplrcorpsaas.auditactionbanklimitutilization
+			WHERE utilization_id = ANY($1) AND action_type IN ('CREATE','EDIT','DELETE')
 			ORDER BY utilization_id, requested_at DESC`
 
 		rows, err := pgxPool.Query(ctx, sel, req.UtilizationIDs)
@@ -1276,8 +1285,12 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		// ── Approval-matrix engine: attempt engine-side approve first.
+		// ── Approval-matrix engine: attempt engine-side approve first. A blocked
+		// Reason (e.g. "not your turn in approval sequence") must exclude the
+		// record from the legacy fallback entirely — only a genuine "no matrix
+		// applies" case may fall through to the direct SQL stamp below.
 		engineActed := make(map[string]bool)
+		blocked := make(map[string]string)
 		for _, utilID := range req.UtilizationIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "CASH", RecordID: utilID,
@@ -1286,10 +1299,16 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[LimitUtilization] ActOnPendingOrDiagnose approve failed for %s: %v", map[string]interface{}{"utilization_id": utilID, "error": actionErr.Error()})
+				blocked[utilID] = actionErr.Error()
 				continue
 			}
 			if actionRes.Acted {
 				engineActed[utilID] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[LimitUtilization] cancelled stale approval instance for %s", utilID)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[LimitUtilization] engine blocked %s: %s", utilID, actionRes.Reason)
+				blocked[utilID] = actionRes.Reason
 			}
 		}
 
@@ -1297,12 +1316,12 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var legacyDeleteIDs []string
 		for _, id := range actionIDs {
 			uID := actionToUtilMap[id]
-			if !engineActed[uID] {
+			if !engineActed[uID] && blocked[uID] == "" {
 				legacyActionIDs = append(legacyActionIDs, id)
 			}
 		}
 		for _, id := range deleteIDs {
-			if !engineActed[id] {
+			if !engineActed[id] && blocked[id] == "" {
 				legacyDeleteIDs = append(legacyDeleteIDs, id)
 			}
 		}
@@ -1346,10 +1365,14 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			dmsevent.Fire(pgxPool, "CASH", "LIMIT_UTILIZATION", "POST_DELETE", deleted, checkerBy)
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"approved_count": len(actionIDs),
+		respApprove := map[string]interface{}{
+			"approved_count": len(actionIDs) - len(blocked),
 			"deleted":        deleted,
-		})
+		}
+		if len(blocked) > 0 {
+			respApprove["blocked"] = blocked
+		}
+		api.RespondWithPayload(w, true, "", respApprove)
 		// Notify: utilizations approved with FULL record data
 		capturedUser := req.UserID
 		capturedIDs := req.UtilizationIDs
@@ -1393,9 +1416,9 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		sel := `SELECT DISTINCT ON (utilization_id) action_id, utilization_id 
-			FROM cimplrcorpsaas.auditactionbanklimitutilization 
-			WHERE utilization_id = ANY($1) 
+		sel := `SELECT DISTINCT ON (utilization_id) action_id, utilization_id
+			FROM cimplrcorpsaas.auditactionbanklimitutilization
+			WHERE utilization_id = ANY($1) AND action_type IN ('CREATE','EDIT','DELETE')
 			ORDER BY utilization_id, requested_at DESC`
 
 		rows, err := pgxPool.Query(ctx, sel, req.UtilizationIDs)
@@ -1463,8 +1486,10 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		// ── Approval-matrix engine: attempt engine-side reject first.
+		// ── Approval-matrix engine: attempt engine-side reject first. A blocked
+		// Reason must exclude the record from the legacy fallback entirely.
 		engineActed := make(map[string]bool)
+		blocked := make(map[string]string)
 		for _, utilID := range req.UtilizationIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "CASH", RecordID: utilID,
@@ -1473,17 +1498,23 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[LimitUtilization] ActOnPendingOrDiagnose reject failed for %s: %v", map[string]interface{}{"utilization_id": utilID, "error": actionErr.Error()})
+				blocked[utilID] = actionErr.Error()
 				continue
 			}
 			if actionRes.Acted {
 				engineActed[utilID] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[LimitUtilization] cancelled stale approval instance for %s", utilID)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[LimitUtilization] engine blocked %s: %s", utilID, actionRes.Reason)
+				blocked[utilID] = actionRes.Reason
 			}
 		}
 
 		var legacyActionIDs []string
 		for _, id := range actionIDs {
 			uID := actionToUtilMap[id]
-			if !engineActed[uID] {
+			if !engineActed[uID] && blocked[uID] == "" {
 				legacyActionIDs = append(legacyActionIDs, id)
 			}
 		}
@@ -1507,9 +1538,13 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		dmsevent.Fire(pgxPool, "CASH", "LIMIT_UTILIZATION", "POST_REJECT", req.UtilizationIDs, checkerBy)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rejected_count": len(actionIDs),
-		})
+		respReject := map[string]interface{}{
+			"rejected_count": len(actionIDs) - len(blocked),
+		}
+		if len(blocked) > 0 {
+			respReject["blocked"] = blocked
+		}
+		api.RespondWithPayload(w, true, "", respReject)
 		// Notify: utilizations rejected with FULL record data
 		capturedUser := req.UserID
 		capturedIDs := req.UtilizationIDs
@@ -2045,7 +2080,7 @@ func DownloadSelectedUtilizationUploadFiles(pgxPool *pgxpool.Pool) http.HandlerF
 	}
 }
 
-func submitLimitUtilizationForApproval(pool *pgxpool.Pool, utilID, limitID, submittedByUserID, actorEmail, txType string, amount float64) {
+func submitLimitUtilizationForApproval(pool *pgxpool.Pool, utilID, limitID, submittedByUserID, actorEmail, txType string, amount float64, matrixID string) {
 	go func() {
 		bgCtx := context.Background()
 		
@@ -2069,6 +2104,7 @@ func submitLimitUtilizationForApproval(pool *pgxpool.Pool, utilID, limitID, subm
 			Amount:           amount,
 			SubmittedBy:      submittedByUserID,
 			SubmittedByEmail: actorEmail,
+			MatrixID:         matrixID,
 		}); err != nil {
 			api.LogError("[LimitUtilization] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"utilization_id": utilID, "tx_type": txType, "error": err.Error()})
 		}

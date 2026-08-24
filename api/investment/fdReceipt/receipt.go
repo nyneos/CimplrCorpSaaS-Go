@@ -474,7 +474,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{
+		createOK, createMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{
 			EventCode:   common.TriggerPreCreate,
 			HandlerName: "CreateReceipt",
 			APIPath:     "/investment/fd/receipt/create",
@@ -505,7 +505,8 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			ReceiptStatus:         "CAPTURED",
 			ReconcileStatus:       "PENDING",
 			IsActive:              true,
-		})) {
+		}))
+		if !createOK {
 			return
 		}
 
@@ -612,7 +613,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		api.LogInfo("[FDReceipt] Created receipt_id=%s fd=%s gross=%.4f tds=%.4f", receiptID, req.FdID, req.GrossInterestReceived, req.TdsAmountDeducted)
 
-		go func(rID, eID, uEmail string, amount float64) {
+		go func(rID, eID, uEmail, matrixID string, amount float64) {
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
@@ -627,13 +628,14 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				Amount:           amount,
 				SubmittedBy:      req.UserID,
 				SubmittedByEmail: uEmail,
+				MatrixID:         matrixID,
 			})
 			if instErr != nil {
 				api.LogError("[FDReceipt] CreateInstance CREATE failed: %v", instErr)
 			} else if instID != "" {
 				api.LogInfo("[FDReceipt] CreateInstance CREATE created instance=%s", instID)
 			}
-		}(receiptID, entityID, userEmail, req.GrossInterestReceived)
+		}(receiptID, entityID, userEmail, createMatrixID, req.GrossInterestReceived)
 
 		go func(rID, fdID, uEmail string, gross float64) {
 			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/create", rID, map[string]interface{}{
@@ -841,14 +843,15 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		mergedReceiptRow := applyFDReceiptEdits(existingReceiptRow, req.Fields)
 
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{
+		editOK, editMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{
 			EventCode:   common.TriggerPreEdit,
 			HandlerName: "UpdateReceipt",
 			APIPath:     "/investment/fd/receipt/update",
 			SubModule:   fdSubReceipt,
 			EntityCode:  entityID,
 			Actor:       userEmail,
-		}, buildFDReceiptPolicyFields(mergedReceiptRow)) {
+		}, buildFDReceiptPolicyFields(mergedReceiptRow))
+		if !editOK {
 			return
 		}
 
@@ -974,6 +977,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				Amount:           newGross,
 				SubmittedBy:      req.UserID,
 				SubmittedByEmail: userEmail,
+				MatrixID:         editMatrixID,
 			})
 			if instErr != nil {
 				api.LogError("[FDReceipt] CreateInstance EDIT failed: %v", instErr)
@@ -1020,6 +1024,7 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		results := make([]map[string]interface{}, 0, len(req.ReceiptIDs))
 		validIDs := []string{}
+		deleteMatrixByID := map[string]string{}
 
 		for _, rid := range req.ReceiptIDs {
 			var status string
@@ -1039,18 +1044,20 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": errFDReceiptNotFound})
 				continue
 			}
-			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{
+			ok, pmsg, matrixID := fdEnforceInlineWithMatrix(ctx, r, pool, enforceCtx{
 				EventCode:   common.TriggerPreDelete,
 				HandlerName: "DeleteReceipt",
 				APIPath:     "/investment/fd/receipt/delete",
 				SubModule:   fdSubReceipt,
 				EntityCode:  delRow.EntityID,
 				Actor:       userEmail,
-			}, buildFDReceiptPolicyFields(delRow)); !ok {
+			}, buildFDReceiptPolicyFields(delRow))
+			if !ok {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": pmsg})
 				continue
 			}
 			validIDs = append(validIDs, rid)
+			deleteMatrixByID[rid] = matrixID
 			results = append(results, map[string]interface{}{"receipt_id": rid, "success": true})
 		}
 
@@ -1080,6 +1087,7 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 			for _, rid := range validIDs {
 				rid := rid
+				matrixID := deleteMatrixByID[rid]
 				go func() {
 					bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 					defer bgCancel()
@@ -1099,6 +1107,7 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 						Amount:           amount,
 						SubmittedBy:      req.UserID,
 						SubmittedByEmail: userEmail,
+						MatrixID:         matrixID,
 					})
 					if instErr != nil {
 						api.LogError("[FDReceipt] CreateInstance DELETE failed: %v", instErr)
@@ -2636,7 +2645,7 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{
+		ingestOK, ingestMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{
 			EventCode:   common.TriggerPreSubmit,
 			HandlerName: "IngestReconciliation",
 			APIPath:     "/investment/fd/reconcile/ingest",
@@ -2653,7 +2662,8 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			"matching_basis": req.MatchingBasis,
 			"receipt_ids":    req.ReceiptIDs,
 			"tds_ids":        req.TDSIDs,
-		}) {
+		})
+		if !ingestOK {
 			return
 		}
 
@@ -2708,7 +2718,7 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}(runID, req.EntityID, userEmail)
 
-		go func(rID, eID, uEmail string) {
+		go func(rID, eID, uEmail, matrixID string) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDReceipt] IngestReconciliation engine panic run=%s: %v", rID, rec)
@@ -2727,8 +2737,9 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 				ActionType:       "CREATE",
 				SubmittedBy:      uEmail,
 				SubmittedByEmail: uEmail,
+				MatrixID:         matrixID,
 			})
-		}(runID, req.EntityID, userEmail)
+		}(runID, req.EntityID, userEmail, ingestMatrixID)
 
 		go func(rID, eID, uEmail string) {
 			defer func() {
@@ -4096,13 +4107,13 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		var currentStatus, fdIDForTDS string
+		var currentStatus, fdIDForTDS, entityID string
 		var currentPeriodStart, currentPeriodEnd, currentDeductionDate *time.Time
 		err := pool.QueryRow(ctx, `
-			SELECT tds_status, fd_id, period_start, period_end, deduction_date
+			SELECT tds_status, fd_id, period_start, period_end, deduction_date, COALESCE(entity_id,'')
 			FROM investment.fd_tds_receipt
 			WHERE tds_id=$1 AND is_deleted=false`,
-			req.TdsID).Scan(&currentStatus, &fdIDForTDS, &currentPeriodStart, &currentPeriodEnd, &currentDeductionDate)
+			req.TdsID).Scan(&currentStatus, &fdIDForTDS, &currentPeriodStart, &currentPeriodEnd, &currentDeductionDate, &entityID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, "TDS record not found")
 			return
@@ -4160,6 +4171,25 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, errMsg)
 				return
 			}
+		}
+
+		tdsEditOK, tdsEditMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "UpdateTDS",
+			APIPath:     "/investment/fd/receipt/tds/update",
+			SubModule:   fdSubReceipt,
+			EntityCode:  entityID,
+			Actor:       userEmail,
+		}, map[string]interface{}{
+			"tds_id":      req.TdsID,
+			"fd_id":       fdIDForTDS,
+			"entity_id":   entityID,
+			"entity_code": entityID,
+			"tds_status":  currentStatus,
+			"fields":      req.Fields,
+		})
+		if !tdsEditOK {
+			return
 		}
 
 		tx, err := pool.Begin(ctx)
@@ -4242,8 +4272,6 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			req.TdsID, req.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			oldStatus, oldActual, oldRateApplied, oldVariance,
 			oldExceptionRaised, oldBankTDSRef, oldIsActive)
-		var entityID string
-		_ = pool.QueryRow(ctx, `SELECT COALESCE(entity_id,'') FROM investment.fd_tds_receipt WHERE tds_id=$1`, req.TdsID).Scan(&entityID)
 
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
@@ -4255,7 +4283,7 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		go func(tID, uEmail string) {
+		go func(tID, uEmail, matrixID string) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDReceipt] UpdateTDS engine panic for %s: %v", tID, rec)
@@ -4282,6 +4310,7 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 				ActionType:       "EDIT",
 				SubmittedBy:      uEmail,
 				SubmittedByEmail: uEmail,
+				MatrixID:         matrixID,
 			})
 			if instErr != nil {
 				api.LogError("[FDReceipt] UpdateTDS CreateInstance failed tds=%s: %v", tID, instErr)
@@ -4290,7 +4319,7 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			if instID != "" {
 				api.LogInfo("[FDReceipt] UpdateTDS engine instance %s for tds %s", instID, tID)
 			}
-		}(req.TdsID, userEmail)
+		}(req.TdsID, userEmail, tdsEditMatrixID)
 
 		go func(tID, uEmail, eID string) {
 			defer func() {
