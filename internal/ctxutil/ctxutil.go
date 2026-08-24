@@ -209,6 +209,23 @@ func (s RequestScope) HasEntityAccess(id string) bool {
 	return false
 }
 
+// InLiveEntityScope reports whether id is in the session entity list.
+// Unlike HasEntityAccess this does not short-circuit for admin override:
+// SessionMiddleware's LoadAllEntities already omits soft-deleted entities,
+// so admins stay consistent with list filters.
+func (s RequestScope) InLiveEntityScope(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" || len(s.EntityIDs) == 0 {
+		return false
+	}
+	for _, eid := range s.EntityIDs {
+		if strings.EqualFold(strings.TrimSpace(eid), id) {
+			return true
+		}
+	}
+	return false
+}
+
 // HasEntityNameAccess reports whether name is in the user's accessible entity names.
 // Always returns true for admin overrides and when EntityNames is empty.
 func (s RequestScope) HasEntityNameAccess(name string) bool {
@@ -254,9 +271,11 @@ func AllowedEntityNames(ctx context.Context) []string {
 
 // HasApprovedBankAccount reports whether an account with the given account number
 // is in the approved list loaded by GlobalDependentMiddleware.
-// Always returns true for admin overrides and when BankAccounts is empty.
+// When the list is empty the check fail-opens (middleware loaded nothing).
+// Admin override does not skip membership once the list is populated —
+// that list is already scoped to live session entities.
 func (s RequestScope) HasApprovedBankAccount(accountNumber string) bool {
-	if s.IsAdminOverride || len(s.BankAccounts) == 0 {
+	if len(s.BankAccounts) == 0 {
 		return true
 	}
 	upper := strings.ToUpper(strings.TrimSpace(accountNumber))

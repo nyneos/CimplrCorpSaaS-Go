@@ -359,17 +359,23 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !ctxutil.FromContext(ctx).HasApprovedBank(req.BankName) {
+		scope := ctxutil.FromContext(ctx)
+		if !scope.HasApprovedBank(req.BankName) {
 			api.RespondWithResult(w, false, constants.ErrBankInvalidOrInactive)
 			return
 		}
-		if !ctxutil.FromContext(ctx).HasApprovedBankAccount(req.AccountNo) {
+		if !scope.HasApprovedBankAccount(req.AccountNo) {
+			api.RespondWithResult(w, false, constants.ErrInvalidAccount)
+			return
+		}
+		accountEntityID := lookupEntityIDForAccountNo(ctx, pgxPool, req.AccountNo)
+		if !scope.InLiveEntityScope(accountEntityID) {
 			api.RespondWithResult(w, false, constants.ErrInvalidAccount)
 			return
 		}
 
 		// currency validation (middleware may provide approved currencies)
-		if !ctxutil.FromContext(ctx).HasApprovedCurrency(req.CurrencyCode) {
+		if !scope.HasApprovedCurrency(req.CurrencyCode) {
 			api.RespondWithResult(w, false, "Invalid or inactive currency")
 			return
 		}
@@ -385,7 +391,7 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "BANK_BALANCE",
-			EntityCode:          lookupEntityIDForAccountNo(ctx, pgxPool, req.AccountNo),
+			EntityCode:          accountEntityID,
 			ActorUserID:         req.UserID,
 			HandlerName:         "CreateBankBalance",
 			APIPath:             "/cash/bank-balances/create",

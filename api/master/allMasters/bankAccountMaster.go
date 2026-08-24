@@ -1765,8 +1765,16 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}))
 
 		ctx := r.Context()
+		scope := ctxutil.FromContext(ctx)
 		bankNames := api.GetBankNamesFromCtx(ctx)
 		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+		entityIDs := scope.EntityIDs
+		accountNos := make([]string, 0, len(scope.BankAccounts))
+		for _, acc := range scope.BankAccounts {
+			if n := strings.TrimSpace(acc["account_number"]); n != "" {
+				accountNos = append(accountNos, n)
+			}
+		}
 
 		baseQuery := `
 			SELECT
@@ -1783,9 +1791,9 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM masterbankaccount a
 			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
 			LEFT JOIN LATERAL (
-				SELECT entity_name FROM public.masterentitycash WHERE entity_id = a.entity_id::text
+				SELECT entity_name FROM public.masterentitycash WHERE entity_id = a.entity_id::text AND COALESCE(is_deleted, false) = false
 				UNION ALL
-				SELECT entity_name FROM public.masterentity WHERE entity_id::text = a.entity_id
+				SELECT entity_name FROM public.masterentity WHERE entity_id::text = a.entity_id AND COALESCE(is_deleted, false) = false
 				LIMIT 1
 			) ent ON TRUE
 			LEFT JOIN LATERAL (
@@ -1804,12 +1812,30 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) astatus ON TRUE
-			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active' AND COALESCE(a.is_deleted, false) = false`
+			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active' AND COALESCE(a.is_deleted, false) = false
+			  AND NOT EXISTS (
+			  	SELECT 1 FROM public.masterentitycash ec
+			  	WHERE ec.entity_id = a.entity_id::text AND COALESCE(ec.is_deleted, false) = true
+			  )
+			  AND NOT EXISTS (
+			  	SELECT 1 FROM public.masterentity me
+			  	WHERE me.entity_id::text = a.entity_id AND COALESCE(me.is_deleted, false) = true
+			  )`
 
 		filters := []string{}
 		args := []interface{}{}
 		argIdx := 1
 
+		if len(entityIDs) > 0 {
+			filters = append(filters, fmt.Sprintf("a.entity_id = ANY($%d)", argIdx))
+			args = append(args, entityIDs)
+			argIdx++
+		}
+		if len(accountNos) > 0 {
+			filters = append(filters, fmt.Sprintf("a.account_number = ANY($%d)", argIdx))
+			args = append(args, accountNos)
+			argIdx++
+		}
 		if len(bankNames) > 0 {
 			filters = append(filters, fmt.Sprintf(constants.QuerryBankName, argIdx))
 			args = append(args, bankNames)
@@ -1818,6 +1844,7 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(currCodes) > 0 {
 			filters = append(filters, fmt.Sprintf(constants.QuerryCurrency, argIdx))
 			args = append(args, currCodes)
+			argIdx++
 		}
 
 		if len(filters) > 0 {
