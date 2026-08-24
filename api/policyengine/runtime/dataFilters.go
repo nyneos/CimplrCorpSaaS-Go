@@ -19,6 +19,29 @@ func lookupCDMVar(vars map[string]string, suffixes ...string) string {
 	return ""
 }
 
+func lookupCDMVarAll(vars map[string]string, suffixes ...string) []string {
+	out := make([]string, 0, len(suffixes))
+	for _, suffix := range suffixes {
+		for k, v := range vars {
+			if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(k)), suffix) {
+				continue
+			}
+			val := strings.TrimSpace(v)
+			if val == "" || containsFold(out, val) {
+				continue
+			}
+			out = append(out, val)
+		}
+	}
+	return out
+}
+
+func currencyFromVars(vars map[string]string) []string {
+	return lookupCDMVarAll(vars,
+		".currency_code", ".currency",
+		".base_currency", ".quote_currency", ".local_currency")
+}
+
 func tenorBandFromVars(vars map[string]string) string {
 	years := 0.0
 	if v := lookupCDMVar(vars, ".tenure_years", ".tenor_years"); v != "" {

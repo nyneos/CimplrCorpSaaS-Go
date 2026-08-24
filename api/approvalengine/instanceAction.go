@@ -108,6 +108,7 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 		transactionType string
 		actionType      string
 		instanceStatus  string
+		submittedBy     string
 	)
 	err = tx.QueryRow(ctx, `
 		SELECT
@@ -115,7 +116,7 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 		  ie.approvals_required, ie.approvals_received,  ie.position,
 		  mm.approval_order,     inst.record_id,         inst.record_table,
 		  inst.audit_table,      inst.transaction_type,  inst.action_type,
-		  inst.status
+		  inst.status,           COALESCE(inst.submitted_by, '')
 		FROM uam.approval_instance_eye ie
 		JOIN uam.approval_instance      inst ON inst.instance_id = ie.instance_id
 		JOIN uam.approval_matrix_master mm   ON mm.matrix_id     = inst.matrix_id
@@ -127,7 +128,7 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 		&approvalsReq, &approvalsRcvd, &currentPos,
 		&approvalOrder, &recordID, &recordTable,
 		&auditTable, &transactionType, &actionType,
-		&instanceStatus,
+		&instanceStatus, &submittedBy,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -146,6 +147,10 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 	}
 	if instanceStatus != InstStatusPending {
 		return fmt.Errorf("instance is not pending (current status: %s)", instanceStatus)
+	}
+
+	if submittedBy != "" && submittedBy == req.ActorUserID {
+		return fmt.Errorf("segregation of duties: user %s submitted this request and cannot approve or reject it", req.ActorUserID)
 	}
 
 	// Step 3: Validate actor eligibility.

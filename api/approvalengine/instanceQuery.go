@@ -35,6 +35,7 @@ func GetPendingForUser(ctx context.Context, pool *pgxpool.Pool, userID string) (
 		  AND ie.status = 'ACTIVE'
 		WHERE i.status     = 'PENDING'
 		  AND i.is_deleted = false
+		  AND COALESCE(i.submitted_by, '') <> $1
 		  AND (
 		    EXISTS (
 		      SELECT 1 FROM uam.approval_matrix_eye_member m

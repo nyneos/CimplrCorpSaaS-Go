@@ -47,13 +47,21 @@ func snapshotString(snap map[string]interface{}, key string) string {
 }
 
 func dataFilterSkip(instrument, currency, tenor, rating string, vars map[string]string) (string, string, bool) {
+	if expected := strings.TrimSpace(currency); expected != "" {
+		actuals := currencyFromVars(vars)
+		if len(actuals) == 0 {
+			return "CURRENCY_FILTER_UNRESOLVED", fmt.Sprintf("currency scope requires %q; request carries no resolvable currency", expected), true
+		}
+		if !containsFold(actuals, expected) {
+			return "CURRENCY_FILTER_MISMATCH", fmt.Sprintf("currency scope requires %q; request resolved %q", expected, strings.Join(actuals, "/")), true
+		}
+	}
 	checks := []struct {
 		filter string
 		actual string
 		code   string
 		field  string
 	}{
-		{currency, lookupCDMVar(vars, ".currency_code", ".currency"), "CURRENCY_FILTER_MISMATCH", "currency"},
 		{instrument, lookupCDMVar(vars, ".instrument_type", ".instrument"), "INSTRUMENT_FILTER_MISMATCH", "instrument"},
 		{rating, lookupCDMVar(vars, ".credit_rating", ".rating"), "RATING_FILTER_MISMATCH", "rating"},
 		{tenor, tenorBandFromVars(vars), "TENOR_FILTER_MISMATCH", "tenor"},

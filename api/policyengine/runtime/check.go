@@ -381,6 +381,11 @@ func breachedTriggerApprovalMatrix(eventCode string, policies []map[string]inter
 		if pr.Result != "BREACH" || pr.Action != common.BreachTriggerApproval {
 			continue
 		}
+		if ref := strings.TrimSpace(pr.ApprovalRef); ref != "" {
+			if _, err := uuid.Parse(ref); err == nil {
+				return ref
+			}
+		}
 		if m := matrixByPolicy[pr.PolicyID]; m != "" {
 			return m
 		}
