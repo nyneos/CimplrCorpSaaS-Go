@@ -54,10 +54,13 @@ func applyPoolLimits(cfg *pgxpool.Config, service string) {
 	}
 }
 
-// ApplyPoolerSafeQueryMode disables pgx prepared-statement caching.
+// ApplyPoolerSafeQueryMode disables pgx prepared-statement caching and
+// strips startup GUCs that PgBouncer rejects.
 // Required for Supabase/PgBouncer transaction pooler (port 6543): prepared
 // statements are connection-scoped, so reuse across clients yields
-// SQLSTATE 42P05 "prepared statement ... already exists".
+// SQLSTATE 42P05 "prepared statement ... already exists". Startup params
+// such as statement_timeout yield SQLSTATE 08P01
+// "unsupported startup parameter".
 func ApplyPoolerSafeQueryMode(cfg *pgxpool.Config) {
 	if cfg == nil {
 		return
@@ -65,4 +68,14 @@ func ApplyPoolerSafeQueryMode(cfg *pgxpool.Config) {
 	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	cfg.ConnConfig.StatementCacheCapacity = 0
 	cfg.ConnConfig.DescriptionCacheCapacity = 0
+	if cfg.ConnConfig.RuntimeParams != nil {
+		for _, key := range []string{
+			"statement_timeout",
+			"lock_timeout",
+			"idle_in_transaction_session_timeout",
+			"idle_session_timeout",
+		} {
+			delete(cfg.ConnConfig.RuntimeParams, key)
+		}
+	}
 }

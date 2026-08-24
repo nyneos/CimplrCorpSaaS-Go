@@ -41,13 +41,16 @@ func main() {
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	// connect_timeout and statement_timeout guard against hung connections.
+	// connect_timeout is a libpq client-side dial timeout. Do not put
+	// statement_timeout in the DSN: pgx sends it as a startup GUC and
+	// Supabase PgBouncer (port 6543) rejects it with
+	// FATAL: unsupported startup parameter: statement_timeout.
 	sslMode := os.Getenv("DB_SSLMODE")
 	if sslMode == "" {
 		sslMode = "require"
 	}
 	pgxConnStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&statement_timeout=30000",
+		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10",
 		user, pass, host, port, name, sslMode,
 	)
 
