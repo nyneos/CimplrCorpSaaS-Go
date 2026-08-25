@@ -42,6 +42,7 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		req.ModuleCode = strings.TrimSpace(req.ModuleCode)
 		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
 		req.Status = strings.TrimSpace(req.Status)
+		req.Description = strings.TrimSpace(req.Description)
 		if req.TemplateID == "" {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "template_id is required", "VALIDATION_ERROR")
 			return
@@ -60,13 +61,13 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(r.Context())
 
-		var oldName, oldModuleCode, oldSubModuleCode, oldStatus, processingStatus string
+		var oldName, oldModuleCode, oldSubModuleCode, oldStatus, processingStatus, oldDescription string
 		if err := tx.QueryRow(r.Context(), `
-			SELECT name, module_code, sub_module_code, status, processing_status
+			SELECT name, module_code, sub_module_code, status, processing_status, COALESCE(description, '')
 			FROM dms_svc.template
 			WHERE template_id = $1::uuid AND is_deleted = false
 			FOR UPDATE`, req.TemplateID,
-		).Scan(&oldName, &oldModuleCode, &oldSubModuleCode, &oldStatus, &processingStatus); err != nil {
+		).Scan(&oldName, &oldModuleCode, &oldSubModuleCode, &oldStatus, &processingStatus, &oldDescription); err != nil {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "template not found", "NOT_FOUND")
 			return
 		}
@@ -85,8 +86,12 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.SubModuleCode == "" {
 			req.SubModuleCode = oldSubModuleCode
 		}
+		if req.Description == "" {
+			req.Description = oldDescription
+		}
 
-		headerUnchanged := req.Name == oldName && req.ModuleCode == oldModuleCode && req.SubModuleCode == oldSubModuleCode
+		headerUnchanged := req.Name == oldName && req.ModuleCode == oldModuleCode &&
+			req.SubModuleCode == oldSubModuleCode && req.Description == oldDescription
 		statusOnly := req.Status != "" && req.Status != oldStatus && headerUnchanged
 
 		if statusOnly {
@@ -124,6 +129,8 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			a.set("new_module_code", oldModuleCode)
 			a.set("old_sub_module_code", oldSubModuleCode)
 			a.set("new_sub_module_code", oldSubModuleCode)
+			a.set("old_description", oldDescription)
+			a.set("new_description", oldDescription)
 			if err := a.exec(r.Context(), tx); err != nil {
 				api.LogErrorForResponse(w, "dms template set status audit: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit status change", "DMS_TEMPLATE_UPDATE_FAILED")
@@ -174,6 +181,8 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		a.set("new_sub_module_code", req.SubModuleCode)
 		a.set("old_status", oldStatus)
 		a.set("new_status", newStatus)
+		a.set("old_description", oldDescription)
+		a.set("new_description", req.Description)
 		if err := a.exec(r.Context(), tx); err != nil {
 			api.LogErrorForResponse(w, "dms template update audit: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit template update", "DMS_TEMPLATE_UPDATE_FAILED")

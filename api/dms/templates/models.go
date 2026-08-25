@@ -38,6 +38,7 @@ type templateAuditRow struct {
 	NewModuleCode    *string
 	NewSubModuleCode *string
 	NewStatus        *string
+	NewDescription   *string
 }
 
 // versionSummary is the list-view projection of a template_version row.
