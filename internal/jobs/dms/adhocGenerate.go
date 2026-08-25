@@ -565,6 +565,7 @@ var adhocSourceIDFieldBySub = map[string]string{
 	"EXPOSURE_UPLOAD":      "exposure_header_id",
 	"EXPOSURE_BUCKETING":   "exposure_header_id",
 	"HEDGE_LINK":           "exposure_header_id",
+	"HEDGE_PROPOSAL":       "proposal_id",
 	"FORWARD_BOOKING":      "system_transaction_id",
 	"FORWARD_CANCELLATION": "booking_id",
 	"FORWARD_ROLLOVER":     "booking_id",
