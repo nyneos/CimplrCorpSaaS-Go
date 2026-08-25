@@ -1054,6 +1054,13 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 					dmsjobs.FireDmsEvent(pool, "FX", subModule, "POST_REJECT", bookingIDs, actor)
 				}
 			}
+			allRejectedIDs := make([]string, 0, len(notifItems))
+			for _, item := range notifItems {
+				allRejectedIDs = append(allRejectedIDs, item.BookingID)
+			}
+			if len(allRejectedIDs) > 0 {
+				dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_CANCEL_ROLL", "POST_REJECT", allRejectedIDs, actor)
+			}
 		}
 		respondEnvelopeSuccess(w, "Cancellation/rollover action processed successfully", map[string]interface{}{
 			"processed": processed,
