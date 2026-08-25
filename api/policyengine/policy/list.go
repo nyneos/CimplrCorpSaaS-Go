@@ -31,6 +31,7 @@ type ListItem struct {
 	Version          int      `json:"version"`
 	EffectiveStart   string   `json:"effective_start"`
 	Source           string   `json:"source"`
+	LibraryRef       string   `json:"library_ref"`
 	TriggerEvents    []string `json:"trigger_events"`
 	Modules          []string `json:"modules"`
 	SubModules       []string `json:"sub_modules"`
@@ -147,7 +148,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 		listQ := `
 			SELECT p.policy_id::text, p.code, p.name, p.category, p.validation_level, p.criticality,
 			       p.action_on_breach, p.rule_type, p.status, p.processing_status, p.version,
-			       p.effective_start::text, p.source,
+			       p.effective_start::text, p.source, COALESCE(p.library_ref, ''),
 			       COALESCE(t.trigger_events, ARRAY[]::varchar[]) AS trigger_events,
 			       COALESCE(m.modules, ARRAY[]::varchar[]) AS modules,
 			       COALESCE(sm.sub_modules, ARRAY[]::varchar[]) AS sub_modules,
@@ -183,7 +184,7 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 			var createdAt, editedAt, deletedAt, approvedAt, requestedAt, checkerAt *time.Time
 			if err := rows.Scan(&it.PolicyID, &it.Code, &it.Name, &it.Category, &it.ValidationLevel, &it.Criticality,
 				&it.ActionOnBreach, &it.RuleType, &it.Status, &it.ProcessingStatus, &it.Version,
-				&it.EffectiveStart, &it.Source, &it.TriggerEvents, &it.Modules, &it.SubModules,
+				&it.EffectiveStart, &it.Source, &it.LibraryRef, &it.TriggerEvents, &it.Modules, &it.SubModules,
 				&it.CreatedBy, &createdAt, &it.EditedBy, &editedAt,
 				&it.DeletedBy, &deletedAt, &it.ApprovedBy, &approvedAt,
 				&it.RequestedBy, &requestedAt, &it.CheckerBy, &checkerAt,

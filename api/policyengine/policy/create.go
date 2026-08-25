@@ -20,6 +20,7 @@ type createReq struct {
 	Description       string `json:"description"`
 	Category          string `json:"category"`
 	SubCategory       string `json:"sub_category"`
+	LibraryRef        string `json:"library_ref"`
 	ValidationLevel   string `json:"validation_level"`
 	Criticality       string `json:"criticality"`
 	ActionOnBreach    string `json:"action_on_breach"`
@@ -222,7 +223,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		var policyID string
 		err = tx.QueryRow(r.Context(), `
 			INSERT INTO policyengine_svc.policy_master (
-				code, name, description, category, sub_category, source,
+				code, name, description, category, sub_category, source, library_ref,
 				validation_level, criticality, action_on_breach, notification_group, breach_message,
 				requires_approval, applicability, can_override,
 				instrument_filter, currency_filter, tenor_filter, rating_filter,
@@ -235,7 +236,8 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				addl_expression, status, version, effective_start, effective_end,
 				processing_status, created_by, last_modified_by, approval_matrix_id
 			) VALUES (
-				$1,$2,$3,$4,NULLIF($5,''),'Custom',
+				$1,$2,$3,$4,NULLIF($5,''),
+				CASE WHEN NULLIF($49,'') IS NULL THEN 'Custom' ELSE 'Library' END, NULLIF($49,''),
 				$6,$7,$8,NULLIF($9,''),$10,
 				$11,$12,$13,
 				NULLIF($14,''),NULLIF($15,''),NULLIF($16,''),NULLIF($17,''),
@@ -260,7 +262,7 @@ func HandleCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			rf.FormulaExpression, rf.FormulaReturnType, rf.FormulaOperator, rf.FormulaValue,
 			req.AddlExpression, req.EffectiveStart, req.EffectiveEnd,
 			actor, rf.ThrValueDate, req.NullHandlingDefault, rf.SlabPercentBase,
-			req.ApprovalMatrixID,
+			req.ApprovalMatrixID, strings.TrimSpace(req.LibraryRef),
 		).Scan(&policyID)
 		if err != nil {
 			api.LogErrorForResponse(w, "policy create insert: %v", err)
