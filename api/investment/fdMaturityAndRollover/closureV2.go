@@ -4680,18 +4680,20 @@ type approvalInstanceRequest struct {
 
 func createCimplrApprovalInstance(ctx context.Context, pool *pgxpool.Pool, req approvalInstanceRequest) (string, error) {
 	return approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-		ModuleCode:       cimplrClosureModule,
-		EntityCode:       firstNonEmpty(req.EntityID, "DEFAULT"),
-		TransactionType:  req.TxType,
-		RecordID:         req.RecordID,
-		RecordTable:      req.RecordTable,
-		AuditTable:       req.AuditTable,
-		AuditIDColumn:    req.AuditIDColumn,
-		ActionType:       req.Action,
-		Amount:           req.Amount,
-		SubmittedBy:      req.UserID,
-		SubmittedByEmail: req.UserEmail,
-		MatrixID:         req.MatrixID,
+		ModuleCode:          cimplrClosureModule,
+		EntityCode:          firstNonEmpty(req.EntityID, "DEFAULT"),
+		TransactionType:     req.TxType,
+		RecordID:            req.RecordID,
+		RecordTable:         req.RecordTable,
+		AuditTable:          req.AuditTable,
+		AuditIDColumn:       req.AuditIDColumn,
+		ActionType:          req.Action,
+		Amount:              req.Amount,
+		SubmittedBy:         req.UserID,
+		SubmittedByEmail:    req.UserEmail,
+		MatrixID:            req.MatrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: true,
 	})
 }
 

@@ -35,10 +35,9 @@ func CreateInstance(ctx context.Context, pool *pgxpool.Pool, req InstanceRequest
 		}
 	}
 
-	// Step 2: Resolve matrix — pinned when the caller supplied one, else by scope.
-	// A pin that is deleted, inactive, unapproved, or latest-audit DELETE is
-	// treated as dead: never attach it to a new instance; resolve a live matrix
-	// instead (or skip if none exists).
+	// Step 2: Matrix is attached only when a TriggerApproval policy pinned one.
+	// Empty / dead pin must not ResolveMatrix — that is what made rows look
+	// "stuck" on a default matrix when the policy never fired.
 	var matrix *MatrixResult
 	var err error
 	if pin := strings.TrimSpace(req.MatrixID); pin != "" {
@@ -47,19 +46,30 @@ func CreateInstance(ctx context.Context, pool *pgxpool.Pool, req InstanceRequest
 			return "", err
 		}
 		if matrix == nil {
-			api.LogInfo("[ApprovalEngine] Pinned matrix %s is dead/unusable — resolving a live matrix for %s/%s/%s",
+			api.LogInfo("[ApprovalEngine] Pinned matrix %s is dead/unusable for %s/%s/%s — skipping approval",
 				pin, req.ModuleCode, req.EntityCode, req.TransactionType)
 		}
 	}
-	if matrix == nil {
+	if matrix == nil && isAmountRoutedModule(req.ModuleCode) {
 		matrix, err = ResolveMatrix(ctx, pool, req.ModuleCode, req.EntityCode, req.TransactionType, req.Amount)
 		if err != nil {
 			return "", err
 		}
+		if matrix != nil {
+			api.LogInfo("[ApprovalEngine] FD amount matrix %s matched %s/%s amount=%.2f",
+				matrix.MatrixID, req.ModuleCode, req.TransactionType, req.Amount)
+		}
 	}
 	if matrix == nil {
-		api.LogInfo("[ApprovalEngine] No live matrix configured for %s/%s/%s — skipping",
+		api.LogInfo("[ApprovalEngine] No policy-pinned matrix for %s/%s/%s — skipping approval",
 			req.ModuleCode, req.EntityCode, req.TransactionType)
+		if req.AutoApplyIfUnpinned {
+			if applyErr := autoApplyUnpinned(ctx, pool, req); applyErr != nil {
+				api.LogInfo("[ApprovalEngine] Auto-apply failed for %s/%s: %v",
+					req.ModuleCode, req.RecordID, applyErr)
+				return "", applyErr
+			}
+		}
 		return "", nil
 	}
 
@@ -343,11 +353,7 @@ func DiagnosePendingInstance(ctx context.Context, pool *pgxpool.Pool, moduleCode
 		  AND m.is_deleted=false
 		  AND COALESCE(mla.processing_status,'APPROVED')='APPROVED'
 		  AND COALESCE(mla.action_type,'') <> 'DELETE'
-		  AND (
-		    (m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id=$2)
-		    OR (m.assignment_type='ROLE_ONLY' AND EXISTS (SELECT 1 FROM public.user_roles ur WHERE ur.role_id=m.role_id AND ur.user_id=$2))
-		    OR (m.assignment_type='ROLE_USER' AND EXISTS (SELECT 1 FROM public.user_roles ur WHERE ur.role_id=m.role_id AND ur.user_id=$2))
-		  )`,
+		  AND `+sqlUserOnEyeMember("$2"),
 		d.ActiveEyeID, userID,
 	).Scan(&eligible)
 	d.Eligible = eligible > 0
@@ -430,12 +436,7 @@ func actOnPendingOrDiagnose(ctx context.Context, pool *pgxpool.Pool, req ActOnPe
 			(
 			  COALESCE(mla.processing_status,'APPROVED')='APPROVED'
 			  AND COALESCE(mla.action_type,'') <> 'DELETE'
-			  AND (
-				(m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id=$3)
-				OR (m.assignment_type IN ('ROLE_ONLY','ROLE_USER') AND EXISTS (
-					SELECT 1 FROM public.user_roles ur WHERE ur.role_id=m.role_id AND ur.user_id=$3
-				))
-			  )
+			  AND `+sqlUserOnEyeMember("$3")+`
 			)
 			OR (
 			  ie.is_escalated=true
@@ -443,7 +444,7 @@ func actOnPendingOrDiagnose(ctx context.Context, pool *pgxpool.Pool, req ActOnPe
 				ie.escalated_to_user_id=$3
 				OR EXISTS (
 					SELECT 1 FROM public.user_roles ur
-					WHERE ur.role_id=ie.escalated_to_role_id AND ur.user_id=$3
+					WHERE ur.role_id::text=ie.escalated_to_role_id::text AND ur.user_id::text=$3
 				)
 			  )
 			)

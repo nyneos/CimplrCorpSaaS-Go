@@ -60,22 +60,32 @@ func submitPayRecForApproval(pool *pgxpool.Pool, recordID, entityName, submitted
 	}
 
 	_, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-		ModuleCode:       "CASH",
-		EntityCode:       entityName,
-		TransactionType:  txType,
-		RecordID:         recordID,
-		RecordTable:      recordTable,
-		AuditTable:       auditTable,
-		AuditIDColumn:    auditColumn,
-		ActionType:       actionType,
-		Amount:           amount,
-		SubmittedBy:      submittedByUserID,
-		SubmittedByEmail: actorEmail,
-		MatrixID:         matrixID,
+		ModuleCode:          "CASH",
+		EntityCode:          entityName,
+		TransactionType:     txType,
+		RecordID:            recordID,
+		RecordTable:         recordTable,
+		AuditTable:          auditTable,
+		AuditIDColumn:       auditColumn,
+		ActionType:          actionType,
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: false,
 	})
 	if err != nil {
 		api.LogError("[PayRec] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"record_id": recordID, "tx_type": txType, "error": err.Error()})
 	}
+}
+
+func policyPinnedMatrix(matrixID string) bool {
+	return approvalengine.PolicyPinned(matrixID)
+}
+
+func payRecAuditStatus(matrixID, pendingStatus string) string {
+	return approvalengine.AuditStatus(matrixID, pendingStatus)
 }
 
 func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -678,16 +688,19 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					rows.Close()
 					if len(payableIDs) > 0 {
 						uploadedIDs = append(uploadedIDs, payableIDs...)
+						uploadStatus := payRecAuditStatus(triggerMatrixID, "PENDING_APPROVAL")
 						_, auditErr := pgxPool.Exec(ctx, `
 							INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
-							SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
-						`, payableIDs, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r)))
+							SELECT unnest($1::text[]), 'CREATE', $4, NULL, $2, now(), $3
+						`, payableIDs, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r)), uploadStatus)
 						if auditErr != nil {
 							http.Error(w, "Audit log error (payables): "+auditErr.Error(), http.StatusInternalServerError)
 							return
 						}
-						for _, i := range infos {
-							submitPayRecForApproval(pgxPool, i.id, i.ename, userID, actorEmail, "PAYABLE_CREATE", i.amt, triggerMatrixID)
+						if policyPinnedMatrix(triggerMatrixID) {
+							for _, i := range infos {
+								submitPayRecForApproval(pgxPool, i.id, i.ename, userID, actorEmail, "PAYABLE_CREATE", i.amt, triggerMatrixID)
+							}
 						}
 					}
 				} else if txTypeUpper == "RECEIVABLE" {
@@ -719,16 +732,19 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					rows.Close()
 					if len(receivableIDs) > 0 {
 						uploadedIDs = append(uploadedIDs, receivableIDs...)
+						uploadStatus := payRecAuditStatus(triggerMatrixID, "PENDING_APPROVAL")
 						_, auditErr := pgxPool.Exec(ctx, `
 							INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
-							SELECT unnest($1::text[]), 'CREATE', 'PENDING_APPROVAL', NULL, $2, now(), $3
-						`, receivableIDs, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r)))
+							SELECT unnest($1::text[]), 'CREATE', $4, NULL, $2, now(), $3
+						`, receivableIDs, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r)), uploadStatus)
 						if auditErr != nil {
 							http.Error(w, "Audit log error (receivables): "+auditErr.Error(), http.StatusInternalServerError)
 							return
 						}
-						for _, i := range infos {
-							submitPayRecForApproval(pgxPool, i.id, i.ename, userID, actorEmail, "RECEIVABLE_CREATE", i.amt, triggerMatrixID)
+						if policyPinnedMatrix(triggerMatrixID) {
+							for _, i := range infos {
+								submitPayRecForApproval(pgxPool, i.id, i.ename, userID, actorEmail, "RECEIVABLE_CREATE", i.amt, triggerMatrixID)
+							}
 						}
 					}
 				} else {
@@ -1234,7 +1250,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		insPay := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4) RETURNING action_id`
+		insPay := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'DELETE',$2,$3,$4,now(),$5) RETURNING action_id`
 		reasonArg := interface{}(nil)
 		if strings.TrimSpace(req.Reason) != "" {
 			reasonArg = req.Reason
@@ -1253,12 +1269,21 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			var actionID string
-			if err := tx.QueryRow(ctx, insPay, id, reasonArg, requestedBy, requestedIP).Scan(&actionID); err == nil {
-				// nop: collected if needed
+			delStatus := payRecAuditStatus(deleteMatrixByID[id], "PENDING_DELETE_APPROVAL")
+			if err := tx.QueryRow(ctx, insPay, id, delStatus, reasonArg, requestedBy, requestedIP).Scan(&actionID); err == nil {
+				if !policyPinnedMatrix(deleteMatrixByID[id]) {
+					if _, err := tx.Exec(ctx, `
+						UPDATE tr_payables SET is_deleted = TRUE, deleted_at = now(), deleted_by = $2
+						WHERE payable_id = $1 AND is_deleted != TRUE
+					`, id, requestedBy); err != nil {
+						api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to delete payable: "+err.Error(), "")
+						return
+					}
+				}
 			}
 		}
 
-		insRec := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4) RETURNING action_id`
+		insRec := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'DELETE',$2,$3,$4,now(),$5) RETURNING action_id`
 		for _, id := range txIDsRec {
 			var latestActionType, latestStatus string
 			latestErr := tx.QueryRow(ctx, `
@@ -1273,8 +1298,17 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			var actionID string
-			if err := tx.QueryRow(ctx, insRec, id, reasonArg, requestedBy, requestedIP).Scan(&actionID); err == nil {
-				// nop
+			delStatus := payRecAuditStatus(deleteMatrixByID[id], "PENDING_DELETE_APPROVAL")
+			if err := tx.QueryRow(ctx, insRec, id, delStatus, reasonArg, requestedBy, requestedIP).Scan(&actionID); err == nil {
+				if !policyPinnedMatrix(deleteMatrixByID[id]) {
+					if _, err := tx.Exec(ctx, `
+						UPDATE tr_receivables SET is_deleted = TRUE, deleted_at = now(), deleted_by = $2
+						WHERE receivable_id = $1 AND is_deleted != TRUE
+					`, id, requestedBy); err != nil {
+						api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to delete receivable: "+err.Error(), "")
+						return
+					}
+				}
 			}
 		}
 
@@ -1285,12 +1319,18 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		for _, id := range txIDsPay {
+			if !policyPinnedMatrix(deleteMatrixByID[id]) {
+				continue
+			}
 			f := fieldsMap[id]
 			entityName := fmt.Sprint(f["entity_name"])
 			amt, _ := strconv.ParseFloat(fmt.Sprint(f["amount"]), 64)
 			submitPayRecForApproval(pgxPool, id, entityName, req.UserID, actorEmail, "PAYABLE_DELETE", amt, deleteMatrixByID[id])
 		}
 		for _, id := range txIDsRec {
+			if !policyPinnedMatrix(deleteMatrixByID[id]) {
+				continue
+			}
 			f := fieldsMap[id]
 			entityName := fmt.Sprint(f["entity_name"])
 			amt, _ := strconv.ParseFloat(fmt.Sprint(f["invoice_amount"]), 64)
@@ -1853,6 +1893,17 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(blocked) > 0 {
 			resp["blocked"] = blocked
 		}
+		if len(engineActed) == 0 && len(blocked) > 0 && len(payActionIDs)+len(recActionIDs) == 0 {
+			msg := "approval blocked"
+			for _, reason := range blocked {
+				if strings.TrimSpace(reason) != "" {
+					msg = reason
+					break
+				}
+			}
+			api.RespondEnvelopeFailureWithData(w, http.StatusUnprocessableEntity, msg, "APPROVAL_BLOCKED", resp)
+			return
+		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", resp)
 	}
 }
@@ -2000,20 +2051,23 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				createdPayables = append(createdPayables, pid)
 				var actionID string
-				auditQ := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now(),$3) RETURNING action_id`
-				if err := tx.QueryRow(ctx, auditQ, pid, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r))).Scan(&actionID); err != nil {
+				auditQ := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE',$2,NULL,$3,now(),$4) RETURNING action_id`
+				createStatus := payRecAuditStatus(createMatrixByIdx[idx], "PENDING_APPROVAL")
+				if err := tx.QueryRow(ctx, auditQ, pid, createStatus, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r))).Scan(&actionID); err != nil {
 					tx.Rollback(ctx)
 					api.RespondEnvelopeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create audit for payable %s: %v", pid, err), "")
 					return
 				}
 				payableActionIDs = append(payableActionIDs, actionID)
-				instancesToCreate = append(instancesToCreate, instanceReq{
-					recordID:   pid,
-					entityName: entityName,
-					txType:     "PAYABLE_CREATE",
-					amount:     amountF,
-					matrixID:   createMatrixByIdx[idx],
-				})
+				if policyPinnedMatrix(createMatrixByIdx[idx]) {
+					instancesToCreate = append(instancesToCreate, instanceReq{
+						recordID:   pid,
+						entityName: entityName,
+						txType:     "PAYABLE_CREATE",
+						amount:     amountF,
+						matrixID:   createMatrixByIdx[idx],
+					})
+				}
 
 			} else if txType == "RECEIVABLE" {
 				var rid string
@@ -2025,20 +2079,23 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				createdReceivables = append(createdReceivables, rid)
 				var actionID string
-				auditQ := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now(),$3) RETURNING action_id`
-				if err := tx.QueryRow(ctx, auditQ, rid, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r))).Scan(&actionID); err != nil {
+				auditQ := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE',$2,NULL,$3,now(),$4) RETURNING action_id`
+				createStatus := payRecAuditStatus(createMatrixByIdx[idx], "PENDING_APPROVAL")
+				if err := tx.QueryRow(ctx, auditQ, rid, createStatus, userName, transactionNullIfEmpty(api.ClientIPFromRequest(r))).Scan(&actionID); err != nil {
 					tx.Rollback(ctx)
 					api.RespondEnvelopeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create audit for receivable %s: %v", rid, err), "")
 					return
 				}
 				receivableActionIDs = append(receivableActionIDs, actionID)
-				instancesToCreate = append(instancesToCreate, instanceReq{
-					recordID:   rid,
-					entityName: entityName,
-					txType:     "RECEIVABLE_CREATE",
-					amount:     amountF,
-					matrixID:   createMatrixByIdx[idx],
-				})
+				if policyPinnedMatrix(createMatrixByIdx[idx]) {
+					instancesToCreate = append(instancesToCreate, instanceReq{
+						recordID:   rid,
+						entityName: entityName,
+						txType:     "RECEIVABLE_CREATE",
+						amount:     amountF,
+						matrixID:   createMatrixByIdx[idx],
+					})
+				}
 
 			} else {
 				tx.Rollback(ctx)
@@ -2264,18 +2321,37 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   old_due_date, old_amount, old_currency_code,
 				   new_entity_name, new_counterparty_name, new_invoice_number, new_invoice_date,
 				   new_due_date, new_amount, new_currency_code)
-				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),
-					$4,
-					$5,$6,$7,$8,$9,$10,$11,
-					$12,$13,$14,$15,$16,$17,$18)
+				VALUES ($1,'EDIT',$2,$3,$4,now(),$5,
+					$6,$7,$8,$9,$10,$11,$12,
+					$13,$14,$15,$16,$17,$18,$19)
 				RETURNING action_id`
-			if err := tx.QueryRow(ctx, auditQ, id, reasonArg, userName,
+			editStatus := payRecAuditStatus(triggerMatrixID, "PENDING_EDIT_APPROVAL")
+			if err := tx.QueryRow(ctx, auditQ, id, editStatus, reasonArg, userName,
 				transactionNullIfEmpty(api.ClientIPFromRequest(r)),
 				oldEntity, oldCounter, oldInvoice, oldInvDate, oldDueDate, oldAmount, oldCurrency,
 				newEntity, newCounter, newInvoice, newInvDate, newDueDate, newAmount, newCurrency).Scan(&actionID); err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to create audit for payable: "+err.Error())
 				return
+			}
+			if !policyPinnedMatrix(triggerMatrixID) {
+				if _, err := tx.Exec(ctx, `
+					UPDATE tr_payables p
+					SET
+						entity_name       = COALESCE(NULLIF(aa.new_entity_name, ''), p.entity_name),
+						counterparty_name = COALESCE(NULLIF(aa.new_counterparty_name, ''), p.counterparty_name),
+						invoice_number    = COALESCE(NULLIF(aa.new_invoice_number, ''), p.invoice_number),
+						invoice_date      = COALESCE(NULLIF(aa.new_invoice_date::text, '')::date, p.invoice_date),
+						due_date          = COALESCE(NULLIF(aa.new_due_date::text, '')::date, p.due_date),
+						amount            = COALESCE(NULLIF(aa.new_amount::text, '')::numeric, p.amount),
+						currency_code     = COALESCE(NULLIF(aa.new_currency_code, ''), p.currency_code)
+					FROM auditactionpayable aa
+					WHERE aa.action_id = $1 AND aa.payable_id = p.payable_id
+				`, actionID); err != nil {
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to apply payable edit: "+err.Error())
+					return
+				}
 			}
 
 		} else if strings.HasPrefix(id, constants.ErrPrefixReceivable) {
@@ -2381,18 +2457,37 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   old_due_date, old_amount, old_currency_code,
 				   new_entity_name, new_counterparty_name, new_invoice_number, new_invoice_date,
 				   new_due_date, new_amount, new_currency_code)
-				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),
-					$4,
-					$5,$6,$7,$8,$9,$10,$11,
-					$12,$13,$14,$15,$16,$17,$18)
+				VALUES ($1,'EDIT',$2,$3,$4,now(),$5,
+					$6,$7,$8,$9,$10,$11,$12,
+					$13,$14,$15,$16,$17,$18,$19)
 				RETURNING action_id`
-			if err := tx.QueryRow(ctx, auditQ, id, reasonArg, userName,
+			editStatus := payRecAuditStatus(triggerMatrixID, "PENDING_EDIT_APPROVAL")
+			if err := tx.QueryRow(ctx, auditQ, id, editStatus, reasonArg, userName,
 				transactionNullIfEmpty(api.ClientIPFromRequest(r)),
 				oldEntity, oldCounter, oldInvoice, oldInvDate, oldDueDate, oldAmount, oldCurrency,
 				newEntity, newCounter, newInvoice, newInvDate, newDueDate, newAmount, newCurrency).Scan(&actionID); err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to create audit for receivable: "+err.Error())
 				return
+			}
+			if !policyPinnedMatrix(triggerMatrixID) {
+				if _, err := tx.Exec(ctx, `
+					UPDATE tr_receivables r
+					SET
+						entity_name       = COALESCE(NULLIF(aa.new_entity_name, ''), r.entity_name),
+						counterparty_name = COALESCE(NULLIF(aa.new_counterparty_name, ''), r.counterparty_name),
+						invoice_number    = COALESCE(NULLIF(aa.new_invoice_number, ''), r.invoice_number),
+						invoice_date      = COALESCE(NULLIF(aa.new_invoice_date::text, '')::date, r.invoice_date),
+						due_date          = COALESCE(NULLIF(aa.new_due_date::text, '')::date, r.due_date),
+						invoice_amount    = COALESCE(NULLIF(aa.new_amount::text, '')::numeric, r.invoice_amount),
+						currency_code     = COALESCE(NULLIF(aa.new_currency_code, ''), r.currency_code)
+					FROM auditactionreceivable aa
+					WHERE aa.action_id = $1 AND aa.receivable_id = r.receivable_id
+				`, actionID); err != nil {
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to apply receivable edit: "+err.Error())
+					return
+				}
 			}
 
 		} else {
@@ -2407,7 +2502,9 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
-		submitPayRecForApproval(pgxPool, id, effEntity, req.UserID, actorEmail, txType, effAmount, triggerMatrixID)
+		if policyPinnedMatrix(triggerMatrixID) {
+			submitPayRecForApproval(pgxPool, id, effEntity, req.UserID, actorEmail, txType, effAmount, triggerMatrixID)
+		}
 
 		dmsevent.Fire(pgxPool, "CASH", "PAYABLE_RECEIVABLE", "POST_EDIT", []string{req.ID}, userName)
 

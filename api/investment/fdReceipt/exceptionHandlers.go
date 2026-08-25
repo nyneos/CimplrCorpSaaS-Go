@@ -127,16 +127,18 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", eID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				TransactionType:  "FD_EXCEPTION_EDIT",
-				RecordID:         eID,
-				RecordTable:      constants.QuerryReceiptException,
-				AuditTable:       constants.QuerryReceiptExceptionAudit,
-				AuditIDColumn:    "exception_id",
-				ActionType:       "EDIT",
-				SubmittedBy:      uEmail,
-				SubmittedByEmail: uEmail,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				TransactionType:     "FD_EXCEPTION_EDIT",
+				RecordID:            eID,
+				RecordTable:         constants.QuerryReceiptException,
+				AuditTable:          constants.QuerryReceiptExceptionAudit,
+				AuditIDColumn:       "exception_id",
+				ActionType:          "EDIT",
+				SubmittedBy:         uEmail,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(req.ExceptionID, userEmail, editVarMatrixID)
 
@@ -265,16 +267,18 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", eID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				TransactionType:  "FD_EXCEPTION_RESOLVE",
-				RecordID:         eID,
-				RecordTable:      constants.QuerryReceiptException,
-				AuditTable:       constants.QuerryReceiptExceptionAudit,
-				AuditIDColumn:    "exception_id",
-				ActionType:       "EDIT",
-				SubmittedBy:      uEmail,
-				SubmittedByEmail: uEmail,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				TransactionType:     "FD_EXCEPTION_RESOLVE",
+				RecordID:            eID,
+				RecordTable:         constants.QuerryReceiptException,
+				AuditTable:          constants.QuerryReceiptExceptionAudit,
+				AuditIDColumn:       "exception_id",
+				ActionType:          "EDIT",
+				SubmittedBy:         uEmail,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(req.ExceptionID, userEmail, resolveMatrixID)
 
@@ -522,15 +526,17 @@ func closeOneVariance(ctx context.Context, r *http.Request, pool *pgxpool.Pool, 
 		bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer bgCancel()
 		_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "FIXED_DEPOSIT",
-			TransactionType:  "FD_EXCEPTION_CLOSE",
-			RecordID:         eID,
-			RecordTable:      constants.QuerryReceiptException,
-			AuditTable:       constants.QuerryReceiptExceptionAudit,
-			AuditIDColumn:    "exception_id",
-			ActionType:       "EDIT",
-			SubmittedBy:      uEmail,
-			SubmittedByEmail: uEmail,
+			ModuleCode:          "FIXED_DEPOSIT",
+			TransactionType:     "FD_EXCEPTION_CLOSE",
+			RecordID:            eID,
+			RecordTable:         constants.QuerryReceiptException,
+			AuditTable:          constants.QuerryReceiptExceptionAudit,
+			AuditIDColumn:       "exception_id",
+			ActionType:          "EDIT",
+			SubmittedBy:         uEmail,
+			SubmittedByEmail:    uEmail,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: true,
 		})
 	}(exceptionID, userEmail)
 

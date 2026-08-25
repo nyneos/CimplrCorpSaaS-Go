@@ -23,7 +23,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/api/approvalengine"
-	"context")
+	"context"
+)
 
 const errLoadExposureBucketingRowForPolicyCheck = "Failed to load exposure_bucketing row for policy check: "
 
@@ -424,11 +425,13 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 
 		go func(tID string) {
 			_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FX",
-				TransactionType:  "FX_BUCKETING_EDIT",
-				RecordID:         req.ExposureHeaderID,
-				MatrixID:         tID,
-				SubmittedByEmail: makerEmail,
+				ModuleCode:          "FX",
+				TransactionType:     "FX_BUCKETING_EDIT",
+				RecordID:            req.ExposureHeaderID,
+				MatrixID:            tID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
+				SubmittedByEmail:    makerEmail,
 			})
 		}(triggerMatrixID)
 	}
@@ -719,11 +722,13 @@ func DeleteBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					TransactionType:  "FX_BUCKETING_DELETE",
-					RecordID:         id,
-					MatrixID:         matrices[id],
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					TransactionType:     "FX_BUCKETING_DELETE",
+					RecordID:            id,
+					MatrixID:            matrices[id],
+					SubmittedByEmail:    email,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 			}
 		}(deleted, makerEmail, triggerMatrices)

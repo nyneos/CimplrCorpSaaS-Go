@@ -317,17 +317,19 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, bsid := range newIDs {
 				if _, aerr := pgxPool.Exec(ctx, `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now(),$3)`, bsid, userName, requestedIP); aerr == nil {
 					approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-						ModuleCode:       common.ModuleCash,
-						TransactionType:  "BANK_STATEMENT_CREATE",
-						RecordID:         bsid,
-						RecordTable:      "bank_statement",
-						AuditTable:       "public.auditactionbankstatement",
-						AuditIDColumn:    "bankstatementid",
-						ActionType:       "CREATE",
-						Amount:           0,
-						SubmittedBy:      userID,
-						SubmittedByEmail: userName,
-						MatrixID:         uploadMatrixID,
+						ModuleCode:          common.ModuleCash,
+						TransactionType:     "BANK_STATEMENT_CREATE",
+						RecordID:            bsid,
+						RecordTable:         "bank_statement",
+						AuditTable:          "public.auditactionbankstatement",
+						AuditIDColumn:       "bankstatementid",
+						ActionType:          "CREATE",
+						Amount:              0,
+						SubmittedBy:         userID,
+						SubmittedByEmail:    userName,
+						MatrixID:            uploadMatrixID,
+						RequirePinnedMatrix: true,
+						AutoApplyIfUnpinned: false,
 					})
 				} else {
 					// log but don't fail the entire upload for audit insert error
@@ -1247,17 +1249,19 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 		for _, id := range req.IDs {
 			approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       common.ModuleCash,
-				TransactionType:  "BANK_STATEMENT_DELETE",
-				RecordID:         id,
-				RecordTable:      "bank_statement",
-				AuditTable:       "public.auditactionbankstatement",
-				AuditIDColumn:    "bankstatementid",
-				ActionType:       "DELETE",
-				Amount:           0,
-				SubmittedBy:      req.UserID,
-				SubmittedByEmail: requestedBy,
-				MatrixID:         deleteMatrixByID[id],
+				ModuleCode:          common.ModuleCash,
+				TransactionType:     "BANK_STATEMENT_DELETE",
+				RecordID:            id,
+				RecordTable:         "bank_statement",
+				AuditTable:          "public.auditactionbankstatement",
+				AuditIDColumn:       "bankstatementid",
+				ActionType:          "DELETE",
+				Amount:              0,
+				SubmittedBy:         req.UserID,
+				SubmittedByEmail:    requestedBy,
+				MatrixID:            deleteMatrixByID[id],
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: false,
 			})
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true})
@@ -1862,17 +1866,19 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, id := range created {
 			approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       common.ModuleCash,
-				TransactionType:  "BANK_STATEMENT_CREATE",
-				RecordID:         id,
-				RecordTable:      "bank_statement",
-				AuditTable:       "public.auditactionbankstatement",
-				AuditIDColumn:    "bankstatementid",
-				ActionType:       "CREATE",
-				Amount:           0,
-				SubmittedBy:      req.UserID,
-				SubmittedByEmail: createdBy,
-				MatrixID:         createMatrixByID[id],
+				ModuleCode:          common.ModuleCash,
+				TransactionType:     "BANK_STATEMENT_CREATE",
+				RecordID:            id,
+				RecordTable:         "bank_statement",
+				AuditTable:          "public.auditactionbankstatement",
+				AuditIDColumn:       "bankstatementid",
+				ActionType:          "CREATE",
+				Amount:              0,
+				SubmittedBy:         req.UserID,
+				SubmittedByEmail:    createdBy,
+				MatrixID:            createMatrixByID[id],
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: false,
 			})
 		}
 
@@ -2136,17 +2142,19 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_STATEMENT", "POST_EDIT", []string{req.BankStatementID}, requestedBy)
 
 		approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-			ModuleCode:       common.ModuleCash,
-			TransactionType:  "BANK_STATEMENT_EDIT",
-			RecordID:         req.BankStatementID,
-			RecordTable:      "bank_statement",
-			AuditTable:       "public.auditactionbankstatement",
-			AuditIDColumn:    "bankstatementid",
-			ActionType:       "EDIT",
-			Amount:           0,
-			SubmittedBy:      req.UserID,
-			SubmittedByEmail: requestedBy,
-			MatrixID:         editMatrixID,
+			ModuleCode:          common.ModuleCash,
+			TransactionType:     "BANK_STATEMENT_EDIT",
+			RecordID:            req.BankStatementID,
+			RecordTable:         "bank_statement",
+			AuditTable:          "public.auditactionbankstatement",
+			AuditIDColumn:       "bankstatementid",
+			ActionType:          "EDIT",
+			Amount:              0,
+			SubmittedBy:         req.UserID,
+			SubmittedByEmail:    requestedBy,
+			MatrixID:            editMatrixID,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: false,
 		})
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"bankstatementid": req.BankStatementID})

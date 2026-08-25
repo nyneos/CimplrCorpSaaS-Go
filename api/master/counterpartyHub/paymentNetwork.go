@@ -137,6 +137,8 @@ func CreatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordID: id, RecordTable: "apibox.payment_network_master",
 				AuditTable: "apibox.audit_payment_network", AuditIDColumn: "payment_network_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(pnID, req.UserID, userEmail)
 

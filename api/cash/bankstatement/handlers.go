@@ -1693,17 +1693,19 @@ func DeleteBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				continue
 			}
 			approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       common.ModuleCash,
-				TransactionType:  "BANK_STATEMENT_DELETE",
-				RecordID:         bsid,
-				RecordTable:      "cimplrcorpsaas.bank_statements",
-				AuditTable:       "cimplrcorpsaas.auditactionbankstatement",
-				AuditIDColumn:    "bankstatementid",
-				ActionType:       "DELETE",
-				Amount:           0,
-				SubmittedBy:      body.UserID,
-				SubmittedByEmail: requestedBy,
-				MatrixID:         out.Result.TriggerApprovalMatrixID,
+				ModuleCode:          common.ModuleCash,
+				TransactionType:     "BANK_STATEMENT_DELETE",
+				RecordID:            bsid,
+				RecordTable:         "cimplrcorpsaas.bank_statements",
+				AuditTable:          "cimplrcorpsaas.auditactionbankstatement",
+				AuditIDColumn:       "bankstatementid",
+				ActionType:          "DELETE",
+				Amount:              0,
+				SubmittedBy:         body.UserID,
+				SubmittedByEmail:    requestedBy,
+				MatrixID:            out.Result.TriggerApprovalMatrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: false,
 			})
 			results = append(results, map[string]interface{}{
 				"bank_statement_id": bsid,

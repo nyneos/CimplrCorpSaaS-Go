@@ -1,7 +1,6 @@
 package approvalengine
 
 import (
-	"CimplrCorpSaas/api"
 	"context"
 	"fmt"
 	"strings"
@@ -152,8 +151,9 @@ func isPendingAuditStatus(status string) bool {
 	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(status)), "PENDING")
 }
 
-// EnsureInstanceForRecord creates a pending instance for a record whose audit
-// is still PENDING but whose CreateInstance raced the HTTP response.
+// EnsureInstanceForRecord returns an existing PENDING instance for the record.
+// It does not create a new one: inventing a matrix via ResolveMatrix would
+// re-route entries that never breached a TriggerApproval policy.
 func EnsureInstanceForRecord(ctx context.Context, pool *pgxpool.Pool, moduleCode, recordID string) string {
 	moduleCode = strings.TrimSpace(moduleCode)
 	recordID = strings.TrimSpace(recordID)
@@ -167,63 +167,7 @@ func EnsureInstanceForRecord(ctx context.Context, pool *pgxpool.Pool, moduleCode
 			return existing
 		}
 	}
-	h := loadHealContext(ctx, pool, moduleCode, recordID)
-	if !h.Found || !isPendingAuditStatus(h.Status) {
-		return ""
-	}
-	mod := h.Spec.ModuleCode
-	if moduleCode != "" {
-		mod = moduleCode
-	}
-	instID, err := CreateInstance(ctx, pool, InstanceRequest{
-		ModuleCode:       mod,
-		EntityCode:       h.EntityCode,
-		TransactionType:  txTypeFromHeal(h.Spec, h.ActionType),
-		RecordID:         recordID,
-		RecordTable:      h.Spec.RecordTable,
-		AuditTable:       h.Spec.AuditTable,
-		AuditIDColumn:    h.Spec.AuditIDColumn,
-		ActionType:       strings.ToUpper(strings.TrimSpace(h.ActionType)),
-		Amount:           h.Amount,
-		SubmittedBy:      h.RequestedBy,
-		SubmittedByEmail: h.RequestedBy,
-	})
-	if err != nil || instID == "" {
-		if err != nil {
-			api.LogError("[ApprovalEngine] EnsureInstanceForRecord %s/%s: %v", mod, recordID, err)
-		}
-		return ""
-	}
-	return instID
-}
-
-func liveMatrixAppliesForRecord(ctx context.Context, pool *pgxpool.Pool, moduleCode, recordID string) bool {
-	var txType, entity string
-	var amount float64
-	err := pool.QueryRow(ctx, `
-		SELECT COALESCE(transaction_type,''), COALESCE(entity_code,''), COALESCE(amount,0)
-		FROM uam.approval_instance
-		WHERE record_id=$1 AND ($2='' OR module_code=$2) AND is_deleted=false
-		ORDER BY submitted_at DESC LIMIT 1`, recordID, strings.TrimSpace(moduleCode),
-	).Scan(&txType, &entity, &amount)
-	if err == nil && strings.TrimSpace(txType) != "" {
-		mod := strings.TrimSpace(moduleCode)
-		if mod == "" {
-			mod = "CASH"
-		}
-		m, mErr := ResolveMatrix(ctx, pool, mod, entity, txType, amount)
-		return mErr == nil && m != nil
-	}
-	h := loadHealContext(ctx, pool, moduleCode, recordID)
-	if !h.Found || !isPendingAuditStatus(h.Status) {
-		return false
-	}
-	mod := h.Spec.ModuleCode
-	if strings.TrimSpace(moduleCode) != "" {
-		mod = moduleCode
-	}
-	m, mErr := ResolveMatrix(ctx, pool, mod, h.EntityCode, txTypeFromHeal(h.Spec, h.ActionType), h.Amount)
-	return mErr == nil && m != nil
+	return ""
 }
 
 func applyNoPendingMatrixGate(ctx context.Context, pool *pgxpool.Pool, req ActOnPendingRequest, result *ActOnPendingResult, healed bool) (ActOnPendingResult, error) {
@@ -232,8 +176,7 @@ func applyNoPendingMatrixGate(ctx context.Context, pool *pgxpool.Pool, req ActOn
 			return actOnPendingOrDiagnose(ctx, pool, req, true)
 		}
 	}
-	if liveMatrixAppliesForRecord(ctx, pool, req.ModuleCode, req.RecordID) {
-		result.Reason = "not your turn in approval sequence"
-	}
+	// No pending instance: policy did not trigger approval. Do not block the
+	// legacy apply path just because some other live matrix exists for the type.
 	return *result, nil
 }

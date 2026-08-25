@@ -142,6 +142,8 @@ func CreateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordID: pid, RecordTable: "apibox.data_provider_master",
 				AuditTable: "apibox.audit_data_provider", AuditIDColumn: "provider_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(providerID, req.UserID, userEmail)
 

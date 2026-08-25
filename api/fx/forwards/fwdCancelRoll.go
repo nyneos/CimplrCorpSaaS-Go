@@ -25,7 +25,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/api/approvalengine"
-	"CimplrCorpSaas/api/auth")
+	"CimplrCorpSaas/api/auth"
+)
 
 const (
 	cancelRollTypeCancellation = "cancellation"
@@ -1183,11 +1184,13 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					TransactionType:  "FX_FORWARD_ROLLOVER",
-					RecordID:         id,
-					MatrixID:         matrixIDs[id],
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					TransactionType:     "FX_FORWARD_ROLLOVER",
+					RecordID:            id,
+					MatrixID:            matrixIDs[id],
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
+					SubmittedByEmail:    email,
 				})
 			}
 		}(createdBookingIDs, makerEmail, matrixByBooking)
@@ -1547,11 +1550,13 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					TransactionType:  "FX_FORWARD_CANCELLATION",
-					RecordID:         id,
-					MatrixID:         matrixIDs[id],
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					TransactionType:     "FX_FORWARD_CANCELLATION",
+					RecordID:            id,
+					MatrixID:            matrixIDs[id],
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
+					SubmittedByEmail:    email,
 				})
 			}
 		}(createdBookingIDs, makerEmail, matrixByBooking)

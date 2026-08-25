@@ -198,6 +198,8 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordID: eid, RecordTable: "apibox.exchange_master",
 				AuditTable: "apibox.audit_exchange_master", AuditIDColumn: "exchange_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(exchangeID, req.UserID, userEmail)
 

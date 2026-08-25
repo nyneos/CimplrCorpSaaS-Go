@@ -35,18 +35,20 @@ func submitMFProposalForApproval(pool *pgxpool.Pool, proposalID, entityName, sub
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-		ModuleCode:       "INVESTMENT_MF",
-		EntityCode:       entityName,
-		TransactionType:  txType,
-		RecordID:         proposalID,
-		RecordTable:      "investment.investment_proposal",
-		AuditTable:       "investment.auditactionproposal",
-		AuditIDColumn:    "proposal_id",
-		ActionType:       strings.TrimPrefix(txType, "MF_PROPOSAL_"),
-		Amount:           amount,
-		SubmittedBy:      submittedByUserID,
-		SubmittedByEmail: actorEmail,
-		MatrixID:         matrixID,
+		ModuleCode:          "INVESTMENT_MF",
+		EntityCode:          entityName,
+		TransactionType:     txType,
+		RecordID:            proposalID,
+		RecordTable:         "investment.investment_proposal",
+		AuditTable:          "investment.auditactionproposal",
+		AuditIDColumn:       "proposal_id",
+		ActionType:          strings.TrimPrefix(txType, "MF_PROPOSAL_"),
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: true,
 	}); err != nil {
 		api.LogError("[MFProposal] approvalengine.CreateInstance failed for proposal %s (%s): %v", proposalID, txType, err)
 	}

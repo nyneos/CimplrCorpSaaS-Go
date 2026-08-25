@@ -931,7 +931,9 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id",
 			ActionType: "CREATE", Amount: principalAmount,
 			SubmittedBy: req.UserID, SubmittedByEmail: userEmail,
-			MatrixID: initiateMatrixID,
+			MatrixID:            initiateMatrixID,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: true,
 		})
 		if instErr != nil {
 			cleanupUpload()
@@ -2455,18 +2457,20 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		instID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "FIXED_DEPOSIT",
-			EntityCode:       firstNonEmpty(entityID, "DEFAULT"),
-			TransactionType:  "FD_CLOSURE_DELETE",
-			RecordID:         req.ClosureRequestID,
-			RecordTable:      constants.QuerryClosureRequest,
-			AuditTable:       constants.QuerryAuditClosureRequest,
-			AuditIDColumn:    "closure_request_id",
-			ActionType:       "DELETE",
-			Amount:           principalAmt,
-			SubmittedBy:      req.UserID,
-			SubmittedByEmail: userEmail,
-			MatrixID:         deleteMatrixID,
+			ModuleCode:          "FIXED_DEPOSIT",
+			EntityCode:          firstNonEmpty(entityID, "DEFAULT"),
+			TransactionType:     "FD_CLOSURE_DELETE",
+			RecordID:            req.ClosureRequestID,
+			RecordTable:         constants.QuerryClosureRequest,
+			AuditTable:          constants.QuerryAuditClosureRequest,
+			AuditIDColumn:       "closure_request_id",
+			ActionType:          "DELETE",
+			Amount:              principalAmt,
+			SubmittedBy:         req.UserID,
+			SubmittedByEmail:    userEmail,
+			MatrixID:            deleteMatrixID,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: true,
 		})
 		if instErr != nil {
 			api.LogError("[FDClosure] CreateInstance DELETE failed: %v", instErr)

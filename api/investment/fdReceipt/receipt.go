@@ -617,18 +617,20 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_RECEIPT_CREATE",
-				RecordID:         rID,
-				RecordTable:      constants.QuerryInterestReceipt,
-				AuditTable:       constants.QuerryAuditInterestReceipt,
-				AuditIDColumn:    "receipt_id",
-				ActionType:       "CREATE",
-				Amount:           amount,
-				SubmittedBy:      req.UserID,
-				SubmittedByEmail: uEmail,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_RECEIPT_CREATE",
+				RecordID:            rID,
+				RecordTable:         constants.QuerryInterestReceipt,
+				AuditTable:          constants.QuerryAuditInterestReceipt,
+				AuditIDColumn:       "receipt_id",
+				ActionType:          "CREATE",
+				Amount:              amount,
+				SubmittedBy:         req.UserID,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 			if instErr != nil {
 				api.LogError("[FDReceipt] CreateInstance CREATE failed: %v", instErr)
@@ -1088,18 +1090,20 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				var amount float64
 				pool.QueryRow(ctx, `SELECT COALESCE(entity_id,''), COALESCE(gross_interest_received, 0) FROM investment.fd_interest_receipt WHERE receipt_id=$1`, rid).Scan(&eID, &amount) //nolint:errcheck
 				instID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FIXED_DEPOSIT",
-					EntityCode:       eID,
-					TransactionType:  "FD_RECEIPT_DELETE",
-					RecordID:         rid,
-					RecordTable:      constants.QuerryInterestReceipt,
-					AuditTable:       constants.QuerryAuditInterestReceipt,
-					AuditIDColumn:    "receipt_id",
-					ActionType:       "DELETE",
-					Amount:           amount,
-					SubmittedBy:      req.UserID,
-					SubmittedByEmail: userEmail,
-					MatrixID:         matrixID,
+					ModuleCode:          "FIXED_DEPOSIT",
+					EntityCode:          eID,
+					TransactionType:     "FD_RECEIPT_DELETE",
+					RecordID:            rid,
+					RecordTable:         constants.QuerryInterestReceipt,
+					AuditTable:          constants.QuerryAuditInterestReceipt,
+					AuditIDColumn:       "receipt_id",
+					ActionType:          "DELETE",
+					Amount:              amount,
+					SubmittedBy:         req.UserID,
+					SubmittedByEmail:    userEmail,
+					MatrixID:            matrixID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 				if instErr != nil {
 					api.LogError("[FDReceipt] CreateInstance DELETE failed: %v", instErr)
@@ -2718,17 +2722,19 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_RECONCILE_CREATE",
-				RecordID:         rID,
-				RecordTable:      "investment.fd_receipt_reconcile_run",
-				AuditTable:       "investment.fd_receipt_reconcile_run",
-				AuditIDColumn:    "reconcile_run_id",
-				ActionType:       "CREATE",
-				SubmittedBy:      uEmail,
-				SubmittedByEmail: uEmail,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_RECONCILE_CREATE",
+				RecordID:            rID,
+				RecordTable:         "investment.fd_receipt_reconcile_run",
+				AuditTable:          "investment.fd_receipt_reconcile_run",
+				AuditIDColumn:       "reconcile_run_id",
+				ActionType:          "CREATE",
+				SubmittedBy:         uEmail,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(runID, req.EntityID, userEmail, ingestMatrixID)
 
@@ -4291,17 +4297,19 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_TDS_EDIT",
-				RecordID:         tID,
-				RecordTable:      constants.QuerryTDSReceipt,
-				AuditTable:       constants.QuerryAuditTDSReceipt,
-				AuditIDColumn:    "tds_id",
-				ActionType:       "EDIT",
-				SubmittedBy:      uEmail,
-				SubmittedByEmail: uEmail,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_TDS_EDIT",
+				RecordID:            tID,
+				RecordTable:         constants.QuerryTDSReceipt,
+				AuditTable:          constants.QuerryAuditTDSReceipt,
+				AuditIDColumn:       "tds_id",
+				ActionType:          "EDIT",
+				SubmittedBy:         uEmail,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 			if instErr != nil {
 				api.LogError("[FDReceipt] UpdateTDS CreateInstance failed tds=%s: %v", tID, instErr)

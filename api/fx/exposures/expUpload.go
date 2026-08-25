@@ -703,11 +703,13 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 
 		go func(tID string) {
 			_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FX",
-				TransactionType:  "FX_EXPOSURE_EDIT",
-				RecordID:         exposureHeaderID,
-				MatrixID:         tID,
-				SubmittedByEmail: makerEmail,
+				ModuleCode:          "FX",
+				TransactionType:     "FX_EXPOSURE_EDIT",
+				RecordID:            exposureHeaderID,
+				MatrixID:            tID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
+				SubmittedByEmail:    makerEmail,
 			})
 		}(triggerMatrixID)
 	}
@@ -934,11 +936,13 @@ func DeleteExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					TransactionType:  "FX_EXPOSURE_DELETE",
-					RecordID:         id,
-					MatrixID:         matrices[id],
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					TransactionType:     "FX_EXPOSURE_DELETE",
+					RecordID:            id,
+					MatrixID:            matrices[id],
+					SubmittedByEmail:    email,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 			}
 		}(req.ExposureHeaderIds, userEmail, triggerMatrices)
@@ -2527,12 +2531,14 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 						bgCtx := context.Background()
 						for _, id := range ids {
 							_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-								ModuleCode:       "FX",
-								EntityCode:       entities[id],
-								TransactionType:  "FX_EXPOSURE_CREATE",
-								RecordID:         id,
-								MatrixID:         matrices[id],
-								SubmittedByEmail: email,
+								ModuleCode:          "FX",
+								EntityCode:          entities[id],
+								TransactionType:     "FX_EXPOSURE_CREATE",
+								RecordID:            id,
+								MatrixID:            matrices[id],
+								SubmittedByEmail:    email,
+								RequirePinnedMatrix: true,
+								AutoApplyIfUnpinned: true,
 							})
 						}
 					}(createdExposureIDs, session.Email, createMatrices, createEntities)

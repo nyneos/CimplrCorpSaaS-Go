@@ -1416,12 +1416,14 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			bgCtx := context.Background()
 			for _, hidStr := range docs {
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					EntityCode:       entities[hidStr],
-					TransactionType:  "FX_EXPOSURE_CREATE",
-					RecordID:         hidStr,
-					MatrixID:         matrices[hidStr],
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					EntityCode:          entities[hidStr],
+					TransactionType:     "FX_EXPOSURE_CREATE",
+					RecordID:            hidStr,
+					MatrixID:            matrices[hidStr],
+					SubmittedByEmail:    email,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 			}
 		}(docToID, makerEmail, createMatrices, createEntities)

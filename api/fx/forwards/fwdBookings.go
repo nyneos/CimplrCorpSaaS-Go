@@ -469,12 +469,14 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			go func(id, email, matrixID string) {
 				_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					EntityCode:       req.EntityLevel0,
-					TransactionType:  "FX_FORWARD_CREATE",
-					RecordID:         id,
-					MatrixID:         matrixID,
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					EntityCode:          req.EntityLevel0,
+					TransactionType:     "FX_FORWARD_CREATE",
+					RecordID:            id,
+					MatrixID:            matrixID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
+					SubmittedByEmail:    email,
 				})
 			}(systemTransactionID, makerEmail, tID)
 		}
@@ -672,12 +674,14 @@ func UploadForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 				bgCtx := context.Background()
 				for _, id := range ids {
 					_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-						ModuleCode:       "FX",
-						EntityCode:       entities[id],
-						TransactionType:  "FX_FORWARD_CREATE",
-						RecordID:         id,
-						MatrixID:         matrices[id],
-						SubmittedByEmail: email,
+						ModuleCode:          "FX",
+						EntityCode:          entities[id],
+						TransactionType:     "FX_FORWARD_CREATE",
+						RecordID:            id,
+						MatrixID:            matrices[id],
+						SubmittedByEmail:    email,
+						RequirePinnedMatrix: true,
+						AutoApplyIfUnpinned: true,
 					})
 				}
 			}(uploadedIDs, makerEmail, createMatrices, createEntities)

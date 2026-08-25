@@ -71,18 +71,20 @@ func fireRateNegotiationInstance(pool *pgxpool.Pool, recordID, userID, userEmail
 		return
 	}
 	instID, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-		ModuleCode:       rateNegModule,
-		EntityCode:       "",
-		TransactionType:  txTypeForAction(actionType),
-		RecordID:         recordID,
-		RecordTable:      rateNegRecordTable,
-		AuditTable:       rateNegAuditTable,
-		AuditIDColumn:    rateNegPK,
-		ActionType:       strings.ToUpper(actionType),
-		Amount:           amount,
-		SubmittedBy:      userID,
-		SubmittedByEmail: userEmail,
-		MatrixID:         matrixID,
+		ModuleCode:          rateNegModule,
+		EntityCode:          "",
+		TransactionType:     txTypeForAction(actionType),
+		RecordID:            recordID,
+		RecordTable:         rateNegRecordTable,
+		AuditTable:          rateNegAuditTable,
+		AuditIDColumn:       rateNegPK,
+		ActionType:          strings.ToUpper(actionType),
+		Amount:              amount,
+		SubmittedBy:         userID,
+		SubmittedByEmail:    userEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: true,
 	})
 	if err != nil {
 		api.LogError("[FDRateNeg] CreateInstance(%s) %s: %v", actionType, recordID, err)

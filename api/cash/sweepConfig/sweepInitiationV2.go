@@ -58,18 +58,20 @@ func submitSweepInitiationForApproval(pgxPool *pgxpool.Pool, initiationID, sweep
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-		ModuleCode:       "CASH",
-		EntityCode:       entityName,
-		TransactionType:  "SWEEP_INITIATION_CREATE",
-		RecordID:         initiationID,
-		RecordTable:      "cimplrcorpsaas.sweep_initiation",
-		AuditTable:       "cimplrcorpsaas.auditactionsweepinitiation",
-		AuditIDColumn:    "initiation_id",
-		ActionType:       "CREATE",
-		Amount:           amount,
-		SubmittedBy:      submittedByUserID,
-		SubmittedByEmail: actorEmail,
-		MatrixID:         matrixID,
+		ModuleCode:          "CASH",
+		EntityCode:          entityName,
+		TransactionType:     "SWEEP_INITIATION_CREATE",
+		RecordID:            initiationID,
+		RecordTable:         "cimplrcorpsaas.sweep_initiation",
+		AuditTable:          "cimplrcorpsaas.auditactionsweepinitiation",
+		AuditIDColumn:       "initiation_id",
+		ActionType:          "CREATE",
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: false,
 	}); err != nil {
 		api.LogError("approvalengine.CreateInstance failed for sweep initiation %s (sweep %s): %v", initiationID, sweepID, err)
 	}
@@ -1716,18 +1718,20 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[SweepInitiation] CancelPendingInstances failed for %s: %v", c.initiationID, cerr)
 				}
 				if _, cerr := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-					ModuleCode:       "CASH",
-					EntityCode:       c.entityName,
-					TransactionType:  "SWEEP_INITIATION_DELETE",
-					RecordID:         c.initiationID,
-					RecordTable:      "cimplrcorpsaas.sweep_initiation",
-					AuditTable:       "cimplrcorpsaas.auditactionsweepinitiation",
-					AuditIDColumn:    "initiation_id",
-					ActionType:       "DELETE",
-					Amount:           c.amount,
-					SubmittedBy:      req.UserID,
-					SubmittedByEmail: requestedByEmail,
-					MatrixID:         c.matrixID,
+					ModuleCode:          "CASH",
+					EntityCode:          c.entityName,
+					TransactionType:     "SWEEP_INITIATION_DELETE",
+					RecordID:            c.initiationID,
+					RecordTable:         "cimplrcorpsaas.sweep_initiation",
+					AuditTable:          "cimplrcorpsaas.auditactionsweepinitiation",
+					AuditIDColumn:       "initiation_id",
+					ActionType:          "DELETE",
+					Amount:              c.amount,
+					SubmittedBy:         req.UserID,
+					SubmittedByEmail:    requestedByEmail,
+					MatrixID:            c.matrixID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: false,
 				}); cerr != nil {
 					api.LogError("[SweepInitiation] CreateInstance (DELETE) failed for %s: %v", c.initiationID, cerr)
 				}

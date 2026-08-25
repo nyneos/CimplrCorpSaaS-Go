@@ -1,6 +1,7 @@
 package exposures
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,10 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"context"
 
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxexposures "CimplrCorpSaas/api/fx/exposures"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
@@ -276,7 +276,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		engineActedMap := make(map[string]bool)
-		
+
 		engineAwaitingMap := make(map[string]bool)
 		for _, id := range req.ExposureIDs {
 			gate := approvalengine.Gate(ctx, pool, approvalengine.ActOnPendingRequest{
@@ -566,19 +566,21 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-			go func(ids []string, email string, matrices map[string]string) {
-				bgCtx := context.Background()
-				for _, id := range ids {
-					_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
-					_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-						ModuleCode:       "FX",
-						TransactionType:  "FX_EXPOSURE_DELETE",
-						RecordID:         id,
-						MatrixID:         matrices[id],
-						SubmittedByEmail: email,
-					})
-				}
-			}(deleted, makerEmail, triggerMatrices)
+		go func(ids []string, email string, matrices map[string]string) {
+			bgCtx := context.Background()
+			for _, id := range ids {
+				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+					ModuleCode:          "FX",
+					TransactionType:     "FX_EXPOSURE_DELETE",
+					RecordID:            id,
+					MatrixID:            matrices[id],
+					SubmittedByEmail:    email,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
+				})
+			}
+		}(deleted, makerEmail, triggerMatrices)
 	}
 }
 

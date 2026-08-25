@@ -1537,18 +1537,20 @@ func submitBankLimitForApproval(pool *pgxpool.Pool, limitID, entityName, submitt
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-		ModuleCode:       "CASH",
-		EntityCode:       entityName, // limit has EntityName directly
-		TransactionType:  txType,
-		RecordID:         limitID,
-		RecordTable:      "cimplrcorpsaas.bank_limit",
-		AuditTable:       "cimplrcorpsaas.auditactionbanklimit",
-		AuditIDColumn:    "limit_id",
-		ActionType:       strings.TrimPrefix(txType, "BANK_LIMIT_"),
-		Amount:           amount,
-		SubmittedBy:      submittedByUserID,
-		SubmittedByEmail: actorEmail,
-		MatrixID:         matrixID,
+		ModuleCode:          "CASH",
+		EntityCode:          entityName, // limit has EntityName directly
+		TransactionType:     txType,
+		RecordID:            limitID,
+		RecordTable:         "cimplrcorpsaas.bank_limit",
+		AuditTable:          "cimplrcorpsaas.auditactionbanklimit",
+		AuditIDColumn:       "limit_id",
+		ActionType:          strings.TrimPrefix(txType, "BANK_LIMIT_"),
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: false,
 	}); err != nil {
 		api.LogError("[BankLimit] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"limit_id": limitID, "tx_type": txType, "error": err.Error()})
 	}

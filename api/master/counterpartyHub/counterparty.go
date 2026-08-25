@@ -282,6 +282,8 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordID: cpID, RecordTable: constants.ErrCounterpartyMasterTable,
 				AuditTable: constants.ErrAuditCounterpartyMasterTable, AuditIDColumn: "counterparty_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(counterpartyID, req.UserID, userEmail)
 
@@ -415,12 +417,14 @@ func CreateCounterpartyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			go func(id, uID, uEmail string) {
 				defer func() { recover() }()
 				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer bgCancel()
+				defer bgCancel()
 				_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_MASTER_CREATE",
 					RecordID: id, RecordTable: constants.ErrCounterpartyMasterTable,
 					AuditTable: constants.ErrAuditCounterpartyMasterTable, AuditIDColumn: "counterparty_id",
 					ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 			}(cpID, req.UserID, userEmail)
 		}
@@ -595,6 +599,8 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordID: cpID, RecordTable: constants.ErrCounterpartyMasterTable,
 				AuditTable: constants.ErrAuditCounterpartyMasterTable, AuditIDColumn: "counterparty_id",
 				ActionType: "EDIT", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(req.CounterpartyID, req.UserID, userEmail)
 
@@ -1334,9 +1340,9 @@ func GetCounterpartyMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		childData, _ := fetchLinkedChildDetail(ctx, pgxPool, cpType, cpID)
 
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
-			"data":    result,
-			"audits":  audits,
-			"child":   childData,
+			"data":   result,
+			"audits": audits,
+			"child":  childData,
 		})
 	}
 }

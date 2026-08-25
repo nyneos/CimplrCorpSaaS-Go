@@ -784,11 +784,13 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 				bgCtx := context.Background()
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					TransactionType:  tType,
-					RecordID:         id,
-					MatrixID:         tID,
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					TransactionType:     tType,
+					RecordID:            id,
+					MatrixID:            tID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
+					SubmittedByEmail:    email,
 				})
 			}(settlementID, makerEmail, txnType, triggerMatrixID)
 		}
@@ -1169,11 +1171,13 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					TransactionType:  "FX_SETTLEMENT_DELETE",
-					RecordID:         id,
-					MatrixID:         matrices[id],
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					TransactionType:     "FX_SETTLEMENT_DELETE",
+					RecordID:            id,
+					MatrixID:            matrices[id],
+					SubmittedByEmail:    email,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 			}
 		}(req.SettlementIDs, makerEmail, triggerMatrices)

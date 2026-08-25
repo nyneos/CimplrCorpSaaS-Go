@@ -482,17 +482,19 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-			ModuleCode:       common.ModuleCash,
-			TransactionType:  "CASH_FLOW_PROJECTION_CREATE",
-			RecordID:         proposalID,
-			RecordTable:      "cimplrcorpsaas.cashflow_proposal",
-			AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
-			AuditIDColumn:    "proposal_id",
-			ActionType:       "CREATE",
-			Amount:           0,
-			SubmittedBy:      userID,
-			SubmittedByEmail: requestedBy,
-			MatrixID:         uploadMatrixID,
+			ModuleCode:          common.ModuleCash,
+			TransactionType:     "CASH_FLOW_PROJECTION_CREATE",
+			RecordID:            proposalID,
+			RecordTable:         "cimplrcorpsaas.cashflow_proposal",
+			AuditTable:          "cimplrcorpsaas.audit_action_cashflow_proposal",
+			AuditIDColumn:       "proposal_id",
+			ActionType:          "CREATE",
+			Amount:              0,
+			SubmittedBy:         userID,
+			SubmittedByEmail:    requestedBy,
+			MatrixID:            uploadMatrixID,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: false,
 		})
 
 		api.RespondEnvelopeSuccessCompat(w, "V2 Proposal, items, projections & audit committed successfully", map[string]interface{}{

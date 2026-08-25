@@ -37,18 +37,20 @@ func submitMFRedemptionForApproval(pool *pgxpool.Pool, redemptionID, entityName,
 		amt = *amount
 	}
 	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-		ModuleCode:       "INVESTMENT_MF",
-		EntityCode:       entityName,
-		TransactionType:  txType,
-		RecordID:         redemptionID,
-		RecordTable:      "investment.redemption_initiation",
-		AuditTable:       "investment.auditactionredemption",
-		AuditIDColumn:    "redemption_id",
-		ActionType:       strings.TrimPrefix(txType, "MF_REDEMPTION_INITIATION_"),
-		Amount:           amt,
-		SubmittedBy:      submittedByUserID,
-		SubmittedByEmail: actorEmail,
-		MatrixID:         matrixID,
+		ModuleCode:          "INVESTMENT_MF",
+		EntityCode:          entityName,
+		TransactionType:     txType,
+		RecordID:            redemptionID,
+		RecordTable:         "investment.redemption_initiation",
+		AuditTable:          "investment.auditactionredemption",
+		AuditIDColumn:       "redemption_id",
+		ActionType:          strings.TrimPrefix(txType, "MF_REDEMPTION_INITIATION_"),
+		Amount:              amt,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: true,
 	}); err != nil {
 		api.LogError("[MFRedemptionInitiation] approvalengine.CreateInstance failed for redemption %s (%s): %v", redemptionID, txType, err)
 	}

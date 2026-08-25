@@ -362,18 +362,20 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       entityID,
-				TransactionType:  "FD_BOOKING",
-				RecordID:         bID,
-				RecordTable:      constants.QuerryBookingRequest,
-				AuditTable:       constants.QuerryAuditBookingRequest,
-				AuditIDColumn:    "booking_id",
-				ActionType:       "CREATE",
-				Amount:           amount,
-				SubmittedBy:      uID,
-				SubmittedByEmail: uEmail,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          entityID,
+				TransactionType:     "FD_BOOKING",
+				RecordID:            bID,
+				RecordTable:         constants.QuerryBookingRequest,
+				AuditTable:          constants.QuerryAuditBookingRequest,
+				AuditIDColumn:       "booking_id",
+				ActionType:          "CREATE",
+				Amount:              amount,
+				SubmittedBy:         uID,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 			if err != nil {
 				api.LogError("[FDBooking] CreateInstance failed for booking %s: %v", bID, err)
@@ -736,7 +738,9 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					RecordTable: constants.QuerryBookingRequest, AuditTable: constants.QuerryAuditBookingRequest,
 					AuditIDColumn: "booking_id", ActionType: "CREATE",
 					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
-					MatrixID: matrixID,
+					MatrixID:            matrixID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 				if err != nil {
 					api.LogError("[FDBooking] CreateInstance failed for booking %s: %v", bID, err)
@@ -1070,7 +1074,9 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordTable: constants.QuerryBookingRequest, AuditTable: constants.QuerryAuditBookingRequest,
 				AuditIDColumn: "booking_id", ActionType: "EDIT",
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
-				MatrixID: matrixID,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 			if err != nil {
 				api.LogError("[FDBooking] CreateInstance(EDIT) failed for booking %s: %v", bID, err)
@@ -1287,7 +1293,9 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					RecordTable: constants.QuerryBookingRequest, AuditTable: constants.QuerryAuditBookingRequest,
 					AuditIDColumn: "booking_id", ActionType: "DELETE",
 					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
-					MatrixID: matrixID,
+					MatrixID:            matrixID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 				if err != nil {
 					api.LogError("[FDBooking] CreateInstance(DELETE) failed for booking %s: %v", bID, err)

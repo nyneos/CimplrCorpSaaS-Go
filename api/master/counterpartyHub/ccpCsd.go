@@ -142,6 +142,8 @@ func CreateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordID: id, RecordTable: "apibox.ccp_csd_master",
 				AuditTable: "apibox.audit_ccp_csd", AuditIDColumn: "ccp_csd_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(ccpID, req.UserID, userEmail)
 

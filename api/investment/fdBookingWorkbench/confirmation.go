@@ -600,18 +600,20 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_CONFIRMATION_CREATE",
-				RecordID:         cID,
-				RecordTable:      constants.QuerryConfirmation,
-				AuditTable:       constants.QuerryAuditConfirmation,
-				AuditIDColumn:    "confirmation_id",
-				ActionType:       "CREATE",
-				Amount:           amount,
-				SubmittedBy:      uID,
-				SubmittedByEmail: uEmail,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_CONFIRMATION_CREATE",
+				RecordID:            cID,
+				RecordTable:         constants.QuerryConfirmation,
+				AuditTable:          constants.QuerryAuditConfirmation,
+				AuditIDColumn:       "confirmation_id",
+				ActionType:          "CREATE",
+				Amount:              amount,
+				SubmittedBy:         uID,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 			if err != nil {
 				api.LogError("[FDBooking] CaptureConfirmation CreateInstance failed for %s: %v", cID, err)
@@ -1236,7 +1238,9 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 				AuditIDColumn: "confirmation_id", ActionType: actionType,
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
-				MatrixID: matrixID,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(confirmationID, req.UserID, userEmail, entityID, varMatrixID, req.ConfirmedPrincipalAmount, isUpdate)
 
@@ -1808,7 +1812,9 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 				AuditIDColumn: "confirmation_id", ActionType: "EDIT",
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
-				MatrixID: matrixID,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(req.ConfirmationID, req.UserID, userEmail, entityID, editConfMatrixID, updateAmount)
 
@@ -2062,7 +2068,9 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 				AuditIDColumn: "confirmation_id", ActionType: "EDIT",
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
-				MatrixID: matrixID,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(req.ConfirmationID, req.UserID, userEmail, entityID, veMatrixID, confPrincipal)
 
@@ -3554,7 +3562,9 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 					AuditIDColumn: "confirmation_id", ActionType: "DELETE",
 					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
-					MatrixID: matrixID,
+					MatrixID:            matrixID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 				if err != nil {
 					api.LogError("[FDBooking] CreateInstance(DELETE) failed for confirmation %s: %v", cID, err)

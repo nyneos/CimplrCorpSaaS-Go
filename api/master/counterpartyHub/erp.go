@@ -206,6 +206,8 @@ func CreateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordID: id, RecordTable: "apibox.erp_system_master",
 				AuditTable: "apibox.audit_erp_system", AuditIDColumn: "erp_system_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(erpID, req.UserID, userEmail)
 

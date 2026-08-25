@@ -96,11 +96,10 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 
 // RetryWithBackoff executes a function with exponential backoff retry logic
 func RetryWithBackoff(maxRetries int, initialDelay time.Duration, fn func() error) error {
-	var lastErr error
+	var lastErr, lastCause error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff with jitter
 			delay := time.Duration(math.Pow(2, float64(attempt-1))) * initialDelay
 			logger.GlobalLogger.LogAudit(fmt.Sprintf("Retrying after %v (attempt %d/%d)", delay, attempt, maxRetries))
 			time.Sleep(delay)
@@ -112,8 +111,18 @@ func RetryWithBackoff(maxRetries int, initialDelay time.Duration, fn func() erro
 		}
 
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("Attempt %d failed: %v", attempt+1, lastErr))
+		if strings.Contains(lastErr.Error(), "circuit breaker is open") {
+			if lastCause != nil {
+				return fmt.Errorf("failed after %d attempts: %v", attempt+1, lastCause)
+			}
+			return fmt.Errorf("failed after %d attempts: %v", attempt+1, lastErr)
+		}
+		lastCause = lastErr
 	}
 
+	if lastCause != nil {
+		return fmt.Errorf("failed after %d attempts: %v", maxRetries+1, lastCause)
+	}
 	return fmt.Errorf("failed after %d attempts: %v", maxRetries+1, lastErr)
 }
 
@@ -455,7 +464,7 @@ func processNAVDataWithCircuitBreaker(url string, db *pgxpool.Pool, batchSize in
 
 	// HTTP request with circuit breaker protection
 	err := httpCB.Execute(func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -463,7 +472,7 @@ func processNAVDataWithCircuitBreaker(url string, db *pgxpool.Pool, batchSize in
 			return fmt.Errorf("error creating request: %v", err)
 		}
 
-		client := &http.Client{Timeout: 30 * time.Second}
+		client := &http.Client{Timeout: 120 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
 			return fmt.Errorf("error fetching AMFI NAV data: %v", err)
@@ -475,6 +484,7 @@ func processNAVDataWithCircuitBreaker(url string, db *pgxpool.Pool, batchSize in
 		}
 
 		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		currentAMC := ""
 
 		for scanner.Scan() {
@@ -523,9 +533,7 @@ func processNAVDataWithCircuitBreaker(url string, db *pgxpool.Pool, batchSize in
 
 	// Process records in batches with circuit breaker protection
 	logger.GlobalLogger.LogAudit(fmt.Sprintf("Downloaded %d NAV records, processing in batches...", len(navRecords)))
-	return dbCB.Execute(func() error {
-		return processNAVBatches(navRecords, db, batchSize)
-	})
+	return processNAVBatches(navRecords, db, batchSize)
 }
 
 type NAVRecord struct {
@@ -674,20 +682,23 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 		INSERT INTO investment.amfi_nav_staging
 		(scheme_code, isin_div_payout_growth, isin_div_reinvestment,
 		scheme_name, nav_value, nav_date, amc_name, file_date)
-		SELECT t.scheme_code::bigint, 
-			   t.isin_div_payout_growth, 
+		SELECT DISTINCT ON (t.scheme_code, t.nav_date)
+			   t.scheme_code::bigint,
+			   t.isin_div_payout_growth,
 			   t.isin_div_reinvestment,
-			   t.scheme_name, 
-			   CASE 
-				   WHEN t.nav_value IS NULL OR t.nav_value = '' THEN NULL
-				   ELSE t.nav_value::numeric(18,4)
+			   t.scheme_name,
+			   CASE
+				   WHEN t.nav_value ~ '^-?[0-9]+(\.[0-9]+)?$' THEN t.nav_value::numeric(18,4)
+				   ELSE NULL
 			   END,
-			   t.nav_date, 
-			   t.amc_name, 
+			   t.nav_date,
+			   t.amc_name,
 			   t.file_date
 		FROM temp_nav_staging t
 		INNER JOIN investment.amfi_scheme_master_staging s ON t.scheme_code::bigint = s.scheme_code
 		WHERE t.scheme_code ~ '^[0-9]+$'
+		  AND t.nav_date IS NOT NULL
+		ORDER BY t.scheme_code, t.nav_date, t.file_date DESC NULLS LAST
 		ON CONFLICT (scheme_code, nav_date) DO UPDATE SET
 			isin_div_payout_growth = EXCLUDED.isin_div_payout_growth,
 			isin_div_reinvestment = EXCLUDED.isin_div_reinvestment,
@@ -794,6 +805,31 @@ func parseMinAmount(input string) *string {
 	}
 
 	return &result
+}
+
+// RunAMFISchemeSyncOnce downloads scheme master data only (no NAV).
+// Used by POST /investment/amfi/sync-schemes — NAV is a separate button
+// (RunAMFINAVSyncOnce / /investment/amfi/update-nav).
+func RunAMFISchemeSyncOnce(cfg *Config, db *pgxpool.Pool) error {
+	if cfg.DefaultSchemeURL == "" {
+		cfg.DefaultSchemeURL = config.DefaultSchemeURL
+	}
+	if cfg.BatchSize == 0 {
+		cfg.BatchSize = 1000
+	}
+	if cfg.MaxRetries == 0 {
+		cfg.MaxRetries = 3
+	}
+	if cfg.RetryDelay == 0 {
+		cfg.RetryDelay = 2 * time.Second
+	}
+
+	httpCircuitBreaker := NewCircuitBreaker(5, 30*time.Second)
+	dbCircuitBreaker := NewCircuitBreaker(3, 60*time.Second)
+
+	return RetryWithBackoff(cfg.MaxRetries, cfg.RetryDelay, func() error {
+		return processSchemeDataWithCircuitBreaker(cfg.DefaultSchemeURL, db, cfg.BatchSize, httpCircuitBreaker, dbCircuitBreaker)
+	})
 }
 
 // RunAMFIDataDownloaderOnce runs the AMFI data downloader job once without scheduling.

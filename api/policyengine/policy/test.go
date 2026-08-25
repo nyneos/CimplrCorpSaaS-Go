@@ -135,11 +135,13 @@ func HandleTest(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		api.RespondEnvelopeSuccess(w, "Policy test completed", map[string]interface{}{
-			"result":            result,
-			"detail":            detail,
-			"message":           message,
-			"aggregated_action": checkRes.AggregatedAction,
-			"results":           enrichedResultsPayload(checkRes, policies, req.Variables),
+			"result":                  result,
+			"detail":                  detail,
+			"message":                 message,
+			"aggregated_action":       checkRes.AggregatedAction,
+			"aggregated_policy_code":  checkRes.AggregatedPolicyCode,
+			"aggregated_approval_ref": checkRes.AggregatedApprovalRef,
+			"results":                 enrichedResultsPayload(checkRes, policies, req.Variables),
 			"duration_ms":       checkRes.DurationMS,
 			"conflict_findings": conflictFindingsPayload(checkRes.ConflictReport),
 			"conflict_warnings": conflictWarningsPayload(checkRes.ConflictReport),

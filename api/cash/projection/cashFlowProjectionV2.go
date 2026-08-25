@@ -252,17 +252,19 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, proposalID := range req.ProposalIDs {
 			approvalengine.CancelPendingInstances(ctx, pgxPool, common.ModuleCash, proposalID, requestedBy)
 			approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       common.ModuleCash,
-				TransactionType:  "CASH_FLOW_PROJECTION_DELETE",
-				RecordID:         proposalID,
-				RecordTable:      "cimplrcorpsaas.cashflow_proposal",
-				AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
-				AuditIDColumn:    "proposal_id",
-				ActionType:       "DELETE",
-				Amount:           0,
-				SubmittedBy:      req.UserID,
-				SubmittedByEmail: requestedBy,
-				MatrixID:         deleteMatrixByID[proposalID],
+				ModuleCode:          common.ModuleCash,
+				TransactionType:     "CASH_FLOW_PROJECTION_DELETE",
+				RecordID:            proposalID,
+				RecordTable:         "cimplrcorpsaas.cashflow_proposal",
+				AuditTable:          "cimplrcorpsaas.audit_action_cashflow_proposal",
+				AuditIDColumn:       "proposal_id",
+				ActionType:          "DELETE",
+				Amount:              0,
+				SubmittedBy:         req.UserID,
+				SubmittedByEmail:    requestedBy,
+				MatrixID:            deleteMatrixByID[proposalID],
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: false,
 			})
 		}
 		api.RespondWithResult(w, true, fmt.Sprintf("Marked %d proposals for deletion in %v", len(req.ProposalIDs), elapsed))
@@ -935,17 +937,19 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_CREATE", []string{proposalID}, createdBy)
 
 		approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-			ModuleCode:       common.ModuleCash,
-			TransactionType:  "CASH_FLOW_PROJECTION_CREATE",
-			RecordID:         proposalID,
-			RecordTable:      "cimplrcorpsaas.cashflow_proposal",
-			AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
-			AuditIDColumn:    "proposal_id",
-			ActionType:       "CREATE",
-			Amount:           0,
-			SubmittedBy:      req.UserID,
-			SubmittedByEmail: createdBy,
-			MatrixID:         createMatrixID,
+			ModuleCode:          common.ModuleCash,
+			TransactionType:     "CASH_FLOW_PROJECTION_CREATE",
+			RecordID:            proposalID,
+			RecordTable:         "cimplrcorpsaas.cashflow_proposal",
+			AuditTable:          "cimplrcorpsaas.audit_action_cashflow_proposal",
+			AuditIDColumn:       "proposal_id",
+			ActionType:          "CREATE",
+			Amount:              0,
+			SubmittedBy:         req.UserID,
+			SubmittedByEmail:    createdBy,
+			MatrixID:            createMatrixID,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: false,
 		})
 
 		// Notify: FULL proposal data for rich templates
@@ -1728,17 +1732,19 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		dmsevent.Fire(pgxPool, "CASH", "CASHFLOW_PROJECTION", "POST_EDIT", []string{req.ProposalID}, requestedBy)
 
 		approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-			ModuleCode:       common.ModuleCash,
-			TransactionType:  "CASH_FLOW_PROJECTION_EDIT",
-			RecordID:         req.ProposalID,
-			RecordTable:      "cimplrcorpsaas.cashflow_proposal",
-			AuditTable:       "cimplrcorpsaas.audit_action_cashflow_proposal",
-			AuditIDColumn:    "proposal_id",
-			ActionType:       "EDIT",
-			Amount:           0,
-			SubmittedBy:      req.UserID,
-			SubmittedByEmail: requestedBy,
-			MatrixID:         editMatrixID,
+			ModuleCode:          common.ModuleCash,
+			TransactionType:     "CASH_FLOW_PROJECTION_EDIT",
+			RecordID:            req.ProposalID,
+			RecordTable:         "cimplrcorpsaas.cashflow_proposal",
+			AuditTable:          "cimplrcorpsaas.audit_action_cashflow_proposal",
+			AuditIDColumn:       "proposal_id",
+			ActionType:          "EDIT",
+			Amount:              0,
+			SubmittedBy:         req.UserID,
+			SubmittedByEmail:    requestedBy,
+			MatrixID:            editMatrixID,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: false,
 		})
 
 		elapsed := time.Since(start)

@@ -702,11 +702,13 @@ func processUploadMTMFiles(ctx context.Context, pool *pgxpool.Pool, r *http.Requ
 				bgCtx := context.Background()
 				for _, id := range ids {
 					_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-						ModuleCode:       "FX",
-						TransactionType:  "FX_MTM_UPDATE",
-						RecordID:         id,
-						MatrixID:         matrices[id],
-						SubmittedByEmail: email,
+						ModuleCode:          "FX",
+						TransactionType:     "FX_MTM_UPDATE",
+						RecordID:            id,
+						MatrixID:            matrices[id],
+						SubmittedByEmail:    email,
+						RequirePinnedMatrix: true,
+						AutoApplyIfUnpinned: true,
 					})
 				}
 			}(insertedMTMIDs, makerEmail, createMatrices)
@@ -1213,11 +1215,13 @@ func RequestDeleteMTMRecords(pool *pgxpool.Pool) http.HandlerFunc {
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					TransactionType:  "FX_MTM_UPDATE",
-					RecordID:         id,
-					MatrixID:         matrices[id],
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					TransactionType:     "FX_MTM_UPDATE",
+					RecordID:            id,
+					MatrixID:            matrices[id],
+					SubmittedByEmail:    email,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 			}
 		}(eligibleIDs, makerEmail, triggerMatrices)

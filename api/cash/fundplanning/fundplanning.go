@@ -30,18 +30,20 @@ func submitFundPlanForApproval(pgxPool *pgxpool.Pool, groupID, entityName, submi
 	defer cancel()
 
 	_, err := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-		ModuleCode:       "CASH",
-		EntityCode:       entityName,
-		TransactionType:  actionType,
-		RecordID:         groupID,
-		RecordTable:      "fund_plan_groups",
-		AuditTable:       "public.auditaction_fund_plan_groups",
-		AuditIDColumn:    "group_id",
-		ActionType:       strings.Split(actionType, "_")[2], // FUND_PLANNING_CREATE -> CREATE
-		Amount:           amount,
-		SubmittedBy:      submittedByUserID,
-		SubmittedByEmail: actorEmail,
-		MatrixID:         matrixID,
+		ModuleCode:          "CASH",
+		EntityCode:          entityName,
+		TransactionType:     actionType,
+		RecordID:            groupID,
+		RecordTable:         "fund_plan_groups",
+		AuditTable:          "public.auditaction_fund_plan_groups",
+		AuditIDColumn:       "group_id",
+		ActionType:          strings.Split(actionType, "_")[2], // FUND_PLANNING_CREATE -> CREATE
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: false,
 	})
 	if err != nil {
 		api.LogError("[FundPlanning] Failed to create approval instance for %s %s: %v", actionType, groupID, err)

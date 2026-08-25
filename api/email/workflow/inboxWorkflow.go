@@ -181,20 +181,29 @@ func submitInboxApproval(ctx context.Context, pool *pgxpool.Pool, req inboxAppro
 	if err := approvalengine.CancelPendingInstances(ctx, pool, emailInboxModuleCode, req.InboxID, userEmail); err != nil {
 		return "", err
 	}
-	return approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-		ModuleCode:       emailInboxModuleCode,
-		EntityCode:       req.EntityID,
-		TransactionType:  req.TxType,
-		RecordID:         req.InboxID,
-		RecordTable:      emailInboxRecordTable,
-		AuditTable:       emailInboxAuditTable,
-		AuditIDColumn:    "inbox_id",
-		ActionType:       req.ActionType,
-		Amount:           0,
-		SubmittedBy:      req.UserID,
-		SubmittedByEmail: userEmail,
-		MatrixID:         req.MatrixID,
+	instID, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:          emailInboxModuleCode,
+		EntityCode:          req.EntityID,
+		TransactionType:     req.TxType,
+		RecordID:            req.InboxID,
+		RecordTable:         emailInboxRecordTable,
+		AuditTable:          emailInboxAuditTable,
+		AuditIDColumn:       "inbox_id",
+		ActionType:          req.ActionType,
+		Amount:              0,
+		SubmittedBy:         req.UserID,
+		SubmittedByEmail:    userEmail,
+		MatrixID:            req.MatrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: true,
 	})
+	if err != nil {
+		return "", err
+	}
+	if instID == "" && !approvalengine.PolicyPinned(req.MatrixID) {
+		finalizeEmailInboxApproval(ctx, pool, req.InboxID, req.TxType, approvalengine.InstStatusApproved, userEmail, "Auto-applied: policy did not trigger approval")
+	}
+	return instID, nil
 }
 
 func finalizeEmailInboxApproval(ctx context.Context, pool *pgxpool.Pool, recordID, transactionType, finalStatus, actorEmail, comment string) {

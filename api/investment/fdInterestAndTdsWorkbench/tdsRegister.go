@@ -282,16 +282,18 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_TDS_REGISTER_CREATE",
-				MatrixID:         matrixID,
-				RecordID:         id,
-				RecordTable:      constants.QuerryTDSReceipt,
-				AuditTable:       constants.QuerryAuditTDSReceipt,
-				AuditIDColumn:    "tds_id",
-				ActionType:       "CREATE",
-				SubmittedByEmail: uEmail,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_TDS_REGISTER_CREATE",
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
+				RecordID:            id,
+				RecordTable:         constants.QuerryTDSReceipt,
+				AuditTable:          constants.QuerryAuditTDSReceipt,
+				AuditIDColumn:       "tds_id",
+				ActionType:          "CREATE",
+				SubmittedByEmail:    uEmail,
 			})
 			if instErr != nil {
 				api.LogError("[FDTDS] CreateInstance CREATE failed: %v", instErr)
@@ -627,16 +629,18 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_TDS_REGISTER_RECONCILE",
-				MatrixID:         matrixID,
-				RecordID:         eID,
-				RecordTable:      constants.QuerryTDSReceipt,
-				AuditTable:       constants.QuerryAuditTDSReceipt,
-				AuditIDColumn:    "tds_id",
-				ActionType:       "RECONCILE",
-				SubmittedByEmail: uEmail,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_TDS_REGISTER_RECONCILE",
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
+				RecordID:            eID,
+				RecordTable:         constants.QuerryTDSReceipt,
+				AuditTable:          constants.QuerryAuditTDSReceipt,
+				AuditIDColumn:       "tds_id",
+				ActionType:          "RECONCILE",
+				SubmittedByEmail:    uEmail,
 			})
 			if instErr != nil {
 				api.LogError("[FDTDS] CreateInstance RECONCILE failed: %v", instErr)
@@ -955,17 +959,19 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", tID, uEmail)
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_TDS_REGISTER_EDIT",
-				MatrixID:         matrixID,
-				RecordID:         tID,
-				RecordTable:      constants.QuerryTDSReceipt,
-				AuditTable:       constants.QuerryAuditTDSReceipt,
-				AuditIDColumn:    "tds_id",
-				ActionType:       "EDIT",
-				SubmittedBy:      uEmail,
-				SubmittedByEmail: uEmail,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_TDS_REGISTER_EDIT",
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
+				RecordID:            tID,
+				RecordTable:         constants.QuerryTDSReceipt,
+				AuditTable:          constants.QuerryAuditTDSReceipt,
+				AuditIDColumn:       "tds_id",
+				ActionType:          "EDIT",
+				SubmittedBy:         uEmail,
+				SubmittedByEmail:    uEmail,
 			})
 			if instErr != nil {
 				api.LogError("[FDTDS] UpdateTDSRegister CreateInstance failed tds=%s: %v", tID, instErr)

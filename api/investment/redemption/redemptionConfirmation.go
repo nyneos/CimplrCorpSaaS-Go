@@ -35,18 +35,20 @@ func submitMFRedemptionConfirmationForApproval(pool *pgxpool.Pool, confirmID, re
 	var entityName string
 	_ = pool.QueryRow(ctx, "SELECT entity_name FROM investment.redemption_initiation WHERE redemption_id = $1", redemptionID).Scan(&entityName)
 	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-		ModuleCode:       "INVESTMENT_MF",
-		EntityCode:       entityName,
-		TransactionType:  txType,
-		RecordID:         confirmID,
-		RecordTable:      "investment.redemption_confirmation",
-		AuditTable:       "investment.auditactionredemptionconfirmation",
-		AuditIDColumn:    "redemption_confirm_id",
-		ActionType:       strings.TrimPrefix(txType, "MF_REDEMPTION_CONFIRMATION_"),
-		Amount:           amount,
-		SubmittedBy:      submittedByUserID,
-		SubmittedByEmail: actorEmail,
-		MatrixID:         matrixID,
+		ModuleCode:          "INVESTMENT_MF",
+		EntityCode:          entityName,
+		TransactionType:     txType,
+		RecordID:            confirmID,
+		RecordTable:         "investment.redemption_confirmation",
+		AuditTable:          "investment.auditactionredemptionconfirmation",
+		AuditIDColumn:       "redemption_confirm_id",
+		ActionType:          strings.TrimPrefix(txType, "MF_REDEMPTION_CONFIRMATION_"),
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: true,
 	}); err != nil {
 		api.LogError("[MFRedemptionConfirmation] approvalengine.CreateInstance failed for confirmation %s (%s): %v", confirmID, txType, err)
 	}

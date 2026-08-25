@@ -37,18 +37,20 @@ func submitSweepConfigForApproval(pgxPool *pgxpool.Pool, sweepID, entityName, su
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-		ModuleCode:       "CASH",
-		EntityCode:       entityName,
-		TransactionType:  actionType,
-		RecordID:         sweepID,
-		RecordTable:      "cimplrcorpsaas.sweepconfiguration",
-		AuditTable:       "cimplrcorpsaas.auditactionsweepconfiguration",
-		AuditIDColumn:    "sweep_id",
-		ActionType:       strings.Split(actionType, "_")[2],
-		Amount:           amount,
-		SubmittedBy:      submittedByUserID,
-		SubmittedByEmail: actorEmail,
-		MatrixID:         matrixID,
+		ModuleCode:          "CASH",
+		EntityCode:          entityName,
+		TransactionType:     actionType,
+		RecordID:            sweepID,
+		RecordTable:         "cimplrcorpsaas.sweepconfiguration",
+		AuditTable:          "cimplrcorpsaas.auditactionsweepconfiguration",
+		AuditIDColumn:       "sweep_id",
+		ActionType:          strings.Split(actionType, "_")[2],
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: false,
 	}); err != nil {
 		api.LogError("approvalengine.CreateInstance failed for sweep config %s: %v", sweepID, err)
 	}

@@ -74,10 +74,13 @@ type PolicyResult struct {
 }
 
 type EvaluateResponse struct {
-	Success          bool           `json:"success"`
-	AggregatedAction string         `json:"aggregated_action,omitempty"`
-	Results          []PolicyResult `json:"results"`
-	Error            string         `json:"error,omitempty"`
+	Success               bool           `json:"success"`
+	AggregatedAction      string         `json:"aggregated_action,omitempty"`
+	AggregatedPolicyID    string         `json:"aggregated_policy_id,omitempty"`
+	AggregatedPolicyCode  string         `json:"aggregated_policy_code,omitempty"`
+	AggregatedApprovalRef string         `json:"aggregated_approval_ref,omitempty"`
+	Results               []PolicyResult `json:"results"`
+	Error                 string         `json:"error,omitempty"`
 }
 
 func (c *Client) Evaluate(ctx context.Context, req EvaluateRequest) (*EvaluateResponse, error) {

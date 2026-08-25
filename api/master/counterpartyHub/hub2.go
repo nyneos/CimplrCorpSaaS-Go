@@ -390,16 +390,18 @@ func CreateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "COUNTERPARTY_HUB",
-				TransactionType:  "COUNTERPARTY_CREATE",
-				RecordID:         cpID,
-				RecordTable:      constants.ErrCounterpartyServiceTable,
-				AuditTable:       constants.ErrAuditCounterpartyServiceTable,
-				AuditIDColumn:    "counterparty_id",
-				ActionType:       "CREATE",
-				SubmittedBy:      uID,
-				SubmittedByEmail: uEmail,
-				MatrixID:         matrixID,
+				ModuleCode:          "COUNTERPARTY_HUB",
+				TransactionType:     "COUNTERPARTY_CREATE",
+				RecordID:            cpID,
+				RecordTable:         constants.ErrCounterpartyServiceTable,
+				AuditTable:          constants.ErrAuditCounterpartyServiceTable,
+				AuditIDColumn:       "counterparty_id",
+				ActionType:          "CREATE",
+				SubmittedBy:         uID,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(counterpartyID, req.UserID, userEmail, req.CounterpartyType, createMatrixID)
 
@@ -1033,7 +1035,9 @@ func CreateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					RecordID: id, RecordTable: constants.ErrCounterpartyServiceTable,
 					AuditTable: constants.ErrAuditCounterpartyServiceTable, AuditIDColumn: "counterparty_id",
 					ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail,
-					MatrixID: matrixID,
+					MatrixID:            matrixID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 			}(cpID, req.UserID, userEmail, row.CounterpartyType, bulkMatrixID)
 		}
@@ -1258,7 +1262,9 @@ func UpdateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordID: cpID, RecordTable: constants.ErrCounterpartyServiceTable,
 				AuditTable: constants.ErrAuditCounterpartyServiceTable, AuditIDColumn: "counterparty_id",
 				ActionType: "EDIT", SubmittedBy: uID, SubmittedByEmail: uEmail,
-				MatrixID: matrixID,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(req.CounterpartyID, req.UserID, userEmail, editMatrixID)
 

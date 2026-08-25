@@ -195,23 +195,9 @@ func SyncSchemesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// runManualSchemeSync runs the AMFI scheme sync job manually
+// runManualSchemeSync runs the AMFI scheme sync job manually (schemes only).
 func runManualSchemeSync(config *investmentjobs.Config, pool *pgxpool.Pool) error {
-	// Create circuit breakers
-	httpCircuitBreaker := investmentjobs.NewCircuitBreaker(5, 30*time.Second)
-	dbCircuitBreaker := investmentjobs.NewCircuitBreaker(3, 60*time.Second)
-
-	// Run the scheme data processing directly
-	return investmentjobs.RetryWithBackoff(config.MaxRetries, config.RetryDelay, func() error {
-		return processSchemeDataManually(config.DefaultSchemeURL, pool, config.BatchSize, httpCircuitBreaker, dbCircuitBreaker)
-	})
-}
-
-// processSchemeDataManually processes scheme data without cron scheduling
-func processSchemeDataManually(url string, pool *pgxpool.Pool, batchSize int, httpCB, dbCB interface{}) error {
-	// Use the jobs package function to run the sync once
-	config := investmentjobs.NewDefaultConfig()
-	return investmentjobs.RunAMFIDataDownloaderOnce(config, pool)
+	return investmentjobs.RunAMFISchemeSyncOnce(config, pool)
 }
 
 // getAmcCount returns the current count of unique AMCs in the database

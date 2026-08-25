@@ -34,18 +34,20 @@ func submitMFInitiationForApproval(pool *pgxpool.Pool, initiationID, entityName,
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-		ModuleCode:       "INVESTMENT_MF",
-		EntityCode:       entityName,
-		TransactionType:  txType,
-		RecordID:         initiationID,
-		RecordTable:      "investment.investment_initiation",
-		AuditTable:       "investment.auditactioninitiation",
-		AuditIDColumn:    "initiation_id",
-		ActionType:       strings.TrimPrefix(txType, "MF_INITIATION_"),
-		Amount:           amount,
-		SubmittedBy:      submittedByUserID,
-		SubmittedByEmail: actorEmail,
-		MatrixID:         matrixID,
+		ModuleCode:          "INVESTMENT_MF",
+		EntityCode:          entityName,
+		TransactionType:     txType,
+		RecordID:            initiationID,
+		RecordTable:         "investment.investment_initiation",
+		AuditTable:          "investment.auditactioninitiation",
+		AuditIDColumn:       "initiation_id",
+		ActionType:          strings.TrimPrefix(txType, "MF_INITIATION_"),
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: true,
 	}); err != nil {
 		api.LogError("[MFInitiation] approvalengine.CreateInstance failed for initiation %s (%s): %v", initiationID, txType, err)
 	}

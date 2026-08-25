@@ -36,27 +36,13 @@ func GetPendingForUser(ctx context.Context, pool *pgxpool.Pool, userID string) (
 		  AND ie.status = 'ACTIVE'
 		WHERE i.status     = 'PENDING'
 		  AND i.is_deleted = false
-		  AND COALESCE(i.submitted_by, '') <> $1
 		  AND (
 		    EXISTS (
 		      SELECT 1 FROM uam.approval_matrix_eye_member m
 		      WHERE m.eye_id      = ie.matrix_eye_id
-		        -- AND m.member_type = 'APPROVER'
 		        AND m.is_deleted  = false
 		        AND m.is_active   = true
-		        AND (
-		          (m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $1)
-		          OR
-		          (m.assignment_type = 'ROLE_ONLY' AND EXISTS (
-		            SELECT 1 FROM public.user_roles ur
-		            WHERE ur.role_id = m.role_id AND ur.user_id = $1
-		          ))
-		          OR
-		          (m.assignment_type = 'ROLE_USER' AND EXISTS (
-		            SELECT 1 FROM public.user_roles ur
-		            WHERE ur.role_id = m.role_id AND ur.user_id = $1
-		          ))
-		        )
+		        AND ` + sqlUserOnEyeMember("$1") + `
 		    )
 		    OR (
 		      ie.is_escalated = true
@@ -519,16 +505,9 @@ func GetRichInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID, 
 				SELECT COUNT(*)
 				FROM uam.approval_matrix_eye_member m
 				WHERE m.eye_id      = $1
-				  -- AND m.member_type = 'APPROVER'
 				  AND m.is_deleted  = false
 				  AND m.is_active   = true
-				  AND (
-				    (m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2)
-				    OR
-				    (m.assignment_type IN ('ROLE_ONLY','ROLE_USER') AND EXISTS (
-				      SELECT 1 FROM public.user_roles ur WHERE ur.role_id = m.role_id AND ur.user_id = $2
-				    ))
-				  )`,
+				  AND `+sqlUserOnEyeMember("$2"),
 				meta.matrixEyeID, viewerUserID,
 			).Scan(&cnt)
 			if cnt > 0 {

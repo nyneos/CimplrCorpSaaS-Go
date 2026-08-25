@@ -2092,18 +2092,20 @@ func submitLimitUtilizationForApproval(pool *pgxpool.Pool, utilID, limitID, subm
 	}
 
 	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-		ModuleCode:       "CASH",
-		EntityCode:       entityName,
-		TransactionType:  txType,
-		RecordID:         utilID,
-		RecordTable:      "cimplrcorpsaas.bank_limit_utilization",
-		AuditTable:       "cimplrcorpsaas.auditactionbanklimitutilization",
-		AuditIDColumn:    "utilization_id",
-		ActionType:       strings.TrimPrefix(txType, "LIMIT_UTILIZATION_"),
-		Amount:           amount,
-		SubmittedBy:      submittedByUserID,
-		SubmittedByEmail: actorEmail,
-		MatrixID:         matrixID,
+		ModuleCode:          "CASH",
+		EntityCode:          entityName,
+		TransactionType:     txType,
+		RecordID:            utilID,
+		RecordTable:         "cimplrcorpsaas.bank_limit_utilization",
+		AuditTable:          "cimplrcorpsaas.auditactionbanklimitutilization",
+		AuditIDColumn:       "utilization_id",
+		ActionType:          strings.TrimPrefix(txType, "LIMIT_UTILIZATION_"),
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: false,
 	}); err != nil {
 		api.LogError("[LimitUtilization] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"utilization_id": utilID, "tx_type": txType, "error": err.Error()})
 	}

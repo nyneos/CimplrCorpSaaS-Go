@@ -22,19 +22,7 @@ func canUserActOnEye(ctx context.Context, tx pgx.Tx, userID, matrixEyeID, instan
 		  AND m.member_type = 'APPROVER'
 		  AND m.is_deleted  = false
 		  AND m.is_active   = true
-		  AND (
-		    (m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2)
-		    OR
-		    (m.assignment_type = 'ROLE_ONLY' AND EXISTS (
-		      SELECT 1 FROM public.user_roles ur
-		      WHERE ur.role_id = m.role_id AND ur.user_id = $2
-		    ))
-		    OR
-		    (m.assignment_type = 'ROLE_USER' AND EXISTS (
-		      SELECT 1 FROM public.user_roles ur
-		      WHERE ur.role_id = m.role_id AND ur.user_id = $2
-		    ))
-		  )`,
+		  AND `+sqlUserOnEyeMember("$2"),
 		matrixEyeID, userID,
 	).Scan(&directCount)
 	if err != nil {
@@ -148,10 +136,7 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 	if instanceStatus != InstStatusPending {
 		return fmt.Errorf("instance is not pending (current status: %s)", instanceStatus)
 	}
-
-	if submittedBy != "" && submittedBy == req.ActorUserID {
-		return fmt.Errorf("segregation of duties: user %s submitted this request and cannot approve or reject it", req.ActorUserID)
-	}
+	_ = submittedBy // maker may also act; kept from the lock query for audit context
 
 	// Step 3: Validate actor eligibility.
 	allowed, err := canUserActOnEye(ctx, tx, req.ActorUserID, matrixEyeID, req.InstanceEyeID)

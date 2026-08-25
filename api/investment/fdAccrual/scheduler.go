@@ -222,17 +222,19 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_ACCRUAL_SCHED", "POST_CREATE", []string{cfgID}, email)
 			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       entID,
-				TransactionType:  "FD_ACCRUAL_SCHEDULE_CREATE",
-				RecordID:         cfgID,
-				RecordTable:      constants.QuerryAccrualScheduleConfig,
-				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
-				AuditIDColumn:    "config_id",
-				ActionType:       "CREATE",
-				SubmittedBy:      uID,
-				SubmittedByEmail: email,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          entID,
+				TransactionType:     "FD_ACCRUAL_SCHEDULE_CREATE",
+				RecordID:            cfgID,
+				RecordTable:         constants.QuerryAccrualScheduleConfig,
+				AuditTable:          constants.QuerryAccrualScheduleConfigAudit,
+				AuditIDColumn:       "config_id",
+				ActionType:          "CREATE",
+				SubmittedBy:         uID,
+				SubmittedByEmail:    email,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(configID, req.EntityID, req.UserID, userEmail, schedCreateMatrixID)
 		api.LogInfo("[FDAccrual] CreateScheduleConfig: config_id=%s entity=%s freq=%s", configID, req.EntityID, req.ScheduleFrequency)
@@ -413,17 +415,19 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"record_id": cfgID, "event": "FD_ACCRUAL_SCHEDULE_UPDATED", "actor_email": email,
 			})
 			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       entID,
-				TransactionType:  "FD_ACCRUAL_SCHEDULE_EDIT",
-				RecordID:         cfgID,
-				RecordTable:      constants.QuerryAccrualScheduleConfig,
-				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
-				AuditIDColumn:    "config_id",
-				ActionType:       "EDIT",
-				SubmittedBy:      uID,
-				SubmittedByEmail: email,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          entID,
+				TransactionType:     "FD_ACCRUAL_SCHEDULE_EDIT",
+				RecordID:            cfgID,
+				RecordTable:         constants.QuerryAccrualScheduleConfig,
+				AuditTable:          constants.QuerryAccrualScheduleConfigAudit,
+				AuditIDColumn:       "config_id",
+				ActionType:          "EDIT",
+				SubmittedBy:         uID,
+				SubmittedByEmail:    email,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(req.ConfigID, entityID, req.UserID, userEmail, schedEditMatrixID)
 		api.LogInfo("[FDAccrual] UpdateScheduleConfig: config_id=%s by=%s", req.ConfigID, userEmail)
@@ -1179,17 +1183,19 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"record_id": cfgID, "event": "FD_ACCRUAL_SCHEDULE_DELETED", "actor_email": email,
 			})
 			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       entID,
-				TransactionType:  "FD_ACCRUAL_SCHEDULE_DELETE",
-				RecordID:         cfgID,
-				RecordTable:      constants.QuerryAccrualScheduleConfig,
-				AuditTable:       constants.QuerryAccrualScheduleConfigAudit,
-				AuditIDColumn:    "config_id",
-				ActionType:       "DELETE",
-				SubmittedBy:      uID,
-				SubmittedByEmail: email,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          entID,
+				TransactionType:     "FD_ACCRUAL_SCHEDULE_DELETE",
+				RecordID:            cfgID,
+				RecordTable:         constants.QuerryAccrualScheduleConfig,
+				AuditTable:          constants.QuerryAccrualScheduleConfigAudit,
+				AuditIDColumn:       "config_id",
+				ActionType:          "DELETE",
+				SubmittedBy:         uID,
+				SubmittedByEmail:    email,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(req.ConfigID, entityID, req.UserID, userEmail, schedDeleteMatrixID)
 		api.LogInfo("[FDAccrual] DeleteScheduleConfig: config_id=%s by=%s", req.ConfigID, userEmail)

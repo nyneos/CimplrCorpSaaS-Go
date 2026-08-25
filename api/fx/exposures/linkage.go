@@ -22,7 +22,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/api/approvalengine"
-	"CimplrCorpSaas/api/auth")
+	"CimplrCorpSaas/api/auth"
+)
 
 // Helper: send JSON error response
 // func respondWithError(w http.ResponseWriter, status int, errMsg string) {
@@ -665,11 +666,13 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 
 		go func(tID string) {
 			_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FX",
-				TransactionType:  "FX_LINKAGE_CREATE",
-				RecordID:         req.ExposureHeaderID,
-				MatrixID:         tID,
-				SubmittedByEmail: makerEmail,
+				ModuleCode:          "FX",
+				TransactionType:     "FX_LINKAGE_CREATE",
+				RecordID:            req.ExposureHeaderID,
+				MatrixID:            tID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
+				SubmittedByEmail:    makerEmail,
 			})
 		}(triggerMatrixID)
 	}

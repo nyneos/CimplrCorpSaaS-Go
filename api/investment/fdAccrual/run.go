@@ -1184,18 +1184,20 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_ACCRUAL_RUN",
-				RecordID:         runID,
-				RecordTable:      "investment.fd_accrual_run",
-				AuditTable:       "investment.fd_accrual_run_audit",
-				AuditIDColumn:    "run_id",
-				ActionType:       "CREATE",
-				Amount:           amount,
-				SubmittedBy:      uID,
-				SubmittedByEmail: uEmail,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_ACCRUAL_RUN",
+				RecordID:            runID,
+				RecordTable:         "investment.fd_accrual_run",
+				AuditTable:          "investment.fd_accrual_run_audit",
+				AuditIDColumn:       "run_id",
+				ActionType:          "CREATE",
+				Amount:              amount,
+				SubmittedBy:         uID,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 			if err != nil {
 				api.LogError("[FDAccrual] CreateInstance failed for run %s: %v", runID, err)
@@ -2463,18 +2465,20 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[FDAccrual] ProposeOverride CancelPendingInstances failed ledger=%s: %v", lID, err)
 			}
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_ACCRUAL_OVERRIDE",
-				RecordID:         lID,
-				RecordTable:      "investment.fd_accrual_ledger",
-				AuditTable:       "investment.fd_accrual_ledger_audit",
-				AuditIDColumn:    "ledger_id",
-				ActionType:       "EDIT",
-				Amount:           amount,
-				SubmittedBy:      uID,
-				SubmittedByEmail: uEmail,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_ACCRUAL_OVERRIDE",
+				RecordID:            lID,
+				RecordTable:         "investment.fd_accrual_ledger",
+				AuditTable:          "investment.fd_accrual_ledger_audit",
+				AuditIDColumn:       "ledger_id",
+				ActionType:          "EDIT",
+				Amount:              amount,
+				SubmittedBy:         uID,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 			if err != nil {
 				api.LogError("[FDAccrual] ProposeOverride CreateInstance failed ledger=%s: %v", lID, err)
