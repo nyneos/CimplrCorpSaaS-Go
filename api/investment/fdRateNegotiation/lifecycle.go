@@ -144,6 +144,7 @@ func revertEditOnMaster(ctx context.Context, tx pgx.Tx, ids []string, checker st
 			selected_offer_id = a.old_selected_offer_id,
 			selection_remarks = a.old_selection_remarks,
 			booking_id = a.old_booking_id,
+			processing_status = 'APPROVED',
 			updated_by = $2,
 			updated_at = now()
 		FROM investment.fd_audit_rate_negotiation a
@@ -165,15 +166,39 @@ func applyApproveMaster(ctx context.Context, tx pgx.Tx, id, actionType string) e
 	case "DELETE":
 		_, err := tx.Exec(ctx, `
 			UPDATE investment.fd_rate_negotiation
-			SET is_deleted = true, request_status = 'DELETED', updated_at = now()
+			SET is_deleted = true, request_status = 'DELETED',
+				processing_status = 'APPROVED', updated_at = now()
 			WHERE rate_request_id = $1::uuid`, id)
 		return err
 	default:
+		// Never collapse CONVERTED_TO_FD back to APPROVED (zombie booking-link approve).
+		// PENDING_RATE_APPROVAL (selection) → APPROVED.
+		// Field EDIT: restore pre-edit lifecycle (SENT_TO_BANKS / OFFERS_RECEIVED / …).
 		_, err := tx.Exec(ctx, `
-			UPDATE investment.fd_rate_negotiation
-			SET request_status = 'APPROVED', updated_at = now()
-			WHERE rate_request_id = $1::uuid
-			  AND COALESCE(is_deleted,false) = false`, id)
+			UPDATE investment.fd_rate_negotiation m
+			SET request_status = CASE
+					WHEN m.request_status = 'CONVERTED_TO_FD' THEN 'CONVERTED_TO_FD'
+					WHEN m.request_status = 'PENDING_RATE_APPROVAL' THEN 'APPROVED'
+					WHEN a.old_request_status IS NOT NULL
+						AND a.old_request_status <> ''
+						AND a.old_request_status NOT LIKE 'PENDING%'
+						AND a.old_request_status <> 'CONVERTED_TO_FD'
+					THEN a.old_request_status
+					ELSE 'APPROVED'
+				END,
+				processing_status = 'APPROVED',
+				updated_at = now()
+			FROM (SELECT 1) AS _
+			LEFT JOIN LATERAL (
+				SELECT a2.old_request_status
+				FROM investment.fd_audit_rate_negotiation a2
+				WHERE a2.rate_request_id = m.rate_request_id
+				  AND a2.action_type = 'EDIT'
+				ORDER BY a2.requested_at DESC, a2.audit_id DESC
+				LIMIT 1
+			) a ON true
+			WHERE m.rate_request_id = $1::uuid
+			  AND COALESCE(m.is_deleted,false) = false`, id)
 		return err
 	}
 }
@@ -189,13 +214,13 @@ func applyRejectMaster(ctx context.Context, tx pgx.Tx, id, actionType, oldStatus
 		}
 		_, err := tx.Exec(ctx, `
 			UPDATE investment.fd_rate_negotiation
-			SET request_status = $2, is_deleted = false, updated_at = now()
+			SET request_status = $2, processing_status = 'APPROVED', is_deleted = false, updated_at = now()
 			WHERE rate_request_id = $1::uuid`, id, restore)
 		return err
 	default:
 		_, err := tx.Exec(ctx, `
 			UPDATE investment.fd_rate_negotiation
-			SET request_status = 'REJECTED', updated_at = now()
+			SET request_status = 'REJECTED', processing_status = 'REJECTED', updated_at = now()
 			WHERE rate_request_id = $1::uuid
 			  AND COALESCE(is_deleted,false) = false`, id)
 		return err
@@ -243,8 +268,9 @@ func DeleteRateRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT rate_request_id::text, COALESCE(request_status,''), COALESCE(proposed_fd_amount,0), COALESCE(entity_id,'')
 			FROM investment.fd_rate_negotiation
 			WHERE rate_request_id = ANY($1::uuid[])
-			  AND COALESCE(is_deleted,false) = false
-			  AND request_status NOT IN ('DELETED','CONVERTED_TO_FD','PENDING_DELETE_APPROVAL')
+			AND COALESCE(is_deleted,false) = false
+			  AND request_status NOT IN ('DELETED','CONVERTED_TO_FD')
+			  AND COALESCE(processing_status,'') <> 'PENDING_DELETE_APPROVAL'
 			FOR UPDATE`, ids)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to load rate requests")
@@ -322,7 +348,7 @@ func DeleteRateRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if _, err = tx.Exec(ctx, `
 				UPDATE investment.fd_rate_negotiation
-				SET request_status = 'PENDING_DELETE_APPROVAL', updated_by = $2, updated_at = now()
+				SET processing_status = 'PENDING_DELETE_APPROVAL', updated_by = $2, updated_at = now()
 				WHERE rate_request_id = $1::uuid`, m.id, userEmail); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Status update failed")
 				return

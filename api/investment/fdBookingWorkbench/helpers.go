@@ -53,6 +53,99 @@ func resolveConfirmationRateBaseline(ctx context.Context, pool *pgxpool.Pool, bo
 	return negotiated
 }
 
+// convertRateNegotiationOnBookingCreate stamps negotiation ↔ booking, sets
+// CONVERTED_TO_FD, clears PENDING_* audits, and writes an APPROVED EDIT audit.
+// Mirrors fdRateNegotiation.applyBookingConversion (same package boundary).
+func convertRateNegotiationOnBookingCreate(ctx context.Context, tx pgx.Tx, rateRequestID, bookingID, userEmail, clientIP string) error {
+	rateRequestID = strings.TrimSpace(rateRequestID)
+	bookingID = strings.TrimSpace(bookingID)
+	if rateRequestID == "" || bookingID == "" {
+		return nil
+	}
+
+	var oldStatus string
+	var oldBookingID *string
+	err := tx.QueryRow(ctx, `
+		SELECT request_status, booking_id
+		FROM investment.fd_rate_negotiation
+		WHERE rate_request_id = $1::uuid AND COALESCE(is_deleted,false)=false
+		FOR UPDATE`, rateRequestID).Scan(&oldStatus, &oldBookingID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("rate_request_id not found")
+		}
+		return fmt.Errorf("load rate negotiation for convert: %w", err)
+	}
+	switch strings.ToUpper(strings.TrimSpace(oldStatus)) {
+	case "PENDING_DELETE_APPROVAL", "DELETED", "CANCELLED":
+		return fmt.Errorf("rate request cannot be converted in status %s", oldStatus)
+	case "CONVERTED_TO_FD":
+		// Already converted — still ensure booking link points here.
+		if _, err = tx.Exec(ctx, `
+			UPDATE investment.fd_booking_request
+			SET rate_request_id = $1::uuid
+			WHERE booking_id = $2 AND COALESCE(is_deleted,false)=false`,
+			rateRequestID, bookingID); err != nil {
+			return fmt.Errorf("re-stamp booking rate_request_id: %w", err)
+		}
+		return nil
+	}
+
+	newStatus := "CONVERTED_TO_FD"
+	if _, err = tx.Exec(ctx, `
+		UPDATE investment.fd_rate_negotiation SET
+			booking_id = $2,
+			request_status = $3,
+			processing_status = $3,
+			updated_by = $4,
+			updated_at = now()
+		WHERE rate_request_id = $1::uuid`,
+		rateRequestID, bookingID, newStatus, userEmail,
+	); err != nil {
+		return fmt.Errorf("convert rate negotiation: %w", err)
+	}
+
+	if _, err = tx.Exec(ctx, `
+		UPDATE investment.fd_audit_rate_negotiation
+		SET processing_status = 'APPROVED',
+			checker_by = $2,
+			checker_at = now(),
+			checker_comment = COALESCE(NULLIF(checker_comment,''), 'Auto-stamped on booking create conversion')
+		WHERE rate_request_id = $1::uuid
+		  AND processing_status LIKE 'PENDING%'`,
+		rateRequestID, api.SystemIfBlank(userEmail),
+	); err != nil {
+		return fmt.Errorf("stamp pending rate-neg audits: %w", err)
+	}
+
+	var oldBookingVal interface{}
+	if oldBookingID != nil && strings.TrimSpace(*oldBookingID) != "" {
+		oldBookingVal = *oldBookingID
+	}
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO investment.fd_audit_rate_negotiation (
+			rate_request_id, action_type, processing_status,
+			requested_by, requested_at, requested_ip,
+			checker_by, checker_at, checker_comment,
+			old_booking_id, new_booking_id,
+			old_request_status, new_request_status
+		) VALUES (
+			$1::uuid, 'EDIT', 'APPROVED',
+			$2, now(), $3,
+			$2, now(), 'Booking created — converted to FD',
+			$4, $5,
+			$6, $7
+		)`,
+		rateRequestID,
+		api.SystemIfBlank(userEmail), api.SystemIfBlank(clientIP),
+		oldBookingVal, bookingID,
+		oldStatus, newStatus,
+	); err != nil {
+		return fmt.Errorf("rate-neg convert audit: %w", err)
+	}
+	return nil
+}
+
 func asFloat64(v interface{}) float64 {
 	switch n := v.(type) {
 	case float64:

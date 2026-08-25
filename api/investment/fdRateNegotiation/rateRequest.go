@@ -477,7 +477,6 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				internal_notes = NULLIF($12,''),
 				entity_id = COALESCE(NULLIF($13,''), entity_id),
 				entity_name = COALESCE(NULLIF($14,''), entity_name),
-				request_status = $15,
 				processing_status = $15,
 				updated_by = $16,
 				updated_at = now()
@@ -543,7 +542,7 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tenureType, req.TenureValue,
 			req.ExpectedStartDate, maturity, interestType,
 			nullIfEmpty(payoutMode), bankIDs, bankNames,
-			nullIfEmpty(req.InternalNotes), newStatus,
+			nullIfEmpty(req.InternalNotes), oldStatus,
 		)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed")
@@ -569,7 +568,8 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"rate_request_id": req.RateRequestID,
-			"request_status":  newStatus,
+			"request_status":  oldStatus,
+			"processing_status": newStatus,
 		})
 	}
 }
@@ -625,7 +625,7 @@ func scanRateRequest(row pgx.Row) (map[string]interface{}, error) {
 		"created_at":             createdAt,
 		"updated_by":             "",
 		"updated_at":             "",
-		"processing_status":      status,
+		"processing_status":      "",
 		"action_type":            "",
 		"selected_offer_id":      "",
 		"selected_bank_id":       "",
@@ -711,7 +711,7 @@ const rateRequestSelect = `
 		TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 		m.updated_by,
 		TO_CHAR(m.updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-		la.processing_status,
+		COALESCE(NULLIF(m.processing_status,''), la.processing_status),
 		la.action_type,
 		m.selected_offer_id::text,
 		m.selected_bank_id,

@@ -197,10 +197,10 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			st := strings.ToUpper(strings.TrimSpace(negStatus))
-			// Selection done: pending rate approval, or checker-approved (ready to book).
-			if st != "PENDING_RATE_APPROVAL" && st != "APPROVED" {
+			// Checker must approve selection before booking (no early book on PENDING_RATE_APPROVAL).
+			if st != "APPROVED" && st != "CONVERTED_TO_FD" {
 				api.RespondWithError(w, http.StatusBadRequest,
-					fmt.Sprintf("rate request status must be PENDING_RATE_APPROVAL or APPROVED (got %s)", st))
+					fmt.Sprintf("rate request status must be APPROVED before booking (got %s)", st))
 				return
 			}
 		}
@@ -344,6 +344,15 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			msg, status := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
 			return
+		}
+
+		if rateRequestID != "" {
+			if err = convertRateNegotiationOnBookingCreate(
+				ctx, tx, rateRequestID, bookingID, userEmail, api.ClientIPFromContext(ctx),
+			); err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 
 		if err = tx.Commit(ctx); err != nil {

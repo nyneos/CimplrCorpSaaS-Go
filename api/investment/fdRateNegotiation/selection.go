@@ -2,12 +2,15 @@ package fdRateNegotiation
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/policyengine/common"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,6 +23,9 @@ const selectionAuditAction = "EDIT"
 // Selection is apply-immediately on the master (selected_* columns) and waits
 // for checker on PENDING_EDIT_APPROVAL. Approve stamps the master APPROVED.
 const selectionAuditStatus = "PENDING_EDIT_APPROVAL"
+
+// Booking link is terminal (CONVERTED_TO_FD) — never leave a PENDING_* zombie audit.
+const bookingLinkAuditStatus = "APPROVED"
 
 type selectionPayload struct {
 	RateRequestID    string   `json:"rate_request_id"`
@@ -156,6 +162,7 @@ func SubmitSelection(pool *pgxpool.Pool) http.HandlerFunc {
 				selection_submitted_by = $6,
 				selection_submitted_at = now(),
 				request_status = $7,
+				processing_status = $8,
 				updated_by = $6,
 				updated_at = now()
 			WHERE rate_request_id = $1::uuid`,
@@ -166,6 +173,7 @@ func SubmitSelection(pool *pgxpool.Pool) http.HandlerFunc {
 			req.SelectionRemarks,
 			userEmail,
 			newStatus,
+			selectionAuditStatus,
 		)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Selection update failed: %v", err))
@@ -261,6 +269,7 @@ func SubmitSelection(pool *pgxpool.Pool) http.HandlerFunc {
 			"selected_bank_name": outBankName,
 			"selection_remarks":  req.SelectionRemarks,
 			"request_status":     newStatus,
+			"processing_status":  selectionAuditStatus,
 		})
 	}
 }
@@ -317,57 +326,9 @@ func LinkBooking(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		newStatus := "CONVERTED_TO_FD"
-		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_rate_negotiation SET
-				booking_id = $2,
-				request_status = $3,
-				updated_by = $4,
-				updated_at = now()
-			WHERE rate_request_id = $1::uuid`,
-			req.RateRequestID, strings.TrimSpace(req.BookingID), newStatus, userEmail,
-		)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Booking link failed: %v", err))
-			return
-		}
-
-		// Stamp bidirectional link: booking → rate request (demo conversion path).
-		if _, err = tx.Exec(ctx, `
-			UPDATE investment.fd_booking_request
-			SET rate_request_id = $1::uuid
-			WHERE booking_id = $2
-			  AND COALESCE(is_deleted, false) = false`,
-			req.RateRequestID, strings.TrimSpace(req.BookingID),
-		); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Stamp booking rate_request_id failed: %v", err))
-			return
-		}
-
-		var oldBookingVal interface{}
-		if oldBookingID != nil && strings.TrimSpace(*oldBookingID) != "" {
-			oldBookingVal = *oldBookingID
-		}
-
-		_, err = tx.Exec(ctx, `
-			INSERT INTO investment.fd_audit_rate_negotiation (
-				rate_request_id, action_type, processing_status,
-				requested_by, requested_at, requested_ip,
-				old_booking_id, new_booking_id,
-				old_request_status, new_request_status
-			) VALUES (
-				$1::uuid, $2, $3,
-				$4, now(), $5,
-				$6, $7,
-				$8, $9
-			)`,
-			req.RateRequestID, selectionAuditAction, selectionAuditStatus,
-			api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
-			oldBookingVal, strings.TrimSpace(req.BookingID),
-			oldStatus, newStatus,
-		)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed")
+		bookingID := strings.TrimSpace(req.BookingID)
+		if err = applyBookingConversion(ctx, tx, req.RateRequestID, bookingID, oldStatus, oldBookingID, userEmail, api.ClientIPFromContext(ctx)); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -376,10 +337,88 @@ func LinkBooking(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Drop any leftover maker-checker instances — conversion is terminal.
+		go func(id, actor string) {
+			bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_ = approvalengine.CancelPendingInstances(bg, pool, rateNegModule, id, actor)
+		}(req.RateRequestID, userEmail)
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"rate_request_id": req.RateRequestID,
-			"booking_id":      strings.TrimSpace(req.BookingID),
-			"request_status":  newStatus,
+			"booking_id":      bookingID,
+			"request_status":  "CONVERTED_TO_FD",
 		})
 	}
+}
+
+// applyBookingConversion stamps negotiation ↔ booking bidirectionally, sets
+// CONVERTED_TO_FD, clears pending audits, and writes an APPROVED EDIT audit
+// (never PENDING_EDIT_APPROVAL — that left zombie "pending edit" rows).
+func applyBookingConversion(ctx context.Context, tx pgx.Tx, rateRequestID, bookingID, oldStatus string, oldBookingID *string, userEmail, clientIP string) error {
+	newStatus := "CONVERTED_TO_FD"
+	if _, err := tx.Exec(ctx, `
+		UPDATE investment.fd_rate_negotiation SET
+			booking_id = $2,
+			request_status = $3,
+			processing_status = $4,
+			updated_by = $5,
+			updated_at = now()
+		WHERE rate_request_id = $1::uuid`,
+		rateRequestID, bookingID, newStatus, bookingLinkAuditStatus, userEmail,
+	); err != nil {
+		return fmt.Errorf("Booking link failed: %v", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE investment.fd_booking_request
+		SET rate_request_id = $1::uuid
+		WHERE booking_id = $2
+		  AND COALESCE(is_deleted, false) = false`,
+		rateRequestID, bookingID,
+	); err != nil {
+		return fmt.Errorf("Stamp booking rate_request_id failed: %v", err)
+	}
+
+	// Clear any stuck PENDING_* audits so list/join cannot resurface pending edit.
+	if _, err := tx.Exec(ctx, `
+		UPDATE investment.fd_audit_rate_negotiation
+		SET processing_status = 'APPROVED',
+			checker_by = $2,
+			checker_at = now(),
+			checker_comment = COALESCE(NULLIF(checker_comment,''), 'Auto-stamped on booking conversion')
+		WHERE rate_request_id = $1::uuid
+		  AND processing_status LIKE 'PENDING%'`,
+		rateRequestID, api.SystemIfBlank(userEmail),
+	); err != nil {
+		return fmt.Errorf("Stamp pending audits failed: %v", err)
+	}
+
+	var oldBookingVal interface{}
+	if oldBookingID != nil && strings.TrimSpace(*oldBookingID) != "" {
+		oldBookingVal = *oldBookingID
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO investment.fd_audit_rate_negotiation (
+			rate_request_id, action_type, processing_status,
+			requested_by, requested_at, requested_ip,
+			checker_by, checker_at, checker_comment,
+			old_booking_id, new_booking_id,
+			old_request_status, new_request_status
+		) VALUES (
+			$1::uuid, $2, $3,
+			$4, now(), $5,
+			$4, now(), 'Booking linked — converted to FD',
+			$6, $7,
+			$8, $9
+		)`,
+		rateRequestID, selectionAuditAction, bookingLinkAuditStatus,
+		api.SystemIfBlank(userEmail), api.SystemIfBlank(clientIP),
+		oldBookingVal, bookingID,
+		oldStatus, newStatus,
+	); err != nil {
+		return fmt.Errorf("Audit insert failed: %v", err)
+	}
+	return nil
 }
