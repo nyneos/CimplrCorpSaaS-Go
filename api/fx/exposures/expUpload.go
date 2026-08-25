@@ -264,10 +264,10 @@ func parseDBValue(col string, val interface{}) interface{} {
 	return val
 }
 
-// Columns needed by All Exposure Request + Pending Exposure Request tables
-// (list, expand/edit sections, download buttons, approve/reject metadata).
-// Intentionally omits bulky JSON blobs and unused audit/SAP detail columns.
-const headersLineItemsSelectSQL = `
+// Columns for the All / Pending Exposure list tables only.
+// Intentionally header-only (no line-item JOIN) so 100k+ headers stay fast.
+// Full line items load via GetExposureHeaderDetail on expand / eye.
+const headersListSelectSQL = `
 			SELECT
 				h.exposure_header_id,
 				h.document_id,
@@ -285,19 +285,23 @@ const headersLineItemsSelectSQL = `
 				h.amount_in_local_currency,
 				h.gl_account,
 				h.upload_s3_key,
-				l.line_item_id,
-				l.line_number,
-				l.line_item_amount
+				h.created_at,
+				h.batch_id,
+				h.value_date,
+				h.posting_date,
+				h.status
 			FROM exposure_headers h
-			LEFT JOIN exposure_line_items l ON l.exposure_header_id = h.exposure_header_id
 			LEFT JOIN LATERAL (
-				SELECT ie.status
+				-- Instance status (PENDING/APPROVED/...), never eye ACTIVE — that made the
+				-- Status column look like "Active" while approval was still pending.
+				SELECT inst.status
 				FROM uam.approval_instance inst
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = inst.instance_id AND ie.status = 'ACTIVE'
 				WHERE inst.record_id = h.exposure_header_id::text
 				  AND inst.module_code = 'FX'
+				  AND inst.is_deleted = false
 				  AND inst.status = 'PENDING'
-				ORDER BY inst.submitted_at DESC LIMIT 1
+				ORDER BY inst.submitted_at DESC NULLS LAST, inst.instance_id DESC
+				LIMIT 1
 			) i ON true
 `
 
@@ -349,7 +353,7 @@ func scanHeadersLineItemsRows(rows pgx.Rows) ([]map[string]interface{}, error) {
 }
 
 func queryHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, buNames []string, batchID string, pendingOnly bool) ([]map[string]interface{}, error) {
-	query := headersLineItemsSelectSQL + `
+	query := headersListSelectSQL + `
 			WHERE h.entity = ANY($1)
 			  AND h.exposure_creation_status = 'Approved'
 			  AND h.is_deleted IS NOT TRUE
@@ -362,14 +366,92 @@ func queryHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, buNames []st
 	if pendingOnly {
 		query += ` AND upper(COALESCE(i.status, h.approval_status, '')) <> 'APPROVED'`
 	}
-	query += ` ORDER BY h.document_id, l.line_number NULLS FIRST`
+	query += ` ORDER BY h.created_at DESC NULLS LAST, h.exposure_header_id`
 
-	joinRows, err := pool.Query(ctx, query, args...)
+	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer joinRows.Close()
-	return scanHeadersLineItemsRows(joinRows)
+	defer rows.Close()
+	return scanHeadersLineItemsRows(rows)
+}
+
+// GetExposureHeaderDetail returns one header + all line-item columns for eye/expand.
+// Keeps the list endpoint light; this is loaded on demand.
+func GetExposureHeaderDetail(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID           string `json:"user_id"`
+			ExposureHeaderID string `json:"exposure_header_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.ExposureHeaderID) == "" {
+			respondWithError(w, http.StatusBadRequest, "exposure_header_id required")
+			return
+		}
+		ctx := r.Context()
+		scope := ctxutil.FromContext(ctx)
+		buNames := scope.EntityNames
+		if len(buNames) == 0 {
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			return
+		}
+
+		headerRows, err := pool.Query(ctx, `
+			SELECT
+				h.exposure_header_id, h.company_code, h.entity, h.entity1, h.entity2, h.entity3,
+				h.exposure_type, h.document_id, h.document_date, h.counterparty_type,
+				h.counterparty_code, h.counterparty_name, h.currency,
+				h.total_original_amount, h.total_open_amount, h.value_date, h.status,
+				h.approval_status, h.amount_in_local_currency, h.posting_date, h.text,
+				h.gl_account, h.reference, h.additional_header_details, h.exposure_category,
+				h.exposure_creation_status, h.batch_id, h.file_hash, h.upload_s3_key,
+				h.created_at, h.updated_at, h.requested_by, h.approved_by, h.approved_at,
+				h.rejected_by, h.rejected_at
+			FROM exposure_headers h
+			WHERE h.exposure_header_id = $1::uuid
+			  AND h.entity = ANY($2)
+			  AND h.is_deleted IS NOT TRUE
+			LIMIT 1`, req.ExposureHeaderID, buNames)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure header")
+			return
+		}
+		headers, err := scanHeadersLineItemsRows(headerRows)
+		headerRows.Close()
+		if err != nil || len(headers) == 0 {
+			respondWithError(w, http.StatusNotFound, "Exposure header not found")
+			return
+		}
+		header := headers[0]
+
+		lineRows, err := pool.Query(ctx, `
+			SELECT
+				line_item_id, exposure_header_id, line_number, product_id, product_description,
+				quantity, unit_of_measure, unit_price, line_item_amount, plant_code,
+				delivery_date, payment_terms, inco_terms, additional_line_details, created_at
+			FROM exposure_line_items
+			WHERE exposure_header_id = $1::uuid
+			ORDER BY line_number NULLS FIRST, created_at, line_item_id`, req.ExposureHeaderID)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure line items")
+			return
+		}
+		lineItems, err := scanHeadersLineItemsRows(lineRows)
+		lineRows.Close()
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to scan exposure line items")
+			return
+		}
+		if lineItems == nil {
+			lineItems = []map[string]interface{}{}
+		}
+		header["line_items"] = lineItems
+
+		respondWithSuccess(w, http.StatusOK, "Exposure header detail fetched successfully", map[string]interface{}{
+			"header":     header,
+			"line_items": lineItems,
+		})
+	}
 }
 
 func resolveUploadMappingValue(staged map[string]interface{}, sourceCol, dataType, tableName string) (interface{}, bool) {
@@ -379,7 +461,9 @@ func resolveUploadMappingValue(staged map[string]interface{}, sourceCol, dataTyp
 	case tableName:
 		return staged, true
 	case "1":
-		return 1, true
+		// Literal mapping constant (e.g. LC line_number / quantity). Must be a
+		// string — int 1 cannot encode into varchar columns via pgx.
+		return "1", true
 	case "true":
 		return true, true
 	case "false":
@@ -390,6 +474,31 @@ func resolveUploadMappingValue(staged map[string]interface{}, sourceCol, dataTyp
 
 	val, ok := staged[sourceCol]
 	return val, ok
+}
+
+// exposureLineItemVarcharCols must receive text to pgx — staging often yields
+// int (row_number) / float for fields that land in varchar targets.
+var exposureLineItemVarcharCols = map[string]bool{
+	"line_number": true, "product_id": true, "unit_of_measure": true,
+	"plant_code": true, "payment_terms": true, "inco_terms": true,
+}
+
+func coerceExposureLineItemValue(field string, v interface{}) interface{} {
+	if !exposureLineItemVarcharCols[field] {
+		return v
+	}
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case string:
+		return t
+	case []byte:
+		return string(t)
+	case fmt.Stringer:
+		return t.String()
+	default:
+		return fmt.Sprint(t)
+	}
 }
 
 func hasNonEmptyUploadValue(v interface{}) bool {
@@ -1564,10 +1673,26 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 		}) {
 			return
 		}
-		results, absorptionErrors, err := processBatchUploadStagingData(ctx, pool, r, buNames, session)
+		results, absorptionErrors, policySummary, err := processBatchUploadStagingData(ctx, pool, r, buNames, session)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		if line := strings.TrimSpace(policySummary); line != "" {
+			// HTTP headers must be ASCII — ClientMessage may include em-dashes.
+			line = strings.Map(func(r rune) rune {
+				switch {
+				case r == '–' || r == '—':
+					return '-'
+				case r >= 32 && r < 127:
+					return r
+				default:
+					return -1
+				}
+			}, line)
+			if line = strings.TrimSpace(line); line != "" {
+				w.Header().Set("X-Policy-Summary", line)
+			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		var allErrors []string
@@ -1760,7 +1885,7 @@ func GetExposureBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *http.Request, buNames []string, session *auth.UserSession) ([]map[string]interface{}, []string, error) {
+func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *http.Request, buNames []string, session *auth.UserSession) ([]map[string]interface{}, []string, string, error) {
 	uploadedBy := "user"
 	if session != nil {
 		uploadedBy = strings.TrimSpace(session.Name)
@@ -1784,6 +1909,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 	results := []map[string]interface{}{}
 	absorptionErrors := []string{}
+	var policySummaryParts []string
 	for _, field := range fileFields {
 		files := r.MultipartForm.File[field.Field]
 		for _, fh := range files {
@@ -2437,7 +2563,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 							}
 							lineVals = append(lineVals, jsonVal)
 						} else {
-							lineVals = append(lineVals, v)
+							lineVals = append(lineVals, coerceExposureLineItemValue(k, v))
 						}
 						linePlaceholders = append(linePlaceholders, fmt.Sprintf("$%d", idx))
 						idx++
@@ -2494,13 +2620,10 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 						createdExposureIDs, uploadedBy,
 					)
 
-					// Evaluate the EXPOSURE_CREATION create policy per header so a
-					// TriggerApproval rule (e.g. Exposure Amount) can pin the approval
-					// matrix its breach selected. Headers are already committed in
-					// PENDING_APPROVAL at this point, so this cannot block the upload —
-					// it exists to carry the matrix into CreateInstance, which
-					// previously received none and, with no entity code either,
-					// resolved no matrix and so created no instance at all.
+					// Evaluate EXPOSURE_CREATION PRE_CREATE so TriggerApproval can pin a
+					// matrix. Runs after commit (cannot block upload). CreateInstance is
+					// synchronous so the audit panel sees the workflow immediately.
+					// Empty pin = no approval instance (do not invent a default matrix).
 					createMatrices := make(map[string]string, len(createdExposureIDs))
 					createEntities := make(map[string]string, len(createdExposureIDs))
 					for _, exposureHeaderID := range createdExposureIDs {
@@ -2510,7 +2633,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 							continue
 						}
 						createEntities[exposureHeaderID] = creationRow.Entity
-						okPolicy, msgPolicy, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+						out := runtime.EnforceDetailed(ctx, r, pool, runtime.EnforceInput{
 							EventCode:           common.TriggerPreCreate,
 							ModuleCode:          common.ModuleFX,
 							SubModule:           "EXPOSURE_CREATION",
@@ -2519,29 +2642,53 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 							HandlerName:         "BatchUploadStagingData",
 							APIPath:             "/fx/exposures/batch-upload-staging",
 							DefaultBlockMessage: "Exposure creation blocked by policy",
+							BusinessRecordID:    exposureHeaderID,
+							BusinessRecordType:  "exposure_headers",
 							Fields:              BuildExposureCreationPolicyFields(creationRow),
 						})
-						if !okPolicy {
-							logger.LogError("[FX-STAGING] exposure create policy breach for %s: %s", exposureHeaderID, msgPolicy)
+						if !out.OK {
+							logger.LogError("[FX-STAGING] exposure create policy HardBlock for %s: %s", exposureHeaderID, out.Message)
+							continue
+						}
+						if _, failed := out.Result.CountPassedFailed(); failed > 0 {
+							if toast := strings.TrimSpace(out.Result.ClientMessage(out.Result.FirstBreachMessage())); toast != "" {
+								policySummaryParts = append(policySummaryParts, toast)
+							}
+						}
+						tID := strings.TrimSpace(out.Result.TriggerApprovalMatrixID)
+						if tID == "" {
+							logger.LogInfo("[FX-STAGING] exposure create policy ok for %s but no TriggerApproval matrix pin — skipping CreateInstance", exposureHeaderID)
 							continue
 						}
 						createMatrices[exposureHeaderID] = tID
+						logger.LogInfo("[FX-STAGING] exposure create policy pinned matrix %s for %s", tID, exposureHeaderID)
 					}
-					go func(ids []string, email string, matrices, entities map[string]string) {
-						bgCtx := context.Background()
-						for _, id := range ids {
-							_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-								ModuleCode:          "FX",
-								EntityCode:          entities[id],
-								TransactionType:     "FX_EXPOSURE_CREATE",
-								RecordID:            id,
-								MatrixID:            matrices[id],
-								SubmittedByEmail:    email,
-								RequirePinnedMatrix: true,
-								AutoApplyIfUnpinned: true,
-							})
+					for _, id := range createdExposureIDs {
+						matrixID := strings.TrimSpace(createMatrices[id])
+						if matrixID == "" {
+							continue
 						}
-					}(createdExposureIDs, session.Email, createMatrices, createEntities)
+						instID, cerr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+							ModuleCode:          "FX",
+							EntityCode:          createEntities[id],
+							TransactionType:     "FX_EXPOSURE_CREATE",
+							ActionType:          "CREATE",
+							RecordID:            id,
+							MatrixID:            matrixID,
+							SubmittedByEmail:    session.Email,
+							RequirePinnedMatrix: true,
+							AutoApplyIfUnpinned: false,
+						})
+						if cerr != nil {
+							logger.LogError("[FX-STAGING] CreateInstance failed for %s matrix=%s: %v", id, matrixID, cerr)
+							continue
+						}
+						if strings.TrimSpace(instID) == "" {
+							logger.LogInfo("[FX-STAGING] CreateInstance skipped for %s matrix=%s", id, matrixID)
+						} else {
+							logger.LogInfo("[FX-STAGING] CreateInstance ok for %s instance=%s matrix=%s", id, instID, matrixID)
+						}
+					}
 				}
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: success,
@@ -2555,7 +2702,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		}
 	}
 
-	return results, absorptionErrors, nil
+	return results, absorptionErrors, strings.Join(policySummaryParts, "; "), nil
 }
 
 func batchStagingExposureTypeFolder(dataType string) (string, error) {

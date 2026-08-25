@@ -136,6 +136,17 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		auditStatus := approvalengine.AuditStatus(triggerMatrixID, "PENDING_APPROVAL")
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO cimplrcorpsaas.auditactionbanklimitutilization (
+				utilization_id, limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+			) VALUES ($1,$2,'CREATE',$3,$4,$5,now(),$6)`,
+			utilizationID, req.LimitID, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
+		); err != nil {
+			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			return
+		}
+
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
@@ -296,6 +307,20 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 				result["success"] = false
 				result["error"] = "failed to insert: " + err.Error()
+				results = append(results, result)
+				continue
+			}
+
+			auditStatus := approvalengine.AuditStatus(tID, "PENDING_APPROVAL")
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO cimplrcorpsaas.auditactionbanklimitutilization (
+					utilization_id, limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+				) VALUES ($1,$2,'CREATE',$3,$4,$5,now(),$6)`,
+				utilizationID, util.LimitID, auditStatus, nil, requestedBy, api.ClientIPFromContext(ctx),
+			); err != nil {
+				tx.Rollback(ctx)
+				result["success"] = false
+				result["error"] = "failed to create audit: " + err.Error()
 				results = append(results, result)
 				continue
 			}
@@ -511,6 +536,17 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			limitForAudit = *curLimitID
 		}
 
+		auditStatus := approvalengine.AuditStatus(triggerMatrixID, "PENDING_EDIT_APPROVAL")
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO cimplrcorpsaas.auditactionbanklimitutilization (
+				utilization_id, limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+			) VALUES ($1,$2,'EDIT',$3,$4,$5,now(),$6)`,
+			req.UtilizationID, limitForAudit, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
+		); err != nil {
+			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			return
+		}
+
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
@@ -616,6 +652,20 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 				result["success"] = false
 				result["error"] = "utilization not found"
+				results = append(results, result)
+				continue
+			}
+
+			auditStatus := approvalengine.AuditStatus(tID, "PENDING_DELETE_APPROVAL")
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO cimplrcorpsaas.auditactionbanklimitutilization (
+					utilization_id, limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+				) VALUES ($1,$2,'DELETE',$3,$4,$5,now(),$6)`,
+				utilizationID, limitID, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
+			); err != nil {
+				tx.Rollback(ctx)
+				result["success"] = false
+				result["error"] = "failed to create audit: " + err.Error()
 				results = append(results, result)
 				continue
 			}

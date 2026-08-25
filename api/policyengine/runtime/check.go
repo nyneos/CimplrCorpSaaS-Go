@@ -352,22 +352,25 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 
 	dispatchNotifyBreaches(ctx, pool, req, policies, resp.Results)
 
+	matrixID := breachedTriggerApprovalMatrix(req.EventCode, resp, policies)
 	return CheckResult{
 		RunID:                   runID,
 		AggregatedAction:        resp.AggregatedAction,
 		AggregatedPolicyID:      resp.AggregatedPolicyID,
 		AggregatedPolicyCode:    resp.AggregatedPolicyCode,
-		AggregatedApprovalRef:   resp.AggregatedApprovalRef,
+		AggregatedApprovalRef:   firstNonEmpty(resp.AggregatedApprovalRef, matrixID),
 		Results:                 resp.Results,
 		DurationMS:              duration,
 		ConflictReport:          conflictReport,
-		TriggerApprovalMatrixID: breachedTriggerApprovalMatrix(req.EventCode, resp),
+		TriggerApprovalMatrixID: matrixID,
 	}, nil
 }
 
 // breachedTriggerApprovalMatrix returns the approval matrix from the winning
-// TriggerApproval policy after action/criticality/approved_at tie-breaks.
-func breachedTriggerApprovalMatrix(eventCode string, resp *policysvc.EvaluateResponse) string {
+// TriggerApproval policy. Remote evaluate sometimes omits aggregated_approval_ref;
+// recover from per-result approval_ref, then from the policy snapshot we already loaded
+// (slab approval_ref / approval_matrix_id).
+func breachedTriggerApprovalMatrix(eventCode string, resp *policysvc.EvaluateResponse, policies []map[string]interface{}) string {
 	if resp == nil || common.ForbidsTriggerApproval(eventCode) {
 		return ""
 	}
@@ -376,6 +379,47 @@ func breachedTriggerApprovalMatrix(eventCode string, resp *policysvc.EvaluateRes
 	}
 	if ref := strings.TrimSpace(resp.AggregatedApprovalRef); ref != "" {
 		return ref
+	}
+	for _, r := range resp.Results {
+		if !strings.EqualFold(strings.TrimSpace(r.Result), "BREACH") {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(r.Action), common.BreachTriggerApproval) {
+			continue
+		}
+		if ref := strings.TrimSpace(r.ApprovalRef); ref != "" {
+			return ref
+		}
+	}
+	winID := strings.TrimSpace(resp.AggregatedPolicyID)
+	for _, p := range policies {
+		id, _ := p["policy_id"].(string)
+		if winID != "" && id != winID {
+			continue
+		}
+		if ref := strings.TrimSpace(fmt.Sprint(p["approval_matrix_id"])); ref != "" && ref != "<nil>" {
+			return ref
+		}
+		if slabs, ok := p["slab_rows"].([]map[string]interface{}); ok {
+			for _, s := range slabs {
+				act := strings.TrimSpace(fmt.Sprint(s["action"]))
+				if !strings.EqualFold(act, common.BreachTriggerApproval) {
+					continue
+				}
+				if ref := strings.TrimSpace(fmt.Sprint(s["approval_ref"])); ref != "" && ref != "<nil>" {
+					return ref
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
 	}
 	return ""
 }

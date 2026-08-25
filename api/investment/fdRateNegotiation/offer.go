@@ -553,11 +553,10 @@ func ListOffers(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		for _, item := range results {
 			id, _ := item["offer_id"].(string)
-			status, _ := item["offer_status"].(string)
 			if ps := procMap[id]; ps != "" {
 				item["processing_status"] = ps
 			} else {
-				item["processing_status"] = status
+				item["processing_status"] = ""
 			}
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{

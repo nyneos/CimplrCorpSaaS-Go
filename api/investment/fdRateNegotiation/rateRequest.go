@@ -772,6 +772,7 @@ const comparableRateRequestFilter = `
 				'PENDING_APPROVAL',
 				'PENDING_EDIT_APPROVAL',
 				'PENDING_DELETE_APPROVAL',
+				'PENDING_RATE_APPROVAL',
 				'REJECTED',
 				'CANCELLED',
 				'DELETED'
@@ -779,10 +780,10 @@ const comparableRateRequestFilter = `
 			ORDER BY GREATEST(m.created_at, COALESCE(la.requested_at, m.created_at)) DESC, m.rate_request_id DESC`
 
 // ListComparableRateRequests is the Rate Comparison feed: only requests that
-// already have a checker-approved captured offer. Create/edit/delete pendings
-// stay on the Rate Request page — including PENDING_EDIT_APPROVAL after an
-// offer was approved. Remaining statuses (OFFERS_RECEIVED, PENDING_RATE_APPROVAL,
-// APPROVED, CONVERTED_TO_FD, …) are returned as stored.
+// already have a checker-approved captured offer and are not awaiting selection
+// checker approval (PENDING_RATE_APPROVAL). Create/edit/delete pendings stay on
+// the Rate Request page. Finalized rows (APPROVED / CONVERTED_TO_FD with selection)
+// remain visible for read-only comparison trail.
 func ListComparableRateRequests(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()

@@ -1028,8 +1028,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			   COALESCE(ai.status,'')             AS approval_engine_status,
 			   COALESCE(aie.instance_eye_id,'')   AS current_eye_id,
 			   COALESCE(aie.position::text,'')    AS current_eye_position,
-			   COALESCE(aie.approvals_required,0) AS approvals_required,
-			   COALESCE(aie.approvals_received,0) AS approvals_received,
+			   ` + approvalengine.SQLInstanceApprovalProgressSelect() + `,
 			   aie.sla_deadline                   AS sla_deadline,
 			   COALESCE(aie.is_escalated,false)   AS is_escalated
 		   FROM bank_balances_manual b
@@ -1056,6 +1055,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			   ORDER BY aie.position ASC, aie.instance_eye_id ASC
 			   LIMIT 1
 		   ) aie ON true
+		   ` + approvalengine.SQLInstanceApprovalProgressJoin("ai") + `
 		   LEFT JOIN LATERAL (
 			   SELECT GREATEST(COALESCE(a.checker_at, a.requested_at), a.requested_at) AS activity_at
 			   FROM auditactionbankbalances a

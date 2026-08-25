@@ -247,10 +247,25 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 		}) {
 			return
 		}
-		results, elapsed, status, err := processBatchUploadStagingData(r.Context(), pool, r)
+		results, elapsed, policySummary, status, err := processBatchUploadStagingData(r.Context(), pool, r)
 		if err != nil {
 			httpError(w, status, err.Error())
 			return
+		}
+		if line := strings.TrimSpace(policySummary); line != "" {
+			line = strings.Map(func(r rune) rune {
+				switch {
+				case r == '–' || r == '—':
+					return '-'
+				case r >= 32 && r < 127:
+					return r
+				default:
+					return -1
+				}
+			}, line)
+			if line = strings.TrimSpace(line); line != "" {
+				w.Header().Set("X-Policy-Summary", line)
+			}
 		}
 		respondEnvelopeSuccess(w, "Upload processed successfully", map[string]interface{}{
 			"results": results,
@@ -261,8 +276,9 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *http.Request) ([]UploadRouteResult, time.Duration, int, error) {
+func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *http.Request) ([]UploadRouteResult, time.Duration, string, int, error) {
 	start := time.Now()
+	var policySummaryParts []string
 	files := r.MultipartForm.File["files"]
 	sources := r.MultipartForm.Value["source"]
 	mappings := r.MultipartForm.Value["mapping"]
@@ -300,7 +316,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 	userID := r.FormValue(constants.KeyUserID)
 	if userID == "" {
-		return nil, 0, http.StatusBadRequest, errors.New(constants.ErrUserIDRequired)
+		return nil, 0, "", http.StatusBadRequest, errors.New(constants.ErrUserIDRequired)
 	}
 	userName := ""
 	makerEmail := ""
@@ -312,7 +328,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		}
 	}
 	if len(files) == 0 {
-		return nil, 0, http.StatusBadRequest, errors.New("no files uploaded")
+		return nil, 0, "", http.StatusBadRequest, errors.New("no files uploaded")
 	}
 
 	// build entity map (use masterentitycash + canonical fields)
@@ -422,28 +438,28 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 		f, err := fh.Open()
 		if err != nil {
-			return nil, 0, http.StatusBadRequest, fmt.Errorf("open file: %w", err)
+			return nil, 0, "", http.StatusBadRequest, fmt.Errorf("open file: %w", err)
 		}
 		tmpPath, fileHash, err := saveTempAndHash(f, fh.Filename)
 		f.Close()
 		if err != nil {
-			return nil, 0, http.StatusInternalServerError, fmt.Errorf("temp save: %w", err)
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("temp save: %w", err)
 		}
 		defer os.Remove(tmpPath)
 
 		tmpFile, err := os.Open(tmpPath)
 		if err != nil {
-			return nil, 0, http.StatusInternalServerError, fmt.Errorf("open tmp: %w", err)
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("open tmp: %w", err)
 		}
 		defer tmpFile.Close()
 
 		fileExt := strings.ToLower(filepath.Ext(fh.Filename))
 		allRows, err := ubParseUploadFile(tmpFile, fileExt)
 		if err != nil {
-			return nil, 0, http.StatusBadRequest, fmt.Errorf("file parse error: %w", err)
+			return nil, 0, "", http.StatusBadRequest, fmt.Errorf("file parse error: %w", err)
 		}
 		if len(allRows) == 0 {
-			return nil, 0, http.StatusBadRequest, errors.New("empty file or no data rows")
+			return nil, 0, "", http.StatusBadRequest, errors.New("empty file or no data rows")
 		}
 
 		// headers
@@ -486,13 +502,13 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		batchID := uuid.New()
 		storedFileName, s3Key, err := fxExposureS3Key(fh.Filename, userName, src)
 		if err != nil {
-			return nil, 0, http.StatusBadRequest, err
+			return nil, 0, "", http.StatusBadRequest, err
 		}
 		uploadedNewObject := false
 		if s3storage.IsS3UploadEnabled() {
 			fileBytes, err := os.ReadFile(tmpPath)
 			if err != nil {
-				return nil, 0, http.StatusInternalServerError, fmt.Errorf("read temp file for s3 upload: %w", err)
+				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("read temp file for s3 upload: %w", err)
 			}
 			// Duplicate file-hash protection is temporarily disabled for repeated
 			// v91 upload testing. Re-enable this guard before production use.
@@ -510,13 +526,13 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			// 		  AND COALESCE(is_deleted, false) = false
 			// 	)
 			// `, fileHash).Scan(&duplicateExists); err != nil {
-			// 	return nil, 0, http.StatusInternalServerError, fmt.Errorf("failed to check duplicate exposure upload: %w", err)
+			// 	return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("failed to check duplicate exposure upload: %w", err)
 			// }
 			// if duplicateExists {
-			// 	return nil, 0, http.StatusBadRequest, errors.New(duplicateExposureUploadMessage)
+			// 	return nil, 0, "", http.StatusBadRequest, errors.New(duplicateExposureUploadMessage)
 			// }
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, s3storage.DetectContentType(fileBytes)); err != nil {
-				return nil, 0, http.StatusInternalServerError, fmt.Errorf("failed to store original file to s3: %w", err)
+				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("failed to store original file to s3: %w", err)
 			}
 			uploadedNewObject = true
 		}
@@ -527,7 +543,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					logger.LogError("[FBUP-S3] cleanup after acquire failure failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
-			return nil, 0, http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrDBAcquire, err.Error())
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrDBAcquire, err.Error())
 		}
 		tx, err := conn.Begin(ctx)
 		if err != nil {
@@ -537,7 +553,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					logger.LogError("[FBUP-S3] cleanup after tx begin failure failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
-			return nil, 0, http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrTxBegin, err.Error())
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrTxBegin, err.Error())
 		}
 		committed := false
 		cleanupUploadedObject := uploadedNewObject
@@ -557,7 +573,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		if len(mappingRaw) > 0 {
 			var temp interface{}
 			if err := json.Unmarshal(mappingRaw, &temp); err != nil {
-				return nil, 0, http.StatusBadRequest, fmt.Errorf("invalid mapping JSON: %w", err)
+				return nil, 0, "", http.StatusBadRequest, fmt.Errorf("invalid mapping JSON: %w", err)
 			}
 		}
 
@@ -566,7 +582,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				(batch_id, ingestion_source, status, total_records, file_hash, file_name, uploaded_by, mapping_json, upload_s3_key)
 				VALUES ($1,$2,'processing',$3,$4,$5,$6,$7,$8)
 			`, batchID, src, 0, fileHash, storedFileName, userName, string(mappingRaw), s3Key); err != nil {
-			return nil, 0, http.StatusInternalServerError, fmt.Errorf("insert batch: %w", err)
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("insert batch: %w", err)
 		}
 
 		// staging copy
@@ -674,11 +690,11 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		close(stagingCh)
 		wgCopy.Wait()
 		if stagingErr != nil {
-			return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy staging_exposures: %w", stagingErr)
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("copy staging_exposures: %w", stagingErr)
 		}
 
 		if _, err := tx.Exec(ctx, `UPDATE public.staging_batches_exposures SET total_records=$1 WHERE batch_id=$2`, totalRows, batchID); err != nil {
-			return nil, 0, http.StatusInternalServerError, fmt.Errorf("update batch total_records: %w", err)
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("update batch total_records: %w", err)
 		}
 
 		logger.LogInfo("[DEBUG] After parsing: canonicals=%d, batch=%s file=%s", len(canonicals), batchID.String(), fh.Filename)
@@ -992,7 +1008,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 		logger.LogInfo("[FBUP] about to COPY %d exposure_headers for batch %s file=%s", len(qualified), batchID.String(), fh.Filename)
 		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"public", "exposure_headers"}, headerCols, headerSrc); err != nil {
-			return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy headers: %w", err)
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("copy headers: %w", err)
 		}
 		logger.LogInfo("[FBUP] finished COPY exposure_headers for batch %s file=%s", batchID.String(), fh.Filename)
 
@@ -1064,7 +1080,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				fileErrors = append(fileErrors, "copy line items: "+err.Error())
 				logger.LogError("copy line items: %v", err)
 				tx.Rollback(ctx)
-				return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy line items failed: %w", err)
+				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("copy line items failed: %w", err)
 			}
 		}
 		logger.LogInfo("[FBUP] finished COPY exposure_line_items for batch %s", batchID.String())
@@ -1216,7 +1232,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				fileErrors = append(fileErrors, "copy allocations: "+err.Error())
 				logger.LogError("copy allocations: %v", err)
 				tx.Rollback(ctx)
-				return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy allocations failed: %w", err)
+				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("copy allocations failed: %w", err)
 			}
 		}
 
@@ -1270,7 +1286,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				fileErrors = append(fileErrors, "copy unallocated: "+err.Error())
 				logger.LogError("copy unallocated: %v", err)
 				tx.Rollback(ctx)
-				return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy unallocated failed: %w", err)
+				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("copy unallocated failed: %w", err)
 			}
 		}
 
@@ -1315,19 +1331,21 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				fileErrors = append(fileErrors, "copy unqualified: "+err.Error())
 				logger.LogError("copy unqualified: %v", err)
 				tx.Rollback(ctx)
-				return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy unqualified failed: %w", err)
+				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("copy unqualified failed: %w", err)
 			}
 		}
 
-		// One consolidated CREATE audit per file upload (batch-scoped), not per exposure header.
+		// One CREATE audit per exposure header so /audit?id=<header> is populated.
+		// (A single batch-scoped row keyed by batch_id never matches the header UI.)
 		if strings.TrimSpace(userName) != "" {
-			if _, err := tx.Exec(ctx, `
+			for _, hidStr := range docToID {
+				if _, err := tx.Exec(ctx, `
 				INSERT INTO public.auditactionexposure
 					(exposure_header_id, actiontype, processing_status, reason,
 					 requested_by, requested_at, requested_ip, old_values,
 					 new_values, change_summary)
 				VALUES (
-					$1::text,
+					$1,
 					'CREATE',
 					$2::text,
 					'SAP file upload',
@@ -1336,18 +1354,17 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					NULLIF($4::text, ''),
 					NULL,
 					jsonb_build_object(
-						'batch_id', $1::text,
-						'file_name', $5::text,
-						'upload_s3_key', $6::text,
-						'qualified_headers', $7::int,
-						'unqualified_rows', $8::int,
-						'source', $9::text
+						'batch_id', $5::text,
+						'file_name', $6::text,
+						'upload_s3_key', $7::text,
+						'source', $8::text
 					),
 					NULL
 				)
-			`, batchID.String(), constants.StatusPendingApproval, userName,
-				api.ClientIPFromContext(ctx), fh.Filename, s3Key, len(docToID), len(nonQualified), src); err != nil {
-				return nil, 0, http.StatusInternalServerError, fmt.Errorf("insert exposure create audit row: %w", err)
+			`, hidStr, constants.StatusPendingApproval, userName,
+					api.ClientIPFromContext(ctx), batchID.String(), fh.Filename, s3Key, src); err != nil {
+					return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("insert exposure create audit row: %w", err)
+				}
 			}
 		}
 
@@ -1359,19 +1376,19 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					error_message=$3
 				WHERE batch_id=$4
 			`, len(qualified), len(nonQualified), strings.Join(fileErrors, "; "), batchID); err != nil {
-			return nil, 0, http.StatusInternalServerError, fmt.Errorf("update batch: %w", err)
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("update batch: %w", err)
 		}
 
 		if err := tx.Commit(ctx); err != nil {
 			persisted, persistErr := exposureBatchUploadS3KeyPersisted(ctx, pool, batchID, s3Key)
 			if persistErr != nil {
 				cleanupUploadedObject = false
-				return nil, 0, http.StatusInternalServerError, fmt.Errorf("%s%s (unable to verify persisted upload_s3_key: %v)", constants.ErrCommitFailed, err.Error(), persistErr)
+				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("%s%s (unable to verify persisted upload_s3_key: %v)", constants.ErrCommitFailed, err.Error(), persistErr)
 			}
 			if persisted {
 				cleanupUploadedObject = false
 			}
-			return nil, 0, http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrCommitFailed, err.Error())
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrCommitFailed, err.Error())
 		}
 		committed = true
 		cleanupUploadedObject = false
@@ -1380,11 +1397,9 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 		fxnotif.NotifyExposureUpload(ctx, pool, fxnotif.SourceRouteV91Upload, batchID.String(), userID, userName)
 
-		// Evaluate the EXPOSURE_CREATION create policy per header so a
-		// TriggerApproval rule (e.g. Exposure Amount) can pin the approval matrix
-		// its breach selected. Headers are already committed here, so this cannot
-		// block the upload — it exists to carry the matrix into CreateInstance,
-		// which previously received none and so created no instance at all.
+		// Evaluate EXPOSURE_CREATION PRE_CREATE so TriggerApproval can pin a matrix.
+		// Empty pin = no CreateInstance. CreateInstance is sync so audit shows workflow
+		// before the upload response returns; X-Policy-Summary carries the toast.
 		createMatrices := make(map[string]string, len(docToID))
 		createEntities := make(map[string]string, len(docToID))
 		for _, hidStr := range docToID {
@@ -1394,7 +1409,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				continue
 			}
 			createEntities[hidStr] = creationRow.Entity
-			okPolicy, msgPolicy, tID := policyruntime.EnforceInlineWithMatrix(ctx, r, pool, policyruntime.EnforceInput{
+			out := policyruntime.EnforceDetailed(ctx, r, pool, policyruntime.EnforceInput{
 				EventCode:           common.TriggerPreCreate,
 				ModuleCode:          common.ModuleFX,
 				SubModule:           "EXPOSURE_CREATION",
@@ -1403,37 +1418,60 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				HandlerName:         "BatchUploadStagingData",
 				APIPath:             "/fx/exposures/v91/upload",
 				DefaultBlockMessage: "Exposure creation blocked by policy",
+				BusinessRecordID:    hidStr,
+				BusinessRecordType:  "exposure_headers",
 				Fields:              fxexposures.BuildExposureCreationPolicyFields(creationRow),
 			})
-			if !okPolicy {
-				logger.LogError("[FBUP] exposure create policy breach for %s: %s", hidStr, msgPolicy)
+			if !out.OK {
+				logger.LogError("[FBUP] exposure create policy HardBlock for %s: %s", hidStr, out.Message)
+				continue
+			}
+			if _, failed := out.Result.CountPassedFailed(); failed > 0 {
+				if toast := strings.TrimSpace(out.Result.ClientMessage(out.Result.FirstBreachMessage())); toast != "" {
+					policySummaryParts = append(policySummaryParts, toast)
+				}
+			}
+			tID := strings.TrimSpace(out.Result.TriggerApprovalMatrixID)
+			if tID == "" {
+				logger.LogInfo("[FBUP] exposure create policy ok for %s but no TriggerApproval matrix pin — skipping CreateInstance", hidStr)
 				continue
 			}
 			createMatrices[hidStr] = tID
+			logger.LogInfo("[FBUP] exposure create policy pinned matrix %s for %s", tID, hidStr)
 		}
-		// Create approval instances for all new headers
-		go func(docs map[string]string, email string, matrices, entities map[string]string) {
-			bgCtx := context.Background()
-			for _, hidStr := range docs {
-				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:          "FX",
-					EntityCode:          entities[hidStr],
-					TransactionType:     "FX_EXPOSURE_CREATE",
-					RecordID:            hidStr,
-					MatrixID:            matrices[hidStr],
-					SubmittedByEmail:    email,
-					RequirePinnedMatrix: true,
-					AutoApplyIfUnpinned: true,
-				})
+		for _, hidStr := range docToID {
+			matrixID := strings.TrimSpace(createMatrices[hidStr])
+			if matrixID == "" {
+				continue
 			}
-		}(docToID, makerEmail, createMatrices, createEntities)
+			instID, cerr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+				ModuleCode:          "FX",
+				EntityCode:          createEntities[hidStr],
+				TransactionType:     "FX_EXPOSURE_CREATE",
+				ActionType:          "CREATE",
+				RecordID:            hidStr,
+				MatrixID:            matrixID,
+				SubmittedByEmail:    makerEmail,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: false,
+			})
+			if cerr != nil {
+				logger.LogError("[FBUP] CreateInstance failed for %s matrix=%s: %v", hidStr, matrixID, cerr)
+				continue
+			}
+			if strings.TrimSpace(instID) == "" {
+				logger.LogInfo("[FBUP] CreateInstance skipped for %s matrix=%s", hidStr, matrixID)
+			} else {
+				logger.LogInfo("[FBUP] CreateInstance ok for %s instance=%s matrix=%s", hidStr, instID, matrixID)
+			}
+		}
 
 		// Authoritative preview: use DB-driven preview builder instead of in-memory approximation.
 		// The old in-memory preview (based on canonicals) is intentionally removed to ensure
 		// upload responses match the edit/preview responses produced after persisting data.
 		previewRes, _, err := buildPreviewForBatch(pool, ctx, batchID, nil)
 		if err != nil {
-			return nil, 0, http.StatusInternalServerError, fmt.Errorf("preview build after commit: %w", err)
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("preview build after commit: %w", err)
 		}
 		// merge file-level warnings/info into preview result for visibility
 		if len(fileWarnings) > 0 {
@@ -1459,7 +1497,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 	elapsed := time.Since(start)
 	logger.LogInfo("[FBUP] total upload completed in %s, files=%d", elapsed.String(), len(results))
-	return results, elapsed, 0, nil
+	return results, elapsed, strings.Join(policySummaryParts, "; "), 0, nil
 }
 
 func allocateFIFOFloat(rows []CanonicalRow, receivableLogic, payableLogic string) ([]CanonicalRow, []knockFloatInput) {

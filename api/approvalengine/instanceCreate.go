@@ -86,6 +86,23 @@ func CreateInstance(ctx context.Context, pool *pgxpool.Pool, req InstanceRequest
 
 	submittedByID, submittedByEmail := resolveSubmitter(ctx, pool, req.SubmittedBy, req.SubmittedByEmail)
 
+	// action_type is CHECK'd to CREATE|EDIT|DELETE — empty string fails insert.
+	actionType := strings.ToUpper(strings.TrimSpace(req.ActionType))
+	switch actionType {
+	case "CREATE", "EDIT", "DELETE":
+	default:
+		if strings.HasSuffix(strings.ToUpper(strings.TrimSpace(req.TransactionType)), "_EDIT") {
+			actionType = "EDIT"
+		} else if strings.HasSuffix(strings.ToUpper(strings.TrimSpace(req.TransactionType)), "_DELETE") {
+			actionType = "DELETE"
+		} else {
+			actionType = "CREATE"
+		}
+		api.LogInfo("[ApprovalEngine] ActionType empty/invalid — defaulting to %s for %s/%s",
+			actionType, req.ModuleCode, req.TransactionType)
+	}
+	req.ActionType = actionType
+
 	// Step 3: Begin transaction.
 	tx, err := pool.Begin(ctx)
 	if err != nil {

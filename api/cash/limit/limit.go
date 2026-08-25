@@ -200,6 +200,17 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		auditStatus := approvalengine.AuditStatus(triggerMatrixID, "PENDING_APPROVAL")
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO cimplrcorpsaas.auditactionbanklimit (
+				limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+			) VALUES ($1,'CREATE',$2,$3,$4,now(),$5)`,
+			limitID, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
+		); err != nil {
+			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			return
+		}
+
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
@@ -477,6 +488,20 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 
+				auditStatus := approvalengine.AuditStatus(tID, "PENDING_APPROVAL")
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO cimplrcorpsaas.auditactionbanklimit (
+						limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+					) VALUES ($1,'CREATE',$2,$3,$4,now(),$5)`,
+					limitID, auditStatus, nil, requestedBy, api.ClientIPFromContext(ctx),
+				); err != nil {
+					tx.Rollback(ctx)
+					result["success"] = false
+					result["error"] = "failed to create audit: " + err.Error()
+					results = append(results, result)
+					continue
+				}
+
 				if err := tx.Commit(ctx); err != nil {
 					result["success"] = false
 					result["error"] = constants.ErrTxCommitFailed
@@ -745,6 +770,17 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		auditStatus := approvalengine.AuditStatus(triggerMatrixID, "PENDING_EDIT_APPROVAL")
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO cimplrcorpsaas.auditactionbanklimit (
+				limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+			) VALUES ($1,'EDIT',$2,$3,$4,now(),$5)`,
+			req.LimitID, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
+		); err != nil {
+			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			return
+		}
+
 		// Cancel any pending approval instances for this record
 		if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", req.LimitID, requestedBy); err != nil {
 			api.LogError("[BankLimit] Failed to cancel pending instances for %s: %v", map[string]interface{}{"limit_id": req.LimitID, "error": err.Error()})
@@ -859,6 +895,20 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[BankLimit] Failed to cancel pending instances for %s: %v", map[string]interface{}{"limit_id": limitID, "error": err.Error()})
 			}
 
+			auditStatus := approvalengine.AuditStatus(tID, "PENDING_DELETE_APPROVAL")
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO cimplrcorpsaas.auditactionbanklimit (
+					limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+				) VALUES ($1,'DELETE',$2,$3,$4,now(),$5)`,
+				limitID, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
+			); err != nil {
+				tx.Rollback(ctx)
+				result["success"] = false
+				result["error"] = "failed to create audit: " + err.Error()
+				results = append(results, result)
+				continue
+			}
+
 			if err := tx.Commit(ctx); err != nil {
 				result["success"] = false
 				result["error"] = constants.ErrTxCommitFailed
@@ -924,7 +974,11 @@ func GetAllBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		) e ON TRUE
 		WHERE COALESCE(l.is_deleted, false) = false
 			AND l.entity_name = ANY($1)
-		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC`
+		ORDER BY GREATEST(
+			COALESCE(a.requested_at, '1970-01-01'::timestamp),
+			COALESCE(a.checker_at,   '1970-01-01'::timestamp)
+		) DESC NULLS LAST,
+		l.limit_id DESC`
 		rows, err := pgxPool.Query(ctx, query, entityNames)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
