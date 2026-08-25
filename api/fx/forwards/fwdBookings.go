@@ -458,7 +458,7 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			actor := auditutil.Actor(req.UserID)
 			auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: systemTransactionID, ActionType: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: "", RequestedBy: actor, OldValues: nil, NewValues: result})
 			triggerForwardBookingNotif(r.Context(), pool, routeForwardManualEntry, "CREATE", actor, "pending", []string{systemTransactionID})
-			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_CREATE", []string{systemTransactionID}, actor)
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_CONFIRMATION", "POST_CREATE", []string{systemTransactionID}, actor)
 
 			makerEmail := ""
 			for _, s := range auth.GetActiveSessions() {
@@ -634,7 +634,7 @@ func UploadForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(uploadedIDs) > 0 {
-			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_UPLOAD", uploadedIDs, uploadedBy)
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_CONFIRMATION", "POST_UPLOAD", uploadedIDs, uploadedBy)
 
 			makerEmail := ""
 			for _, s := range auth.GetActiveSessions() {

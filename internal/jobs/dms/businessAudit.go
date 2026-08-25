@@ -36,6 +36,7 @@ var businessAuditBySub = map[string]businessAuditTarget{
 	"EXPOSURE_UPLOAD":      {Table: "public.auditactionexposure", ParentCol: "exposure_header_id", ActionCol: "actiontype"},
 	"EXPOSURE_BUCKETING":   {Table: "public.auditactionexposurebucketing", ParentCol: "exposure_header_id", ActionCol: "actiontype"},
 	"FORWARD_BOOKING":      {Table: "public.auditactionforwardbooking", ParentCol: "system_transaction_id", ActionCol: "actiontype"},
+	"FX_CONFIRMATION":      {Table: "public.auditactionforwardbooking", ParentCol: "system_transaction_id", ActionCol: "actiontype"},
 	"FORWARD_CANCELLATION": {Table: "public.auditactionforwardcancellation", ParentCol: "booking_id", ActionCol: "actiontype"},
 	"FORWARD_ROLLOVER":     {Table: "public.auditactionforwardrollover", ParentCol: "booking_id", ActionCol: "actiontype"},
 	"FORWARD_CANCEL_ROLL":  {Table: "public.auditactionforwardcancellation", ParentCol: "booking_id", ActionCol: "actiontype"},

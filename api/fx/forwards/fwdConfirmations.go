@@ -480,7 +480,7 @@ func applyForwardBookingDecision(
 	if processingStatus == constants.FwdProcessingStatusApproved {
 		deleteApprovedIDs := collectBookingIDsFromRows(deletedRows)
 		if len(deleteApprovedIDs) > 0 {
-			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_DELETE", deleteApprovedIDs, actor)
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_CONFIRMATION", "POST_DELETE", deleteApprovedIDs, actor)
 		}
 	}
 	if statusIDs := collectBookingIDsFromRows(updatedRows); len(statusIDs) > 0 && processingStatus == constants.FwdProcessingStatusApproved {
@@ -494,17 +494,17 @@ func applyForwardBookingDecision(
 			}
 		}
 		if len(createApprovedIDs) > 0 {
-			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_APPROVE", createApprovedIDs, actor)
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_CONFIRMATION", "POST_APPROVE", createApprovedIDs, actor)
 		}
 		if len(editApprovedIDs) > 0 {
-			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", "POST_EDIT", editApprovedIDs, actor)
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_CONFIRMATION", "POST_EDIT", editApprovedIDs, actor)
 		}
 	} else if statusIDs := collectBookingIDsFromRows(updatedRows); len(statusIDs) > 0 {
 		trig := "POST_APPROVE"
 		if processingStatus == constants.FwdProcessingStatusRejected {
 			trig = "POST_REJECT"
 		}
-		dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_BOOKING", trig, statusIDs, actor)
+		dmsjobs.FireDmsEvent(pool, "FX", "FX_CONFIRMATION", trig, statusIDs, actor)
 	}
 	respondEnvelopeSuccess(w, successMessage, map[string]interface{}{
 		"updated": updatedRows,

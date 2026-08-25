@@ -283,7 +283,7 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			if oldSnap == nil {
 				dmsTrigger = "POST_CREATE"
 			}
-			dmsjobs.FireDmsEvent(pool, "FX", "HEDGE_PROPOSAL", dmsTrigger, []string{proposalID}, actor)
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", dmsTrigger, []string{proposalID}, actor)
 		}
 
 		respondWithSuccess(w, http.StatusOK, "Hedging proposal saved", map[string]any{
@@ -578,11 +578,11 @@ func updateHedgingProposalDocumentStatuses(
 	if len(updatedIDs) > 0 {
 		switch actionType {
 		case "CONFIRM":
-			dmsjobs.FireDmsEvent(pool, "FX", "HEDGE_PROPOSAL", "POST_APPROVE", updatedIDs, actor)
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", "POST_APPROVE", updatedIDs, actor)
 		case "REJECT":
-			dmsjobs.FireDmsEvent(pool, "FX", "HEDGE_PROPOSAL", "POST_REJECT", updatedIDs, actor)
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", "POST_REJECT", updatedIDs, actor)
 		case "DELETE":
-			dmsjobs.FireDmsEvent(pool, "FX", "HEDGE_PROPOSAL", "POST_DELETE", updatedIDs, actor)
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", "POST_DELETE", updatedIDs, actor)
 		}
 	}
 	return count, nil
