@@ -134,7 +134,20 @@ func queryFXExposureBucketing(ctx context.Context, pool *pgxpool.Pool, entityIDs
 // Header rows from public.hedging_proposal_document (All Hedging Proposals list).
 func queryFXHedgingProposalDocuments(ctx context.Context, pool *pgxpool.Pool, limit int, offset int) ([]map[string]any, error) {
 	args := limitOffsetArgs(limit, offset)
-	q := `
+	ef, efArgs := entityNameFilter(ctx, "l", "business_unit", len(args)+1)
+	args = append(args, efArgs...)
+
+	scope := ""
+	if ef != "" {
+		scope = fmt.Sprintf(`
+		AND EXISTS (
+			SELECT 1
+			FROM public.hedging_proposal_document_line l
+			WHERE l.proposal_id = d.proposal_id %s
+		)`, ef)
+	}
+
+	q := fmt.Sprintf(`
 		SELECT
 			COALESCE(d.proposal_id::text, '') AS proposal_id,
 			COALESCE(d.proposal_name, '') AS proposal_name,
@@ -147,13 +160,14 @@ func queryFXHedgingProposalDocuments(ctx context.Context, pool *pgxpool.Pool, li
 			COALESCE((
 				SELECT COUNT(*)::int
 				FROM public.hedging_proposal_document_line l
-				WHERE l.proposal_id = d.proposal_id
+				WHERE l.proposal_id = d.proposal_id %s
 			), 0) AS line_count
 		FROM public.hedging_proposal_document d
-		WHERE COALESCE(d.is_deleted, false) = false
+		WHERE COALESCE(d.is_deleted, false) = false %s
 		ORDER BY d.created_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
-	`
+	`, ef, scope)
+
 	return runSourceQuery(ctx, pool, q, args)
 }
 
@@ -166,7 +180,10 @@ func queryFXHedgingProposalDocumentLines(ctx context.Context, pool *pgxpool.Pool
 	}
 
 	args := []any{limit, offset, proposalIDs}
-	q := `
+	ef, efArgs := entityNameFilter(ctx, "l", "business_unit", len(args)+1)
+	args = append(args, efArgs...)
+
+	q := fmt.Sprintf(`
 		SELECT
 			COALESCE(l.line_id::text, '') AS line_id,
 			COALESCE(l.proposal_id::text, '') AS proposal_id,
@@ -195,10 +212,10 @@ func queryFXHedgingProposalDocumentLines(ctx context.Context, pool *pgxpool.Pool
 		FROM public.hedging_proposal_document_line l
 		JOIN public.hedging_proposal_document d ON d.proposal_id = l.proposal_id
 		WHERE COALESCE(d.is_deleted, false) = false
-		  AND l.proposal_id::text = ANY($3)
+		  AND l.proposal_id::text = ANY($3) %s
 		ORDER BY d.proposal_name, l.business_unit, l.currency, l.exposure_type, l.line_id
 		LIMIT NULLIF($1, 0) OFFSET $2
-	`
+	`, ef)
 	return runSourceQuery(ctx, pool, q, args)
 }
 

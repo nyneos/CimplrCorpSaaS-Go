@@ -39,7 +39,7 @@ func lookupCDMVarAll(vars map[string]string, suffixes ...string) []string {
 func currencyFromVars(vars map[string]string) []string {
 	return lookupCDMVarAll(vars,
 		".currency_code", ".currency",
-		".base_currency", ".quote_currency", ".local_currency")
+		".base_currency", ".quote_currency")
 }
 
 func tenorBandFromVars(vars map[string]string) string {
