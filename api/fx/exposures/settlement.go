@@ -166,6 +166,7 @@ func GetApprovedExposuresForSettlement(pool *pgxpool.Pool) http.HandlerFunc {
 					OR UPPER(TRIM(COALESCE(h.exposure_creation_status, ''))) = 'APPROVED'
 				)
 			  AND ABS(COALESCE(h.total_open_amount, 0)) > 0
+			  AND UPPER(TRIM(COALESCE(h.status, ''))) NOT IN ('CLOSED', 'CANCELLED', 'CANCELED', 'SETTLED', 'PAID')
 			ORDER BY h.document_id, l.line_number NULLS FIRST
 		`
 

@@ -368,12 +368,228 @@ func reduceExposureOpenAmount(ctx context.Context, pool *pgxpool.Pool, exposureH
 	}
 	_, err := pool.Exec(ctx, `
 		UPDATE public.exposure_headers
-		SET total_open_amount = GREATEST(0, COALESCE(total_open_amount, 0) - $1),
+		SET total_open_amount = CASE
+		      WHEN COALESCE(total_open_amount, 0) >= 0
+		        THEN GREATEST(0, COALESCE(total_open_amount, 0) - $1)
+		      ELSE LEAST(0, COALESCE(total_open_amount, 0) + $1)
+		    END,
 		    updated_at = NOW()
 		WHERE exposure_header_id::text = $2
 		  AND COALESCE(is_deleted, false) = false
 	`, math.Abs(amount), exposureHeaderID)
 	return err
+}
+
+// syncExposureLifecycleStatus closes or cancels an exposure when open amount is fully settled.
+// Payment / full settlement → Closed (cannot continue). Cancellation → Cancelled.
+func syncExposureLifecycleStatus(ctx context.Context, pool *pgxpool.Pool, exposureHeaderID, method string) {
+	exposureHeaderID = strings.TrimSpace(exposureHeaderID)
+	if exposureHeaderID == "" {
+		return
+	}
+	var open float64
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(total_open_amount, 0)
+		FROM public.exposure_headers
+		WHERE exposure_header_id::text = $1 AND COALESCE(is_deleted, false) = false
+	`, exposureHeaderID).Scan(&open); err != nil {
+		return
+	}
+	if math.Abs(open) > 0.0001 {
+		return
+	}
+	next := "Closed"
+	if strings.EqualFold(method, "CANCELLATION") {
+		next = "Cancelled"
+	}
+	_, _ = pool.Exec(ctx, `
+		UPDATE public.exposure_headers
+		SET status = $1,
+		    is_active = false,
+		    updated_at = NOW()
+		WHERE exposure_header_id::text = $2
+		  AND COALESCE(is_deleted, false) = false
+	`, next, exposureHeaderID)
+}
+
+func parseSettlementDate(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, fmt.Errorf("settlement_date is required")
+	}
+	if len(s) >= 10 {
+		s = s[:10]
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid settlement_date")
+	}
+	return t, nil
+}
+
+// validateSettlementDateRules:
+// settlement date may be before the exposure transaction (document) date,
+// but not by more than 2 days.
+func validateSettlementDateRules(settlementDate string, documentDates []time.Time) error {
+	settle, err := parseSettlementDate(settlementDate)
+	if err != nil {
+		return err
+	}
+	for _, doc := range documentDates {
+		if doc.IsZero() {
+			continue
+		}
+		docDay := time.Date(doc.Year(), doc.Month(), doc.Day(), 0, 0, 0, 0, time.UTC)
+		settleDay := time.Date(settle.Year(), settle.Month(), settle.Day(), 0, 0, 0, 0, time.UTC)
+		if settleDay.Before(docDay.AddDate(0, 0, -2)) {
+			return fmt.Errorf("settlement date cannot be more than 2 days before the exposure transaction date")
+		}
+	}
+	return nil
+}
+
+type settlementExposureGuard struct {
+	ID           string
+	DocumentDate time.Time
+	ValueDate    time.Time
+	OpenAmount   float64
+	Status       string
+}
+
+func loadSettlementExposureGuards(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]settlementExposureGuard, error) {
+	uniq := make([]string, 0, len(ids))
+	seen := map[string]struct{}{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniq = append(uniq, id)
+	}
+	if len(uniq) == 0 {
+		return nil, nil
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT exposure_header_id::text,
+		       document_date,
+		       value_date,
+		       COALESCE(total_open_amount, 0),
+		       COALESCE(status, '')
+		FROM public.exposure_headers
+		WHERE exposure_header_id::text = ANY($1)
+		  AND COALESCE(is_deleted, false) = false
+	`, uniq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]settlementExposureGuard, 0, len(uniq))
+	for rows.Next() {
+		var g settlementExposureGuard
+		var doc, val *time.Time
+		if err := rows.Scan(&g.ID, &doc, &val, &g.OpenAmount, &g.Status); err != nil {
+			continue
+		}
+		if doc != nil {
+			g.DocumentDate = *doc
+		}
+		if val != nil {
+			g.ValueDate = *val
+		}
+		out = append(out, g)
+	}
+	return out, nil
+}
+
+func validateSettlementBusinessRules(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	method string,
+	settlementDate string,
+	lines []settlementLineInput,
+	newAmount *float64,
+	newMaturity string,
+) error {
+	ids := make([]string, 0, len(lines))
+	var exposureSettled float64
+	for _, l := range lines {
+		ids = append(ids, l.ExposureHeaderID)
+		leg := strings.ToUpper(strings.TrimSpace(l.LegType))
+		if leg == "EXPOSURE" || leg == "CANCELLATION" || leg == "ROLLOVER" || leg == "" {
+			amt := l.SettlementAmount
+			if l.PartialAmount != nil && *l.PartialAmount > 0 {
+				amt = *l.PartialAmount
+			}
+			exposureSettled += math.Abs(amt)
+		}
+	}
+	if method == "ROLLOVER" && newAmount != nil && *newAmount > 0 {
+		exposureSettled = math.Abs(*newAmount)
+	}
+
+	guards, err := loadSettlementExposureGuards(ctx, pool, ids)
+	if err != nil {
+		return fmt.Errorf("failed to load exposures for settlement validation")
+	}
+	if len(guards) == 0 {
+		return fmt.Errorf("no valid exposures found for settlement")
+	}
+
+	docDates := make([]time.Time, 0, len(guards))
+	var openAbsSum float64
+	for _, g := range guards {
+		st := strings.ToUpper(strings.TrimSpace(g.Status))
+		switch st {
+		case "CLOSED", "CANCELLED", "CANCELED", "SETTLED", "PAID":
+			return fmt.Errorf("exposure %s is already %s and cannot be settled", g.ID, g.Status)
+		}
+		if !g.DocumentDate.IsZero() {
+			docDates = append(docDates, g.DocumentDate)
+		}
+		openAbsSum += math.Abs(g.OpenAmount)
+	}
+	if err := validateSettlementDateRules(settlementDate, docDates); err != nil {
+		return err
+	}
+
+	settle, _ := parseSettlementDate(settlementDate)
+
+	switch method {
+	case "ROLLOVER":
+		if openAbsSum > 0 && exposureSettled > openAbsSum+1e-6 {
+			return fmt.Errorf("rollover amount cannot exceed existing exposure open amount")
+		}
+		for _, g := range guards {
+			if g.ValueDate.IsZero() {
+				return fmt.Errorf("exposure %s is missing maturity (value_date) required for rollover", g.ID)
+			}
+			mat := time.Date(g.ValueDate.Year(), g.ValueDate.Month(), g.ValueDate.Day(), 0, 0, 0, 0, time.UTC)
+			settleDay := time.Date(settle.Year(), settle.Month(), settle.Day(), 0, 0, 0, 0, time.UTC)
+			if settleDay.Before(mat.AddDate(0, 0, -2)) {
+				return fmt.Errorf("rollover settlement date must be on/around exposure maturity (within 2 days before value_date)")
+			}
+		}
+		if nm := strings.TrimSpace(newMaturity); nm != "" {
+			mt, err := parseSettlementDate(nm)
+			if err != nil {
+				return fmt.Errorf("invalid new_maturity_date")
+			}
+			for _, g := range guards {
+				if !g.ValueDate.IsZero() && !mt.After(g.ValueDate) {
+					return fmt.Errorf("new maturity date must be after the current exposure maturity date")
+				}
+			}
+		}
+	case "PAYMENT", "CANCELLATION":
+		if openAbsSum > 0 && exposureSettled > openAbsSum+1e-6 {
+			return fmt.Errorf("%s amount cannot exceed existing exposure open amount", strings.ToLower(method))
+		}
+	}
+	return nil
 }
 
 func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlementID, actor string) error {
@@ -422,13 +638,32 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 
 	switch method {
 	case "PAYMENT", "CANCELLATION":
+		hasExposureLeg := false
+		for _, lr := range lines {
+			if lr.LegType == "EXPOSURE" || lr.LegType == "CANCELLATION" {
+				hasExposureLeg = true
+				break
+			}
+		}
+		touched := map[string]struct{}{}
 		for _, lr := range lines {
 			amt := lr.Amount
 			if lr.Partial > 0 {
 				amt = lr.Partial
 			}
-			if lr.LegType == "CASH" || lr.LegType == "ADDITIONAL_FWD" || lr.LegType == "LINKED_HEDGE" || lr.LegType == "EXPOSURE" || lr.LegType == "CANCELLATION" {
+			// Prefer EXPOSURE/CANCELLATION legs so cash/hedge legs do not double-reduce open amount.
+			shouldReduce := false
+			switch lr.LegType {
+			case "EXPOSURE", "CANCELLATION":
+				shouldReduce = true
+			case "CASH", "ADDITIONAL_FWD", "LINKED_HEDGE":
+				shouldReduce = !hasExposureLeg
+			}
+			if shouldReduce {
 				_ = reduceExposureOpenAmount(ctx, pool, lr.ExposureID, amt)
+				if strings.TrimSpace(lr.ExposureID) != "" {
+					touched[strings.TrimSpace(lr.ExposureID)] = struct{}{}
+				}
 			}
 			// Release / consume hedge link when booking present
 			if strings.TrimSpace(lr.BookingID) != "" && strings.TrimSpace(lr.ExposureID) != "" {
@@ -472,11 +707,15 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 				}
 			}
 		}
+		for id := range touched {
+			syncExposureLifecycleStatus(ctx, pool, id, method)
+		}
 
 	case "ROLLOVER":
 		// Reduce old exposures + create one new exposure from form fields
 		var primaryOldID string
 		totalRoll := 0.0
+		touched := map[string]struct{}{}
 		for _, lr := range lines {
 			amt := lr.Amount
 			if lr.Partial > 0 {
@@ -485,9 +724,15 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 			if amt == 0 && newAmt != nil {
 				amt = *newAmt
 			}
+			if lr.LegType != "" && lr.LegType != "ROLLOVER" && lr.LegType != "EXPOSURE" {
+				continue
+			}
 			_ = reduceExposureOpenAmount(ctx, pool, lr.ExposureID, amt)
-			if primaryOldID == "" && strings.TrimSpace(lr.ExposureID) != "" {
-				primaryOldID = strings.TrimSpace(lr.ExposureID)
+			if id := strings.TrimSpace(lr.ExposureID); id != "" {
+				touched[id] = struct{}{}
+				if primaryOldID == "" {
+					primaryOldID = id
+				}
 			}
 			totalRoll += math.Abs(amt)
 		}
@@ -591,6 +836,10 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 			SET new_exposure_header_id = $1
 			WHERE settlement_id = $2::uuid
 		`, newHeaderID, settlementID)
+
+		for id := range touched {
+			syncExposureLifecycleStatus(ctx, pool, id, "ROLLOVER")
+		}
 	}
 	return nil
 }
@@ -632,6 +881,12 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if method == "ROLLOVER" && len(req.Lines) == 0 {
 			respondWithError(w, http.StatusBadRequest, "at least one exposure line is required for rollover")
+			return
+		}
+		if err := validateSettlementBusinessRules(
+			ctx, pool, method, req.SettlementDate, req.Lines, req.NewAmount, req.NewMaturityDate,
+		); err != nil {
+			respondWithError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -762,9 +1017,30 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Cancellation takes effect immediately on the exposure when initiated (submit).
+		cancellationApplied := false
+		if req.Submit && method == "CANCELLATION" {
+			if err := applySettlementOnApprove(ctx, pool, settlementID, actor); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "failed to apply cancellation to exposure: "+err.Error())
+				return
+			}
+			_, _ = pool.Exec(ctx, `
+				UPDATE public.exposure_settlement_document
+				SET processing_status = $1,
+				    updated_by = $2,
+				    updated_at = NOW()
+				WHERE settlement_id = $3::uuid
+			`, constants.StatusApproved, actor, settlementID)
+			status = constants.StatusApproved
+			cancellationApplied = true
+		}
+
 		finalStatus := status
 		if !req.Submit {
 			_ = pool.QueryRow(ctx, `SELECT processing_status FROM public.exposure_settlement_document WHERE settlement_id = $1::uuid`, settlementID).Scan(&finalStatus)
+		}
+		if cancellationApplied {
+			finalStatus = constants.StatusApproved
 		}
 		// Prefer pre-change snapshot for EDIT/SUBMIT; CREATE has empty oldSnap.
 		auditSnap := oldSnap
@@ -776,7 +1052,7 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			Actor: actor, OldSnap: auditSnap, MethodHint: method,
 		})
 
-		if req.Submit {
+		if req.Submit && !cancellationApplied {
 			makerEmail := ""
 			for _, s := range auth.GetActiveSessions() {
 				if s.UserID == req.UserID {
@@ -808,7 +1084,11 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			}(settlementID, makerEmail, txnType, triggerMatrixID)
 		}
 
-		respondWithSuccess(w, http.StatusOK, "Settlement saved", map[string]any{
+		msg := "Settlement saved"
+		if cancellationApplied {
+			msg = "Cancellation applied immediately to exposure"
+		}
+		respondWithSuccess(w, http.StatusOK, msg, map[string]any{
 			"settlement_id":        settlementID,
 			"settlement_method":    method,
 			"processing_status":    finalStatus,
