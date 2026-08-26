@@ -92,8 +92,12 @@ func applyApproval(ctx context.Context, tx pgx.Tx, templateID, actor, ip, checke
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE dms_svc.template SET processing_status = 'APPROVED', status = 'Active',
-				current_version_id = $1::uuid, last_modified_by = $2, last_modified_at = now()
-			WHERE template_id = $3::uuid`, *pa.VersionID, actor, templateID); err != nil {
+				name = COALESCE($1, name),
+				module_code = COALESCE($2, module_code),
+				sub_module_code = COALESCE($3, sub_module_code),
+				current_version_id = $4::uuid, last_modified_by = $5, last_modified_at = now()
+			WHERE template_id = $6::uuid`,
+			pa.NewName, pa.NewModuleCode, pa.NewSubModuleCode, *pa.VersionID, actor, templateID); err != nil {
 			return err
 		}
 	case "EDIT":
@@ -103,10 +107,11 @@ func applyApproval(ctx context.Context, tx pgx.Tx, templateID, actor, ip, checke
 				module_code = COALESCE($2, module_code),
 				sub_module_code = COALESCE($3, sub_module_code),
 				status = COALESCE($4, status),
+				description = COALESCE($5, description),
 				processing_status = 'APPROVED',
-				last_modified_by = $5, last_modified_at = now()
-			WHERE template_id = $6::uuid`,
-			pa.NewName, pa.NewModuleCode, pa.NewSubModuleCode, pa.NewStatus, actor, templateID); err != nil {
+				last_modified_by = $6, last_modified_at = now()
+			WHERE template_id = $7::uuid`,
+			pa.NewName, pa.NewModuleCode, pa.NewSubModuleCode, pa.NewStatus, pa.NewDescription, actor, templateID); err != nil {
 			return err
 		}
 	case "DELETE":
@@ -127,9 +132,13 @@ func applyApproval(ctx context.Context, tx pgx.Tx, templateID, actor, ip, checke
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE dms_svc.template SET current_version_id = $1::uuid, processing_status = 'APPROVED',
+				name = COALESCE($2, name),
+				module_code = COALESCE($3, module_code),
+				sub_module_code = COALESCE($4, sub_module_code),
 				status = CASE WHEN status = 'PendingApproval' THEN 'Active' ELSE status END,
-				last_modified_by = $2, last_modified_at = now()
-			WHERE template_id = $3::uuid`, *pa.VersionID, actor, templateID); err != nil {
+				last_modified_by = $5, last_modified_at = now()
+			WHERE template_id = $6::uuid`,
+			*pa.VersionID, pa.NewName, pa.NewModuleCode, pa.NewSubModuleCode, actor, templateID); err != nil {
 			return err
 		}
 	default:

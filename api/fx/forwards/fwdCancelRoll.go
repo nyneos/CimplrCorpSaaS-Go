@@ -1042,12 +1042,25 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if action == constants.AuditActionReject {
-			bookingIDs := make([]string, 0, len(notifItems))
+			rejectedBySub := map[string][]string{}
 			for _, item := range notifItems {
-				bookingIDs = append(bookingIDs, item.BookingID)
+				subModule := "FORWARD_CANCELLATION"
+				if item.RequestType == cancelRollTypeRollover {
+					subModule = "FORWARD_ROLLOVER"
+				}
+				rejectedBySub[subModule] = append(rejectedBySub[subModule], item.BookingID)
 			}
-			if len(bookingIDs) > 0 {
-				dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_CANCEL_ROLL", "POST_REJECT", bookingIDs, actor)
+			for subModule, bookingIDs := range rejectedBySub {
+				if len(bookingIDs) > 0 {
+					dmsjobs.FireDmsEvent(pool, "FX", subModule, "POST_REJECT", bookingIDs, actor)
+				}
+			}
+			allRejectedIDs := make([]string, 0, len(notifItems))
+			for _, item := range notifItems {
+				allRejectedIDs = append(allRejectedIDs, item.BookingID)
+			}
+			if len(allRejectedIDs) > 0 {
+				dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_CANCEL_ROLL", "POST_REJECT", allRejectedIDs, actor)
 			}
 		}
 		respondEnvelopeSuccess(w, "Cancellation/rollover action processed successfully", map[string]interface{}{

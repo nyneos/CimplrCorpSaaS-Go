@@ -15,6 +15,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -314,6 +315,12 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 					SubmittedByEmail:    email,
 				})
 			}(proposalID, makerEmail, txnType, triggerMatrixID)
+
+			dmsTrigger := "POST_EDIT"
+			if oldSnap == nil {
+				dmsTrigger = "POST_CREATE"
+			}
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", dmsTrigger, []string{proposalID}, actor)
 		}
 
 		respondWithSuccess(w, http.StatusOK, "Hedging proposal saved", map[string]any{
@@ -539,6 +546,7 @@ func updateHedgingProposalDocumentStatuses(
 		return 0, nil
 	}
 	count := 0
+	updatedIDs := make([]string, 0, len(ids))
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -604,6 +612,17 @@ func updateHedgingProposalDocumentStatuses(
 			}
 		}
 		count++
+		updatedIDs = append(updatedIDs, id)
+	}
+	if len(updatedIDs) > 0 {
+		switch actionType {
+		case "CONFIRM":
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", "POST_APPROVE", updatedIDs, actor)
+		case "REJECT":
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", "POST_REJECT", updatedIDs, actor)
+		case "DELETE":
+			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", "POST_DELETE", updatedIDs, actor)
+		}
 	}
 	return count, nil
 }

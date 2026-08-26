@@ -14,8 +14,18 @@ import (
 
 const errFailedCreateTemplateVersion = "failed to create template version"
 
+func changedHeaderValue(next, current string) *string {
+	if next == "" || next == current {
+		return nil
+	}
+	return &next
+}
+
 type createVersionReq struct {
 	TemplateID        string                `json:"template_id"`
+	Name              string                `json:"name"`
+	ModuleCode        string                `json:"module_code"`
+	SubModuleCode     string                `json:"sub_module_code"`
 	ContentJSON       json.RawMessage       `json:"content_json"`
 	MergeFields       []mergeFieldReq       `json:"merge_fields"`
 	ChartPlaceholders []chartPlaceholderReq `json:"chart_placeholders"`
@@ -39,6 +49,9 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		req.TemplateID = strings.TrimSpace(req.TemplateID)
+		req.Name = strings.TrimSpace(req.Name)
+		req.ModuleCode = strings.TrimSpace(req.ModuleCode)
+		req.SubModuleCode = strings.TrimSpace(req.SubModuleCode)
 		if req.TemplateID == "" {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "template_id is required", "VALIDATION_ERROR")
 			return
@@ -62,6 +75,19 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusConflict, err.Error(), "DMS_TEMPLATE_PENDING_EXISTS")
 			return
 		}
+
+		var curName, curModuleCode, curSubModuleCode string
+		if err := tx.QueryRow(r.Context(), `
+			SELECT name, module_code, sub_module_code
+			FROM dms_svc.template
+			WHERE template_id = $1::uuid AND is_deleted = false`, req.TemplateID,
+		).Scan(&curName, &curModuleCode, &curSubModuleCode); err != nil {
+			api.RespondEnvelopeError(w, http.StatusNotFound, "template not found", "NOT_FOUND")
+			return
+		}
+		newName := changedHeaderValue(req.Name, curName)
+		newModuleCode := changedHeaderValue(req.ModuleCode, curModuleCode)
+		newSubModuleCode := changedHeaderValue(req.SubModuleCode, curSubModuleCode)
 
 		var nextVersionNo int
 		if err := tx.QueryRow(r.Context(), `
@@ -104,9 +130,13 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.Exec(r.Context(), `
 				UPDATE dms_svc.template_audit
 				SET version_id = $1::uuid, reason = COALESCE($2, reason), requested_by = $3,
-					requested_ip = $4, requested_at = now(), processing_status = 'PENDING_EDIT_APPROVAL'
-				WHERE audit_id = $5::uuid`,
-				versionID, common.NullIfEmpty(req.Reason), actor, common.NullIfEmpty(ip), amend.AuditID); err != nil {
+					requested_ip = $4, requested_at = now(), processing_status = 'PENDING_EDIT_APPROVAL',
+					new_name = COALESCE($5, new_name),
+					new_module_code = COALESCE($6, new_module_code),
+					new_sub_module_code = COALESCE($7, new_sub_module_code)
+				WHERE audit_id = $8::uuid`,
+				versionID, common.NullIfEmpty(req.Reason), actor, common.NullIfEmpty(ip),
+				newName, newModuleCode, newSubModuleCode, amend.AuditID); err != nil {
 				api.LogErrorForResponse(w, "dms template version amend audit: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit template version", "DMS_TEMPLATE_VERSION_FAILED")
 				return
@@ -135,6 +165,18 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			a.set("reason", common.NullIfEmpty(req.Reason))
 			a.set("requested_by", actor)
 			a.set("requested_ip", common.NullIfEmpty(ip))
+			if newName != nil {
+				a.set("old_name", curName)
+				a.set("new_name", *newName)
+			}
+			if newModuleCode != nil {
+				a.set("old_module_code", curModuleCode)
+				a.set("new_module_code", *newModuleCode)
+			}
+			if newSubModuleCode != nil {
+				a.set("old_sub_module_code", curSubModuleCode)
+				a.set("new_sub_module_code", *newSubModuleCode)
+			}
 			if err := a.exec(r.Context(), tx); err != nil {
 				api.LogErrorForResponse(w, "dms template version audit: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to audit template version", "DMS_TEMPLATE_VERSION_FAILED")

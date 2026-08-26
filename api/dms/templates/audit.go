@@ -39,13 +39,13 @@ func (a *auditRow) exec(ctx context.Context, tx pgx.Tx) error {
 func findPendingAudit(ctx context.Context, tx pgx.Tx, templateID string) (templateAuditRow, error) {
 	var row templateAuditRow
 	err := tx.QueryRow(ctx, `
-		SELECT audit_id::text, action_type, version_id::text, new_name, new_module_code, new_sub_module_code, new_status
+		SELECT audit_id::text, action_type, version_id::text, new_name, new_module_code, new_sub_module_code, new_status, new_description
 		FROM dms_svc.template_audit
 		WHERE template_id = $1::uuid AND processing_status = ANY($2::text[])
 		ORDER BY requested_at DESC
 		LIMIT 1
 		FOR UPDATE`, templateID, common.PendingProcessingStatuses,
-	).Scan(&row.AuditID, &row.ActionType, &row.VersionID, &row.NewName, &row.NewModuleCode, &row.NewSubModuleCode, &row.NewStatus)
+	).Scan(&row.AuditID, &row.ActionType, &row.VersionID, &row.NewName, &row.NewModuleCode, &row.NewSubModuleCode, &row.NewStatus, &row.NewDescription)
 	return row, err
 }
 
