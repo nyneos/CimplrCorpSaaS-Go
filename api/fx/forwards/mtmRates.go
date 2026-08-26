@@ -663,6 +663,7 @@ func processUploadMTMFiles(ctx context.Context, pool *pgxpool.Pool, r *http.Requ
 		triggerMTMNotif(ctx, pool, routeForwardUploadMTM, "UPLOAD", uploadedBy, constants.StatusPendingApproval, insertedMTMIDs)
 		if len(insertedMTMIDs) > 0 {
 			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_MTM", "POST_CREATE", insertedMTMIDs, uploadedBy)
+			dmsjobs.FireDmsEvent(pool, "FX", "FORWARD_MTM", "POST_UPLOAD", insertedMTMIDs, uploadedBy)
 
 			makerEmail := ""
 			userID := r.FormValue(constants.KeyUserID)
