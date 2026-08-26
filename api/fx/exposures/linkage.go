@@ -698,6 +698,7 @@ func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		approved := 0
+		approvedExposureIDs := make([]string, 0, len(req.Links))
 		for _, link := range req.Links {
 			expID := strings.TrimSpace(link.ExposureHeaderID)
 			bookID := strings.TrimSpace(link.BookingID)
@@ -738,6 +739,11 @@ func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 				logger.LogError("approve hedge link audit failed exposure=%s booking=%s: %v", expID, bookID, auditErr)
 			}
 			approved++
+			approvedExposureIDs = append(approvedExposureIDs, expID)
+		}
+
+		if len(approvedExposureIDs) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", "HEDGE_LINK", "POST_APPROVE", approvedExposureIDs, auditutil.Actor(req.UserID))
 		}
 
 		respondWithSuccess(w, http.StatusOK, "Hedge links approved successfully", map[string]interface{}{
@@ -761,6 +767,7 @@ func RejectHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		rejected := 0
+		rejectedExposureIDs := make([]string, 0, len(req.Links))
 		for _, link := range req.Links {
 			expID := strings.TrimSpace(link.ExposureHeaderID)
 			bookID := strings.TrimSpace(link.BookingID)
@@ -793,6 +800,11 @@ func RejectHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 				logger.LogError("reject hedge link audit failed exposure=%s booking=%s: %v", expID, bookID, auditErr)
 			}
 			rejected++
+			rejectedExposureIDs = append(rejectedExposureIDs, expID)
+		}
+
+		if len(rejectedExposureIDs) > 0 {
+			dmsjobs.FireDmsEvent(pool, "FX", "HEDGE_LINK", "POST_REJECT", rejectedExposureIDs, auditutil.Actor(req.UserID))
 		}
 
 		respondWithSuccess(w, http.StatusOK, "Hedge links rejected successfully", map[string]interface{}{

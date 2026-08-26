@@ -37,6 +37,28 @@ var dmsEventTriggers = map[string]string{
 	"ON_REJECT":       "POST_REJECT",
 }
 
+var dmsEventSourceIDFields = map[string]string{
+	"FX|FX_CONFIRMATION":      "system_transaction_id",
+	"FX|FX_HEDGING_PROPOSAL":  "proposal_id",
+	"FX|EXPOSURE_CREATION":    "exposure_header_id",
+	"FX|EXPOSURE_UPLOAD":      "exposure_header_id",
+	"FX|EXPOSURE_BUCKETING":   "exposure_header_id",
+	"FX|HEDGE_LINK":           "exposure_header_id",
+	"FX|FORWARD_MTM":          "mtm_id",
+	"FX|FORWARD_CANCELLATION": "booking_id",
+	"FX|FORWARD_ROLLOVER":     "booking_id",
+	"FX|FORWARD_CANCEL_ROLL":  "booking_id",
+}
+
+// CanonicalEventSourceIDField returns the dashboard column that carries the IDs
+// the business handlers pass to FireDmsEvent for a module/sub-module. Empty when
+// the sub-module is not registered, in which case the rule's stored
+// source_id_field is used as-is.
+func CanonicalEventSourceIDField(moduleCode, subModuleCode string) string {
+	key := strings.ToUpper(strings.TrimSpace(moduleCode)) + "|" + strings.ToUpper(strings.TrimSpace(subModuleCode))
+	return dmsEventSourceIDFields[key]
+}
+
 // NormalizeDmsEventTrigger maps aliases to canonical POST_* codes.
 func NormalizeDmsEventTrigger(triggerType string) (string, error) {
 	key := strings.ToUpper(strings.TrimSpace(triggerType))
@@ -137,11 +159,17 @@ func RunEventRules(
 		return fmt.Errorf("load DMS event rules: %w", err)
 	}
 	defer rows.Close()
+	canonSourceIDField := CanonicalEventSourceIDField(moduleCode, subModuleCode)
 	var rules []eventRule
 	for rows.Next() {
 		var rule eventRule
 		if err := rows.Scan(&rule.RuleID, &rule.SourceIDField); err != nil {
 			return err
+		}
+		if canonSourceIDField != "" && !strings.EqualFold(strings.TrimSpace(rule.SourceIDField), canonSourceIDField) {
+			api.LogInfo("[DMS-EVENT] rule=%s trigger=%s source_id_field %q → %q (canonical for %s/%s)",
+				rule.RuleID, canon, strings.TrimSpace(rule.SourceIDField), canonSourceIDField, moduleCode, subModuleCode)
+			rule.SourceIDField = canonSourceIDField
 		}
 		if strings.TrimSpace(rule.SourceIDField) == "" {
 			api.LogError("[DMS-EVENT] rule=%s trigger=%s missing source_id_field", rule.RuleID, canon)
