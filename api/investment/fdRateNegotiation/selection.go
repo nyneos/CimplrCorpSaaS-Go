@@ -20,9 +20,10 @@ import (
 // SELECT is not allowed, so selection and booking-link rows use EDIT.
 const selectionAuditAction = "EDIT"
 
-// Selection is apply-immediately on the master (selected_* columns) and waits
-// for checker on PENDING_EDIT_APPROVAL. Approve stamps the master APPROVED.
-const selectionAuditStatus = "PENDING_EDIT_APPROVAL"
+// Selection is a lifecycle wait (request_status = PENDING_RATE_APPROVAL), not a
+// Rate Request field-edit. Keep processing_status on the 5-value audit set as
+// APPROVED so the list does not show "Pending Edit Approval".
+const selectionAuditStatus = "APPROVED"
 
 // Booking link is terminal (CONVERTED_TO_FD) — never leave a PENDING_* zombie audit.
 const bookingLinkAuditStatus = "APPROVED"

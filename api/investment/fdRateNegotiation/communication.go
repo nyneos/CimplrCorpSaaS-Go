@@ -137,6 +137,51 @@ func keepOrReplace(oldVal, incoming string) string {
 	return incoming
 }
 
+// resolveCommunicationBank attributes a communication to one target bank.
+// When bank_id/bank_name are empty and the request has targets, the first
+// target bank is used so outbound email and inbound capture stay trackable
+// per bank (same rule for SYSTEM_EMAIL, MANUAL, and attachments).
+func resolveCommunicationBank(ctx context.Context, tx pgx.Tx, rateRequestID, bankID, bankName string) (string, string, error) {
+	var ids, names []string
+	err := tx.QueryRow(ctx, `
+		SELECT
+			COALESCE(target_bank_ids, ARRAY[]::text[]),
+			COALESCE(target_bank_names, ARRAY[]::text[])
+		FROM investment.fd_rate_negotiation
+		WHERE rate_request_id = $1::uuid
+		  AND COALESCE(is_deleted, false) = false`, rateRequestID).Scan(&ids, &names)
+	if err != nil {
+		return "", "", fmt.Errorf("load target banks: %w", err)
+	}
+	id := strings.TrimSpace(bankID)
+	name := strings.TrimSpace(bankName)
+	if len(names) == 0 {
+		return id, name, nil
+	}
+
+	targetID := func(i int) string {
+		if i < len(ids) && strings.TrimSpace(ids[i]) != "" {
+			return strings.TrimSpace(ids[i])
+		}
+		return names[i]
+	}
+
+	if id == "" && name == "" {
+		return targetID(0), names[0], nil
+	}
+
+	for i, n := range names {
+		tid := targetID(i)
+		if id != "" && (id == tid || strings.EqualFold(id, n)) {
+			return tid, n, nil
+		}
+		if name != "" && strings.EqualFold(name, n) {
+			return tid, n, nil
+		}
+	}
+	return "", "", fmt.Errorf("bank must be one of the request target banks")
+}
+
 func collectRecipients(p communicationPayload) []communicationRecipientInput {
 	seen := map[string]struct{}{}
 	out := make([]communicationRecipientInput, 0)
@@ -560,6 +605,12 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		resolvedBankID, resolvedBankName, err := resolveCommunicationBank(ctx, tx, req.RateRequestID, req.BankID, req.BankName)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		var sentBy, sentAt interface{}
 
 		var id string
@@ -581,7 +632,7 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			templateID, strings.TrimSpace(req.EmailTemplateName), strings.TrimSpace(req.EmailTemplateVersion),
 			req.EmailContent, responseSource, responseDate, strings.TrimSpace(req.EmailMessageID),
 			sentBy, sentAt, userEmail,
-			strings.TrimSpace(req.BankID), strings.TrimSpace(req.BankName),
+			resolvedBankID, resolvedBankName,
 		).Scan(&id)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Create failed: %v", err))
@@ -612,8 +663,8 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			NewResponseSource: nullIfEmpty(responseSource),
 			NewResponseDate:   responseDate,
 			NewEmailMessageID: nullIfEmpty(strings.TrimSpace(req.EmailMessageID)),
-			NewBankID:         nullIfEmpty(strings.TrimSpace(req.BankID)),
-			NewBankName:       nullIfEmpty(strings.TrimSpace(req.BankName)),
+			NewBankID:         nullIfEmpty(resolvedBankID),
+			NewBankName:       nullIfEmpty(resolvedBankName),
 		}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed")
 			return
@@ -851,6 +902,11 @@ func UpdateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		newEmailMessageID := keepOrReplace(derefOrEmpty(oldEmailMessageID), req.EmailMessageID)
 		newBankID := keepOrReplace(derefOrEmpty(oldBankID), req.BankID)
 		newBankName := keepOrReplace(derefOrEmpty(oldBankName), req.BankName)
+		newBankID, newBankName, err = resolveCommunicationBank(ctx, tx, oldRateRequestID, newBankID, newBankName)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 
 		if req.recipientsProvided() {
 			recs := collectRecipients(req)

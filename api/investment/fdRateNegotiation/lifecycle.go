@@ -518,23 +518,39 @@ func bulkDecide(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, appr
 			continue
 		}
 
+		// Selection waits on request_status=PENDING_RATE_APPROVAL with processing
+		// already APPROVED (no PENDING_EDIT zombie). Still allow checker decide.
 		if actionType == "" {
-			_ = tx.Rollback(ctx)
-			errors = append(errors, id+": no pending audit action found")
-			continue
+			var reqStatus string
+			_ = tx.QueryRow(ctx, `
+				SELECT COALESCE(request_status,'')
+				FROM investment.fd_rate_negotiation
+				WHERE rate_request_id = $1::uuid
+				  AND COALESCE(is_deleted,false)=false`, id).Scan(&reqStatus)
+			if strings.EqualFold(strings.TrimSpace(reqStatus), "PENDING_RATE_APPROVAL") {
+				actionType = "EDIT"
+				_ = tx.QueryRow(ctx, `
+					SELECT COALESCE(old_request_status,'')
+					FROM investment.fd_audit_rate_negotiation
+					WHERE rate_request_id = $1::uuid
+					  AND action_type = 'EDIT'
+					  AND COALESCE(new_request_status,'') = 'PENDING_RATE_APPROVAL'
+					ORDER BY requested_at DESC, audit_id DESC
+					LIMIT 1`, id).Scan(&oldStatus)
+			} else {
+				_ = tx.Rollback(ctx)
+				errors = append(errors, id+": no pending audit action found")
+				continue
+			}
 		}
 
-		n, err := stampPendingAudits(ctx, tx, []string{id}, stampStatus, userEmail, comment, ip)
+		_, err = stampPendingAudits(ctx, tx, []string{id}, stampStatus, userEmail, comment, ip)
 		if err != nil {
 			_ = tx.Rollback(ctx)
 			errors = append(errors, id+": audit stamp failed")
 			continue
 		}
-		if n == 0 {
-			_ = tx.Rollback(ctx)
-			errors = append(errors, id+": no pending audit action found")
-			continue
-		}
+		// Zero rows stamped is OK for selection (audit already APPROVED); still apply master.
 
 		var applyErr error
 		if approve {

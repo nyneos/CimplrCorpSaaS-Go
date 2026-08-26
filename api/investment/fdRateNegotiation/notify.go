@@ -174,6 +174,15 @@ func fireBankCommunicationEmail(
 			return
 		}
 
+		var bankID, bankName string
+		if err = pool.QueryRow(ctx, `
+			SELECT COALESCE(bank_id,''), COALESCE(bank_name,'')
+			FROM investment.fd_rate_communication
+			WHERE communication_id = $1::uuid`, communicationID).Scan(&bankID, &bankName); err != nil {
+			api.LogError("[FDRateNeg] bank email load communication bank %s: %v", communicationID, err)
+			// continue — email can still send; BankName may be empty
+		}
+
 		recs, err := loadRecipientsMap(ctx, pool, []string{communicationID})
 		if err != nil {
 			api.LogError("[FDRateNeg] bank email load recipients %s: %v", communicationID, err)
@@ -185,6 +194,12 @@ func fireBankCommunicationEmail(
 
 		payload := row.toPayload("SEND", actorEmail, emailContent, all)
 		payload["CommunicationID"] = communicationID
+		payload["BankID"] = bankID
+		payload["BankName"] = bankName
+		// Prefer the attributed bank in body tokens when set; keep BankNames as full target list.
+		if bankName != "" {
+			payload["Bank"] = bankName
+		}
 
 		// Bank Communication picks a DMS template. Delivery still goes through
 		// the notification EMAIL pipeline for this source_route. A DMS UUID
