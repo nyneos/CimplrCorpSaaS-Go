@@ -455,7 +455,11 @@ func generateOneAttachment(ctx context.Context, pool *pgxpool.Pool, job attachme
 		resolveSheetRows(ctx, pool, tplVersionID, content, values),
 		job.GenCtx.PoolRows,
 	)
-	file, err := renderAndStoreViaDocSvc(ctx, format, renderedHTML, values, content.SheetTokens, sheetRows, content.SheetCells, content.Kind, content.PageDesign)
+	file, err := renderAndStoreViaDocSvc(ctx, renderRequest{
+		Format: format, MergedHTML: renderedHTML, MergeValues: values,
+		SheetTokens: content.SheetTokens, SheetRows: sheetRows, SheetCells: content.SheetCells,
+		Kind: content.Kind, PageDesign: content.PageDesign,
+	})
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
 	}
@@ -513,7 +517,11 @@ func generatePagedAttachment(ctx context.Context, pool *pgxpool.Pool, job attach
 		resolveSheetRows(ctx, pool, tplVersionID, content, values),
 		job.GenCtx.PoolRows,
 	)
-	file, err := renderMergedOutputViaDocSvc(ctx, format, combined, values, content.SheetTokens, sheetRows, content.SheetCells, content.Kind, content.PageDesign)
+	file, err := renderMergedOutputViaDocSvc(ctx, renderRequest{
+		Format: format, MergedHTML: combined, MergeValues: values,
+		SheetTokens: content.SheetTokens, SheetRows: sheetRows, SheetCells: content.SheetCells,
+		Kind: content.Kind, PageDesign: content.PageDesign,
+	})
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
 	}

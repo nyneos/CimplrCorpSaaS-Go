@@ -101,7 +101,20 @@ func lookupMatchingMatrix(
 	return matrixID, approvalOrder, slaHours, err
 }
 
-func finishResolvedMatrix(ctx context.Context, pool *pgxpool.Pool, matrixID, approvalOrder, moduleCode, entityCode, transactionType string, slaHours *int) (*MatrixResult, error) {
+// resolvedMatrixInfo bundles the fields needed to finish resolving a matched
+// approval matrix into a MatrixResult.
+type resolvedMatrixInfo struct {
+	MatrixID        string
+	ApprovalOrder   string
+	ModuleCode      string
+	EntityCode      string
+	TransactionType string
+	SlaHours        *int
+}
+
+func finishResolvedMatrix(ctx context.Context, pool *pgxpool.Pool, info resolvedMatrixInfo) (*MatrixResult, error) {
+	matrixID, approvalOrder, moduleCode, entityCode, transactionType, slaHours :=
+		info.MatrixID, info.ApprovalOrder, info.ModuleCode, info.EntityCode, info.TransactionType, info.SlaHours
 	eyes, err := loadMatrixEyes(ctx, pool, matrixID, approvalOrder)
 	if err != nil {
 		return nil, err
@@ -140,7 +153,14 @@ func ResolveMatrix(
 		if peID != "" {
 			api.LogInfo("[ApprovalEngine] Using POLICY_ENGINE matrix %s for %s/%s (overrides %s module matrix)",
 				peID, transactionType, entityCode, moduleCode)
-			return finishResolvedMatrix(ctx, pool, peID, peOrder, policyEngineModuleCode, "DEFAULT", transactionType, peSla)
+			return finishResolvedMatrix(ctx, pool, resolvedMatrixInfo{
+				MatrixID:        peID,
+				ApprovalOrder:   peOrder,
+				ModuleCode:      policyEngineModuleCode,
+				EntityCode:      "DEFAULT",
+				TransactionType: transactionType,
+				SlaHours:        peSla,
+			})
 		}
 	}
 
@@ -163,7 +183,14 @@ func ResolveMatrix(
 		return nil, nil
 	}
 
-	return finishResolvedMatrix(ctx, pool, matrixID, approvalOrder, moduleCode, entityCode, transactionType, slaHours)
+	return finishResolvedMatrix(ctx, pool, resolvedMatrixInfo{
+		MatrixID:        matrixID,
+		ApprovalOrder:   approvalOrder,
+		ModuleCode:      moduleCode,
+		EntityCode:      entityCode,
+		TransactionType: transactionType,
+		SlaHours:        slaHours,
+	})
 }
 
 // LoadMatrixByID returns a specific matrix by id, applying the same

@@ -30,26 +30,38 @@ import (
 // newly created or edited MF investment initiation, asynchronously.
 // submittedByUserID must be the session's numeric user_id (hard FK to
 // public.users(id) — never a display name or email).
-func submitMFInitiationForApproval(pool *pgxpool.Pool, initiationID, entityName, submittedByUserID, actorEmail, txType, matrixID string, amount float64) {
+// submitMFInitiationParams bundles the fields needed to submit an
+// MF initiation record to the approval engine.
+type submitMFInitiationParams struct {
+	InitiationID      string
+	EntityName        string
+	SubmittedByUserID string
+	ActorEmail        string
+	TxType            string
+	MatrixID          string
+	Amount            float64
+}
+
+func submitMFInitiationForApproval(pool *pgxpool.Pool, p submitMFInitiationParams) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
 		ModuleCode:          "INVESTMENT_MF",
-		EntityCode:          entityName,
-		TransactionType:     txType,
-		RecordID:            initiationID,
+		EntityCode:          p.EntityName,
+		TransactionType:     p.TxType,
+		RecordID:            p.InitiationID,
 		RecordTable:         "investment.investment_initiation",
 		AuditTable:          "investment.auditactioninitiation",
 		AuditIDColumn:       "initiation_id",
-		ActionType:          strings.TrimPrefix(txType, "MF_INITIATION_"),
-		Amount:              amount,
-		SubmittedBy:         submittedByUserID,
-		SubmittedByEmail:    actorEmail,
-		MatrixID:            matrixID,
+		ActionType:          strings.TrimPrefix(p.TxType, "MF_INITIATION_"),
+		Amount:              p.Amount,
+		SubmittedBy:         p.SubmittedByUserID,
+		SubmittedByEmail:    p.ActorEmail,
+		MatrixID:            p.MatrixID,
 		RequirePinnedMatrix: true,
 		AutoApplyIfUnpinned: true,
 	}); err != nil {
-		api.LogError("[MFInitiation] approvalengine.CreateInstance failed for initiation %s (%s): %v", initiationID, txType, err)
+		api.LogError("[MFInitiation] approvalengine.CreateInstance failed for initiation %s (%s): %v", p.InitiationID, p.TxType, err)
 	}
 }
 
@@ -322,7 +334,10 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Fire approval-matrix engine instance (async, no-op if engine disabled or no matrix)
-		submitMFInitiationForApproval(pgxPool, initiationID, req.EntityName, req.UserID, userEmail, "MF_INITIATION_CREATE", createMatrixID, req.Amount)
+		submitMFInitiationForApproval(pgxPool, submitMFInitiationParams{
+			InitiationID: initiationID, EntityName: req.EntityName, SubmittedByUserID: req.UserID, ActorEmail: userEmail,
+			TxType: "MF_INITIATION_CREATE", MatrixID: createMatrixID, Amount: req.Amount,
+		})
 
 		go func(iID, uID, uEmail string) {
 			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, []string{iID}, constants.AuditActionCreate, uEmail)
@@ -912,7 +927,10 @@ func DeleteInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[MFInitiation] CancelPendingInstances for delete failed for %s: %v", id, err)
 			}
 			initiationRow, _ := loadMFInitiationRow(context.Background(), pgxPool, id)
-			submitMFInitiationForApproval(pgxPool, id, initiationRow.EntityName, req.UserID, requestedBy, "MF_INITIATION_DELETE", deleteMatrixByID[id], initiationRow.Amount)
+			submitMFInitiationForApproval(pgxPool, submitMFInitiationParams{
+				InitiationID: id, EntityName: initiationRow.EntityName, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+				TxType: "MF_INITIATION_DELETE", MatrixID: deleteMatrixByID[id], Amount: initiationRow.Amount,
+			})
 		}
 
 		go func(ids []string, uID, uEmail string) {

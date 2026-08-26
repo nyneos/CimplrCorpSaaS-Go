@@ -11,6 +11,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// substrNotFound matches the not-found fragment surfaced by lower-level
+// lookup errors so they can be mapped to an HTTP 404 here.
+const substrNotFound = "not found"
+
 // ─── RecordApprovalAction ─────────────────────────────────────────────────────
 // POST /uam/instance/action
 //
@@ -73,7 +77,7 @@ func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			msg := err.Error()
 			lower := strings.ToLower(msg)
 			switch {
-			case strings.Contains(lower, "not found"):
+			case strings.Contains(lower, substrNotFound):
 				api.RespondWithError(w, http.StatusNotFound, msg)
 			case strings.Contains(lower, "unauthorized"):
 				api.RespondWithError(w, http.StatusForbidden, msg)
@@ -218,7 +222,7 @@ func GetInstanceDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			resolved, lookupErr := approvalengine.LookupLatestInstanceID(ctx, pgxPool, moduleCode, recordID)
 			if lookupErr != nil {
-				if strings.Contains(lookupErr.Error(), "not found") {
+				if strings.Contains(lookupErr.Error(), substrNotFound) {
 					if ensured := approvalengine.EnsureInstanceForRecord(ctx, pgxPool, moduleCode, recordID); ensured != "" {
 						instanceID = ensured
 					} else {
@@ -236,7 +240,7 @@ func GetInstanceDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		detail, err := approvalengine.GetRichInstanceDetail(ctx, pgxPool, instanceID, viewerUserID)
 		if err != nil {
-			if strings.Contains(err.Error(), "not found") {
+			if strings.Contains(err.Error(), substrNotFound) {
 				api.RespondWithError(w, http.StatusNotFound, err.Error())
 				return
 			}

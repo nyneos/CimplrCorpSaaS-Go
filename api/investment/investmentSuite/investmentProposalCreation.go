@@ -31,26 +31,38 @@ const amountTolerance = 0.01
 // newly created or edited MF investment proposal, asynchronously.
 // submittedByUserID must be the session's numeric user_id (hard FK to
 // public.users(id) — never a display name or email).
-func submitMFProposalForApproval(pool *pgxpool.Pool, proposalID, entityName, submittedByUserID, actorEmail, txType, matrixID string, amount float64) {
+// submitMFProposalParams bundles the fields needed to submit an
+// MF proposal record to the approval engine.
+type submitMFProposalParams struct {
+	ProposalID        string
+	EntityName        string
+	SubmittedByUserID string
+	ActorEmail        string
+	TxType            string
+	MatrixID          string
+	Amount            float64
+}
+
+func submitMFProposalForApproval(pool *pgxpool.Pool, p submitMFProposalParams) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
 		ModuleCode:          "INVESTMENT_MF",
-		EntityCode:          entityName,
-		TransactionType:     txType,
-		RecordID:            proposalID,
+		EntityCode:          p.EntityName,
+		TransactionType:     p.TxType,
+		RecordID:            p.ProposalID,
 		RecordTable:         "investment.investment_proposal",
 		AuditTable:          "investment.auditactionproposal",
 		AuditIDColumn:       "proposal_id",
-		ActionType:          strings.TrimPrefix(txType, "MF_PROPOSAL_"),
-		Amount:              amount,
-		SubmittedBy:         submittedByUserID,
-		SubmittedByEmail:    actorEmail,
-		MatrixID:            matrixID,
+		ActionType:          strings.TrimPrefix(p.TxType, "MF_PROPOSAL_"),
+		Amount:              p.Amount,
+		SubmittedBy:         p.SubmittedByUserID,
+		SubmittedByEmail:    p.ActorEmail,
+		MatrixID:            p.MatrixID,
 		RequirePinnedMatrix: true,
 		AutoApplyIfUnpinned: true,
 	}); err != nil {
-		api.LogError("[MFProposal] approvalengine.CreateInstance failed for proposal %s (%s): %v", proposalID, txType, err)
+		api.LogError("[MFProposal] approvalengine.CreateInstance failed for proposal %s (%s): %v", p.ProposalID, p.TxType, err)
 	}
 }
 
@@ -368,7 +380,10 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Fire approval-matrix engine instance (async, no-op if engine disabled or no matrix)
-		submitMFProposalForApproval(pool, proposalID, req.EntityName, req.UserID, userEmail, "MF_PROPOSAL_CREATE", createMatrixID, req.TotalAmount)
+		submitMFProposalForApproval(pool, submitMFProposalParams{
+			ProposalID: proposalID, EntityName: req.EntityName, SubmittedByUserID: req.UserID, ActorEmail: userEmail,
+			TxType: "MF_PROPOSAL_CREATE", MatrixID: createMatrixID, Amount: req.TotalAmount,
+		})
 
 		go func() {
 			payload := BuildProposalNotifPayload(context.Background(), pool, []string{proposalID}, constants.AuditActionCreate, userEmail)
@@ -953,7 +968,10 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[MFProposal] CancelPendingInstances for delete failed for %s: %v", id, err)
 			}
 			proposalRow, _ := loadMFProposalRow(context.Background(), pool, id)
-			submitMFProposalForApproval(pool, id, proposalRow.EntityName, req.UserID, userEmail, "MF_PROPOSAL_DELETE", deleteMatrixByID[id], proposalRow.TotalAmount)
+			submitMFProposalForApproval(pool, submitMFProposalParams{
+				ProposalID: id, EntityName: proposalRow.EntityName, SubmittedByUserID: req.UserID, ActorEmail: userEmail,
+				TxType: "MF_PROPOSAL_DELETE", MatrixID: deleteMatrixByID[id], Amount: proposalRow.TotalAmount,
+			})
 		}
 
 		response := ProposalBulkDeleteResponse{

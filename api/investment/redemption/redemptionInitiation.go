@@ -29,30 +29,42 @@ import (
 // newly created or edited MF redemption initiation, asynchronously.
 // submittedByUserID must be the session's numeric user_id (hard FK to
 // public.users(id) — never a display name or email).
-func submitMFRedemptionForApproval(pool *pgxpool.Pool, redemptionID, entityName, submittedByUserID, actorEmail, txType, matrixID string, amount *float64) {
+// submitMFRedemptionParams bundles the fields needed to submit an
+// MF redemption initiation record to the approval engine.
+type submitMFRedemptionParams struct {
+	RedemptionID      string
+	EntityName        string
+	SubmittedByUserID string
+	ActorEmail        string
+	TxType            string
+	MatrixID          string
+	Amount            *float64
+}
+
+func submitMFRedemptionForApproval(pool *pgxpool.Pool, p submitMFRedemptionParams) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	var amt float64
-	if amount != nil {
-		amt = *amount
+	if p.Amount != nil {
+		amt = *p.Amount
 	}
 	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
 		ModuleCode:          "INVESTMENT_MF",
-		EntityCode:          entityName,
-		TransactionType:     txType,
-		RecordID:            redemptionID,
+		EntityCode:          p.EntityName,
+		TransactionType:     p.TxType,
+		RecordID:            p.RedemptionID,
 		RecordTable:         "investment.redemption_initiation",
 		AuditTable:          "investment.auditactionredemption",
 		AuditIDColumn:       "redemption_id",
-		ActionType:          strings.TrimPrefix(txType, "MF_REDEMPTION_INITIATION_"),
+		ActionType:          strings.TrimPrefix(p.TxType, "MF_REDEMPTION_INITIATION_"),
 		Amount:              amt,
-		SubmittedBy:         submittedByUserID,
-		SubmittedByEmail:    actorEmail,
-		MatrixID:            matrixID,
+		SubmittedBy:         p.SubmittedByUserID,
+		SubmittedByEmail:    p.ActorEmail,
+		MatrixID:            p.MatrixID,
 		RequirePinnedMatrix: true,
 		AutoApplyIfUnpinned: true,
 	}); err != nil {
-		api.LogError("[MFRedemptionInitiation] approvalengine.CreateInstance failed for redemption %s (%s): %v", redemptionID, txType, err)
+		api.LogError("[MFRedemptionInitiation] approvalengine.CreateInstance failed for redemption %s (%s): %v", p.RedemptionID, p.TxType, err)
 	}
 }
 
@@ -480,7 +492,10 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else if req.EstimatedProceeds > 0 {
 			amountToPass = &req.EstimatedProceeds
 		}
-		submitMFRedemptionForApproval(pgxPool, redemptionID, req.EntityName, req.UserID, userEmail, "MF_REDEMPTION_INITIATION_CREATE", createMatrixID, amountToPass)
+		submitMFRedemptionForApproval(pgxPool, submitMFRedemptionParams{
+			RedemptionID: redemptionID, EntityName: req.EntityName, SubmittedByUserID: req.UserID, ActorEmail: userEmail,
+			TxType: "MF_REDEMPTION_INITIATION_CREATE", MatrixID: createMatrixID, Amount: amountToPass,
+		})
 
 		correlationID := redemptionID
 		go func() {
@@ -754,7 +769,10 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else if row.EstimatedProceeds > 0 {
 				amountToPass = &row.EstimatedProceeds
 			}
-			submitMFRedemptionForApproval(pgxPool, redemptionID, row.EntityName, req.UserID, userEmail, "MF_REDEMPTION_INITIATION_CREATE", bulkCreateMatrixID, amountToPass)
+			submitMFRedemptionForApproval(pgxPool, submitMFRedemptionParams{
+				RedemptionID: redemptionID, EntityName: row.EntityName, SubmittedByUserID: req.UserID, ActorEmail: userEmail,
+				TxType: "MF_REDEMPTION_INITIATION_CREATE", MatrixID: bulkCreateMatrixID, Amount: amountToPass,
+			})
 
 			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION", "POST_CREATE", []string{redemptionID}, userEmail)
 
@@ -1139,7 +1157,10 @@ func DeleteRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else if redemptionRow.EstimatedProceeds != nil && *redemptionRow.EstimatedProceeds > 0 {
 				amountToPass = redemptionRow.EstimatedProceeds
 			}
-			submitMFRedemptionForApproval(pgxPool, id, redemptionRow.EntityName, req.UserID, requestedBy, "MF_REDEMPTION_INITIATION_DELETE", deleteMatrixByID[id], amountToPass)
+			submitMFRedemptionForApproval(pgxPool, submitMFRedemptionParams{
+				RedemptionID: id, EntityName: redemptionRow.EntityName, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+				TxType: "MF_REDEMPTION_INITIATION_DELETE", MatrixID: deleteMatrixByID[id], Amount: amountToPass,
+			})
 		}
 
 		go func() {

@@ -44,39 +44,51 @@ func stringPtrValue(value *string) string {
 	return strings.TrimSpace(*value)
 }
 
-func submitPayRecForApproval(pool *pgxpool.Pool, recordID, entityName, submittedByUserID, actorEmail, txType string, amount float64, matrixID string) {
+// submitPayRecParams bundles the fields needed to submit a payable/receivable
+// record to the approval engine.
+type submitPayRecParams struct {
+	RecordID          string
+	EntityName        string
+	SubmittedByUserID string
+	ActorEmail        string
+	TxType            string
+	Amount            float64
+	MatrixID          string
+}
+
+func submitPayRecForApproval(pool *pgxpool.Pool, p submitPayRecParams) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	recordTable := "cimplrcorpsaas.tr_payables"
 	auditTable := "public.auditactionpayable"
 	auditColumn := "payable_id"
-	actionType := strings.TrimPrefix(txType, "PAYABLE_")
-	if strings.HasPrefix(txType, "RECEIVABLE_") {
+	actionType := strings.TrimPrefix(p.TxType, "PAYABLE_")
+	if strings.HasPrefix(p.TxType, "RECEIVABLE_") {
 		recordTable = "cimplrcorpsaas.tr_receivables"
 		auditTable = "public.auditactionreceivable"
 		auditColumn = "receivable_id"
-		actionType = strings.TrimPrefix(txType, "RECEIVABLE_")
+		actionType = strings.TrimPrefix(p.TxType, "RECEIVABLE_")
 	}
 
 	_, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
 		ModuleCode:          "CASH",
-		EntityCode:          entityName,
-		TransactionType:     txType,
-		RecordID:            recordID,
+		EntityCode:          p.EntityName,
+		TransactionType:     p.TxType,
+		RecordID:            p.RecordID,
 		RecordTable:         recordTable,
 		AuditTable:          auditTable,
 		AuditIDColumn:       auditColumn,
 		ActionType:          actionType,
-		Amount:              amount,
-		SubmittedBy:         submittedByUserID,
-		SubmittedByEmail:    actorEmail,
-		MatrixID:            matrixID,
+		Amount:              p.Amount,
+		SubmittedBy:         p.SubmittedByUserID,
+		SubmittedByEmail:    p.ActorEmail,
+		MatrixID:            p.MatrixID,
 		RequirePinnedMatrix: true,
 		AutoApplyIfUnpinned: false,
 	})
 	if err != nil {
-		api.LogError("[PayRec] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"record_id": recordID, "tx_type": txType, "error": err.Error()})
+		api.LogError("[PayRec] approvalengine.CreateInstance failed for %s (%s): %v", p.RecordID, p.TxType, err.Error())
 	}
 }
 
@@ -699,7 +711,10 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 						if policyPinnedMatrix(triggerMatrixID) {
 							for _, i := range infos {
-								submitPayRecForApproval(pgxPool, i.id, i.ename, userID, actorEmail, "PAYABLE_CREATE", i.amt, triggerMatrixID)
+								submitPayRecForApproval(pgxPool, submitPayRecParams{
+									RecordID: i.id, EntityName: i.ename, SubmittedByUserID: userID, ActorEmail: actorEmail,
+									TxType: "PAYABLE_CREATE", Amount: i.amt, MatrixID: triggerMatrixID,
+								})
 							}
 						}
 					}
@@ -743,7 +758,10 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 						if policyPinnedMatrix(triggerMatrixID) {
 							for _, i := range infos {
-								submitPayRecForApproval(pgxPool, i.id, i.ename, userID, actorEmail, "RECEIVABLE_CREATE", i.amt, triggerMatrixID)
+								submitPayRecForApproval(pgxPool, submitPayRecParams{
+									RecordID: i.id, EntityName: i.ename, SubmittedByUserID: userID, ActorEmail: actorEmail,
+									TxType: "RECEIVABLE_CREATE", Amount: i.amt, MatrixID: triggerMatrixID,
+								})
 							}
 						}
 					}
@@ -1325,7 +1343,10 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			f := fieldsMap[id]
 			entityName := fmt.Sprint(f["entity_name"])
 			amt, _ := strconv.ParseFloat(fmt.Sprint(f["amount"]), 64)
-			submitPayRecForApproval(pgxPool, id, entityName, req.UserID, actorEmail, "PAYABLE_DELETE", amt, deleteMatrixByID[id])
+			submitPayRecForApproval(pgxPool, submitPayRecParams{
+				RecordID: id, EntityName: entityName, SubmittedByUserID: req.UserID, ActorEmail: actorEmail,
+				TxType: "PAYABLE_DELETE", Amount: amt, MatrixID: deleteMatrixByID[id],
+			})
 		}
 		for _, id := range txIDsRec {
 			if !policyPinnedMatrix(deleteMatrixByID[id]) {
@@ -1334,7 +1355,10 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			f := fieldsMap[id]
 			entityName := fmt.Sprint(f["entity_name"])
 			amt, _ := strconv.ParseFloat(fmt.Sprint(f["invoice_amount"]), 64)
-			submitPayRecForApproval(pgxPool, id, entityName, req.UserID, actorEmail, "RECEIVABLE_DELETE", amt, deleteMatrixByID[id])
+			submitPayRecForApproval(pgxPool, submitPayRecParams{
+				RecordID: id, EntityName: entityName, SubmittedByUserID: req.UserID, ActorEmail: actorEmail,
+				TxType: "RECEIVABLE_DELETE", Amount: amt, MatrixID: deleteMatrixByID[id],
+			})
 		}
 
 		api.RespondEnvelopeSuccess(w, "delete requests created", nil)
@@ -1394,7 +1418,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Action: approvalengine.ActionRejected, Comment: req.Comment,
 			})
 			if actionErr != nil {
-				api.LogError("[PayRec] ActOnPendingOrDiagnose reject failed for %s: %v", map[string]interface{}{"record_id": id, "error": actionErr.Error()})
+				api.LogError("[PayRec] ActOnPendingOrDiagnose reject failed for %s: %v", id, actionErr.Error())
 				blocked[id] = actionErr.Error()
 				continue
 			}
@@ -1623,7 +1647,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Action: approvalengine.ActionApproved, Comment: req.Comment,
 			})
 			if actionErr != nil {
-				api.LogError("[PayRec] ActOnPendingOrDiagnose approve failed for %s: %v", map[string]interface{}{"record_id": id, "error": actionErr.Error()})
+				api.LogError("[PayRec] ActOnPendingOrDiagnose approve failed for %s: %v", id, actionErr.Error())
 				blocked[id] = actionErr.Error()
 				continue
 			}
@@ -2111,7 +2135,10 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		for _, reqInst := range instancesToCreate {
-			submitPayRecForApproval(pgxPool, reqInst.recordID, reqInst.entityName, req.UserID, actorEmail, reqInst.txType, reqInst.amount, reqInst.matrixID)
+			submitPayRecForApproval(pgxPool, submitPayRecParams{
+				RecordID: reqInst.recordID, EntityName: reqInst.entityName, SubmittedByUserID: req.UserID, ActorEmail: actorEmail,
+				TxType: reqInst.txType, Amount: reqInst.amount, MatrixID: reqInst.matrixID,
+			})
 		}
 
 		if createdIDs := append(append([]string{}, createdPayables...), createdReceivables...); len(createdIDs) > 0 {
@@ -2503,7 +2530,10 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		if policyPinnedMatrix(triggerMatrixID) {
-			submitPayRecForApproval(pgxPool, id, effEntity, req.UserID, actorEmail, txType, effAmount, triggerMatrixID)
+			submitPayRecForApproval(pgxPool, submitPayRecParams{
+				RecordID: id, EntityName: effEntity, SubmittedByUserID: req.UserID, ActorEmail: actorEmail,
+				TxType: txType, Amount: effAmount, MatrixID: triggerMatrixID,
+			})
 		}
 
 		dmsevent.Fire(pgxPool, "CASH", "PAYABLE_RECEIVABLE", "POST_EDIT", []string{req.ID}, userName)

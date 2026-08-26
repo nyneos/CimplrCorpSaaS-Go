@@ -33,26 +33,38 @@ func resolveSweepConfigAmount(sweepAmount, bufferAmount *float64) float64 {
 	return 0
 }
 
-func submitSweepConfigForApproval(pgxPool *pgxpool.Pool, sweepID, entityName, submittedByUserID, actorEmail, actionType string, amount float64, matrixID string) {
+// submitSweepConfigParams bundles the fields needed to submit a sweep-config
+// record to the approval engine.
+type submitSweepConfigParams struct {
+	SweepID           string
+	EntityName        string
+	SubmittedByUserID string
+	ActorEmail        string
+	ActionType        string
+	Amount            float64
+	MatrixID          string
+}
+
+func submitSweepConfigForApproval(pgxPool *pgxpool.Pool, p submitSweepConfigParams) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
 		ModuleCode:          "CASH",
-		EntityCode:          entityName,
-		TransactionType:     actionType,
-		RecordID:            sweepID,
+		EntityCode:          p.EntityName,
+		TransactionType:     p.ActionType,
+		RecordID:            p.SweepID,
 		RecordTable:         "cimplrcorpsaas.sweepconfiguration",
 		AuditTable:          "cimplrcorpsaas.auditactionsweepconfiguration",
 		AuditIDColumn:       "sweep_id",
-		ActionType:          strings.Split(actionType, "_")[2],
-		Amount:              amount,
-		SubmittedBy:         submittedByUserID,
-		SubmittedByEmail:    actorEmail,
-		MatrixID:            matrixID,
+		ActionType:          strings.Split(p.ActionType, "_")[2],
+		Amount:              p.Amount,
+		SubmittedBy:         p.SubmittedByUserID,
+		SubmittedByEmail:    p.ActorEmail,
+		MatrixID:            p.MatrixID,
 		RequirePinnedMatrix: true,
 		AutoApplyIfUnpinned: false,
 	}); err != nil {
-		api.LogError("approvalengine.CreateInstance failed for sweep config %s: %v", sweepID, err)
+		api.LogError("approvalengine.CreateInstance failed for sweep config %s: %v", p.SweepID, err)
 	}
 }
 
@@ -225,10 +237,10 @@ func CreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		submitSweepConfigForApproval(
-			pgxPool, sweepID, req.EntityName, req.UserID, requestedBy,
-			"SWEEP_CONFIG_CREATE", resolveSweepConfigAmount(req.SweepAmount, req.BufferAmount), triggerMatrixID,
-		)
+		submitSweepConfigForApproval(pgxPool, submitSweepConfigParams{
+			SweepID: sweepID, EntityName: req.EntityName, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+			ActionType: "SWEEP_CONFIG_CREATE", Amount: resolveSweepConfigAmount(req.SweepAmount, req.BufferAmount), MatrixID: triggerMatrixID,
+		})
 
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_CREATE", []string{sweepID}, requestedBy)
 
@@ -435,10 +447,10 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		for _, p := range pendingConfigs {
-			submitSweepConfigForApproval(
-				pgxPool, p.sweepID, p.entityName, req.UserID, requestedBy,
-				"SWEEP_CONFIG_CREATE", p.amount, p.matrixID,
-			)
+			submitSweepConfigForApproval(pgxPool, submitSweepConfigParams{
+				SweepID: p.sweepID, EntityName: p.entityName, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+				ActionType: "SWEEP_CONFIG_CREATE", Amount: p.amount, MatrixID: p.matrixID,
+			})
 		}
 
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_CREATE", createdIDs, requestedBy)
@@ -725,7 +737,7 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", req.SweepID, requestedBy); err != nil {
-			api.LogError("[SweepConfig] CancelPendingInstances failed for %s: %v", map[string]interface{}{"sweep_id": req.SweepID, "error": err.Error()})
+			api.LogError("[SweepConfig] CancelPendingInstances failed for %s: %v", req.SweepID, err.Error())
 		}
 
 		q := "UPDATE cimplrcorpsaas.sweepconfiguration SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE sweep_id=$%d", pos)
@@ -761,10 +773,10 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if curBufferAmount.Valid {
 			currentBufferAmount = &curBufferAmount.F
 		}
-		submitSweepConfigForApproval(
-			pgxPool, req.SweepID, finalEntity, req.UserID, requestedBy,
-			"SWEEP_CONFIG_EDIT", resolveSweepConfigAmount(currentSweepAmount, currentBufferAmount), triggerMatrixID,
-		)
+		submitSweepConfigForApproval(pgxPool, submitSweepConfigParams{
+			SweepID: req.SweepID, EntityName: finalEntity, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+			ActionType: "SWEEP_CONFIG_EDIT", Amount: resolveSweepConfigAmount(currentSweepAmount, currentBufferAmount), MatrixID: triggerMatrixID,
+		})
 
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_CONFIG", "POST_EDIT", []string{req.SweepID}, requestedBy)
 
@@ -1232,7 +1244,7 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Action: approvalengine.ActionApproved, Comment: req.Comment,
 			})
 			if actionErr != nil {
-				api.LogError("[SweepConfig] ActOnPendingOrDiagnose approve failed for %s: %v", map[string]interface{}{"sweep_id": sweepID, "error": actionErr.Error()})
+				api.LogError("[SweepConfig] ActOnPendingOrDiagnose approve failed for %s: %v", sweepID, actionErr.Error())
 				blocked[sweepID] = actionErr.Error()
 				continue
 			}
@@ -1426,7 +1438,7 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Action: approvalengine.ActionRejected, Comment: req.Comment,
 			})
 			if actionErr != nil {
-				api.LogError("[SweepConfig] ActOnPendingOrDiagnose reject failed for %s: %v", map[string]interface{}{"sweep_id": sweepID, "error": actionErr.Error()})
+				api.LogError("[SweepConfig] ActOnPendingOrDiagnose reject failed for %s: %v", sweepID, actionErr.Error())
 				blocked[sweepID] = actionErr.Error()
 				continue
 			}
@@ -1592,10 +1604,10 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 			if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", p.sweepID, requestedBy); err != nil {
 				api.LogError("[SweepConfig] CancelPendingInstances failed for delete on %s: %v", p.sweepID, err)
 			}
-			submitSweepConfigForApproval(
-				pgxPool, p.sweepID, p.entityName, req.UserID, requestedBy,
-				"SWEEP_CONFIG_DELETE", p.amount, deleteMatrixByID[p.sweepID],
-			)
+			submitSweepConfigForApproval(pgxPool, submitSweepConfigParams{
+				SweepID: p.sweepID, EntityName: p.entityName, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+				ActionType: "SWEEP_CONFIG_DELETE", Amount: p.amount, MatrixID: deleteMatrixByID[p.sweepID],
+			})
 		}
 
 		api.RespondWithResult(w, true, fmt.Sprintf("created %d delete requests", len(req.SweepIDs)))

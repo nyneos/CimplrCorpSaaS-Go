@@ -29,29 +29,41 @@ import (
 
 // submitMFConfirmationForApproval fires the approval-matrix engine for a
 // newly created or edited MF investment confirmation, asynchronously.
-func submitMFConfirmationForApproval(pool *pgxpool.Pool, confirmationID, initiationID, submittedByUserID, actorEmail, txType, matrixID string, amount float64) {
+// submitMFConfirmationParams bundles the fields needed to submit an
+// MF confirmation record to the approval engine.
+type submitMFConfirmationParams struct {
+	ConfirmationID    string
+	InitiationID      string
+	SubmittedByUserID string
+	ActorEmail        string
+	TxType            string
+	MatrixID          string
+	Amount            float64
+}
+
+func submitMFConfirmationForApproval(pool *pgxpool.Pool, p submitMFConfirmationParams) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	var entityName string
-	_ = pool.QueryRow(ctx, "SELECT entity_name FROM investment.investment_initiation WHERE initiation_id = $1", initiationID).Scan(&entityName)
+	_ = pool.QueryRow(ctx, "SELECT entity_name FROM investment.investment_initiation WHERE initiation_id = $1", p.InitiationID).Scan(&entityName)
 
 	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
 		ModuleCode:          "INVESTMENT_MF",
 		EntityCode:          entityName,
-		TransactionType:     txType,
-		RecordID:            confirmationID,
+		TransactionType:     p.TxType,
+		RecordID:            p.ConfirmationID,
 		RecordTable:         "investment.investment_confirmation",
 		AuditTable:          "investment.auditactioninvestmentconfirmation",
 		AuditIDColumn:       "confirmation_id",
-		ActionType:          strings.TrimPrefix(txType, "MF_CONFIRMATION_"),
-		Amount:              amount,
-		SubmittedBy:         submittedByUserID,
-		SubmittedByEmail:    actorEmail,
-		MatrixID:            matrixID,
+		ActionType:          strings.TrimPrefix(p.TxType, "MF_CONFIRMATION_"),
+		Amount:              p.Amount,
+		SubmittedBy:         p.SubmittedByUserID,
+		SubmittedByEmail:    p.ActorEmail,
+		MatrixID:            p.MatrixID,
 		RequirePinnedMatrix: true,
 		AutoApplyIfUnpinned: true,
 	}); err != nil {
-		api.LogError("[MFConfirmation] approvalengine.CreateInstance failed for confirmation %s (%s): %v", confirmationID, txType, err)
+		api.LogError("[MFConfirmation] approvalengine.CreateInstance failed for confirmation %s (%s): %v", p.ConfirmationID, p.TxType, err)
 	}
 }
 
@@ -430,7 +442,10 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Fire approval-matrix engine instance (async, no-op if engine disabled or no matrix)
-		submitMFConfirmationForApproval(pgxPool, confirmationID, req.InitiationID, req.UserID, userEmail, "MF_CONFIRMATION_CREATE", createMatrixID, req.NetAmount)
+		submitMFConfirmationForApproval(pgxPool, submitMFConfirmationParams{
+			ConfirmationID: confirmationID, InitiationID: req.InitiationID, SubmittedByUserID: req.UserID, ActorEmail: userEmail,
+			TxType: "MF_CONFIRMATION_CREATE", MatrixID: createMatrixID, Amount: req.NetAmount,
+		})
 
 		go func(cID, uID, uEmail string) {
 			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, []string{cID}, constants.AuditActionCreate, uEmail)
@@ -626,7 +641,10 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			submitMFConfirmationForApproval(pgxPool, confirmationID, initiationID, req.UserID, userEmail, "MF_CONFIRMATION_CREATE", bulkCreateMatrixID, row.NetAmount)
+			submitMFConfirmationForApproval(pgxPool, submitMFConfirmationParams{
+				ConfirmationID: confirmationID, InitiationID: initiationID, SubmittedByUserID: req.UserID, ActorEmail: userEmail,
+				TxType: "MF_CONFIRMATION_CREATE", MatrixID: bulkCreateMatrixID, Amount: row.NetAmount,
+			})
 
 			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_CONFIRMATION", "POST_CREATE", []string{confirmationID}, userEmail)
 
@@ -1052,7 +1070,10 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[MFConfirmation] CancelPendingInstances for delete failed for %s: %v", id, err)
 			}
 			confRow, _ := loadMFConfirmationRow(context.Background(), pgxPool, id)
-			submitMFConfirmationForApproval(pgxPool, id, confRow.InitiationID, req.UserID, requestedBy, "MF_CONFIRMATION_DELETE", deleteMatrixByID[id], confRow.NetAmount)
+			submitMFConfirmationForApproval(pgxPool, submitMFConfirmationParams{
+				ConfirmationID: id, InitiationID: confRow.InitiationID, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+				TxType: "MF_CONFIRMATION_DELETE", MatrixID: deleteMatrixByID[id], Amount: confRow.NetAmount,
+			})
 		}
 
 		// Sweep and rebuild global portfolio synchronously to guarantee data integrity

@@ -54,26 +54,38 @@ func resolveSweepInitiationAmount(overridden, sweepAmount, bufferAmount *float64
 // submittedByUserID must be the session's numeric user_id (matching
 // fdBookingWorkbench's uID) — approval_instance.submitted_by has an FK to
 // public.users, so a display name here fails the insert.
-func submitSweepInitiationForApproval(pgxPool *pgxpool.Pool, initiationID, sweepID, entityName, submittedByUserID, actorEmail, matrixID string, amount float64) {
+// submitSweepInitiationParams bundles the fields needed to submit a
+// sweep-initiation record to the approval engine.
+type submitSweepInitiationParams struct {
+	InitiationID      string
+	SweepID           string
+	EntityName        string
+	SubmittedByUserID string
+	ActorEmail        string
+	MatrixID          string
+	Amount            float64
+}
+
+func submitSweepInitiationForApproval(pgxPool *pgxpool.Pool, p submitSweepInitiationParams) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
 		ModuleCode:          "CASH",
-		EntityCode:          entityName,
+		EntityCode:          p.EntityName,
 		TransactionType:     "SWEEP_INITIATION_CREATE",
-		RecordID:            initiationID,
+		RecordID:            p.InitiationID,
 		RecordTable:         "cimplrcorpsaas.sweep_initiation",
 		AuditTable:          "cimplrcorpsaas.auditactionsweepinitiation",
 		AuditIDColumn:       "initiation_id",
 		ActionType:          "CREATE",
-		Amount:              amount,
-		SubmittedBy:         submittedByUserID,
-		SubmittedByEmail:    actorEmail,
-		MatrixID:            matrixID,
+		Amount:              p.Amount,
+		SubmittedBy:         p.SubmittedByUserID,
+		SubmittedByEmail:    p.ActorEmail,
+		MatrixID:            p.MatrixID,
 		RequirePinnedMatrix: true,
 		AutoApplyIfUnpinned: false,
 	}); err != nil {
-		api.LogError("approvalengine.CreateInstance failed for sweep initiation %s (sweep %s): %v", initiationID, sweepID, err)
+		api.LogError("approvalengine.CreateInstance failed for sweep initiation %s (sweep %s): %v", p.InitiationID, p.SweepID, err)
 	}
 }
 
@@ -397,8 +409,11 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_CREATE", []string{initiationID}, initiatedBy)
 
-			submitSweepInitiationForApproval(pgxPool, initiationID, sweepID, req.EntityName, req.UserID,
-				api.GetUserEmailFromCtx(ctx), autoCreateMatrixID, resolveSweepInitiationAmount(req.OverriddenAmount, req.SweepAmount, req.BufferAmount))
+			submitSweepInitiationForApproval(pgxPool, submitSweepInitiationParams{
+				InitiationID: initiationID, SweepID: sweepID, EntityName: req.EntityName, SubmittedByUserID: req.UserID,
+				ActorEmail: api.GetUserEmailFromCtx(ctx), MatrixID: autoCreateMatrixID,
+				Amount: resolveSweepInitiationAmount(req.OverriddenAmount, req.SweepAmount, req.BufferAmount),
+			})
 
 			// autoCreated = true (sweep was auto-created)
 
@@ -580,8 +595,11 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		dmsevent.Fire(pgxPool, "CASH", "SWEEP_INITIATION", "POST_CREATE", []string{initiationID}, initiatedBy)
 
-		submitSweepInitiationForApproval(pgxPool, initiationID, sweepID, entityName, req.UserID,
-			api.GetUserEmailFromCtx(ctx), createMatrixID, resolveSweepInitiationAmount(req.OverriddenAmount, sweepPtr, bufPtr))
+		submitSweepInitiationForApproval(pgxPool, submitSweepInitiationParams{
+			InitiationID: initiationID, SweepID: sweepID, EntityName: entityName, SubmittedByUserID: req.UserID,
+			ActorEmail: api.GetUserEmailFromCtx(ctx), MatrixID: createMatrixID,
+			Amount: resolveSweepInitiationAmount(req.OverriddenAmount, sweepPtr, bufPtr),
+		})
 
 		api.RespondWithPayload(w, true, "Sweep initiation created successfully, pending approval", map[string]interface{}{
 			"initiation_id":     initiationID,
@@ -2177,8 +2195,11 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			reqItem := req.Initiations[i]
-			submitSweepInitiationForApproval(pgxPool, initID, sid, reqItem.EntityName, req.UserID, actorEmail, createMatrixIDs[i],
-				resolveSweepInitiationAmount(reqItem.OverriddenAmount, reqItem.SweepAmount, reqItem.BufferAmount))
+			submitSweepInitiationForApproval(pgxPool, submitSweepInitiationParams{
+				InitiationID: initID, SweepID: sid, EntityName: reqItem.EntityName, SubmittedByUserID: req.UserID,
+				ActorEmail: actorEmail, MatrixID: createMatrixIDs[i],
+				Amount: resolveSweepInitiationAmount(reqItem.OverriddenAmount, reqItem.SweepAmount, reqItem.BufferAmount),
+			})
 		}
 
 		api.RespondWithPayload(w, true, "Bulk initiations created successfully", map[string]interface{}{

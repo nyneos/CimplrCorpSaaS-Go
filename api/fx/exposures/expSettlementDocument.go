@@ -22,6 +22,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errSettlementIDsRequired = "settlement_ids is required"
+
 type settlementLineInput struct {
 	ExposureHeaderID string   `json:"exposure_header_id"`
 	BookingID        string   `json:"booking_id"`
@@ -201,14 +203,22 @@ func settlementLineAmounts(snap map[string]any) (linked, additional, cash, parti
 	return
 }
 
+// settlementAuditParams bundles the fields needed to record a settlement
+// audit row (Payment / Rollover / Cancellation).
+type settlementAuditParams struct {
+	SettlementID string
+	ActionType   string
+	Status       string
+	Reason       string
+	Actor        string
+	OldSnap      map[string]any
+	MethodHint   string
+}
+
 // recordSettlementAudit writes old_* columns (no JSONB) for Payment / Rollover / Cancellation.
-func recordSettlementAudit(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	settlementID, actionType, status, reason, actor string,
-	oldSnap map[string]any,
-	methodHint string,
-) {
+func recordSettlementAudit(ctx context.Context, pool *pgxpool.Pool, p settlementAuditParams) {
+	settlementID, actionType, status, reason, actor, oldSnap, methodHint :=
+		p.SettlementID, p.ActionType, p.Status, p.Reason, p.Actor, p.OldSnap, p.MethodHint
 	if pool == nil || strings.TrimSpace(settlementID) == "" || strings.TrimSpace(actor) == "" {
 		return
 	}
@@ -761,7 +771,10 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 		if actionType == "CREATE" || len(oldSnap) == 0 {
 			auditSnap = nil
 		}
-		recordSettlementAudit(ctx, pool, settlementID, actionType, finalStatus, strings.TrimSpace(req.Comments), actor, auditSnap, method)
+		recordSettlementAudit(ctx, pool, settlementAuditParams{
+			SettlementID: settlementID, ActionType: actionType, Status: finalStatus, Reason: strings.TrimSpace(req.Comments),
+			Actor: actor, OldSnap: auditSnap, MethodHint: method,
+		})
 
 		if req.Submit {
 			makerEmail := ""
@@ -962,16 +975,8 @@ func GetExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func updateExposureSettlementStatuses(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	ids []string,
-	status string,
-	actor string,
-	userID string,
-	comments string,
-	actionType string,
-) (int, error) {
+func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p updateStatusesParams) (int, error) {
+	ids, status, actor, userID, comments, actionType := p.IDs, p.Status, p.Actor, p.UserID, p.Comments, p.ActionType
 	count := 0
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
@@ -1043,7 +1048,10 @@ func updateExposureSettlementStatuses(
 			if m := snapString(oldSnap, "settlement_method"); m != nil {
 				methodHint = fmt.Sprint(m)
 			}
-			recordSettlementAudit(ctx, pool, id, actionType, status, comments, actor, oldSnap, methodHint)
+			recordSettlementAudit(ctx, pool, settlementAuditParams{
+				SettlementID: id, ActionType: actionType, Status: status, Reason: comments,
+				Actor: actor, OldSnap: oldSnap, MethodHint: methodHint,
+			})
 			if actionType == "CONFIRM" || actionType == "REJECT" {
 				auditutil.RecordDecisionPGX(ctx, pool, auditutil.DecisionParams{
 					TableName:    auditutil.TableExposureSettlement,
@@ -1073,11 +1081,14 @@ func ApproveExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.SettlementIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "settlement_ids is required")
+			respondWithError(w, http.StatusBadRequest, errSettlementIDsRequired)
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
-		n, err := updateExposureSettlementStatuses(ctx, pool, req.SettlementIDs, constants.StatusApproved, actor, req.UserID, strings.TrimSpace(req.Comments), "CONFIRM")
+		n, err := updateExposureSettlementStatuses(ctx, pool, updateStatusesParams{
+			IDs: req.SettlementIDs, Status: constants.StatusApproved, Actor: actor, UserID: req.UserID,
+			Comments: strings.TrimSpace(req.Comments), ActionType: "CONFIRM",
+		})
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to approve settlements")
 			return
@@ -1099,11 +1110,14 @@ func RejectExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.SettlementIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "settlement_ids is required")
+			respondWithError(w, http.StatusBadRequest, errSettlementIDsRequired)
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
-		n, err := updateExposureSettlementStatuses(ctx, pool, req.SettlementIDs, constants.StatusRejected, actor, req.UserID, strings.TrimSpace(req.Comments), "REJECT")
+		n, err := updateExposureSettlementStatuses(ctx, pool, updateStatusesParams{
+			IDs: req.SettlementIDs, Status: constants.StatusRejected, Actor: actor, UserID: req.UserID,
+			Comments: strings.TrimSpace(req.Comments), ActionType: "REJECT",
+		})
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to reject settlements")
 			return
@@ -1125,7 +1139,7 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.SettlementIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "settlement_ids is required")
+			respondWithError(w, http.StatusBadRequest, errSettlementIDsRequired)
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
@@ -1153,7 +1167,10 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				triggerMatrices[id] = tID
 			}
 		}
-		n, err := updateExposureSettlementStatuses(ctx, pool, req.SettlementIDs, constants.StatusPendingDeleteApproval, actor, req.UserID, strings.TrimSpace(req.Comments), "DELETE")
+		n, err := updateExposureSettlementStatuses(ctx, pool, updateStatusesParams{
+			IDs: req.SettlementIDs, Status: constants.StatusPendingDeleteApproval, Actor: actor, UserID: req.UserID,
+			Comments: strings.TrimSpace(req.Comments), ActionType: "DELETE",
+		})
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to delete settlements")
 			return

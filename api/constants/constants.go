@@ -182,6 +182,7 @@ const (
 	ErrRowError            = "Row error: "
 	ErrRowsScanFailed      = "rows scan failed: "
 	ErrUnsupportedProvider = "unsupported provider"
+	ErrFailedToCreateAudit = "failed to create audit: "
 )
 
 // SQL formatting patterns
@@ -423,6 +424,7 @@ const (
 	QuerryCurrency                        = "(a.currency IS NULL OR a.currency = ANY($%d))"
 	QuerryEntityNameLower                 = " AND lower(trim(c.entity_name)) = ANY($%d)"
 	QuerryBankNameLower                   = " AND lower(trim(c.bank_name)) = ANY($%d)"
+	QuerryAuditBankStatement              = "public.auditactionbankstatement"
 	QuerryAuditBookingRequest             = "investment.fd_audit_booking_request"
 	QuerryAuditInterestReceipt            = "investment.fd_interest_receipt_audit"
 	QuerryBookingRequest                  = "investment.fd_booking_request"

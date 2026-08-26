@@ -94,6 +94,8 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 	return nil
 }
 
+const errFailedAfterAttemptsFmt = "failed after %d attempts: %v"
+
 // RetryWithBackoff executes a function with exponential backoff retry logic
 func RetryWithBackoff(maxRetries int, initialDelay time.Duration, fn func() error) error {
 	var lastErr, lastCause error
@@ -113,17 +115,17 @@ func RetryWithBackoff(maxRetries int, initialDelay time.Duration, fn func() erro
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("Attempt %d failed: %v", attempt+1, lastErr))
 		if strings.Contains(lastErr.Error(), "circuit breaker is open") {
 			if lastCause != nil {
-				return fmt.Errorf("failed after %d attempts: %v", attempt+1, lastCause)
+				return fmt.Errorf(errFailedAfterAttemptsFmt, attempt+1, lastCause)
 			}
-			return fmt.Errorf("failed after %d attempts: %v", attempt+1, lastErr)
+			return fmt.Errorf(errFailedAfterAttemptsFmt, attempt+1, lastErr)
 		}
 		lastCause = lastErr
 	}
 
 	if lastCause != nil {
-		return fmt.Errorf("failed after %d attempts: %v", maxRetries+1, lastCause)
+		return fmt.Errorf(errFailedAfterAttemptsFmt, maxRetries+1, lastCause)
 	}
-	return fmt.Errorf("failed after %d attempts: %v", maxRetries+1, lastErr)
+	return fmt.Errorf(errFailedAfterAttemptsFmt, maxRetries+1, lastErr)
 }
 
 // NewDefaultConfig creates a new Config with default values from config package

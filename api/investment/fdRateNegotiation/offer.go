@@ -15,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const errOfferIDRequired = "offer_id is required"
+
 type offerPayload struct {
 	UserID              string   `json:"user_id"`
 	OfferID             string   `json:"offer_id,omitempty"`
@@ -85,7 +87,19 @@ func yieldArg(v *float64) interface{} {
 	return *v
 }
 
-func insertOfferCreateAudit(ctx context.Context, tx pgx.Tx, offerID, rateRequestID, userEmail, clientIP string, req offerPayload, source, status string) error {
+// offerCreateAuditParams bundles the fields needed to insert a create-audit
+// row for a new bank rate offer.
+type offerCreateAuditParams struct {
+	OfferID       string
+	RateRequestID string
+	UserEmail     string
+	ClientIP      string
+	Req           offerPayload
+	Source        string
+	Status        string
+}
+
+func insertOfferCreateAudit(ctx context.Context, tx pgx.Tx, p offerCreateAuditParams) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO investment.fd_rate_offer_audit (
 			offer_id, rate_request_id, action_type, processing_status,
@@ -98,10 +112,10 @@ func insertOfferCreateAudit(ctx context.Context, tx pgx.Tx, offerID, rateRequest
 			$5, $6, $7::date,
 			NULLIF($8,''), $9, $10, $11
 		)`,
-		offerID, rateRequestID,
-		api.SystemIfBlank(userEmail), api.SystemIfBlank(clientIP),
-		strings.TrimSpace(req.BankName), req.OfferedInterestRate, strings.TrimSpace(req.ValidTillDate),
-		req.ConditionsRemarks, source, status, yieldArg(req.EffectiveYield),
+		p.OfferID, p.RateRequestID,
+		api.SystemIfBlank(p.UserEmail), api.SystemIfBlank(p.ClientIP),
+		strings.TrimSpace(p.Req.BankName), p.Req.OfferedInterestRate, strings.TrimSpace(p.Req.ValidTillDate),
+		p.Req.ConditionsRemarks, p.Source, p.Status, yieldArg(p.Req.EffectiveYield),
 	)
 	return err
 }
@@ -205,7 +219,10 @@ func CreateOffer(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err = insertOfferCreateAudit(ctx, tx, id, req.RateRequestID, userEmail, api.ClientIPFromContext(ctx), req, source, status); err != nil {
+		if err = insertOfferCreateAudit(ctx, tx, offerCreateAuditParams{
+			OfferID: id, RateRequestID: req.RateRequestID, UserEmail: userEmail, ClientIP: api.ClientIPFromContext(ctx),
+			Req: req, Source: source, Status: status,
+		}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed")
 			return
 		}
@@ -243,7 +260,7 @@ func UpdateOffer(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(req.OfferID) == "" && strings.TrimSpace(req.OfferReferenceID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "offer_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, errOfferIDRequired)
 			return
 		}
 		if msg := validateOffer(req); msg != "" {
@@ -643,7 +660,7 @@ func decideOffers(pgxPool *pgxpool.Pool, approve bool) http.HandlerFunc {
 			ids = append(ids, req.OfferID)
 		}
 		if len(ids) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "offer_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, errOfferIDRequired)
 			return
 		}
 		userEmail := api.GetUserEmailFromCtx(r.Context())
@@ -768,7 +785,7 @@ func DeleteOffers(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ids = append(ids, req.OfferID)
 		}
 		if len(ids) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "offer_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, errOfferIDRequired)
 			return
 		}
 		userEmail := api.GetUserEmailFromCtx(r.Context())

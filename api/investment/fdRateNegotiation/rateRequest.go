@@ -15,6 +15,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	dateLayoutISO            = "2006-01-02"
+	errRateRequestIDRequired = "rate_request_id is required"
+)
+
 type rateRequestPayload struct {
 	UserID               string   `json:"user_id"`
 	RateRequestID        string   `json:"rate_request_id,omitempty"`
@@ -82,15 +87,15 @@ func computeMaturityDate(start string, tenureType string, tenureValue int) strin
 	if start == "" || tenureValue <= 0 {
 		return ""
 	}
-	t, err := time.Parse("2006-01-02", start)
+	t, err := time.Parse(dateLayoutISO, start)
 	if err != nil {
 		return ""
 	}
 	switch normalizeTenureType(tenureType) {
 	case "DAYS":
-		return t.AddDate(0, 0, tenureValue).Format("2006-01-02")
+		return t.AddDate(0, 0, tenureValue).Format(dateLayoutISO)
 	case "MONTHS":
-		return t.AddDate(0, tenureValue, 0).Format("2006-01-02")
+		return t.AddDate(0, tenureValue, 0).Format(dateLayoutISO)
 	default:
 		return ""
 	}
@@ -113,7 +118,7 @@ func validateRateRequest(req rateRequestPayload, requireBanks bool) string {
 	if strings.TrimSpace(req.ExpectedStartDate) == "" {
 		return "expected_start_date is required"
 	}
-	start, err := time.Parse("2006-01-02", req.ExpectedStartDate)
+	start, err := time.Parse(dateLayoutISO, req.ExpectedStartDate)
 	if err != nil {
 		return "expected_start_date must be YYYY-MM-DD"
 	}
@@ -364,7 +369,7 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(req.RateRequestID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "rate_request_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, errRateRequestIDRequired)
 			return
 		}
 
@@ -567,8 +572,8 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		fireRateNegotiationNotification(pgxPool, req.RateRequestID, userEmail, "EDIT")
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rate_request_id": req.RateRequestID,
-			"request_status":  oldStatus,
+			"rate_request_id":   req.RateRequestID,
+			"request_status":    oldStatus,
 			"processing_status": newStatus,
 		})
 	}
@@ -816,7 +821,7 @@ func GetRateRequestDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RateRequestID string `json:"rate_request_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.RateRequestID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "rate_request_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, errRateRequestIDRequired)
 			return
 		}
 		ctx := r.Context()
@@ -838,7 +843,7 @@ func GetRateRequestAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RateRequestID string `json:"rate_request_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.RateRequestID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "rate_request_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, errRateRequestIDRequired)
 			return
 		}
 		ctx := r.Context()

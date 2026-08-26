@@ -143,7 +143,7 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1,$2,'CREATE',$3,$4,$5,now(),$6)`,
 			utilizationID, req.LimitID, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
 		); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToCreateAudit+err.Error())
 			return
 		}
 
@@ -152,7 +152,10 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		submitLimitUtilizationForApproval(pgxPool, utilizationID, req.LimitID, req.UserID, requestedBy, "LIMIT_UTILIZATION_CREATE", req.UtilizedAmount, triggerMatrixID)
+		submitLimitUtilizationForApproval(pgxPool, submitLimitUtilizationParams{
+			UtilID: utilizationID, LimitID: req.LimitID, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+			TxType: "LIMIT_UTILIZATION_CREATE", Amount: req.UtilizedAmount, MatrixID: triggerMatrixID,
+		})
 
 		dmsevent.Fire(pgxPool, "CASH", "LIMIT_UTILIZATION", "POST_CREATE", []string{utilizationID}, requestedBy)
 
@@ -320,7 +323,7 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			); err != nil {
 				tx.Rollback(ctx)
 				result["success"] = false
-				result["error"] = "failed to create audit: " + err.Error()
+				result["error"] = constants.ErrFailedToCreateAudit + err.Error()
 				results = append(results, result)
 				continue
 			}
@@ -332,7 +335,10 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			submitLimitUtilizationForApproval(pgxPool, utilizationID, util.LimitID, req.UserID, requestedBy, "LIMIT_UTILIZATION_CREATE", util.UtilizedAmount, tID)
+			submitLimitUtilizationForApproval(pgxPool, submitLimitUtilizationParams{
+				UtilID: utilizationID, LimitID: util.LimitID, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+				TxType: "LIMIT_UTILIZATION_CREATE", Amount: util.UtilizedAmount, MatrixID: tID,
+			})
 
 			result["success"] = true
 			result["utilization_id"] = utilizationID
@@ -508,7 +514,7 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", req.UtilizationID, requestedBy); err != nil {
-			api.LogError("[LimitUtilization] CancelPendingInstances failed for %s: %v", map[string]interface{}{"utilization_id": req.UtilizationID, "error": err.Error()})
+			api.LogError("[LimitUtilization] CancelPendingInstances failed for %s: %v", req.UtilizationID, err.Error())
 		}
 
 		setClause := strings.Join(oldSets, ", ")
@@ -543,7 +549,7 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1,$2,'EDIT',$3,$4,$5,now(),$6)`,
 			req.UtilizationID, limitForAudit, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
 		); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToCreateAudit+err.Error())
 			return
 		}
 
@@ -552,7 +558,10 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		submitLimitUtilizationForApproval(pgxPool, req.UtilizationID, limitForAudit, req.UserID, requestedBy, "LIMIT_UTILIZATION_EDIT", curUtilizedAmount, triggerMatrixID)
+		submitLimitUtilizationForApproval(pgxPool, submitLimitUtilizationParams{
+			UtilID: req.UtilizationID, LimitID: limitForAudit, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+			TxType: "LIMIT_UTILIZATION_EDIT", Amount: curUtilizedAmount, MatrixID: triggerMatrixID,
+		})
 
 		dmsevent.Fire(pgxPool, "CASH", "LIMIT_UTILIZATION", "POST_EDIT", []string{req.UtilizationID}, requestedBy)
 
@@ -641,7 +650,7 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", utilizationID, requestedBy); err != nil {
-				api.LogError("[LimitUtilization] CancelPendingInstances failed for delete on %s: %v", map[string]interface{}{"utilization_id": utilizationID, "error": err.Error()})
+				api.LogError("[LimitUtilization] CancelPendingInstances failed for delete on %s: %v", utilizationID, err.Error())
 			}
 
 			// Get limit_id and utilized_amount
@@ -665,7 +674,7 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			); err != nil {
 				tx.Rollback(ctx)
 				result["success"] = false
-				result["error"] = "failed to create audit: " + err.Error()
+				result["error"] = constants.ErrFailedToCreateAudit + err.Error()
 				results = append(results, result)
 				continue
 			}
@@ -677,7 +686,10 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			submitLimitUtilizationForApproval(pgxPool, utilizationID, limitID, req.UserID, requestedBy, "LIMIT_UTILIZATION_DELETE", utilizedAmount, tID)
+			submitLimitUtilizationForApproval(pgxPool, submitLimitUtilizationParams{
+				UtilID: utilizationID, LimitID: limitID, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+				TxType: "LIMIT_UTILIZATION_DELETE", Amount: utilizedAmount, MatrixID: tID,
+			})
 
 			result["success"] = true
 			results = append(results, result)
@@ -1348,7 +1360,7 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Action: approvalengine.ActionApproved, Comment: req.Comment,
 			})
 			if actionErr != nil {
-				api.LogError("[LimitUtilization] ActOnPendingOrDiagnose approve failed for %s: %v", map[string]interface{}{"utilization_id": utilID, "error": actionErr.Error()})
+				api.LogError("[LimitUtilization] ActOnPendingOrDiagnose approve failed for %s: %v", utilID, actionErr.Error())
 				blocked[utilID] = actionErr.Error()
 				continue
 			}
@@ -1547,7 +1559,7 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Action: approvalengine.ActionRejected, Comment: req.Comment,
 			})
 			if actionErr != nil {
-				api.LogError("[LimitUtilization] ActOnPendingOrDiagnose reject failed for %s: %v", map[string]interface{}{"utilization_id": utilID, "error": actionErr.Error()})
+				api.LogError("[LimitUtilization] ActOnPendingOrDiagnose reject failed for %s: %v", utilID, actionErr.Error())
 				blocked[utilID] = actionErr.Error()
 				continue
 			}
@@ -2130,33 +2142,45 @@ func DownloadSelectedUtilizationUploadFiles(pgxPool *pgxpool.Pool) http.HandlerF
 	}
 }
 
-func submitLimitUtilizationForApproval(pool *pgxpool.Pool, utilID, limitID, submittedByUserID, actorEmail, txType string, amount float64, matrixID string) {
+// submitLimitUtilizationParams bundles the fields needed to submit a
+// limit-utilization record to the approval engine.
+type submitLimitUtilizationParams struct {
+	UtilID            string
+	LimitID           string
+	SubmittedByUserID string
+	ActorEmail        string
+	TxType            string
+	Amount            float64
+	MatrixID          string
+}
+
+func submitLimitUtilizationForApproval(pool *pgxpool.Pool, p submitLimitUtilizationParams) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	var entityName string
-	err := pool.QueryRow(ctx, `SELECT entity_name FROM cimplrcorpsaas.bank_limit WHERE limit_id = $1`, limitID).Scan(&entityName)
+	err := pool.QueryRow(ctx, `SELECT entity_name FROM cimplrcorpsaas.bank_limit WHERE limit_id = $1`, p.LimitID).Scan(&entityName)
 	if err != nil {
-		api.LogError("[LimitUtilization] failed to fetch entity_name for limit %s: %v", map[string]interface{}{"limit_id": limitID, "error": err.Error()})
+		api.LogError("[LimitUtilization] failed to fetch entity_name for limit %s: %v", p.LimitID, err.Error())
 		return
 	}
 
 	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
 		ModuleCode:          "CASH",
 		EntityCode:          entityName,
-		TransactionType:     txType,
-		RecordID:            utilID,
+		TransactionType:     p.TxType,
+		RecordID:            p.UtilID,
 		RecordTable:         "cimplrcorpsaas.bank_limit_utilization",
 		AuditTable:          "cimplrcorpsaas.auditactionbanklimitutilization",
 		AuditIDColumn:       "utilization_id",
-		ActionType:          strings.TrimPrefix(txType, "LIMIT_UTILIZATION_"),
-		Amount:              amount,
-		SubmittedBy:         submittedByUserID,
-		SubmittedByEmail:    actorEmail,
-		MatrixID:            matrixID,
+		ActionType:          strings.TrimPrefix(p.TxType, "LIMIT_UTILIZATION_"),
+		Amount:              p.Amount,
+		SubmittedBy:         p.SubmittedByUserID,
+		SubmittedByEmail:    p.ActorEmail,
+		MatrixID:            p.MatrixID,
 		RequirePinnedMatrix: true,
 		AutoApplyIfUnpinned: false,
 	}); err != nil {
-		api.LogError("[LimitUtilization] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"utilization_id": utilID, "tx_type": txType, "error": err.Error()})
+		api.LogError("[LimitUtilization] approvalengine.CreateInstance failed for %s (%s): %v", p.UtilID, p.TxType, err.Error())
 	}
 }

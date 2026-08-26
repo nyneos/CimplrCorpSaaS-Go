@@ -207,7 +207,7 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1,'CREATE',$2,$3,$4,now(),$5)`,
 			limitID, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
 		); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToCreateAudit+err.Error())
 			return
 		}
 
@@ -216,7 +216,10 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		submitBankLimitForApproval(pgxPool, limitID, req.EntityName, req.UserID, requestedBy, "BANK_LIMIT_CREATE", req.SanctionedAmount, triggerMatrixID)
+		submitBankLimitForApproval(pgxPool, submitBankLimitParams{
+			LimitID: limitID, EntityName: req.EntityName, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+			TxType: "BANK_LIMIT_CREATE", Amount: req.SanctionedAmount, MatrixID: triggerMatrixID,
+		})
 
 		dmsevent.Fire(pgxPool, "CASH", "BANK_LIMIT", "POST_CREATE", []string{limitID}, requestedBy)
 
@@ -497,7 +500,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				); err != nil {
 					tx.Rollback(ctx)
 					result["success"] = false
-					result["error"] = "failed to create audit: " + err.Error()
+					result["error"] = constants.ErrFailedToCreateAudit + err.Error()
 					results = append(results, result)
 					continue
 				}
@@ -509,7 +512,10 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 
-				submitBankLimitForApproval(pgxPool, limitID, lim.EntityName, req.UserID, requestedBy, "BANK_LIMIT_CREATE", lim.SanctionedAmount, tID)
+				submitBankLimitForApproval(pgxPool, submitBankLimitParams{
+					LimitID: limitID, EntityName: lim.EntityName, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+					TxType: "BANK_LIMIT_CREATE", Amount: lim.SanctionedAmount, MatrixID: tID,
+				})
 
 				result["success"] = true
 				result["limit_id"] = limitID
@@ -777,13 +783,13 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1,'EDIT',$2,$3,$4,now(),$5)`,
 			req.LimitID, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
 		); err != nil {
-			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToCreateAudit+err.Error())
 			return
 		}
 
 		// Cancel any pending approval instances for this record
 		if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", req.LimitID, requestedBy); err != nil {
-			api.LogError("[BankLimit] Failed to cancel pending instances for %s: %v", map[string]interface{}{"limit_id": req.LimitID, "error": err.Error()})
+			api.LogError("[BankLimit] Failed to cancel pending instances for %s: %v", req.LimitID, err.Error())
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -801,7 +807,10 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		submitBankLimitForApproval(pgxPool, req.LimitID, stringOrEmpty(curEntity), req.UserID, requestedBy, "BANK_LIMIT_EDIT", amt, triggerMatrixID)
+		submitBankLimitForApproval(pgxPool, submitBankLimitParams{
+			LimitID: req.LimitID, EntityName: stringOrEmpty(curEntity), SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+			TxType: "BANK_LIMIT_EDIT", Amount: amt, MatrixID: triggerMatrixID,
+		})
 
 		dmsevent.Fire(pgxPool, "CASH", "BANK_LIMIT", "POST_EDIT", []string{req.LimitID}, requestedBy)
 
@@ -892,7 +901,7 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Cancel any pending approval instances for this record
 			if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", limitID, requestedBy); err != nil {
-				api.LogError("[BankLimit] Failed to cancel pending instances for %s: %v", map[string]interface{}{"limit_id": limitID, "error": err.Error()})
+				api.LogError("[BankLimit] Failed to cancel pending instances for %s: %v", limitID, err.Error())
 			}
 
 			auditStatus := approvalengine.AuditStatus(tID, "PENDING_DELETE_APPROVAL")
@@ -904,7 +913,7 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			); err != nil {
 				tx.Rollback(ctx)
 				result["success"] = false
-				result["error"] = "failed to create audit: " + err.Error()
+				result["error"] = constants.ErrFailedToCreateAudit + err.Error()
 				results = append(results, result)
 				continue
 			}
@@ -918,7 +927,10 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// We need the amount for the approval instance. It comes from policyRow
 			amt := policyRow.SanctionedAmount
-			submitBankLimitForApproval(pgxPool, limitID, policyRow.EntityName, req.UserID, requestedBy, "BANK_LIMIT_DELETE", amt, tID)
+			submitBankLimitForApproval(pgxPool, submitBankLimitParams{
+				LimitID: limitID, EntityName: policyRow.EntityName, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+				TxType: "BANK_LIMIT_DELETE", Amount: amt, MatrixID: tID,
+			})
 
 			result["success"] = true
 			results = append(results, result)
@@ -1288,7 +1300,7 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Action: approvalengine.ActionApproved, Comment: req.Comment,
 			})
 			if actionErr != nil {
-				api.LogError("[BankLimit] ActOnPendingOrDiagnose approve failed for %s: %v", map[string]interface{}{"limit_id": limitID, "error": actionErr.Error()})
+				api.LogError("[BankLimit] ActOnPendingOrDiagnose approve failed for %s: %v", limitID, actionErr.Error())
 				blocked[limitID] = actionErr.Error()
 				continue
 			}
@@ -1489,7 +1501,7 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Action: approvalengine.ActionRejected, Comment: req.Comment,
 			})
 			if actionErr != nil {
-				api.LogError("[BankLimit] ActOnPendingOrDiagnose reject failed for %s: %v", map[string]interface{}{"limit_id": limitID, "error": actionErr.Error()})
+				api.LogError("[BankLimit] ActOnPendingOrDiagnose reject failed for %s: %v", limitID, actionErr.Error())
 				blocked[limitID] = actionErr.Error()
 				continue
 			}
@@ -1587,25 +1599,37 @@ func auditTimeOrEmpty(t *time.Time) string {
 	return api.FormatAuditTimestampIST(*t)
 }
 
-func submitBankLimitForApproval(pool *pgxpool.Pool, limitID, entityName, submittedByUserID, actorEmail, txType string, amount float64, matrixID string) {
+// submitBankLimitParams bundles the fields needed to submit a bank-limit
+// record to the approval engine.
+type submitBankLimitParams struct {
+	LimitID           string
+	EntityName        string
+	SubmittedByUserID string
+	ActorEmail        string
+	TxType            string
+	Amount            float64
+	MatrixID          string
+}
+
+func submitBankLimitForApproval(pool *pgxpool.Pool, p submitBankLimitParams) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
 		ModuleCode:          "CASH",
-		EntityCode:          entityName, // limit has EntityName directly
-		TransactionType:     txType,
-		RecordID:            limitID,
+		EntityCode:          p.EntityName, // limit has EntityName directly
+		TransactionType:     p.TxType,
+		RecordID:            p.LimitID,
 		RecordTable:         "cimplrcorpsaas.bank_limit",
 		AuditTable:          "cimplrcorpsaas.auditactionbanklimit",
 		AuditIDColumn:       "limit_id",
-		ActionType:          strings.TrimPrefix(txType, "BANK_LIMIT_"),
-		Amount:              amount,
-		SubmittedBy:         submittedByUserID,
-		SubmittedByEmail:    actorEmail,
-		MatrixID:            matrixID,
+		ActionType:          strings.TrimPrefix(p.TxType, "BANK_LIMIT_"),
+		Amount:              p.Amount,
+		SubmittedBy:         p.SubmittedByUserID,
+		SubmittedByEmail:    p.ActorEmail,
+		MatrixID:            p.MatrixID,
 		RequirePinnedMatrix: true,
 		AutoApplyIfUnpinned: false,
 	}); err != nil {
-		api.LogError("[BankLimit] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"limit_id": limitID, "tx_type": txType, "error": err.Error()})
+		api.LogError("[BankLimit] approvalengine.CreateInstance failed for %s (%s): %v", p.LimitID, p.TxType, err.Error())
 	}
 }

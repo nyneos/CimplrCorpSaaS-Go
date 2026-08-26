@@ -160,15 +160,25 @@ type inboxApprovalRequest struct {
 	MatrixID   string
 }
 
-func inboxEnforceMatrix(ctx context.Context, r *http.Request, pool *pgxpool.Pool, event, handler, path, entity, actor string) (bool, string, string) {
+// inboxEnforceMatrixParams bundles the fields needed to run the pre-action
+// policy/matrix enforcement check for an inbox operation.
+type inboxEnforceMatrixParams struct {
+	Event   string
+	Handler string
+	Path    string
+	Entity  string
+	Actor   string
+}
+
+func inboxEnforceMatrix(ctx context.Context, r *http.Request, pool *pgxpool.Pool, p inboxEnforceMatrixParams) (bool, string, string) {
 	return runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
-		EventCode:        event,
+		EventCode:        p.Event,
 		ModuleCode:       common.ModuleEmail,
 		SubModule:        "EMAIL_INBOX",
-		EntityCode:       entity,
-		ActorUserID:      actor,
-		HandlerName:      handler,
-		APIPath:          path,
+		EntityCode:       p.Entity,
+		ActorUserID:      p.Actor,
+		HandlerName:      p.Handler,
+		APIPath:          p.Path,
 		RequireVariables: false,
 	})
 }
@@ -678,8 +688,10 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			if strings.TrimSpace(item.EntityID) != "" {
 				entityID = strings.TrimSpace(item.EntityID)
 			}
-			okPolicy, pmsg, matrixID := inboxEnforceMatrix(r.Context(), r, pool, common.TriggerPreCreate,
-				"HandleWorkflowInboxCreate", "/email/inbox/workflow/create", entityID, userEmail)
+			okPolicy, pmsg, matrixID := inboxEnforceMatrix(r.Context(), r, pool, inboxEnforceMatrixParams{
+				Event: common.TriggerPreCreate, Handler: "HandleWorkflowInboxCreate",
+				Path: "/email/inbox/workflow/create", Entity: entityID, Actor: userEmail,
+			})
 			if !okPolicy {
 				errors = append(errors, addr+": "+pmsg)
 				continue
@@ -874,8 +886,10 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			okPolicy, pmsg, matrixID := inboxEnforceMatrix(r.Context(), r, pool, common.TriggerPreEdit,
-				"HandleWorkflowInboxUpdate", "/email/inbox/workflow/update", inboxEntityID, userEmail)
+			okPolicy, pmsg, matrixID := inboxEnforceMatrix(r.Context(), r, pool, inboxEnforceMatrixParams{
+				Event: common.TriggerPreEdit, Handler: "HandleWorkflowInboxUpdate",
+				Path: "/email/inbox/workflow/update", Entity: inboxEntityID, Actor: userEmail,
+			})
 			if !okPolicy {
 				errors = append(errors, inboxID+": "+pmsg)
 				continue
@@ -962,8 +976,10 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			// APPROVED (live) mailboxes cannot be deleted at all.
 			switch statusNorm {
 			case constants.StatusPendingApproval, constants.StatusPendingEditApproval, constants.StatusRejected:
-				okPolicy, pmsg, matrixID := inboxEnforceMatrix(r.Context(), r, pool, common.TriggerPreDelete,
-					"HandleWorkflowInboxDeleteRequest", "/email/inbox/workflow/delete", inboxEntityID, userEmail)
+				okPolicy, pmsg, matrixID := inboxEnforceMatrix(r.Context(), r, pool, inboxEnforceMatrixParams{
+					Event: common.TriggerPreDelete, Handler: "HandleWorkflowInboxDeleteRequest",
+					Path: "/email/inbox/workflow/delete", Entity: inboxEntityID, Actor: userEmail,
+				})
 				if !okPolicy {
 					errors = append(errors, inboxID+": "+pmsg)
 					continue

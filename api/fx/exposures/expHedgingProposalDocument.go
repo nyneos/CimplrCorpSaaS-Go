@@ -532,16 +532,19 @@ func GetHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func updateHedgingProposalDocumentStatuses(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	ids []string,
-	status string,
-	actor string,
-	userID string,
-	comments string,
-	actionType string,
-) (int, error) {
+// updateStatusesParams bundles the fields needed to bulk-update hedging
+// proposal document statuses (approve/reject/delete flows).
+type updateStatusesParams struct {
+	IDs        []string
+	Status     string
+	Actor      string
+	UserID     string
+	Comments   string
+	ActionType string
+}
+
+func updateHedgingProposalDocumentStatuses(ctx context.Context, pool *pgxpool.Pool, p updateStatusesParams) (int, error) {
+	ids, status, actor, userID, comments, actionType := p.IDs, p.Status, p.Actor, p.UserID, p.Comments, p.ActionType
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -645,7 +648,10 @@ func ApproveHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
-		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, req.ProposalIDs, constants.StatusApproved, actor, req.UserID, strings.TrimSpace(req.Comments), "CONFIRM")
+		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, updateStatusesParams{
+			IDs: req.ProposalIDs, Status: constants.StatusApproved, Actor: actor, UserID: req.UserID,
+			Comments: strings.TrimSpace(req.Comments), ActionType: "CONFIRM",
+		})
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to approve hedging proposals")
 			return
@@ -672,7 +678,10 @@ func RejectHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
-		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, req.ProposalIDs, constants.StatusRejected, actor, req.UserID, strings.TrimSpace(req.Comments), "REJECT")
+		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, updateStatusesParams{
+			IDs: req.ProposalIDs, Status: constants.StatusRejected, Actor: actor, UserID: req.UserID,
+			Comments: strings.TrimSpace(req.Comments), ActionType: "REJECT",
+		})
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to reject hedging proposals")
 			return
@@ -718,7 +727,10 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				triggerMatrices[id] = tID
 			}
 		}
-		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, req.ProposalIDs, constants.StatusPendingDeleteApproval, actor, req.UserID, strings.TrimSpace(req.Comments), "DELETE")
+		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, updateStatusesParams{
+			IDs: req.ProposalIDs, Status: constants.StatusPendingDeleteApproval, Actor: actor, UserID: req.UserID,
+			Comments: strings.TrimSpace(req.Comments), ActionType: "DELETE",
+		})
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to delete hedging proposals")
 			return

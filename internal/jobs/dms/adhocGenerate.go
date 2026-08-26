@@ -111,12 +111,29 @@ func PreviewMergedOrDraft(ctx context.Context, pool *pgxpool.Pool, in PreviewInp
 	if mergeFields == nil {
 		mergeFields = map[string]string{}
 	}
-	return PreviewMergedHTML(ctx, pool, html, mergeFields, in.Row, in.Overrides, format, subModuleCode, design)
+	return PreviewMergedHTML(ctx, pool, PreviewMergedHTMLParams{
+		HTML: html, MergeFields: mergeFields, Row: in.Row, Overrides: in.Overrides,
+		Format: format, SubModuleCode: subModuleCode, Design: design,
+	})
+}
+
+// PreviewMergedHTMLParams bundles the fields needed to preview a merged
+// document (no DB/S3 writes).
+type PreviewMergedHTMLParams struct {
+	HTML          string
+	MergeFields   map[string]string
+	Row           map[string]any
+	Overrides     map[string]string
+	Format        string
+	SubModuleCode string
+	Design        pageDesignJSON
 }
 
 // PreviewMergedHTML substitutes merge fields (+ optional txn tables) and returns HTML.
 // Does not write to DB/S3. row may be nil (uses overrides only / sample placeholders).
-func PreviewMergedHTML(ctx context.Context, pool *pgxpool.Pool, html string, mergeFields map[string]string, row map[string]any, overrides map[string]string, format, subModuleCode string, design pageDesignJSON) (string, error) {
+func PreviewMergedHTML(ctx context.Context, pool *pgxpool.Pool, p PreviewMergedHTMLParams) (string, error) {
+	html, mergeFields, row, overrides, format, subModuleCode, design :=
+		p.HTML, p.MergeFields, p.Row, p.Overrides, p.Format, p.SubModuleCode, p.Design
 	fieldAliases := loadFieldAliases(ctx, pool, subModuleCode)
 	values := buildMergeValues(html, mergeFields, row, overrides, fieldAliases)
 	out := substituteMergeFields(html, values)
@@ -147,7 +164,7 @@ func PreviewMergedHTML(ctx context.Context, pool *pgxpool.Pool, html string, mer
 }
 
 func previewHTMLDocument(ctx context.Context, body string, design pageDesignJSON) string {
-	file, err := renderMergedOutputViaDocSvc(ctx, "HTML", body, nil, nil, nil, nil, "DOCUMENT", design)
+	file, err := renderMergedOutputViaDocSvc(ctx, renderRequest{Format: "HTML", MergedHTML: body, Kind: "DOCUMENT", PageDesign: design})
 	if err != nil || len(file.Bytes) == 0 {
 		if err != nil {
 			api.LogInfo("[DMS] preview render via document-service failed, using local wrapper: %v", err)
@@ -251,11 +268,11 @@ func RunAdhocGeneration(ctx context.Context, pool *pgxpool.Pool, req AdhocReques
 			row = map[string]any{"source_id": sid}
 		}
 		if err := generateAdhocAttachment(ctx, pool, adhocAttachmentParams{
-			RunID:      runID,
-			TemplateID: tplID,
-			Format:     format,
-			Row:        row,
-			Overrides:  req.MergeOverrides,
+			RunID:         runID,
+			TemplateID:    tplID,
+			Format:        format,
+			Row:           row,
+			Overrides:     req.MergeOverrides,
 			SourceKey:     sourceKey,
 			SubModuleCode: req.SubModuleCode,
 			IDField:       idField,
@@ -409,11 +426,11 @@ func insertAdhocDispatchRequest(ctx context.Context, pool *pgxpool.Pool, runID s
 // source key / id field used to expand tables and charts), and where to store it.
 // Out accumulates the doc ids, filenames and first HTML preview across sources.
 type adhocAttachmentParams struct {
-	RunID      string
-	TemplateID string
-	Format     string
-	Row        map[string]any
-	Overrides  map[string]string
+	RunID         string
+	TemplateID    string
+	Format        string
+	Row           map[string]any
+	Overrides     map[string]string
 	SourceKey     string
 	SubModuleCode string
 	IDField       string
@@ -480,7 +497,11 @@ func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, p adhocAtt
 		resolveSheetRows(ctx, pool, tplVersionID, content, values),
 		genCtx.PoolRows,
 	)
-	file, err := renderAndStoreViaDocSvc(ctx, format, renderedHTML, values, content.SheetTokens, sheetRows, content.SheetCells, content.Kind, content.PageDesign)
+	file, err := renderAndStoreViaDocSvc(ctx, renderRequest{
+		Format: format, MergedHTML: renderedHTML, MergeValues: values,
+		SheetTokens: content.SheetTokens, SheetRows: sheetRows, SheetCells: content.SheetCells,
+		Kind: content.Kind, PageDesign: content.PageDesign,
+	})
 	if err != nil {
 		return fmt.Errorf("render %s: %w", format, err)
 	}

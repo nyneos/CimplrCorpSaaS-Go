@@ -16,6 +16,31 @@ type txTableConfig struct {
 	AuditIDColumn string
 }
 
+// Audit table names referenced more than once in txTypeRegistry below.
+const (
+	auditSweepInitiation      = "cimplrcorpsaas.auditactionsweepinitiation"
+	auditSweepConfiguration   = "cimplrcorpsaas.auditactionsweepconfiguration"
+	auditFundPlanGroups       = "public.auditaction_fund_plan_groups"
+	auditBankStatement        = "public.auditactionbankstatement"
+	auditCashflowProposal     = "cimplrcorpsaas.audit_action_cashflow_proposal"
+	auditBankBalances         = "public.auditactionbankbalances"
+	auditBankLimit            = "cimplrcorpsaas.auditactionbanklimit"
+	auditBankLimitUtilization = "cimplrcorpsaas.auditactionbanklimitutilization"
+	auditPayable              = "public.auditactionpayable"
+	auditReceivable           = "public.auditactionreceivable"
+	auditExposure             = "public.auditactionexposure"
+	auditExposureBucketing    = "public.auditactionexposurebucketing"
+	auditHedgeLink            = "public.auditactionhedgelink"
+	auditForwardBooking       = "public.auditactionforwardbooking"
+	auditHedgeProposalDoc     = "public.auditactionhedgingproposaldocument"
+	auditExposureSettlement   = "public.auditactionexposuresettlement"
+	auditMFProposal           = "investment.auditactionproposal"
+	auditMFInitiation         = "investment.auditactioninitiation"
+	auditMFConfirmation       = "investment.auditactioninvestmentconfirmation"
+	auditMFRedemption         = "investment.auditactionredemption"
+	auditMFRedemptionConfirm  = "investment.auditactionredemptionconfirmation"
+)
+
 // txTypeRegistry maps transaction_type strings (as passed to CreateInstance)
 // to their corresponding audit table and PK column. Add new entries here
 // whenever a new transaction type is introduced in any module.
@@ -77,87 +102,87 @@ var txTypeRegistry = map[string]txTableConfig{
 	"FD_TDS_REGISTER_RECONCILE": {AuditTable: constants.QuerryAuditTDSReceipt, AuditIDColumn: "tds_id"},
 
 	// ── Cash / Sweep Initiation ────────────────────────────────────────────
-	"SWEEP_INITIATION_CREATE": {AuditTable: "cimplrcorpsaas.auditactionsweepinitiation", AuditIDColumn: "initiation_id"},
-	"SWEEP_INITIATION_EDIT":   {AuditTable: "cimplrcorpsaas.auditactionsweepinitiation", AuditIDColumn: "initiation_id"},
-	"SWEEP_INITIATION_DELETE": {AuditTable: "cimplrcorpsaas.auditactionsweepinitiation", AuditIDColumn: "initiation_id"},
+	"SWEEP_INITIATION_CREATE": {AuditTable: auditSweepInitiation, AuditIDColumn: "initiation_id"},
+	"SWEEP_INITIATION_EDIT":   {AuditTable: auditSweepInitiation, AuditIDColumn: "initiation_id"},
+	"SWEEP_INITIATION_DELETE": {AuditTable: auditSweepInitiation, AuditIDColumn: "initiation_id"},
 
 	// ── Cash / Sweep Configuration ────────────────────────────────────────
-	"SWEEP_CONFIG_CREATE": {AuditTable: "cimplrcorpsaas.auditactionsweepconfiguration", AuditIDColumn: "sweep_id"},
-	"SWEEP_CONFIG_EDIT":   {AuditTable: "cimplrcorpsaas.auditactionsweepconfiguration", AuditIDColumn: "sweep_id"},
-	"SWEEP_CONFIG_DELETE": {AuditTable: "cimplrcorpsaas.auditactionsweepconfiguration", AuditIDColumn: "sweep_id"},
+	"SWEEP_CONFIG_CREATE": {AuditTable: auditSweepConfiguration, AuditIDColumn: "sweep_id"},
+	"SWEEP_CONFIG_EDIT":   {AuditTable: auditSweepConfiguration, AuditIDColumn: "sweep_id"},
+	"SWEEP_CONFIG_DELETE": {AuditTable: auditSweepConfiguration, AuditIDColumn: "sweep_id"},
 
 	// ── Cash / Payables & Receivables ─────────────────────────────────────
 	// (add specific types here as the cash module is wired up further)
 
 	// ── Cash / Fund Planning ──────────────────────────────────────────────
-	"FUND_PLANNING_CREATE": {AuditTable: "public.auditaction_fund_plan_groups", AuditIDColumn: "group_id"},
-	"FUND_PLANNING_EDIT":   {AuditTable: "public.auditaction_fund_plan_groups", AuditIDColumn: "group_id"},
-	"FUND_PLANNING_DELETE": {AuditTable: "public.auditaction_fund_plan_groups", AuditIDColumn: "group_id"},
+	"FUND_PLANNING_CREATE": {AuditTable: auditFundPlanGroups, AuditIDColumn: "group_id"},
+	"FUND_PLANNING_EDIT":   {AuditTable: auditFundPlanGroups, AuditIDColumn: "group_id"},
+	"FUND_PLANNING_DELETE": {AuditTable: auditFundPlanGroups, AuditIDColumn: "group_id"},
 
 	// ── Cash / Bank Statement ─────────────────────────────────────────────
-	"BANK_STATEMENT_CREATE": {AuditTable: "public.auditactionbankstatement", AuditIDColumn: "bankstatementid"},
-	"BANK_STATEMENT_EDIT":   {AuditTable: "public.auditactionbankstatement", AuditIDColumn: "bankstatementid"},
-	"BANK_STATEMENT_DELETE": {AuditTable: "public.auditactionbankstatement", AuditIDColumn: "bankstatementid"},
+	"BANK_STATEMENT_CREATE": {AuditTable: auditBankStatement, AuditIDColumn: "bankstatementid"},
+	"BANK_STATEMENT_EDIT":   {AuditTable: auditBankStatement, AuditIDColumn: "bankstatementid"},
+	"BANK_STATEMENT_DELETE": {AuditTable: auditBankStatement, AuditIDColumn: "bankstatementid"},
 
 	// ── Cash / Cash Flow Projection ───────────────────────────────────────
-	"CASH_FLOW_PROJECTION_CREATE": {AuditTable: "cimplrcorpsaas.audit_action_cashflow_proposal", AuditIDColumn: "proposal_id"},
-	"CASH_FLOW_PROJECTION_EDIT":   {AuditTable: "cimplrcorpsaas.audit_action_cashflow_proposal", AuditIDColumn: "proposal_id"},
-	"CASH_FLOW_PROJECTION_DELETE": {AuditTable: "cimplrcorpsaas.audit_action_cashflow_proposal", AuditIDColumn: "proposal_id"},
+	"CASH_FLOW_PROJECTION_CREATE": {AuditTable: auditCashflowProposal, AuditIDColumn: "proposal_id"},
+	"CASH_FLOW_PROJECTION_EDIT":   {AuditTable: auditCashflowProposal, AuditIDColumn: "proposal_id"},
+	"CASH_FLOW_PROJECTION_DELETE": {AuditTable: auditCashflowProposal, AuditIDColumn: "proposal_id"},
 
 	// ── Cash / Bank Balances ──────────────────────────────────────────────
-	"BANK_BALANCE_CREATE": {AuditTable: "public.auditactionbankbalances", AuditIDColumn: "balance_id"},
-	"BANK_BALANCE_EDIT":   {AuditTable: "public.auditactionbankbalances", AuditIDColumn: "balance_id"},
-	"BANK_BALANCE_DELETE": {AuditTable: "public.auditactionbankbalances", AuditIDColumn: "balance_id"},
+	"BANK_BALANCE_CREATE": {AuditTable: auditBankBalances, AuditIDColumn: "balance_id"},
+	"BANK_BALANCE_EDIT":   {AuditTable: auditBankBalances, AuditIDColumn: "balance_id"},
+	"BANK_BALANCE_DELETE": {AuditTable: auditBankBalances, AuditIDColumn: "balance_id"},
 
 	// ── Cash / Bank Limits ────────────────────────────────────────────────
-	"BANK_LIMIT_CREATE": {AuditTable: "cimplrcorpsaas.auditactionbanklimit", AuditIDColumn: "limit_id"},
-	"BANK_LIMIT_EDIT":   {AuditTable: "cimplrcorpsaas.auditactionbanklimit", AuditIDColumn: "limit_id"},
-	"BANK_LIMIT_DELETE": {AuditTable: "cimplrcorpsaas.auditactionbanklimit", AuditIDColumn: "limit_id"},
+	"BANK_LIMIT_CREATE": {AuditTable: auditBankLimit, AuditIDColumn: "limit_id"},
+	"BANK_LIMIT_EDIT":   {AuditTable: auditBankLimit, AuditIDColumn: "limit_id"},
+	"BANK_LIMIT_DELETE": {AuditTable: auditBankLimit, AuditIDColumn: "limit_id"},
 
 	// ── Cash / Limit Utilization ──────────────────────────────────────────
-	"LIMIT_UTILIZATION_CREATE": {AuditTable: "cimplrcorpsaas.auditactionbanklimitutilization", AuditIDColumn: "utilization_id"},
-	"LIMIT_UTILIZATION_EDIT":   {AuditTable: "cimplrcorpsaas.auditactionbanklimitutilization", AuditIDColumn: "utilization_id"},
-	"LIMIT_UTILIZATION_DELETE": {AuditTable: "cimplrcorpsaas.auditactionbanklimitutilization", AuditIDColumn: "utilization_id"},
+	"LIMIT_UTILIZATION_CREATE": {AuditTable: auditBankLimitUtilization, AuditIDColumn: "utilization_id"},
+	"LIMIT_UTILIZATION_EDIT":   {AuditTable: auditBankLimitUtilization, AuditIDColumn: "utilization_id"},
+	"LIMIT_UTILIZATION_DELETE": {AuditTable: auditBankLimitUtilization, AuditIDColumn: "utilization_id"},
 	// ── Cash / Payables & Receivables ─────────────────────────────────────
-	"PAYABLE_CREATE": {AuditTable: "public.auditactionpayable", AuditIDColumn: "payable_id"},
-	"PAYABLE_EDIT":   {AuditTable: "public.auditactionpayable", AuditIDColumn: "payable_id"},
-	"PAYABLE_DELETE": {AuditTable: "public.auditactionpayable", AuditIDColumn: "payable_id"},
+	"PAYABLE_CREATE": {AuditTable: auditPayable, AuditIDColumn: "payable_id"},
+	"PAYABLE_EDIT":   {AuditTable: auditPayable, AuditIDColumn: "payable_id"},
+	"PAYABLE_DELETE": {AuditTable: auditPayable, AuditIDColumn: "payable_id"},
 
-	"RECEIVABLE_CREATE": {AuditTable: "public.auditactionreceivable", AuditIDColumn: "receivable_id"},
-	"RECEIVABLE_EDIT":   {AuditTable: "public.auditactionreceivable", AuditIDColumn: "receivable_id"},
-	"RECEIVABLE_DELETE": {AuditTable: "public.auditactionreceivable", AuditIDColumn: "receivable_id"},
+	"RECEIVABLE_CREATE": {AuditTable: auditReceivable, AuditIDColumn: "receivable_id"},
+	"RECEIVABLE_EDIT":   {AuditTable: auditReceivable, AuditIDColumn: "receivable_id"},
+	"RECEIVABLE_DELETE": {AuditTable: auditReceivable, AuditIDColumn: "receivable_id"},
 
 	// ── FX ───────────────────────────────────────────────────────────────
-	"FX_EXPOSURE_CREATE": {AuditTable: "public.auditactionexposure", AuditIDColumn: "exposure_header_id"},
-	"FX_EXPOSURE_EDIT":   {AuditTable: "public.auditactionexposure", AuditIDColumn: "exposure_header_id"},
-	"FX_EXPOSURE_DELETE": {AuditTable: "public.auditactionexposure", AuditIDColumn: "exposure_header_id"},
+	"FX_EXPOSURE_CREATE": {AuditTable: auditExposure, AuditIDColumn: "exposure_header_id"},
+	"FX_EXPOSURE_EDIT":   {AuditTable: auditExposure, AuditIDColumn: "exposure_header_id"},
+	"FX_EXPOSURE_DELETE": {AuditTable: auditExposure, AuditIDColumn: "exposure_header_id"},
 
-	"FX_BUCKETING_CREATE": {AuditTable: "public.auditactionexposurebucketing", AuditIDColumn: "exposure_header_id"},
-	"FX_BUCKETING_EDIT":   {AuditTable: "public.auditactionexposurebucketing", AuditIDColumn: "exposure_header_id"},
-	"FX_BUCKETING_DELETE": {AuditTable: "public.auditactionexposurebucketing", AuditIDColumn: "exposure_header_id"},
+	"FX_BUCKETING_CREATE": {AuditTable: auditExposureBucketing, AuditIDColumn: "exposure_header_id"},
+	"FX_BUCKETING_EDIT":   {AuditTable: auditExposureBucketing, AuditIDColumn: "exposure_header_id"},
+	"FX_BUCKETING_DELETE": {AuditTable: auditExposureBucketing, AuditIDColumn: "exposure_header_id"},
 
-	"FX_LINKAGE_CREATE": {AuditTable: "public.auditactionhedgelink", AuditIDColumn: "exposure_header_id"},
-	"FX_LINKAGE_EDIT":   {AuditTable: "public.auditactionhedgelink", AuditIDColumn: "exposure_header_id"},
-	"FX_LINKAGE_DELETE": {AuditTable: "public.auditactionhedgelink", AuditIDColumn: "exposure_header_id"},
+	"FX_LINKAGE_CREATE": {AuditTable: auditHedgeLink, AuditIDColumn: "exposure_header_id"},
+	"FX_LINKAGE_EDIT":   {AuditTable: auditHedgeLink, AuditIDColumn: "exposure_header_id"},
+	"FX_LINKAGE_DELETE": {AuditTable: auditHedgeLink, AuditIDColumn: "exposure_header_id"},
 
-	"FX_FORWARD_CREATE":              {AuditTable: "public.auditactionforwardbooking", AuditIDColumn: "system_transaction_id"},
-	"FX_FORWARD_EDIT":                {AuditTable: "public.auditactionforwardbooking", AuditIDColumn: "system_transaction_id"},
-	"FX_FORWARD_DELETE":              {AuditTable: "public.auditactionforwardbooking", AuditIDColumn: "system_transaction_id"},
-	"FX_FORWARD_CONFIRMATION_CREATE": {AuditTable: "public.auditactionforwardbooking", AuditIDColumn: "system_transaction_id"},
+	"FX_FORWARD_CREATE":              {AuditTable: auditForwardBooking, AuditIDColumn: "system_transaction_id"},
+	"FX_FORWARD_EDIT":                {AuditTable: auditForwardBooking, AuditIDColumn: "system_transaction_id"},
+	"FX_FORWARD_DELETE":              {AuditTable: auditForwardBooking, AuditIDColumn: "system_transaction_id"},
+	"FX_FORWARD_CONFIRMATION_CREATE": {AuditTable: auditForwardBooking, AuditIDColumn: "system_transaction_id"},
 
 	"FX_FORWARD_ROLLOVER":     {AuditTable: "public.auditactionforwardrollover", AuditIDColumn: "booking_id"},
 	"FX_FORWARD_CANCELLATION": {AuditTable: "public.auditactionforwardcancellation", AuditIDColumn: "booking_id"},
 
-	"FX_HEDGE_PROPOSAL_CREATE": {AuditTable: "public.auditactionhedgingproposaldocument", AuditIDColumn: "proposal_id"},
-	"FX_HEDGE_PROPOSAL_EDIT":   {AuditTable: "public.auditactionhedgingproposaldocument", AuditIDColumn: "proposal_id"},
-	"FX_HEDGE_PROPOSAL_DELETE": {AuditTable: "public.auditactionhedgingproposaldocument", AuditIDColumn: "proposal_id"},
+	"FX_HEDGE_PROPOSAL_CREATE": {AuditTable: auditHedgeProposalDoc, AuditIDColumn: "proposal_id"},
+	"FX_HEDGE_PROPOSAL_EDIT":   {AuditTable: auditHedgeProposalDoc, AuditIDColumn: "proposal_id"},
+	"FX_HEDGE_PROPOSAL_DELETE": {AuditTable: auditHedgeProposalDoc, AuditIDColumn: "proposal_id"},
 
-	"FX_SETTLEMENT_CREATE": {AuditTable: "public.auditactionexposuresettlement", AuditIDColumn: "settlement_id"},
-	"FX_SETTLEMENT_EDIT":   {AuditTable: "public.auditactionexposuresettlement", AuditIDColumn: "settlement_id"},
-	"FX_SETTLEMENT_DELETE": {AuditTable: "public.auditactionexposuresettlement", AuditIDColumn: "settlement_id"},
+	"FX_SETTLEMENT_CREATE": {AuditTable: auditExposureSettlement, AuditIDColumn: "settlement_id"},
+	"FX_SETTLEMENT_EDIT":   {AuditTable: auditExposureSettlement, AuditIDColumn: "settlement_id"},
+	"FX_SETTLEMENT_DELETE": {AuditTable: auditExposureSettlement, AuditIDColumn: "settlement_id"},
 
-	"FX_SETTLEMENT_ROLLOVER":     {AuditTable: "public.auditactionexposuresettlement", AuditIDColumn: "settlement_id"},
-	"FX_SETTLEMENT_CANCELLATION": {AuditTable: "public.auditactionexposuresettlement", AuditIDColumn: "settlement_id"},
+	"FX_SETTLEMENT_ROLLOVER":     {AuditTable: auditExposureSettlement, AuditIDColumn: "settlement_id"},
+	"FX_SETTLEMENT_CANCELLATION": {AuditTable: auditExposureSettlement, AuditIDColumn: "settlement_id"},
 
 	"FX_MTM_UPDATE": {AuditTable: "public.auditactionforwardmtm", AuditIDColumn: "mtm_id"},
 
@@ -200,25 +225,25 @@ var txTypeRegistry = map[string]txTableConfig{
 	"FD_CLOSURE_PREMATURE_DELETE": {AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id"},
 
 	// ── Mutual Fund ───────────────────────────────────────────────────────
-	"MF_PROPOSAL_CREATE": {AuditTable: "investment.auditactionproposal", AuditIDColumn: "proposal_id"},
-	"MF_PROPOSAL_EDIT":   {AuditTable: "investment.auditactionproposal", AuditIDColumn: "proposal_id"},
-	"MF_PROPOSAL_DELETE": {AuditTable: "investment.auditactionproposal", AuditIDColumn: "proposal_id"},
+	"MF_PROPOSAL_CREATE": {AuditTable: auditMFProposal, AuditIDColumn: "proposal_id"},
+	"MF_PROPOSAL_EDIT":   {AuditTable: auditMFProposal, AuditIDColumn: "proposal_id"},
+	"MF_PROPOSAL_DELETE": {AuditTable: auditMFProposal, AuditIDColumn: "proposal_id"},
 
-	"MF_INITIATION_CREATE": {AuditTable: "investment.auditactioninitiation", AuditIDColumn: "initiation_id"},
-	"MF_INITIATION_EDIT":   {AuditTable: "investment.auditactioninitiation", AuditIDColumn: "initiation_id"},
-	"MF_INITIATION_DELETE": {AuditTable: "investment.auditactioninitiation", AuditIDColumn: "initiation_id"},
+	"MF_INITIATION_CREATE": {AuditTable: auditMFInitiation, AuditIDColumn: "initiation_id"},
+	"MF_INITIATION_EDIT":   {AuditTable: auditMFInitiation, AuditIDColumn: "initiation_id"},
+	"MF_INITIATION_DELETE": {AuditTable: auditMFInitiation, AuditIDColumn: "initiation_id"},
 
-	"MF_CONFIRMATION_CREATE": {AuditTable: "investment.auditactioninvestmentconfirmation", AuditIDColumn: "confirmation_id"},
-	"MF_CONFIRMATION_EDIT":   {AuditTable: "investment.auditactioninvestmentconfirmation", AuditIDColumn: "confirmation_id"},
-	"MF_CONFIRMATION_DELETE": {AuditTable: "investment.auditactioninvestmentconfirmation", AuditIDColumn: "confirmation_id"},
+	"MF_CONFIRMATION_CREATE": {AuditTable: auditMFConfirmation, AuditIDColumn: "confirmation_id"},
+	"MF_CONFIRMATION_EDIT":   {AuditTable: auditMFConfirmation, AuditIDColumn: "confirmation_id"},
+	"MF_CONFIRMATION_DELETE": {AuditTable: auditMFConfirmation, AuditIDColumn: "confirmation_id"},
 
-	"MF_REDEMPTION_INITIATION_CREATE": {AuditTable: "investment.auditactionredemption", AuditIDColumn: "redemption_id"},
-	"MF_REDEMPTION_INITIATION_EDIT":   {AuditTable: "investment.auditactionredemption", AuditIDColumn: "redemption_id"},
-	"MF_REDEMPTION_INITIATION_DELETE": {AuditTable: "investment.auditactionredemption", AuditIDColumn: "redemption_id"},
+	"MF_REDEMPTION_INITIATION_CREATE": {AuditTable: auditMFRedemption, AuditIDColumn: "redemption_id"},
+	"MF_REDEMPTION_INITIATION_EDIT":   {AuditTable: auditMFRedemption, AuditIDColumn: "redemption_id"},
+	"MF_REDEMPTION_INITIATION_DELETE": {AuditTable: auditMFRedemption, AuditIDColumn: "redemption_id"},
 
-	"MF_REDEMPTION_CONFIRMATION_CREATE": {AuditTable: "investment.auditactionredemptionconfirmation", AuditIDColumn: "redemption_confirm_id"},
-	"MF_REDEMPTION_CONFIRMATION_EDIT":   {AuditTable: "investment.auditactionredemptionconfirmation", AuditIDColumn: "redemption_confirm_id"},
-	"MF_REDEMPTION_CONFIRMATION_DELETE": {AuditTable: "investment.auditactionredemptionconfirmation", AuditIDColumn: "redemption_confirm_id"},
+	"MF_REDEMPTION_CONFIRMATION_CREATE": {AuditTable: auditMFRedemptionConfirm, AuditIDColumn: "redemption_confirm_id"},
+	"MF_REDEMPTION_CONFIRMATION_EDIT":   {AuditTable: auditMFRedemptionConfirm, AuditIDColumn: "redemption_confirm_id"},
+	"MF_REDEMPTION_CONFIRMATION_DELETE": {AuditTable: auditMFRedemptionConfirm, AuditIDColumn: "redemption_confirm_id"},
 }
 
 // LookupTxTableConfig returns the audit table name and audit ID column for the

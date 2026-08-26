@@ -206,17 +206,25 @@ func scanForwardBookingReturningRows(rows pgx.Rows) []map[string]interface{} {
 	return out
 }
 
+// forwardBookingDecisionMeta bundles the per-call-site metadata for
+// applyForwardBookingDecision (approve/reject/etc. share the same body logic).
+type forwardBookingDecisionMeta struct {
+	ProcessingStatus string
+	HandlerName      string
+	APIPath          string
+	NotifRoute       string
+	SuccessMessage   string
+}
+
 func applyForwardBookingDecision(
 	pool *pgxpool.Pool,
 	w http.ResponseWriter,
 	r *http.Request,
 	req forwardBookingDecisionReq,
-	processingStatus string,
-	handlerName string,
-	apiPath string,
-	notifRoute string,
-	successMessage string,
+	meta forwardBookingDecisionMeta,
 ) {
+	processingStatus, handlerName, apiPath, notifRoute, successMessage :=
+		meta.ProcessingStatus, meta.HandlerName, meta.APIPath, meta.NotifRoute, meta.SuccessMessage
 	if len(req.SystemTransactionIDs) == 0 {
 		respondEnvelopeError(w, http.StatusBadRequest, "system_transaction_ids (array) required")
 		return
@@ -522,14 +530,13 @@ func BulkApproveForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
-		applyForwardBookingDecision(
-			pool, w, r, req,
-			constants.FwdProcessingStatusApproved,
-			"BulkApproveForwardBookings",
-			routeForwardBulkApprove,
-			routeForwardBulkApprove,
-			"Forward bookings approved successfully",
-		)
+		applyForwardBookingDecision(pool, w, r, req, forwardBookingDecisionMeta{
+			ProcessingStatus: constants.FwdProcessingStatusApproved,
+			HandlerName:      "BulkApproveForwardBookings",
+			APIPath:          routeForwardBulkApprove,
+			NotifRoute:       routeForwardBulkApprove,
+			SuccessMessage:   "Forward bookings approved successfully",
+		})
 	}
 }
 
@@ -541,14 +548,13 @@ func BulkRejectForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
-		applyForwardBookingDecision(
-			pool, w, r, req,
-			constants.FwdProcessingStatusRejected,
-			"BulkRejectForwardBookings",
-			routeForwardBulkReject,
-			routeForwardBulkReject,
-			"Forward bookings rejected successfully",
-		)
+		applyForwardBookingDecision(pool, w, r, req, forwardBookingDecisionMeta{
+			ProcessingStatus: constants.FwdProcessingStatusRejected,
+			HandlerName:      "BulkRejectForwardBookings",
+			APIPath:          routeForwardBulkReject,
+			NotifRoute:       routeForwardBulkReject,
+			SuccessMessage:   "Forward bookings rejected successfully",
+		})
 	}
 }
 

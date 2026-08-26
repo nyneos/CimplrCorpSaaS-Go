@@ -23,6 +23,11 @@ import (
 // tdsEntryNotFoundMsg is the shared 404 message for a missing TDS register entry.
 const tdsEntryNotFoundMsg = "TDS entry not found"
 
+const (
+	errFailedToApproveTDSEntry = "failed to approve TDS entry"
+	errFailedToRejectTDSEntry  = "failed to reject TDS entry"
+)
+
 func nullIfEmpty(s string) interface{} {
 	if strings.TrimSpace(s) == "" {
 		return nil
@@ -724,7 +729,7 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 		if actionErr != nil {
 			api.LogError("[TDSApprove] ActOnPendingOrDiagnose failed for %s: %v", req.TDSID, actionErr)
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to approve TDS entry")
+			api.RespondWithError(w, http.StatusInternalServerError, errFailedToApproveTDSEntry)
 			return
 		}
 		if actionRes.Acted {
@@ -735,7 +740,7 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 					`UPDATE investment.fd_tds_receipt SET tds_status = 'APPROVED' WHERE tds_id = $1`,
 					req.TDSID); err != nil {
 					api.LogError("[TDSApprove] status update failed for %s: %v", req.TDSID, err)
-					api.RespondWithError(w, http.StatusInternalServerError, "failed to approve TDS entry")
+					api.RespondWithError(w, http.StatusInternalServerError, errFailedToApproveTDSEntry)
 					return
 				}
 			}
@@ -755,7 +760,7 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				`UPDATE investment.fd_tds_receipt SET tds_status = 'APPROVED' WHERE tds_id = $1`,
 				req.TDSID); err != nil {
 				api.LogError("[TDSApprove] status update failed for %s: %v", req.TDSID, err)
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to approve TDS entry")
+				api.RespondWithError(w, http.StatusInternalServerError, errFailedToApproveTDSEntry)
 				return
 			}
 
@@ -1323,14 +1328,14 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 		if actionErr != nil {
 			api.LogError("[TDSReject] ActOnPendingOrDiagnose failed for %s: %v", req.TDSID, actionErr)
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to reject TDS entry")
+			api.RespondWithError(w, http.StatusInternalServerError, errFailedToRejectTDSEntry)
 			return
 		}
 		if actionRes.Acted {
 			if _, err = pool.Exec(ctx,
 				`UPDATE investment.fd_tds_receipt SET tds_status = 'REJECTED' WHERE tds_id = $1 AND is_deleted = false`,
 				req.TDSID); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to reject TDS entry")
+				api.RespondWithError(w, http.StatusInternalServerError, errFailedToRejectTDSEntry)
 				return
 			}
 		} else if !actionRes.CancelledStale && actionRes.Reason != "" {
@@ -1347,7 +1352,7 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			if _, err = tx.Exec(ctx,
 				`UPDATE investment.fd_tds_receipt SET tds_status = 'REJECTED' WHERE tds_id = $1 AND is_deleted = false`,
 				req.TDSID); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to reject TDS entry")
+				api.RespondWithError(w, http.StatusInternalServerError, errFailedToRejectTDSEntry)
 				return
 			}
 

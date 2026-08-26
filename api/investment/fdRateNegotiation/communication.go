@@ -400,36 +400,31 @@ func derefOrEmpty(p *string) string {
 	return *p
 }
 
-func communicationRowMap(
-	id, rateRequestID, mode, status string,
-	templateID, templateName, templateVersion, content, responseSource, responseDate, emailMessageID *string,
-	sentBy, sentAt, createdBy, createdAt, updatedBy, updatedAt, bankID, bankName *string,
-	recipients []map[string]interface{},
-) map[string]interface{} {
+func communicationRowMap(it scannedCommunication, recipients []map[string]interface{}) map[string]interface{} {
 	if recipients == nil {
 		recipients = []map[string]interface{}{}
 	}
 	emailTo, emailCC := splitRecipientEmails(recipients)
 	return map[string]interface{}{
-		"communication_id":       id,
-		"rate_request_id":        rateRequestID,
-		"communication_mode":     mode,
-		"communication_status":   status,
-		"email_template_id":      derefOrEmpty(templateID),
-		"email_template_name":    derefOrEmpty(templateName),
-		"email_template_version": derefOrEmpty(templateVersion),
-		"email_content":          derefOrEmpty(content),
-		"response_source":        derefOrEmpty(responseSource),
-		"response_date":          derefOrEmpty(responseDate),
-		"email_message_id":       derefOrEmpty(emailMessageID),
-		"sent_by":                derefOrEmpty(sentBy),
-		"sent_at":                derefOrEmpty(sentAt),
-		"created_by":             derefOrEmpty(createdBy),
-		"created_at":             derefOrEmpty(createdAt),
-		"updated_by":             derefOrEmpty(updatedBy),
-		"updated_at":             derefOrEmpty(updatedAt),
-		"bank_id":                derefOrEmpty(bankID),
-		"bank_name":              derefOrEmpty(bankName),
+		"communication_id":       it.id,
+		"rate_request_id":        it.rateRequestID,
+		"communication_mode":     it.mode,
+		"communication_status":   it.status,
+		"email_template_id":      derefOrEmpty(it.templateID),
+		"email_template_name":    derefOrEmpty(it.templateName),
+		"email_template_version": derefOrEmpty(it.templateVersion),
+		"email_content":          derefOrEmpty(it.content),
+		"response_source":        derefOrEmpty(it.responseSource),
+		"response_date":          derefOrEmpty(it.responseDate),
+		"email_message_id":       derefOrEmpty(it.emailMessageID),
+		"sent_by":                derefOrEmpty(it.sentBy),
+		"sent_at":                derefOrEmpty(it.sentAt),
+		"created_by":             derefOrEmpty(it.createdBy),
+		"created_at":             derefOrEmpty(it.createdAt),
+		"updated_by":             derefOrEmpty(it.updatedBy),
+		"updated_at":             derefOrEmpty(it.updatedAt),
+		"bank_id":                derefOrEmpty(it.bankID),
+		"bank_name":              derefOrEmpty(it.bankName),
 		"recipients":             recipients,
 		"email_to":               emailTo,
 		"email_cc":               emailCC,
@@ -497,14 +492,7 @@ func scanCommunication(row pgx.Row) (scannedCommunication, error) {
 }
 
 func (it scannedCommunication) asMap(recipients []map[string]interface{}) map[string]interface{} {
-	return communicationRowMap(
-		it.id, it.rateRequestID, it.mode, it.status,
-		it.templateID, it.templateName, it.templateVersion, it.content,
-		it.responseSource, it.responseDate, it.emailMessageID,
-		it.sentBy, it.sentAt, it.createdBy, it.createdAt, it.updatedBy, it.updatedAt,
-		it.bankID, it.bankName,
-		recipients,
-	)
+	return communicationRowMap(it, recipients)
 }
 
 func requireSessionEmail(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -689,8 +677,8 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func ListCommunications(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			RateRequestID        string `json:"rate_request_id"`
-			CommunicationStatus  string `json:"communication_status"`
+			RateRequestID       string `json:"rate_request_id"`
+			CommunicationStatus string `json:"communication_status"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")

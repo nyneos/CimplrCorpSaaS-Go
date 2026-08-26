@@ -484,7 +484,10 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.BalanceAmount != nil {
 			amt = *req.BalanceAmount
 		}
-		submitBankBalanceForApproval(ctx, pgxPool, balanceID, req.AccountNo, req.UserID, requestedBy, "BANK_BALANCE_CREATE", amt, triggerMatrixID, false)
+		submitBankBalanceForApproval(ctx, pgxPool, submitBankBalanceParams{
+			BalanceID: balanceID, AccountNo: req.AccountNo, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+			TxType: "BANK_BALANCE_CREATE", Amount: amt, MatrixID: triggerMatrixID, AutoApply: false,
+		})
 
 		api.RespondWithPayload(w, true, "", map[string]any{"balance_id": balanceID})
 	}
@@ -969,7 +972,10 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if row.BalanceAmount != nil {
 				amt = *row.BalanceAmount
 			}
-			submitBankBalanceForApproval(ctx, pgxPool, id, row.AccountNo, req.UserID, requestedBy, "BANK_BALANCE_DELETE", amt, deleteMatrixByID[id], false)
+			submitBankBalanceForApproval(ctx, pgxPool, submitBankBalanceParams{
+				BalanceID: id, AccountNo: row.AccountNo, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+				TxType: "BANK_BALANCE_DELETE", Amount: amt, MatrixID: deleteMatrixByID[id], AutoApply: false,
+			})
 		}
 
 		api.RespondWithResult(w, true, fmt.Sprintf("created %d delete requests", len(req.BalanceIDs)))
@@ -1744,7 +1750,10 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if mergedRow.BalanceAmount != nil {
 			amt = *mergedRow.BalanceAmount
 		}
-		submitBankBalanceForApproval(ctx, pgxPool, req.BalanceID, mergedRow.AccountNo, req.UserID, requestedBy, "BANK_BALANCE_EDIT", amt, triggerMatrixID, false)
+		submitBankBalanceForApproval(ctx, pgxPool, submitBankBalanceParams{
+			BalanceID: req.BalanceID, AccountNo: mergedRow.AccountNo, SubmittedByUserID: req.UserID, ActorEmail: requestedBy,
+			TxType: "BANK_BALANCE_EDIT", Amount: amt, MatrixID: triggerMatrixID, AutoApply: false,
+		})
 
 		api.RespondWithResult(w, true, req.BalanceID)
 	}
@@ -1773,44 +1782,59 @@ func healBankBalanceInstance(ctx context.Context, pool *pgxpool.Pool, row map[st
 	case "DELETE":
 		txType = "BANK_BALANCE_DELETE"
 	}
-	submitBankBalanceForApproval(ctx, pool, balanceID, accountNo, "", "", txType, amt, "", false)
+	submitBankBalanceForApproval(ctx, pool, submitBankBalanceParams{
+		BalanceID: balanceID, AccountNo: accountNo, TxType: txType, Amount: amt,
+	})
 	if resolved, err := approvalengine.LookupLatestInstanceID(ctx, pool, "CASH", balanceID); err == nil && resolved != "" {
 		row["approval_instance_id"] = resolved
 	}
 }
 
+// submitBankBalanceParams bundles the fields needed to submit a bank-balance
+// record to the approval engine.
+type submitBankBalanceParams struct {
+	BalanceID         string
+	AccountNo         string
+	SubmittedByUserID string
+	ActorEmail        string
+	TxType            string
+	Amount            float64
+	MatrixID          string
+	AutoApply         bool
+}
+
 // submitBankBalanceForApproval submits an instance to the approval engine.
 // Runs in-request so sequential eyes exist before a checker can act.
-func submitBankBalanceForApproval(ctx context.Context, pool *pgxpool.Pool, balanceID, accountNo, submittedByUserID, actorEmail, txType string, amount float64, matrixID string, autoApply bool) {
+func submitBankBalanceForApproval(ctx context.Context, pool *pgxpool.Pool, p submitBankBalanceParams) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	entityCode := lookupEntityIDForAccountNo(ctx, pool, accountNo)
+	entityCode := lookupEntityIDForAccountNo(ctx, pool, p.AccountNo)
 	instID, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
 		ModuleCode:          "CASH",
 		EntityCode:          entityCode,
-		TransactionType:     txType,
-		RecordID:            balanceID,
+		TransactionType:     p.TxType,
+		RecordID:            p.BalanceID,
 		RecordTable:         "public.bank_balances_manual",
 		AuditTable:          "public.auditactionbankbalances",
 		AuditIDColumn:       "balance_id",
-		ActionType:          strings.TrimPrefix(txType, "BANK_BALANCE_"),
-		Amount:              amount,
-		SubmittedBy:         submittedByUserID,
-		SubmittedByEmail:    actorEmail,
-		MatrixID:            matrixID,
+		ActionType:          strings.TrimPrefix(p.TxType, "BANK_BALANCE_"),
+		Amount:              p.Amount,
+		SubmittedBy:         p.SubmittedByUserID,
+		SubmittedByEmail:    p.ActorEmail,
+		MatrixID:            p.MatrixID,
 		RequirePinnedMatrix: true,
-		AutoApplyIfUnpinned: autoApply,
+		AutoApplyIfUnpinned: p.AutoApply,
 	})
 	if err != nil {
-		api.LogError("[BankBalance] approvalengine.CreateInstance failed for %s (%s): %v", balanceID, txType, err)
+		api.LogError("[BankBalance] approvalengine.CreateInstance failed for %s (%s): %v", p.BalanceID, p.TxType, err)
 		return
 	}
 	if instID == "" {
-		api.LogInfo("[BankBalance] no live matrix for %s (%s) — instance not created", balanceID, txType)
+		api.LogInfo("[BankBalance] no live matrix for %s (%s) — instance not created", p.BalanceID, p.TxType)
 		return
 	}
-	api.LogInfo("[BankBalance] approval instance %s created for %s (%s)", instID, balanceID, txType)
+	api.LogInfo("[BankBalance] approval instance %s created for %s (%s)", instID, p.BalanceID, p.TxType)
 }
 
 func zeroIfNilInt(v *int) int {

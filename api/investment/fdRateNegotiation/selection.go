@@ -328,7 +328,10 @@ func LinkBooking(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		bookingID := strings.TrimSpace(req.BookingID)
-		if err = applyBookingConversion(ctx, tx, req.RateRequestID, bookingID, oldStatus, oldBookingID, userEmail, api.ClientIPFromContext(ctx)); err != nil {
+		if err = applyBookingConversion(ctx, tx, bookingConversionParams{
+			RateRequestID: req.RateRequestID, BookingID: bookingID, OldStatus: oldStatus, OldBookingID: oldBookingID,
+			UserEmail: userEmail, ClientIP: api.ClientIPFromContext(ctx),
+		}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -356,7 +359,20 @@ func LinkBooking(pool *pgxpool.Pool) http.HandlerFunc {
 // applyBookingConversion stamps negotiation ↔ booking bidirectionally, sets
 // CONVERTED_TO_FD, clears pending audits, and writes an APPROVED EDIT audit
 // (never PENDING_EDIT_APPROVAL — that left zombie "pending edit" rows).
-func applyBookingConversion(ctx context.Context, tx pgx.Tx, rateRequestID, bookingID, oldStatus string, oldBookingID *string, userEmail, clientIP string) error {
+// bookingConversionParams bundles the fields needed to convert a rate
+// negotiation request into a linked FD booking.
+type bookingConversionParams struct {
+	RateRequestID string
+	BookingID     string
+	OldStatus     string
+	OldBookingID  *string
+	UserEmail     string
+	ClientIP      string
+}
+
+func applyBookingConversion(ctx context.Context, tx pgx.Tx, p bookingConversionParams) error {
+	rateRequestID, bookingID, oldStatus, oldBookingID, userEmail, clientIP :=
+		p.RateRequestID, p.BookingID, p.OldStatus, p.OldBookingID, p.UserEmail, p.ClientIP
 	newStatus := "CONVERTED_TO_FD"
 	if _, err := tx.Exec(ctx, `
 		UPDATE investment.fd_rate_negotiation SET

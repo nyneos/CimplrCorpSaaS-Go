@@ -26,6 +26,11 @@ import (
 
 const errProposalNotFound = "Proposal not found: "
 
+const (
+	tableCashflowProposal      = "cimplrcorpsaas.cashflow_proposal"
+	auditTableCashflowProposal = "cimplrcorpsaas.audit_action_cashflow_proposal"
+)
+
 // V2 API handlers for new schema with base_currency_code, maturity_date, bank info
 // PERFORMANCE OPTIMIZED for bulk operations (10K-100K records)
 
@@ -255,8 +260,8 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ModuleCode:          common.ModuleCash,
 				TransactionType:     "CASH_FLOW_PROJECTION_DELETE",
 				RecordID:            proposalID,
-				RecordTable:         "cimplrcorpsaas.cashflow_proposal",
-				AuditTable:          "cimplrcorpsaas.audit_action_cashflow_proposal",
+				RecordTable:         tableCashflowProposal,
+				AuditTable:          auditTableCashflowProposal,
 				AuditIDColumn:       "proposal_id",
 				ActionType:          "DELETE",
 				Amount:              0,
@@ -940,8 +945,8 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ModuleCode:          common.ModuleCash,
 			TransactionType:     "CASH_FLOW_PROJECTION_CREATE",
 			RecordID:            proposalID,
-			RecordTable:         "cimplrcorpsaas.cashflow_proposal",
-			AuditTable:          "cimplrcorpsaas.audit_action_cashflow_proposal",
+			RecordTable:         tableCashflowProposal,
+			AuditTable:          auditTableCashflowProposal,
 			AuditIDColumn:       "proposal_id",
 			ActionType:          "CREATE",
 			Amount:              0,
@@ -1735,8 +1740,8 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ModuleCode:          common.ModuleCash,
 			TransactionType:     "CASH_FLOW_PROJECTION_EDIT",
 			RecordID:            req.ProposalID,
-			RecordTable:         "cimplrcorpsaas.cashflow_proposal",
-			AuditTable:          "cimplrcorpsaas.audit_action_cashflow_proposal",
+			RecordTable:         tableCashflowProposal,
+			AuditTable:          auditTableCashflowProposal,
 			AuditIDColumn:       "proposal_id",
 			ActionType:          "EDIT",
 			Amount:              0,

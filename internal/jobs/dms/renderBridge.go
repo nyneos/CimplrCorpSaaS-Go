@@ -24,26 +24,30 @@ type renderedFile struct {
 	StoredKey string
 }
 
-func renderMergedOutputViaDocSvc(
-	ctx context.Context,
-	format, mergedHTML string,
-	mergeValues map[string]string,
-	sheetTokens []string,
-	sheetRows [][]string,
-	sheetCells []any,
-	kind string,
-	pageDesign pageDesignJSON,
-) (renderedFile, error) {
-	format = strings.ToUpper(strings.TrimSpace(format))
+// renderRequest bundles the merged-output payload shared by
+// renderMergedOutputViaDocSvc and renderAndStoreViaDocSvc.
+type renderRequest struct {
+	Format      string
+	MergedHTML  string
+	MergeValues map[string]string
+	SheetTokens []string
+	SheetRows   [][]string
+	SheetCells  []any
+	Kind        string
+	PageDesign  pageDesignJSON
+}
+
+func renderMergedOutputViaDocSvc(ctx context.Context, req renderRequest) (renderedFile, error) {
+	format := strings.ToUpper(strings.TrimSpace(req.Format))
 	data, err := docsvc.NewFromEnv().RenderFormat(ctx, docsvc.RenderFormatRequest{
 		OutputFormat: format,
-		MergedHTML:   mergedHTML,
-		MergeValues:  mergeValues,
-		SheetTokens:  sheetTokens,
-		SheetRows:    sheetRows,
-		SheetCells:   sheetCells,
-		Kind:         kind,
-		PageDesign:   toDocSvcPageDesign(pageDesign),
+		MergedHTML:   req.MergedHTML,
+		MergeValues:  req.MergeValues,
+		SheetTokens:  req.SheetTokens,
+		SheetRows:    req.SheetRows,
+		SheetCells:   req.SheetCells,
+		Kind:         req.Kind,
+		PageDesign:   toDocSvcPageDesign(req.PageDesign),
 	})
 	if err != nil {
 		return renderedFile{}, fmt.Errorf("document-service render: %w", err)
@@ -68,30 +72,21 @@ func renderMergedOutputViaDocSvc(
 // endpoint (including "not configured"), falls back to the plain render call
 // so a Document-Service deploy without S3 configured yet doesn't break
 // generation — it just keeps using storage_backend='MAIN_S3' as before.
-func renderAndStoreViaDocSvc(
-	ctx context.Context,
-	format, mergedHTML string,
-	mergeValues map[string]string,
-	sheetTokens []string,
-	sheetRows [][]string,
-	sheetCells []any,
-	kind string,
-	pageDesign pageDesignJSON,
-) (renderedFile, error) {
-	format = strings.ToUpper(strings.TrimSpace(format))
+func renderAndStoreViaDocSvc(ctx context.Context, req renderRequest) (renderedFile, error) {
+	format := strings.ToUpper(strings.TrimSpace(req.Format))
 	data, err := docsvc.NewFromEnv().RenderAndStore(ctx, docsvc.RenderFormatRequest{
 		OutputFormat: format,
-		MergedHTML:   mergedHTML,
-		MergeValues:  mergeValues,
-		SheetTokens:  sheetTokens,
-		SheetRows:    sheetRows,
-		SheetCells:   sheetCells,
-		Kind:         kind,
-		PageDesign:   toDocSvcPageDesign(pageDesign),
+		MergedHTML:   req.MergedHTML,
+		MergeValues:  req.MergeValues,
+		SheetTokens:  req.SheetTokens,
+		SheetRows:    req.SheetRows,
+		SheetCells:   req.SheetCells,
+		Kind:         req.Kind,
+		PageDesign:   toDocSvcPageDesign(req.PageDesign),
 	})
 	if err != nil {
 		api.LogInfo("[DMS] render+store unavailable, falling back to render-only (MAIN_S3): %v", err)
-		return renderMergedOutputViaDocSvc(ctx, format, mergedHTML, mergeValues, sheetTokens, sheetRows, sheetCells, kind, pageDesign)
+		return renderMergedOutputViaDocSvc(ctx, req)
 	}
 	raw, err := base64.StdEncoding.DecodeString(data.BytesBase64)
 	if err != nil {
