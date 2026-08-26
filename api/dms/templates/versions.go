@@ -142,16 +142,18 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			if _, err := tx.Exec(r.Context(), `
-				UPDATE dms_svc.template SET processing_status = 'PENDING_EDIT_APPROVAL'
-				WHERE template_id = $1::uuid`, req.TemplateID); err != nil {
+				UPDATE dms_svc.template SET processing_status = 'PENDING_EDIT_APPROVAL',
+					name = COALESCE($1, name)
+				WHERE template_id = $2::uuid`, newName, req.TemplateID); err != nil {
 				api.LogErrorForResponse(w, "dms template version amend flag: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateTemplateVersion, "DMS_TEMPLATE_VERSION_FAILED")
 				return
 			}
 		} else {
 			if _, err := tx.Exec(r.Context(), `
-				UPDATE dms_svc.template SET processing_status = 'PENDING_EDIT_APPROVAL'
-				WHERE template_id = $1::uuid`, req.TemplateID); err != nil {
+				UPDATE dms_svc.template SET processing_status = 'PENDING_EDIT_APPROVAL',
+					name = COALESCE($1, name)
+				WHERE template_id = $2::uuid`, newName, req.TemplateID); err != nil {
 				api.LogErrorForResponse(w, "dms template version flag: %v", err)
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedCreateTemplateVersion, "DMS_TEMPLATE_VERSION_FAILED")
 				return

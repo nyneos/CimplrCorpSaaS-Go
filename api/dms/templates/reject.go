@@ -2,6 +2,7 @@ package templates
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -68,9 +69,20 @@ func HandleReject(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+func markTemplateRejected(ctx context.Context, tx pgx.Tx, templateID, actor string) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE dms_svc.template SET processing_status = 'REJECTED',
+			last_modified_by = $1, last_modified_at = now()
+		WHERE template_id = $2::uuid`, actor, templateID)
+	return err
+}
+
 func applyRejection(ctx context.Context, tx pgx.Tx, templateID, actor, ip, checkerComment string) error {
 	pa, err := findPendingAudit(ctx, tx, templateID)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return markTemplateRejected(ctx, tx, templateID, actor)
+		}
 		return err
 	}
 
@@ -79,13 +91,12 @@ func applyRejection(ctx context.Context, tx pgx.Tx, templateID, actor, ip, check
 		// Never went live — nothing to revert, just close out the template and
 		// its version 1 (see create.go) as rejected so neither is left dangling
 		// in PENDING_APPROVAL.
-		if pa.VersionID == nil {
-			return errNoVersionOnAudit
-		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE dms_svc.template_version SET status = 'REJECTED'
-			WHERE version_id = $1::uuid`, *pa.VersionID); err != nil {
-			return err
+		if pa.VersionID != nil {
+			if _, err := tx.Exec(ctx, `
+				UPDATE dms_svc.template_version SET status = 'REJECTED'
+				WHERE version_id = $1::uuid`, *pa.VersionID); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE dms_svc.template SET processing_status = 'REJECTED', status = 'Inactive',
@@ -102,15 +113,14 @@ func applyRejection(ctx context.Context, tx pgx.Tx, templateID, actor, ip, check
 			return err
 		}
 	case "CREATE_VERSION":
-		if pa.VersionID == nil {
-			return errNoVersionOnAudit
-		}
 		// current_version_id was never advanced — the previously approved
 		// version (if any) stays live exactly as it was.
-		if _, err := tx.Exec(ctx, `
-			UPDATE dms_svc.template_version SET status = 'REJECTED'
-			WHERE version_id = $1::uuid`, *pa.VersionID); err != nil {
-			return err
+		if pa.VersionID != nil {
+			if _, err := tx.Exec(ctx, `
+				UPDATE dms_svc.template_version SET status = 'REJECTED'
+				WHERE version_id = $1::uuid`, *pa.VersionID); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE dms_svc.template SET processing_status = 'REJECTED',
@@ -119,13 +129,15 @@ func applyRejection(ctx context.Context, tx pgx.Tx, templateID, actor, ip, check
 			return err
 		}
 	default:
-		return errUnknownActionType
+		if err := markTemplateRejected(ctx, tx, templateID, actor); err != nil {
+			return err
+		}
 	}
 
 	_, err = tx.Exec(ctx, `
 		UPDATE dms_svc.template_audit
 		SET processing_status = 'REJECTED', checker_by = $1, checker_at = now(), checker_ip = $2, checker_comment = $3
-		WHERE audit_id = $4::uuid`,
-		actor, common.NullIfEmpty(ip), common.NullIfEmpty(checkerComment), pa.AuditID)
+		WHERE template_id = $4::uuid AND processing_status = ANY($5::text[])`,
+		actor, common.NullIfEmpty(ip), common.NullIfEmpty(checkerComment), templateID, common.PendingProcessingStatuses)
 	return err
 }

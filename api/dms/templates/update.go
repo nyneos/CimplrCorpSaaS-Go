@@ -159,8 +159,9 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if _, err := tx.Exec(r.Context(), `
-			UPDATE dms_svc.template SET processing_status = 'PENDING_EDIT_APPROVAL'
-			WHERE template_id = $1::uuid`, req.TemplateID); err != nil {
+			UPDATE dms_svc.template SET processing_status = 'PENDING_EDIT_APPROVAL',
+				name = $1, description = $2
+			WHERE template_id = $3::uuid`, req.Name, req.Description, req.TemplateID); err != nil {
 			api.LogErrorForResponse(w, "dms template update flag: %v", err)
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUpdateTemplate, "DMS_TEMPLATE_UPDATE_FAILED")
 			return
