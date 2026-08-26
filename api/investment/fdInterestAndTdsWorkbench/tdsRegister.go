@@ -282,16 +282,18 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_TDS_REGISTER_CREATE",
-				MatrixID:         matrixID,
-				RecordID:         id,
-				RecordTable:      constants.QuerryTDSReceipt,
-				AuditTable:       constants.QuerryAuditTDSReceipt,
-				AuditIDColumn:    "tds_id",
-				ActionType:       "CREATE",
-				SubmittedByEmail: uEmail,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_TDS_REGISTER_CREATE",
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
+				RecordID:            id,
+				RecordTable:         constants.QuerryTDSReceipt,
+				AuditTable:          constants.QuerryAuditTDSReceipt,
+				AuditIDColumn:       "tds_id",
+				ActionType:          "CREATE",
+				SubmittedByEmail:    uEmail,
 			})
 			if instErr != nil {
 				api.LogError("[FDTDS] CreateInstance CREATE failed: %v", instErr)
@@ -627,16 +629,18 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_TDS_REGISTER_RECONCILE",
-				MatrixID:         matrixID,
-				RecordID:         eID,
-				RecordTable:      constants.QuerryTDSReceipt,
-				AuditTable:       constants.QuerryAuditTDSReceipt,
-				AuditIDColumn:    "tds_id",
-				ActionType:       "RECONCILE",
-				SubmittedByEmail: uEmail,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_TDS_REGISTER_RECONCILE",
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
+				RecordID:            eID,
+				RecordTable:         constants.QuerryTDSReceipt,
+				AuditTable:          constants.QuerryAuditTDSReceipt,
+				AuditIDColumn:       "tds_id",
+				ActionType:          "RECONCILE",
+				SubmittedByEmail:    uEmail,
 			})
 			if instErr != nil {
 				api.LogError("[FDTDS] CreateInstance RECONCILE failed: %v", instErr)
@@ -709,54 +713,70 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
-			return
-		}
-		defer tx.Rollback(ctx) //nolint:errcheck
-
-		// Promote status
-		if _, err = tx.Exec(ctx,
-			`UPDATE investment.fd_tds_receipt SET tds_status = 'APPROVED' WHERE tds_id = $1`,
-			req.TDSID); err != nil {
-			api.LogError("[TDSApprove] status update failed for %s: %v", req.TDSID, err)
+		// Approval-matrix engine: attempt engine-side approve first. Only fall back
+		// to a direct stamp when no engine instance applies (no matrix configured,
+		// or the pending instance was stale and just got cancelled). A "not your
+		// turn" / ineligible-approver Reason must block the approval, not bypass it.
+		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+			ModuleCode: "FIXED_DEPOSIT", RecordID: req.TDSID,
+			UserID: req.UserID, UserEmail: userEmail, RoleID: "",
+			Action: approvalengine.ActionApproved, Comment: req.Comment,
+		})
+		if actionErr != nil {
+			api.LogError("[TDSApprove] ActOnPendingOrDiagnose failed for %s: %v", req.TDSID, actionErr)
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to approve TDS entry")
 			return
 		}
-
-		// Write checker audit row
-		if _, err = tx.Exec(ctx, `
-			UPDATE investment.fd_tds_receipt_audit
-			SET processing_status = 'APPROVED',
-			    checker_by        = $1,
-			    checker_at        = now(),
-			    checker_comment   = $2,
-			    checker_ip        = $3
-			WHERE tds_id = $4
-			  AND processing_status = 'PENDING_APPROVAL'`,
-			api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.TDSID); err != nil {
-			api.LogError("[TDSApprove] audit update failed for %s: %v", req.TDSID, err)
-		}
-
-		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
-			return
-		}
-
-		// Try engine path; direct stamp above serves as no-matrix fallback.
-		go func(tID, uID, uEmail string) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					api.LogError("[FDTDS] ApproveTDSRegister engine panic for %s: %v", tID, rec)
+		if actionRes.Acted {
+			// finalizeRecord already stamped the audit row; only promote the master
+			// status once the instance (all required eyes) is fully approved.
+			if actionRes.InstanceStatus == constants.StatusApproved {
+				if _, err = pool.Exec(ctx,
+					`UPDATE investment.fd_tds_receipt SET tds_status = 'APPROVED' WHERE tds_id = $1`,
+					req.TDSID); err != nil {
+					api.LogError("[TDSApprove] status update failed for %s: %v", req.TDSID, err)
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to approve TDS entry")
+					return
 				}
-			}()
-			_, _ = approvalengine.ActOnPendingOrDiagnose(context.Background(), pool, approvalengine.ActOnPendingRequest{
-				ModuleCode: "FIXED_DEPOSIT", RecordID: tID,
-				UserID: uID, UserEmail: uEmail, RoleID: "",
-				Action: approvalengine.ActionApproved,
-			})
-		}(req.TDSID, req.UserID, userEmail)
+			}
+		} else if !actionRes.CancelledStale && actionRes.Reason != "" {
+			api.RespondWithError(w, http.StatusForbidden, actionRes.Reason)
+			return
+		} else {
+			// No matrix/instance applies — direct stamp (legacy / no-matrix path).
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
+				return
+			}
+			defer tx.Rollback(ctx) //nolint:errcheck
+
+			if _, err = tx.Exec(ctx,
+				`UPDATE investment.fd_tds_receipt SET tds_status = 'APPROVED' WHERE tds_id = $1`,
+				req.TDSID); err != nil {
+				api.LogError("[TDSApprove] status update failed for %s: %v", req.TDSID, err)
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to approve TDS entry")
+				return
+			}
+
+			if _, err = tx.Exec(ctx, `
+				UPDATE investment.fd_tds_receipt_audit
+				SET processing_status = 'APPROVED',
+				    checker_by        = $1,
+				    checker_at        = now(),
+				    checker_comment   = $2,
+				    checker_ip        = $3
+				WHERE tds_id = $4
+				  AND processing_status = 'PENDING_APPROVAL'`,
+				api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.TDSID); err != nil {
+				api.LogError("[TDSApprove] audit update failed for %s: %v", req.TDSID, err)
+			}
+
+			if err = tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
+				return
+			}
+		}
 
 		go func(tID, uEmail string) {
 			defer func() {
@@ -939,17 +959,19 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", tID, uEmail)
 			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_TDS_REGISTER_EDIT",
-				MatrixID:         matrixID,
-				RecordID:         tID,
-				RecordTable:      constants.QuerryTDSReceipt,
-				AuditTable:       constants.QuerryAuditTDSReceipt,
-				AuditIDColumn:    "tds_id",
-				ActionType:       "EDIT",
-				SubmittedBy:      uEmail,
-				SubmittedByEmail: uEmail,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_TDS_REGISTER_EDIT",
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
+				RecordID:            tID,
+				RecordTable:         constants.QuerryTDSReceipt,
+				AuditTable:          constants.QuerryAuditTDSReceipt,
+				AuditIDColumn:       "tds_id",
+				ActionType:          "EDIT",
+				SubmittedBy:         uEmail,
+				SubmittedByEmail:    uEmail,
 			})
 			if instErr != nil {
 				api.LogError("[FDTDS] UpdateTDSRegister CreateInstance failed tds=%s: %v", tID, instErr)
@@ -1031,6 +1053,38 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: pmsg})
 				continue
 			}
+
+			// Approval-matrix engine: attempt engine-side approve first. Only fall
+			// back to a direct stamp when no engine instance applies; a genuine
+			// "not your turn" Reason must block the approval, not bypass it.
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FIXED_DEPOSIT", RecordID: tdsID,
+				UserID: req.UserID, UserEmail: userEmail, RoleID: "",
+				Action: approvalengine.ActionApproved, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				results = append(results, result{TDSID: tdsID, OK: false, Message: "approval engine error: " + actionErr.Error()})
+				continue
+			}
+			if actionRes.Acted {
+				if actionRes.InstanceStatus == constants.StatusApproved {
+					if _, err := pool.Exec(ctx,
+						`UPDATE investment.fd_tds_receipt SET tds_status = 'APPROVED' WHERE tds_id = $1`,
+						tdsID); err != nil {
+						results = append(results, result{TDSID: tdsID, OK: false, Message: "status update failed"})
+						continue
+					}
+				}
+				approved++
+				approvedIDs = append(approvedIDs, tdsID)
+				results = append(results, result{TDSID: tdsID, OK: true})
+				continue
+			}
+			if !actionRes.CancelledStale && actionRes.Reason != "" {
+				results = append(results, result{TDSID: tdsID, OK: false, Message: actionRes.Reason})
+				continue
+			}
+
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: "tx start failed"})
@@ -1068,18 +1122,6 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"results":  results,
 		})
 		for _, tdsID := range approvedIDs {
-			go func(tID, uID, uEmail string) {
-				defer func() {
-					if rec := recover(); rec != nil {
-						api.LogError("[FDTDS] BulkApproveTDSRegister engine panic for %s: %v", tID, rec)
-					}
-				}()
-				_, _ = approvalengine.ActOnPendingOrDiagnose(context.Background(), pool, approvalengine.ActOnPendingRequest{
-					ModuleCode: "FIXED_DEPOSIT", RecordID: tID,
-					UserID: uID, UserEmail: uEmail, RoleID: "",
-					Action: approvalengine.ActionApproved, Comment: req.Comment,
-				})
-			}(tdsID, req.UserID, userEmail)
 			go func(tID, uEmail string) {
 				defer func() {
 					if rec := recover(); rec != nil {
@@ -1154,6 +1196,32 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				buildFDTDSRegisterPolicyFields(bulkRejectRow)); !ok {
 				continue
 			}
+
+			// Approval-matrix engine: attempt engine-side reject first. Only fall
+			// back to a direct stamp when no engine instance applies; a genuine
+			// "not your turn" Reason must block the action, not bypass it.
+			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FIXED_DEPOSIT", RecordID: tdsID,
+				UserID: req.UserID, UserEmail: userEmail, RoleID: "",
+				Action: approvalengine.ActionRejected, Comment: req.Comment,
+			})
+			if actionErr != nil {
+				continue
+			}
+			if actionRes.Acted {
+				if _, err := pool.Exec(ctx,
+					`UPDATE investment.fd_tds_receipt SET tds_status = 'REJECTED' WHERE tds_id = $1 AND is_deleted = false`,
+					tdsID); err != nil {
+					continue
+				}
+				rejected++
+				rejectedIDs = append(rejectedIDs, tdsID)
+				continue
+			}
+			if !actionRes.CancelledStale && actionRes.Reason != "" {
+				continue
+			}
+
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				continue
@@ -1184,18 +1252,6 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"rejected": rejected,
 		})
 		for _, tdsID := range rejectedIDs {
-			go func(tID, uID, uEmail string) {
-				defer func() {
-					if rec := recover(); rec != nil {
-						api.LogError("[FDTDS] BulkRejectTDSRegister engine panic for %s: %v", tID, rec)
-					}
-				}()
-				_, _ = approvalengine.ActOnPendingOrDiagnose(context.Background(), pool, approvalengine.ActOnPendingRequest{
-					ModuleCode: "FIXED_DEPOSIT", RecordID: tID,
-					UserID: uID, UserEmail: uEmail, RoleID: "",
-					Action: approvalengine.ActionRejected, Comment: req.Comment,
-				})
-			}(tdsID, req.UserID, userEmail)
 			go func(tID, uEmail string) {
 				defer func() {
 					if rec := recover(); rec != nil {
@@ -1256,50 +1312,63 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
-			return
-		}
-		defer tx.Rollback(ctx) //nolint:errcheck
-
-		if _, err = tx.Exec(ctx,
-			`UPDATE investment.fd_tds_receipt SET tds_status = 'REJECTED' WHERE tds_id = $1 AND is_deleted = false`,
-			req.TDSID); err != nil {
+		// Approval-matrix engine: attempt engine-side reject first (a reject
+		// immediately closes the eye + instance — see RecordAction). Only fall
+		// back to a direct stamp when no engine instance applies; a genuine
+		// "not your turn" Reason must block the action, not bypass it.
+		actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
+			ModuleCode: "FIXED_DEPOSIT", RecordID: req.TDSID,
+			UserID: req.UserID, UserEmail: userEmail, RoleID: "",
+			Action: approvalengine.ActionRejected, Comment: req.Comment,
+		})
+		if actionErr != nil {
+			api.LogError("[TDSReject] ActOnPendingOrDiagnose failed for %s: %v", req.TDSID, actionErr)
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to reject TDS entry")
 			return
 		}
-
-		if _, err := tx.Exec(ctx, `
-			UPDATE investment.fd_tds_receipt_audit
-			SET processing_status = 'REJECTED',
-			    checker_by        = $1,
-			    checker_at        = now(),
-			    checker_comment   = $2,
-			    checker_ip        = $3
-			WHERE tds_id = $4
-			  AND processing_status = 'PENDING_APPROVAL'`,
-			api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.TDSID); err != nil {
-			api.LogError("[TDSReject] update audit exec failed for %s: %v", req.TDSID, err)
-		}
-
-		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
+		if actionRes.Acted {
+			if _, err = pool.Exec(ctx,
+				`UPDATE investment.fd_tds_receipt SET tds_status = 'REJECTED' WHERE tds_id = $1 AND is_deleted = false`,
+				req.TDSID); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to reject TDS entry")
+				return
+			}
+		} else if !actionRes.CancelledStale && actionRes.Reason != "" {
+			api.RespondWithError(w, http.StatusForbidden, actionRes.Reason)
 			return
-		}
+		} else {
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
+				return
+			}
+			defer tx.Rollback(ctx) //nolint:errcheck
 
-		go func(tID, uID, uEmail string) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					api.LogError("[FDTDS] RejectTDSRegister engine panic for %s: %v", tID, rec)
-				}
-			}()
-			_, _ = approvalengine.ActOnPendingOrDiagnose(context.Background(), pool, approvalengine.ActOnPendingRequest{
-				ModuleCode: "FIXED_DEPOSIT", RecordID: tID,
-				UserID: uID, UserEmail: uEmail, RoleID: "",
-				Action: approvalengine.ActionRejected,
-			})
-		}(req.TDSID, req.UserID, userEmail)
+			if _, err = tx.Exec(ctx,
+				`UPDATE investment.fd_tds_receipt SET tds_status = 'REJECTED' WHERE tds_id = $1 AND is_deleted = false`,
+				req.TDSID); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to reject TDS entry")
+				return
+			}
+
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.fd_tds_receipt_audit
+				SET processing_status = 'REJECTED',
+				    checker_by        = $1,
+				    checker_at        = now(),
+				    checker_comment   = $2,
+				    checker_ip        = $3
+				WHERE tds_id = $4
+				  AND processing_status = 'PENDING_APPROVAL'`,
+				api.SystemIfBlank(userEmail), nullIfEmpty(req.Comment), api.SystemIfBlank(api.ClientIPFromContext(ctx)), req.TDSID); err != nil {
+				api.LogError("[TDSReject] update audit exec failed for %s: %v", req.TDSID, err)
+			}
+
+			if err = tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
+				return
+			}
+		}
 
 		go func(tID, uEmail string) {
 			defer func() {

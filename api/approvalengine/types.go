@@ -56,10 +56,19 @@ type InstanceRequest struct {
 	Amount           float64
 	SubmittedBy      string // public.users.id
 	SubmittedByEmail string
-	// MatrixID pins the approval matrix instead of resolving one from
-	// module/entity/transaction_type/amount. Set by policy-engine TriggerApproval
-	// breaches, which carry the matrix chosen on the policy. Empty = resolve normally.
+	// MatrixID pins the approval matrix from a policy-engine TriggerApproval
+	// breach. Empty means policy did not fire — CreateInstance never falls back
+	// to ResolveMatrix (that would attach any live matrix and look "stuck").
 	MatrixID string
+	// RequirePinnedMatrix is kept for callers that already set it. CreateInstance
+	// always skips ResolveMatrix when MatrixID is empty; this flag is documentation
+	// that the caller ran a policy check.
+	RequirePinnedMatrix bool
+	// AutoApplyIfUnpinned flips the pending audit to APPROVED (and soft-deletes
+	// on DELETE) when policy did not pin a matrix. Set only on the write path
+	// that just inserted PENDING. Do not set on list/self-heal: those must not
+	// auto-approve leftover pending rows.
+	AutoApplyIfUnpinned bool
 }
 
 // ActionRequest is passed to RecordAction when an approver acts on an eye.
@@ -115,13 +124,13 @@ type InstanceSummary struct {
 
 // EyeActionDetail is one approve/reject/escalate event within an eye.
 type EyeActionDetail struct {
-	ActionID    string
-	ActorEmail  string
-	ActorRoleID string
-	ActionType  string
-	Comment     string
-	ActedAt     time.Time
-	IsSystem    bool
+	ActionID    string    `json:"action_id"`
+	ActorEmail  string    `json:"actor_email"`
+	ActorRoleID string    `json:"actor_role_id"`
+	ActionType  string    `json:"action_type"`
+	Comment     string    `json:"comment"`
+	ActedAt     time.Time `json:"acted_at"`
+	IsSystem    bool      `json:"is_system"`
 }
 
 // EyeDetail is the full state of one eye including all actions taken.

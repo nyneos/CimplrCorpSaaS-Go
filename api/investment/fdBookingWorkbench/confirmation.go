@@ -236,6 +236,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Fetch booking failed: "+err.Error())
 			return
 		}
+		// When linked to rate negotiation, variance baseline is the selected negotiated rate.
+		bookedRate = resolveConfirmationRateBaseline(ctx, pgxPool, req.BookingID, bookedRate)
 
 		scope := ctxutil.FromContext(r.Context())
 		if !scope.HasEntityAccess(entityID) {
@@ -598,18 +600,20 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_CONFIRMATION_CREATE",
-				RecordID:         cID,
-				RecordTable:      constants.QuerryConfirmation,
-				AuditTable:       constants.QuerryAuditConfirmation,
-				AuditIDColumn:    "confirmation_id",
-				ActionType:       "CREATE",
-				Amount:           amount,
-				SubmittedBy:      uID,
-				SubmittedByEmail: uEmail,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_CONFIRMATION_CREATE",
+				RecordID:            cID,
+				RecordTable:         constants.QuerryConfirmation,
+				AuditTable:          constants.QuerryAuditConfirmation,
+				AuditIDColumn:       "confirmation_id",
+				ActionType:          "CREATE",
+				Amount:              amount,
+				SubmittedBy:         uID,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 			if err != nil {
 				api.LogError("[FDBooking] CaptureConfirmation CreateInstance failed for %s: %v", cID, err)
@@ -890,6 +894,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Fetch booking failed: "+err.Error())
 			return
 		}
+		bookedRate = resolveConfirmationRateBaseline(ctx, pgxPool, bookingID, bookedRate)
 
 		varResolveScope := ctxutil.FromContext(r.Context())
 		if !varResolveScope.HasEntityAccess(entityID) {
@@ -1233,7 +1238,9 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 				AuditIDColumn: "confirmation_id", ActionType: actionType,
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
-				MatrixID: matrixID,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(confirmationID, req.UserID, userEmail, entityID, varMatrixID, req.ConfirmedPrincipalAmount, isUpdate)
 
@@ -1457,6 +1464,8 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Scan(&bookedPrincipal, &bookedRate, &bookedTenorDays, &bookedTenorMonths, &bookedTenorYears,
 					&bookedValueDate, &bookedMaturityDate, &bookedInterestTypeCode, &bookedFrequencyID, &bookedTenorType,
 					&bookedAccrualFreqCode, &bookedResetType, &bookedPayoutFreqID)
+
+			bookedRate = resolveConfirmationRateBaseline(ctx, pgxPool, bookingID, bookedRate)
 
 			// Inject booking fallbacks into req.Fields for fields the caller omitted
 			// that are also empty on the current confirmation.
@@ -1803,7 +1812,9 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 				AuditIDColumn: "confirmation_id", ActionType: "EDIT",
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
-				MatrixID: matrixID,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(req.ConfirmationID, req.UserID, userEmail, entityID, editConfMatrixID, updateAmount)
 
@@ -1955,7 +1966,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		veFields := buildFDConfirmationPolicyFields(veRow)
 		veFields["reason"] = req.Reason
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		vePolicyOK, veMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleInvestmentFD,
 			SubModule:           "FD_CONFIRMATION",
@@ -1965,7 +1976,8 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/investment/fd/confirmation/variance-exception",
 			DefaultBlockMessage: "FD confirmation variance accept blocked by policy",
 			Fields:              veFields,
-		}) {
+		})
+		if !vePolicyOK {
 			return
 		}
 
@@ -2045,7 +2057,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Refresh unresolved flag
 		_ = varianceengine.RefreshUnresolvedFlag(ctx, pgxPool, "investment.fd_confirmation", "confirmation_id", req.ConfirmationID)
 
-		go func(cID, uID, uEmail, eID string, amount float64) {
+		go func(cID, uID, uEmail, eID, matrixID string, amount float64) {
 			defer func() { recover() }() //nolint:errcheck
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
@@ -2056,8 +2068,11 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 				AuditIDColumn: "confirmation_id", ActionType: "EDIT",
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
-		}(req.ConfirmationID, req.UserID, userEmail, entityID, confPrincipal)
+		}(req.ConfirmationID, req.UserID, userEmail, entityID, veMatrixID, confPrincipal)
 
 		go func(cID, bID, eID, uEmail string) {
 			defer func() {
@@ -2570,6 +2585,8 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_bank_fd_ref_no,
 					a.old_penalty_id
 				FROM investment.fd_audit_confirmation a
+				-- DMS_TRIGGER / file actions must not override maker-checker status
+				WHERE a.action_type IN ('CREATE','EDIT','DELETE','APPROVE','REJECT')
 				ORDER BY a.confirmation_id,
 				         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),
 				                  COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
@@ -3545,7 +3562,9 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 					AuditIDColumn: "confirmation_id", ActionType: "DELETE",
 					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
-					MatrixID: matrixID,
+					MatrixID:            matrixID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 				if err != nil {
 					api.LogError("[FDBooking] CreateInstance(DELETE) failed for confirmation %s: %v", cID, err)
@@ -3646,10 +3665,19 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(br.auto_renewal,false)                              AS auto_renewal,
 				COALESCE(br.booking_status,'')                               AS booking_status,
 				COALESCE(br.booking_remarks,'')                              AS booking_remarks,
-				-- bank config / rate card defaults
+				COALESCE(br.rate_request_id::text,'')                        AS rate_request_id,
+				-- negotiated selected-offer rate (preferred baseline when linked)
+				COALESCE(NULLIF(o.effective_yield,0), o.offered_interest_rate, 0) AS negotiated_rate,
+				COALESCE(rn.selected_offer_id::text,'')                      AS selected_offer_id,
+				COALESCE(o.bank_name,'')                                     AS negotiated_bank_name,
+				-- bank config / rate card defaults (negotiated rate preferred over card)
 				COALESCE(bc.minimum_amount,0)                                AS bank_min_amount,
 				COALESCE(bc.maximum_amount,0)                                AS bank_max_amount,
-				COALESCE(rc.interest_rate,0)                                 AS rate_card_rate,
+				COALESCE(
+					NULLIF(COALESCE(NULLIF(o.effective_yield,0), o.offered_interest_rate, 0), 0),
+					rc.interest_rate,
+					0
+				)                                                            AS rate_card_rate,
 				-- existing confirmation if any
 				COALESCE(cf.confirmation_id,'')                              AS existing_confirmation_id,
 				COALESCE(cf.confirmation_status,'')                          AS existing_confirmation_status,
@@ -3663,6 +3691,12 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN investment.fd_bank_rate_card_master rc
 				ON rc.bank_code = br.bank_id AND rc.is_active = true
 				AND br.tenure_days BETWEEN rc.min_tenor_days AND rc.max_tenor_days
+			LEFT JOIN investment.fd_rate_negotiation rn
+				ON rn.rate_request_id = br.rate_request_id
+				AND COALESCE(rn.is_deleted, false) = false
+			LEFT JOIN investment.fd_rate_offer o
+				ON o.offer_id = rn.selected_offer_id
+				AND COALESCE(o.is_deleted, false) = false
 			LEFT JOIN investment.fd_confirmation cf
 				ON cf.booking_id = br.booking_id AND COALESCE(cf.is_deleted,false) = false
 			LEFT JOIN LATERAL (
@@ -3708,6 +3742,17 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				} else {
 					row[string(f.Name)] = vals[i]
 				}
+			}
+			// Prefer negotiated selected-offer rate as the UI default rate when linked.
+			if neg := asFloat64(row["negotiated_rate"]); neg > 0 {
+				row["default_interest_rate"] = neg
+				if rr, _ := row["rate_request_id"].(string); strings.TrimSpace(rr) != "" {
+					row["interest_rate"] = neg
+				}
+			} else if card := asFloat64(row["rate_card_rate"]); card > 0 {
+				row["default_interest_rate"] = card
+			} else {
+				row["default_interest_rate"] = asFloat64(row["interest_rate"])
 			}
 			bookings = append(bookings, row)
 		}

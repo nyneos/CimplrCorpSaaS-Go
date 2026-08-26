@@ -1,12 +1,12 @@
 package bankstatement
 
 import (
-	"context"
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -192,6 +192,20 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		uploadOK, uploadMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreUpload,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "BANK_STATEMENT",
+			ActorUserID:         userID,
+			HandlerName:         "UploadBankStatement",
+			APIPath:             "/cash/upload-bank-statement",
+			DefaultBlockMessage: "Bank statement upload blocked by policy",
+			Fields:              map[string]interface{}{"upload_type": "file"},
+		})
+		if !uploadOK {
+			return
+		}
+
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			api.RespondWithPayload(w, false, constants.ErrFailedToParseMultipartForm, nil)
 			return
@@ -302,20 +316,21 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			requestedIP := nullIfBlank(api.ClientIPFromRequest(r))
 			for _, bsid := range newIDs {
 				if _, aerr := pgxPool.Exec(ctx, `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now(),$3)`, bsid, userName, requestedIP); aerr == nil {
-					go func(bID string) {
-						approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
-							ModuleCode:       common.ModuleCash,
-							TransactionType:  "BANK_STATEMENT_CREATE",
-							RecordID:         bID,
-							RecordTable:      "bank_statement",
-							AuditTable:       "public.auditactionbankstatement",
-							AuditIDColumn:    "bankstatementid",
-							ActionType:       "CREATE",
-							Amount:           0,
-							SubmittedBy:      userID,
-							SubmittedByEmail: userName,
-						})
-					}(bsid)
+					approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+						ModuleCode:          common.ModuleCash,
+						TransactionType:     "BANK_STATEMENT_CREATE",
+						RecordID:            bsid,
+						RecordTable:         "bank_statement",
+						AuditTable:          "public.auditactionbankstatement",
+						AuditIDColumn:       "bankstatementid",
+						ActionType:          "CREATE",
+						Amount:              0,
+						SubmittedBy:         userID,
+						SubmittedByEmail:    userName,
+						MatrixID:            uploadMatrixID,
+						RequirePinnedMatrix: true,
+						AutoApplyIfUnpinned: false,
+					})
 				} else {
 					// log but don't fail the entire upload for audit insert error
 					// (could collect and return these later if desired)
@@ -826,18 +841,18 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(legacyIDs) > 0 {
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
-			return
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
+				return
 			}
-		}()
-		sel := `
+			committed := false
+			defer func() {
+				if !committed {
+					tx.Rollback(ctx)
+				}
+			}()
+			sel := `
 			SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, actiontype, processing_status
 			FROM auditactionbankstatement
 			WHERE bankstatementid = ANY($1)
@@ -849,70 +864,70 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				requested_at DESC,
 				action_id DESC
 		`
-		rows, err := tx.Query(ctx, sel, legacyIDs)
-		if err != nil {
-			api.RespondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
-			return
-		}
-		defer rows.Close()
-		actionIDs := make([]string, 0)
-		found := map[string]bool{}
-		cannotApprove := []string{}
-		actionTypeBy := map[string]string{}
-		for rows.Next() {
-			var aid, bid, atype, pstatus string
-			if err := rows.Scan(&aid, &bid, &atype, &pstatus); err != nil {
-				api.RespondWithPayload(w, false, "failed to scan audit rows: "+err.Error(), nil)
+			rows, err := tx.Query(ctx, sel, legacyIDs)
+			if err != nil {
+				api.RespondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
 				return
 			}
-			found[bid] = true
-			actionIDs = append(actionIDs, aid)
-			actionTypeBy[bid] = atype
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved || strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusRejected {
-				cannotApprove = append(cannotApprove, bid)
-			}
-		}
-		missing := []string{}
-		for _, bid := range legacyIDs {
-			if !found[bid] {
-				missing = append(missing, bid)
-			}
-		}
-		if len(missing) > 0 || len(cannotApprove) > 0 {
-			msg := ""
-			if len(missing) > 0 {
-				msg += fmt.Sprintf("no audit action found for bankstatement_ids: %v. ", missing)
-			}
-			if len(cannotApprove) > 0 {
-				msg += fmt.Sprintf("cannot approve already approved bankstatement_ids: %v", cannotApprove)
-			}
-			api.RespondWithPayload(w, false, msg, nil)
-			return
-		}
-		upd := `UPDATE auditactionbankstatement SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4) RETURNING action_id, bankstatementid, actiontype`
-		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, nullIfBlank(api.ClientIPFromRequest(r)), actionIDs)
-		if err != nil {
-			api.RespondWithPayload(w, false, "failed to update audit rows: "+err.Error(), nil)
-			return
-		}
-		defer urows.Close()
-		updated := []map[string]interface{}{}
-		deleteActionIDs := make([]string, 0)
-		for urows.Next() {
-			var aid, bid, atype string
-			if err := urows.Scan(&aid, &bid, &atype); err == nil {
-				updated = append(updated, map[string]interface{}{"action_id": aid, "bankstatementid": bid, "action_type": atype})
-				if strings.ToUpper(strings.TrimSpace(atype)) == "DELETE" {
-					deleteActionIDs = append(deleteActionIDs, aid)
+			defer rows.Close()
+			actionIDs := make([]string, 0)
+			found := map[string]bool{}
+			cannotApprove := []string{}
+			actionTypeBy := map[string]string{}
+			for rows.Next() {
+				var aid, bid, atype, pstatus string
+				if err := rows.Scan(&aid, &bid, &atype, &pstatus); err != nil {
+					api.RespondWithPayload(w, false, "failed to scan audit rows: "+err.Error(), nil)
+					return
+				}
+				found[bid] = true
+				actionIDs = append(actionIDs, aid)
+				actionTypeBy[bid] = atype
+				if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved || strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusRejected {
+					cannotApprove = append(cannotApprove, bid)
 				}
 			}
-		}
-		if len(updated) != len(actionIDs) {
-			api.RespondWithPayload(w, false, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)), nil)
-			return
-		}
-		if len(deleteActionIDs) > 0 {
-			sd := `
+			missing := []string{}
+			for _, bid := range legacyIDs {
+				if !found[bid] {
+					missing = append(missing, bid)
+				}
+			}
+			if len(missing) > 0 || len(cannotApprove) > 0 {
+				msg := ""
+				if len(missing) > 0 {
+					msg += fmt.Sprintf("no audit action found for bankstatement_ids: %v. ", missing)
+				}
+				if len(cannotApprove) > 0 {
+					msg += fmt.Sprintf("cannot approve already approved bankstatement_ids: %v", cannotApprove)
+				}
+				api.RespondWithPayload(w, false, msg, nil)
+				return
+			}
+			upd := `UPDATE auditactionbankstatement SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4) RETURNING action_id, bankstatementid, actiontype`
+			urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, nullIfBlank(api.ClientIPFromRequest(r)), actionIDs)
+			if err != nil {
+				api.RespondWithPayload(w, false, "failed to update audit rows: "+err.Error(), nil)
+				return
+			}
+			defer urows.Close()
+			updated := []map[string]interface{}{}
+			deleteActionIDs := make([]string, 0)
+			for urows.Next() {
+				var aid, bid, atype string
+				if err := urows.Scan(&aid, &bid, &atype); err == nil {
+					updated = append(updated, map[string]interface{}{"action_id": aid, "bankstatementid": bid, "action_type": atype})
+					if strings.ToUpper(strings.TrimSpace(atype)) == "DELETE" {
+						deleteActionIDs = append(deleteActionIDs, aid)
+					}
+				}
+			}
+			if len(updated) != len(actionIDs) {
+				api.RespondWithPayload(w, false, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)), nil)
+				return
+			}
+			if len(deleteActionIDs) > 0 {
+				sd := `
 				UPDATE bank_statement bs
 				SET is_deleted = true,
 					deleted_at = now(),
@@ -922,56 +937,56 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND aa.actiontype = 'DELETE'
 				  AND aa.bankstatementid = bs.bankstatementid
 			`
-			if _, err := tx.Exec(ctx, sd, deleteActionIDs); err != nil {
-				api.RespondWithPayload(w, false, "failed to soft-delete bank_statement rows: "+err.Error(), nil)
-				return
+				if _, err := tx.Exec(ctx, sd, deleteActionIDs); err != nil {
+					api.RespondWithPayload(w, false, "failed to soft-delete bank_statement rows: "+err.Error(), nil)
+					return
+				}
 			}
-		}
-		if _, err := tx.Exec(ctx, `
+			if _, err := tx.Exec(ctx, `
 			UPDATE bank_statement
 			SET status = 'APPROVED'
 			WHERE bankstatementid = ANY($1)
 			  AND COALESCE(is_deleted, false) = false
 		`, legacyIDs); err != nil {
-			api.RespondWithPayload(w, false, "failed to update bank_statement status: "+err.Error(), nil)
-			return
-		}
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
-			return
-		}
-		committed = true
-
-		// Match /cash/bank-statements/v2/approve: checker bulk-approve must enqueue notifications
-		// per statement. This path was previously missing TriggerNotification entirely, so approve
-		// emails/pushes never fired until some later unrelated notification run (felt "batched").
-		pool, uID, notifRows := pgxPool, req.UserID, updated
-		go func() {
-			if pool == nil {
+				api.RespondWithPayload(w, false, "failed to update bank_statement status: "+err.Error(), nil)
 				return
 			}
-			nctx := r.Context()
-			for _, row := range notifRows {
-				bid, _ := row["bankstatementid"].(string)
-				atype, _ := row["action_type"].(string)
-				if bid == "" {
-					continue
-				}
-				switch strings.ToUpper(strings.TrimSpace(atype)) {
-				case "DELETE":
-					payload := BuildBankStatementNotifPayload(nctx, pool, []string{bid}, "DELETE_APPROVED", uID)
-					catalog.TriggerNotification(nctx, pool, "/cash/bank-statements/v2/delete",
-						fmt.Sprintf("BSDELETE-APPROVED/%s/%d", bid, time.Now().UnixMilli()), payload)
-				default:
-					// CREATE, EDIT, or unknown — same route as ApproveBankStatementHandler
-					payload := BuildBankStatementNotifPayload(nctx, pool, []string{bid}, "APPROVE", uID)
-					catalog.TriggerNotification(nctx, pool, "/cash/bank-statements/v2/approve",
-						fmt.Sprintf("BSAPPROVE/%s/%d", bid, time.Now().UnixMilli()), payload)
-				}
+			if err := tx.Commit(ctx); err != nil {
+				api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
+				return
 			}
-		}()
+			committed = true
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
+			// Match /cash/bank-statements/v2/approve: checker bulk-approve must enqueue notifications
+			// per statement. This path was previously missing TriggerNotification entirely, so approve
+			// emails/pushes never fired until some later unrelated notification run (felt "batched").
+			pool, uID, notifRows := pgxPool, req.UserID, updated
+			go func() {
+				if pool == nil {
+					return
+				}
+				nctx := r.Context()
+				for _, row := range notifRows {
+					bid, _ := row["bankstatementid"].(string)
+					atype, _ := row["action_type"].(string)
+					if bid == "" {
+						continue
+					}
+					switch strings.ToUpper(strings.TrimSpace(atype)) {
+					case "DELETE":
+						payload := BuildBankStatementNotifPayload(nctx, pool, []string{bid}, "DELETE_APPROVED", uID)
+						catalog.TriggerNotification(nctx, pool, "/cash/bank-statements/v2/delete",
+							fmt.Sprintf("BSDELETE-APPROVED/%s/%d", bid, time.Now().UnixMilli()), payload)
+					default:
+						// CREATE, EDIT, or unknown — same route as ApproveBankStatementHandler
+						payload := BuildBankStatementNotifPayload(nctx, pool, []string{bid}, "APPROVE", uID)
+						catalog.TriggerNotification(nctx, pool, "/cash/bank-statements/v2/approve",
+							fmt.Sprintf("BSAPPROVE/%s/%d", bid, time.Now().UnixMilli()), payload)
+					}
+				}
+			}()
+
+			api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
 		}
 		if len(legacyIDs) == 0 && len(engineIDs) > 0 {
 			api.RespondWithPayload(w, true, fmt.Sprintf("Approved %d bank statements via matrix", len(engineIDs)), nil)
@@ -1029,99 +1044,99 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(legacyIDs) > 0 {
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
-			return
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
-		sel := `SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, processing_status FROM auditactionbankstatement WHERE bankstatementid = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY bankstatementid, requested_at DESC, action_id DESC`
-		rows, err := tx.Query(ctx, sel, legacyIDs)
-		if err != nil {
-			api.RespondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
-			return
-		}
-		defer rows.Close()
-		actionIDs := make([]string, 0)
-		found := map[string]bool{}
-		cannotReject := []string{}
-		for rows.Next() {
-			var aid, bid, pstatus string
-			if err := rows.Scan(&aid, &bid, &pstatus); err != nil {
-				api.RespondWithPayload(w, false, "failed to scan audit rows: "+err.Error(), nil)
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
 				return
 			}
-			found[bid] = true
-			actionIDs = append(actionIDs, aid)
-			if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved || strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusRejected {
-				cannotReject = append(cannotReject, bid)
-			}
-		}
-		missing := []string{}
-		for _, bid := range legacyIDs {
-			if !found[bid] {
-				missing = append(missing, bid)
-			}
-		}
-		if len(missing) > 0 || len(cannotReject) > 0 {
-			msg := ""
-			if len(missing) > 0 {
-				msg += fmt.Sprintf("no audit action found for bankstatement_ids: %v. ", missing)
-			}
-			if len(cannotReject) > 0 {
-				msg += fmt.Sprintf("cannot reject already approved bankstatement_ids: %v", cannotReject)
-			}
-			api.RespondWithPayload(w, false, msg, nil)
-			return
-		}
-		upd := `UPDATE auditactionbankstatement SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4) RETURNING action_id, bankstatementid`
-		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, nullIfBlank(api.ClientIPFromRequest(r)), actionIDs)
-		if err != nil {
-			api.RespondWithPayload(w, false, "failed to update audit rows: "+err.Error(), nil)
-			return
-		}
-		defer urows.Close()
-		updated := []map[string]interface{}{}
-		for urows.Next() {
-			var aid, bid string
-			if err := urows.Scan(&aid, &bid); err == nil {
-				updated = append(updated, map[string]interface{}{"action_id": aid, "bankstatementid": bid})
-			}
-		}
-		if len(updated) != len(actionIDs) {
-			api.RespondWithPayload(w, false, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)), nil)
-			return
-		}
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
-			return
-		}
-		committed = true
-
-		pool, uID, comment := pgxPool, req.UserID, req.Comment
-		rejectedIDs := make([]string, 0, len(updated))
-		for _, row := range updated {
-			if bid, ok := row["bankstatementid"].(string); ok && bid != "" {
-				rejectedIDs = append(rejectedIDs, bid)
-			}
-		}
-		go func() {
-			if pool == nil || len(rejectedIDs) == 0 {
+			committed := false
+			defer func() {
+				if !committed {
+					tx.Rollback(ctx)
+				}
+			}()
+			sel := `SELECT DISTINCT ON (bankstatementid) action_id, bankstatementid, processing_status FROM auditactionbankstatement WHERE bankstatementid = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY bankstatementid, requested_at DESC, action_id DESC`
+			rows, err := tx.Query(ctx, sel, legacyIDs)
+			if err != nil {
+				api.RespondWithPayload(w, false, "failed to fetch audit rows: "+err.Error(), nil)
 				return
 			}
-			nctx := r.Context()
-			payload := BuildBankStatementNotifPayload(nctx, pool, rejectedIDs, "REJECT", uID)
-			payload["Comment"] = comment
-			catalog.TriggerNotification(nctx, pool, "/cash/bank-statements/v2/reject",
-				fmt.Sprintf("BSREJECT/%s/%d", uID, time.Now().UnixMilli()), payload)
-		}()
+			defer rows.Close()
+			actionIDs := make([]string, 0)
+			found := map[string]bool{}
+			cannotReject := []string{}
+			for rows.Next() {
+				var aid, bid, pstatus string
+				if err := rows.Scan(&aid, &bid, &pstatus); err != nil {
+					api.RespondWithPayload(w, false, "failed to scan audit rows: "+err.Error(), nil)
+					return
+				}
+				found[bid] = true
+				actionIDs = append(actionIDs, aid)
+				if strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusApproved || strings.ToUpper(strings.TrimSpace(pstatus)) == constants.StatusRejected {
+					cannotReject = append(cannotReject, bid)
+				}
+			}
+			missing := []string{}
+			for _, bid := range legacyIDs {
+				if !found[bid] {
+					missing = append(missing, bid)
+				}
+			}
+			if len(missing) > 0 || len(cannotReject) > 0 {
+				msg := ""
+				if len(missing) > 0 {
+					msg += fmt.Sprintf("no audit action found for bankstatement_ids: %v. ", missing)
+				}
+				if len(cannotReject) > 0 {
+					msg += fmt.Sprintf("cannot reject already approved bankstatement_ids: %v", cannotReject)
+				}
+				api.RespondWithPayload(w, false, msg, nil)
+				return
+			}
+			upd := `UPDATE auditactionbankstatement SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2, checker_ip=$3 WHERE action_id = ANY($4) RETURNING action_id, bankstatementid`
+			urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, nullIfBlank(api.ClientIPFromRequest(r)), actionIDs)
+			if err != nil {
+				api.RespondWithPayload(w, false, "failed to update audit rows: "+err.Error(), nil)
+				return
+			}
+			defer urows.Close()
+			updated := []map[string]interface{}{}
+			for urows.Next() {
+				var aid, bid string
+				if err := urows.Scan(&aid, &bid); err == nil {
+					updated = append(updated, map[string]interface{}{"action_id": aid, "bankstatementid": bid})
+				}
+			}
+			if len(updated) != len(actionIDs) {
+				api.RespondWithPayload(w, false, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)), nil)
+				return
+			}
+			if err := tx.Commit(ctx); err != nil {
+				api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
+				return
+			}
+			committed = true
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
+			pool, uID, comment := pgxPool, req.UserID, req.Comment
+			rejectedIDs := make([]string, 0, len(updated))
+			for _, row := range updated {
+				if bid, ok := row["bankstatementid"].(string); ok && bid != "" {
+					rejectedIDs = append(rejectedIDs, bid)
+				}
+			}
+			go func() {
+				if pool == nil || len(rejectedIDs) == 0 {
+					return
+				}
+				nctx := r.Context()
+				payload := BuildBankStatementNotifPayload(nctx, pool, rejectedIDs, "REJECT", uID)
+				payload["Comment"] = comment
+				catalog.TriggerNotification(nctx, pool, "/cash/bank-statements/v2/reject",
+					fmt.Sprintf("BSREJECT/%s/%d", uID, time.Now().UnixMilli()), payload)
+			}()
+
+			api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
 		}
 		if len(legacyIDs) == 0 && len(engineIDs) > 0 {
 			api.RespondWithPayload(w, true, fmt.Sprintf("Rejected %d bank statements via matrix", len(engineIDs)), nil)
@@ -1158,6 +1173,31 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+		deleteMatrixByID := map[string]string{}
+		for _, id := range req.IDs {
+			if strings.TrimSpace(id) == "" {
+				api.RespondWithPayload(w, false, "empty bankstatement id provided", nil)
+				return
+			}
+			var entityID string
+			_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entityid,'') FROM bank_statement WHERE bankstatementid=$1`, id).Scan(&entityID)
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_STATEMENT",
+				EntityCode:          entityID,
+				ActorUserID:         req.UserID,
+				HandlerName:         "BulkDeleteBankStatements",
+				APIPath:             "/cash/bank-statements/bulk-delete",
+				DefaultBlockMessage: "Bank statement delete blocked by policy",
+				Fields:              loadBankStatementPolicyFields(ctx, pgxPool, id, entityID, "DELETE"),
+			}); !ok {
+				api.RespondWithPayload(w, false, msg, nil)
+				return
+			} else {
+				deleteMatrixByID[id] = tID
+			}
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
@@ -1208,20 +1248,21 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 		for _, id := range req.IDs {
-			go func(bID string) {
-				approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
-					ModuleCode:       common.ModuleCash,
-					TransactionType:  "BANK_STATEMENT_DELETE",
-					RecordID:         bID,
-					RecordTable:      "bank_statement",
-					AuditTable:       "public.auditactionbankstatement",
-					AuditIDColumn:    "bankstatementid",
-					ActionType:       "DELETE",
-					Amount:           0,
-					SubmittedBy:      req.UserID,
-					SubmittedByEmail: requestedBy,
-				})
-			}(id)
+			approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+				ModuleCode:          common.ModuleCash,
+				TransactionType:     "BANK_STATEMENT_DELETE",
+				RecordID:            id,
+				RecordTable:         "bank_statement",
+				AuditTable:          "public.auditactionbankstatement",
+				AuditIDColumn:       "bankstatementid",
+				ActionType:          "DELETE",
+				Amount:              0,
+				SubmittedBy:         req.UserID,
+				SubmittedByEmail:    requestedBy,
+				MatrixID:            deleteMatrixByID[id],
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: false,
+			})
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true})
 	}
@@ -1692,6 +1733,7 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		created := make([]string, 0, len(req.Rows))
+		createMatrixByID := map[string]string{}
 
 		insertSQL := `INSERT INTO bank_statement (
 			entityid, account_number, statementdate, openingbalance, closingbalance,
@@ -1720,6 +1762,28 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if len(missing) > 0 {
 				api.RespondWithPayload(w, false, "Missing required fields: "+strings.Join(missing, ","), nil)
 				return
+			}
+			var rowMatrixID string
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreCreate,
+				ModuleCode:          common.ModuleCash,
+				SubModule:           "BANK_STATEMENT",
+				EntityCode:          row.EntityID,
+				ActorUserID:         req.UserID,
+				HandlerName:         "CreateBankStatements",
+				APIPath:             "/cash/bank-statements/create",
+				DefaultBlockMessage: "Bank statement create blocked by policy",
+				Fields: buildBankStatementPolicyFields(bankStatementRow{
+					EntityID:       row.EntityID,
+					AccountNumber:  row.AccountNumber,
+					OpeningBalance: row.OpeningBalance,
+					ClosingBalance: row.ClosingBalance,
+				}, "CREATE"),
+			}); !ok {
+				api.RespondWithPayload(w, false, msg, nil)
+				return
+			} else {
+				rowMatrixID = tID
 			}
 
 			var id string
@@ -1791,6 +1855,7 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			created = append(created, id)
+			createMatrixByID[id] = rowMatrixID
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -1800,20 +1865,21 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		for _, id := range created {
-			go func(bID string) {
-				approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
-					ModuleCode:       common.ModuleCash,
-					TransactionType:  "BANK_STATEMENT_CREATE",
-					RecordID:         bID,
-					RecordTable:      "bank_statement",
-					AuditTable:       "public.auditactionbankstatement",
-					AuditIDColumn:    "bankstatementid",
-					ActionType:       "CREATE",
-					Amount:           0,
-					SubmittedBy:      req.UserID,
-					SubmittedByEmail: createdBy,
-				})
-			}(id)
+			approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+				ModuleCode:          common.ModuleCash,
+				TransactionType:     "BANK_STATEMENT_CREATE",
+				RecordID:            id,
+				RecordTable:         "bank_statement",
+				AuditTable:          "public.auditactionbankstatement",
+				AuditIDColumn:       "bankstatementid",
+				ActionType:          "CREATE",
+				Amount:              0,
+				SubmittedBy:         req.UserID,
+				SubmittedByEmail:    createdBy,
+				MatrixID:            createMatrixByID[id],
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: false,
+			})
 		}
 
 		// respond with created ids and overall success
@@ -1880,6 +1946,23 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if requestedBy == "" {
 			api.RespondWithPayload(w, false, constants.ErrInvalidSession, nil)
+			return
+		}
+
+		var entityID string
+		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entityid,'') FROM bank_statement WHERE bankstatementid=$1`, req.BankStatementID).Scan(&entityID)
+		editOK, editMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
+			EventCode:           common.TriggerPreEdit,
+			ModuleCode:          common.ModuleCash,
+			SubModule:           "BANK_STATEMENT",
+			EntityCode:          entityID,
+			ActorUserID:         req.UserID,
+			HandlerName:         "UpdateBankStatement",
+			APIPath:             "/cash/bank-statements/update",
+			DefaultBlockMessage: "Bank statement update blocked by policy",
+			Fields:              loadBankStatementPolicyFields(ctx, pgxPool, req.BankStatementID, entityID, "EDIT"),
+		})
+		if !editOK {
 			return
 		}
 
@@ -2058,20 +2141,21 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_STATEMENT", "POST_EDIT", []string{req.BankStatementID}, requestedBy)
 
-		go func(bID string) {
-			approvalengine.CreateInstance(context.Background(), pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       common.ModuleCash,
-				TransactionType:  "BANK_STATEMENT_EDIT",
-				RecordID:         bID,
-				RecordTable:      "bank_statement",
-				AuditTable:       "public.auditactionbankstatement",
-				AuditIDColumn:    "bankstatementid",
-				ActionType:       "EDIT",
-				Amount:           0,
-				SubmittedBy:      req.UserID,
-				SubmittedByEmail: requestedBy,
-			})
-		}(req.BankStatementID)
+		approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
+			ModuleCode:          common.ModuleCash,
+			TransactionType:     "BANK_STATEMENT_EDIT",
+			RecordID:            req.BankStatementID,
+			RecordTable:         "bank_statement",
+			AuditTable:          "public.auditactionbankstatement",
+			AuditIDColumn:       "bankstatementid",
+			ActionType:          "EDIT",
+			Amount:              0,
+			SubmittedBy:         req.UserID,
+			SubmittedByEmail:    requestedBy,
+			MatrixID:            editMatrixID,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: false,
+		})
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"bankstatementid": req.BankStatementID})
 	}

@@ -30,7 +30,7 @@ func NewFXServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 
 	// create a shared pgx pool once for all middleware and handlers
-	pgxPool, err := pgxpool.New(context.Background(), dsn)
+	pgxPool, err := dbutil.NewTracedPool(context.Background(), dsn, serviceName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to pgxpool DB: %w", err)
 	}

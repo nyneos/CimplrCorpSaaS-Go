@@ -20,6 +20,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/dependency"
 	"context"
 	"encoding/json"
@@ -303,6 +304,17 @@ func CreateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		ok, createMatrixID := hubEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreCreate,
+			HandlerName: "CreateCounterparty",
+			APIPath:     "/master/v2/counterparty-hub/create",
+			EntityCode:  req.CounterpartyCode,
+			Actor:       userEmail,
+		}, nil)
+		if !ok {
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
@@ -372,23 +384,26 @@ func CreateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// ── Post-commit: approval engine + notification ───────────────────────
-		go func(cpID, uID, uEmail, cpType string) {
+		go func(cpID, uID, uEmail, cpType, matrixID string) {
 			defer func() { recover() }()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "COUNTERPARTY_HUB",
-				TransactionType:  "COUNTERPARTY_CREATE",
-				RecordID:         cpID,
-				RecordTable:      constants.ErrCounterpartyServiceTable,
-				AuditTable:       constants.ErrAuditCounterpartyServiceTable,
-				AuditIDColumn:    "counterparty_id",
-				ActionType:       "CREATE",
-				SubmittedBy:      uID,
-				SubmittedByEmail: uEmail,
+				ModuleCode:          "COUNTERPARTY_HUB",
+				TransactionType:     "COUNTERPARTY_CREATE",
+				RecordID:            cpID,
+				RecordTable:         constants.ErrCounterpartyServiceTable,
+				AuditTable:          constants.ErrAuditCounterpartyServiceTable,
+				AuditIDColumn:       "counterparty_id",
+				ActionType:          "CREATE",
+				SubmittedBy:         uID,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
-		}(counterpartyID, req.UserID, userEmail, req.CounterpartyType)
+		}(counterpartyID, req.UserID, userEmail, req.CounterpartyType, createMatrixID)
 
 		go func(cpID, uEmail, cpType string) {
 			defer func() { recover() }()
@@ -921,6 +936,21 @@ func CreateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			ok, pmsg, bulkMatrixID := hubEnforceInlineWithMatrix(ctx, r, pgxPool, enforceCtx{
+				EventCode:   common.TriggerPreCreate,
+				HandlerName: "CreateCounterpartyBulk",
+				APIPath:     "/master/v2/counterparty-hub/create-bulk",
+				EntityCode:  row.CounterpartyCode,
+				Actor:       userEmail,
+			}, nil)
+			if !ok {
+				errList = append(errList, map[string]interface{}{
+					"row_index": i, "success": false, "error": pmsg,
+					"counterparty_code": row.CounterpartyCode,
+				})
+				continue
+			}
+
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				errList = append(errList, map[string]interface{}{
@@ -995,18 +1025,21 @@ func CreateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"counterparty_type": row.CounterpartyType,
 			})
 
-			go func(id, uID, uEmail, cpType string) {
+			go func(id, uID, uEmail, cpType, matrixID string) {
 				defer func() { recover() }()
 				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer bgCancel()
+				defer bgCancel()
 				_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", id, uEmail)
 				_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_CREATE",
 					RecordID: id, RecordTable: constants.ErrCounterpartyServiceTable,
 					AuditTable: constants.ErrAuditCounterpartyServiceTable, AuditIDColumn: "counterparty_id",
 					ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail,
+					MatrixID:            matrixID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
-			}(cpID, req.UserID, userEmail, row.CounterpartyType)
+			}(cpID, req.UserID, userEmail, row.CounterpartyType, bulkMatrixID)
 		}
 
 		all := append(inserted, errList...)
@@ -1045,6 +1078,17 @@ func UpdateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		ok, editMatrixID := hubEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{
+			EventCode:   common.TriggerPreEdit,
+			HandlerName: "UpdateCounterparty",
+			APIPath:     "/master/v2/counterparty-hub/update",
+			EntityCode:  req.CounterpartyID,
+			Actor:       userEmail,
+		}, req.Fields)
+		if !ok {
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
@@ -1208,7 +1252,7 @@ func UpdateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		go func(cpID, uID, uEmail string) {
+		go func(cpID, uID, uEmail, matrixID string) {
 			defer func() { recover() }()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
@@ -1218,8 +1262,11 @@ func UpdateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RecordID: cpID, RecordTable: constants.ErrCounterpartyServiceTable,
 				AuditTable: constants.ErrAuditCounterpartyServiceTable, AuditIDColumn: "counterparty_id",
 				ActionType: "EDIT", SubmittedBy: uID, SubmittedByEmail: uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
-		}(req.CounterpartyID, req.UserID, userEmail)
+		}(req.CounterpartyID, req.UserID, userEmail, editMatrixID)
 
 		go func(cpID, uEmail string) {
 			defer func() { recover() }()

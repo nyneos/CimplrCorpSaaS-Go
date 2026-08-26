@@ -1,8 +1,8 @@
 package forwards
 
 import (
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
@@ -142,7 +142,7 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 		if strings.TrimSpace(requestedBy) == "" {
 			requestedBy = auditutil.ActorFromContext(r.Context())
 		}
-		
+
 		makerEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -158,11 +158,13 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 			bgCtx := context.Background()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FX",
-				TransactionType:  "FX_FORWARD_EDIT",
-				RecordID:         id,
-				MatrixID:         matrixID,
-				SubmittedByEmail: email,
+				ModuleCode:          "FX",
+				TransactionType:     "FX_FORWARD_EDIT",
+				RecordID:            id,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
+				SubmittedByEmail:    email,
 			})
 		}(req.SystemTransactionID, makerEmail, tID)
 
@@ -670,7 +672,7 @@ func BulkDeleteForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		resultRows.Close()
 		triggerForwardBookingNotif(r.Context(), pool, routeForwardBulkDelete, "DELETE", auditutil.Actor(req.UserID), constants.FwdProcessingStatusPendingDeleteApproval, collectBookingIDsFromRows(updated))
-		
+
 		makerEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -683,11 +685,13 @@ func BulkDeleteForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					TransactionType:  "FX_FORWARD_DELETE",
-					RecordID:         id,
-					MatrixID:         matrices[id],
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					TransactionType:     "FX_FORWARD_DELETE",
+					RecordID:            id,
+					MatrixID:            matrices[id],
+					SubmittedByEmail:    email,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 			}
 		}(collectBookingIDsFromRows(updated), makerEmail, triggerMatrices)

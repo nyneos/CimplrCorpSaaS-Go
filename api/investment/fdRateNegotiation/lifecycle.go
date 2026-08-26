@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/policyengine/common"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -62,52 +63,53 @@ func txTypeForAction(actionType string) string {
 	}
 }
 
-func fireRateNegotiationInstance(pool *pgxpool.Pool, recordID, userID, userEmail, actionType string, amount float64) {
-	go func() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				api.LogError("[FDRateNeg] CreateInstance panic record=%s: %v", recordID, rec)
-			}
-		}()
-		bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		if err := approvalengine.CancelPendingInstances(bgCtx, pool, rateNegModule, recordID, userEmail); err != nil {
-			api.LogError("[FDRateNeg] CancelPendingInstances %s: %v", recordID, err)
-			return
-		}
-		instID, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       rateNegModule,
-			EntityCode:       "",
-			TransactionType:  txTypeForAction(actionType),
-			RecordID:         recordID,
-			RecordTable:      rateNegRecordTable,
-			AuditTable:       rateNegAuditTable,
-			AuditIDColumn:    rateNegPK,
-			ActionType:       strings.ToUpper(actionType),
-			Amount:           amount,
-			SubmittedBy:      userID,
-			SubmittedByEmail: userEmail,
-		})
-		if err != nil {
-			api.LogError("[FDRateNeg] CreateInstance(%s) %s: %v", actionType, recordID, err)
-			return
-		}
-		if instID != "" {
-			api.LogInfo("[FDRateNeg] CreateInstance(%s) %s → %s", actionType, instID, recordID)
-		}
-	}()
+func fireRateNegotiationInstance(pool *pgxpool.Pool, recordID, userID, userEmail, actionType, matrixID string, amount float64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := approvalengine.CancelPendingInstances(ctx, pool, rateNegModule, recordID, userEmail); err != nil {
+		api.LogError("[FDRateNeg] CancelPendingInstances %s: %v", recordID, err)
+		return
+	}
+	instID, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:          rateNegModule,
+		EntityCode:          "",
+		TransactionType:     txTypeForAction(actionType),
+		RecordID:            recordID,
+		RecordTable:         rateNegRecordTable,
+		AuditTable:          rateNegAuditTable,
+		AuditIDColumn:       rateNegPK,
+		ActionType:          strings.ToUpper(actionType),
+		Amount:              amount,
+		SubmittedBy:         userID,
+		SubmittedByEmail:    userEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: true,
+	})
+	if err != nil {
+		api.LogError("[FDRateNeg] CreateInstance(%s) %s: %v", actionType, recordID, err)
+		return
+	}
+	if instID != "" {
+		api.LogInfo("[FDRateNeg] CreateInstance(%s) %s → %s", actionType, instID, recordID)
+	}
 }
 
 func stampPendingAudits(ctx context.Context, tx pgx.Tx, ids []string, status, checker, comment, ip string) (int64, error) {
 	tag, err := tx.Exec(ctx, `
-		UPDATE investment.fd_audit_rate_negotiation
+		UPDATE investment.fd_audit_rate_negotiation t
 		SET processing_status = $1,
 			checker_by = $2,
 			checker_at = now(),
 			checker_comment = $3,
 			checker_ip = $4
-		WHERE rate_request_id = ANY($5::uuid[])
-		  AND processing_status LIKE 'PENDING%'`,
+		WHERE t.audit_id IN (
+			SELECT DISTINCT ON (a.rate_request_id) a.audit_id
+			FROM investment.fd_audit_rate_negotiation a
+			WHERE a.rate_request_id = ANY($5::uuid[])
+			  AND a.processing_status LIKE 'PENDING%'
+			ORDER BY a.rate_request_id, a.requested_at DESC, a.audit_id DESC
+		)`,
 		status, api.SystemIfBlank(checker), comment, api.SystemIfBlank(ip), ids)
 	if err != nil {
 		return 0, err
@@ -117,6 +119,7 @@ func stampPendingAudits(ctx context.Context, tx pgx.Tx, ids []string, status, ch
 
 // revertEditOnMaster copies old_* from the latest EDIT audit (pending or just rejected)
 // back onto the master row. This is mandatory on EDIT reject.
+
 func revertEditOnMaster(ctx context.Context, tx pgx.Tx, ids []string, checker string) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE investment.fd_rate_negotiation m
@@ -132,11 +135,16 @@ func revertEditOnMaster(ctx context.Context, tx pgx.Tx, ids []string, checker st
 			target_bank_ids = a.old_target_bank_ids,
 			target_bank_names = a.old_target_bank_names,
 			internal_notes = a.old_internal_notes,
-			request_status = COALESCE(NULLIF(a.old_request_status,''), 'APPROVED'),
+			request_status = CASE
+				WHEN a.old_request_status IS NULL OR a.old_request_status = '' OR a.old_request_status LIKE 'PENDING%'
+				THEN 'APPROVED'
+				ELSE a.old_request_status
+			END,
 			is_active = COALESCE(a.old_is_active, m.is_active),
 			selected_offer_id = a.old_selected_offer_id,
 			selection_remarks = a.old_selection_remarks,
 			booking_id = a.old_booking_id,
+			processing_status = 'APPROVED',
 			updated_by = $2,
 			updated_at = now()
 		FROM investment.fd_audit_rate_negotiation a
@@ -158,15 +166,39 @@ func applyApproveMaster(ctx context.Context, tx pgx.Tx, id, actionType string) e
 	case "DELETE":
 		_, err := tx.Exec(ctx, `
 			UPDATE investment.fd_rate_negotiation
-			SET is_deleted = true, request_status = 'DELETED', updated_at = now()
+			SET is_deleted = true, request_status = 'DELETED',
+				processing_status = 'APPROVED', updated_at = now()
 			WHERE rate_request_id = $1::uuid`, id)
 		return err
 	default:
+		// Never collapse CONVERTED_TO_FD back to APPROVED (zombie booking-link approve).
+		// PENDING_RATE_APPROVAL (selection) → APPROVED.
+		// Field EDIT: restore pre-edit lifecycle (SENT_TO_BANKS / OFFERS_RECEIVED / …).
 		_, err := tx.Exec(ctx, `
-			UPDATE investment.fd_rate_negotiation
-			SET request_status = 'APPROVED', updated_at = now()
-			WHERE rate_request_id = $1::uuid
-			  AND COALESCE(is_deleted,false) = false`, id)
+			UPDATE investment.fd_rate_negotiation m
+			SET request_status = CASE
+					WHEN m.request_status = 'CONVERTED_TO_FD' THEN 'CONVERTED_TO_FD'
+					WHEN m.request_status = 'PENDING_RATE_APPROVAL' THEN 'APPROVED'
+					WHEN a.old_request_status IS NOT NULL
+						AND a.old_request_status <> ''
+						AND a.old_request_status NOT LIKE 'PENDING%'
+						AND a.old_request_status <> 'CONVERTED_TO_FD'
+					THEN a.old_request_status
+					ELSE 'APPROVED'
+				END,
+				processing_status = 'APPROVED',
+				updated_at = now()
+			FROM (SELECT 1) AS _
+			LEFT JOIN LATERAL (
+				SELECT a2.old_request_status
+				FROM investment.fd_audit_rate_negotiation a2
+				WHERE a2.rate_request_id = m.rate_request_id
+				  AND a2.action_type = 'EDIT'
+				ORDER BY a2.requested_at DESC, a2.audit_id DESC
+				LIMIT 1
+			) a ON true
+			WHERE m.rate_request_id = $1::uuid
+			  AND COALESCE(m.is_deleted,false) = false`, id)
 		return err
 	}
 }
@@ -177,18 +209,18 @@ func applyRejectMaster(ctx context.Context, tx pgx.Tx, id, actionType, oldStatus
 		return revertEditOnMaster(ctx, tx, []string{id}, checker)
 	case "DELETE":
 		restore := oldStatus
-		if restore == "" || restore == "PENDING_DELETE_APPROVAL" {
+		if restore == "" || strings.HasPrefix(restore, "PENDING") {
 			restore = "APPROVED"
 		}
 		_, err := tx.Exec(ctx, `
 			UPDATE investment.fd_rate_negotiation
-			SET request_status = $2, is_deleted = false, updated_at = now()
+			SET request_status = $2, processing_status = 'APPROVED', is_deleted = false, updated_at = now()
 			WHERE rate_request_id = $1::uuid`, id, restore)
 		return err
 	default:
 		_, err := tx.Exec(ctx, `
 			UPDATE investment.fd_rate_negotiation
-			SET request_status = 'REJECTED', updated_at = now()
+			SET request_status = 'REJECTED', processing_status = 'REJECTED', updated_at = now()
 			WHERE rate_request_id = $1::uuid
 			  AND COALESCE(is_deleted,false) = false`, id)
 		return err
@@ -233,11 +265,12 @@ func DeleteRateRequests(pool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx) //nolint:errcheck
 
 		rows, err := tx.Query(ctx, `
-			SELECT rate_request_id::text, COALESCE(request_status,''), COALESCE(proposed_fd_amount,0)
+			SELECT rate_request_id::text, COALESCE(request_status,''), COALESCE(proposed_fd_amount,0), COALESCE(entity_id,'')
 			FROM investment.fd_rate_negotiation
 			WHERE rate_request_id = ANY($1::uuid[])
-			  AND COALESCE(is_deleted,false) = false
-			  AND request_status NOT IN ('DELETED','CONVERTED_TO_FD','PENDING_DELETE_APPROVAL')
+			AND COALESCE(is_deleted,false) = false
+			  AND request_status NOT IN ('DELETED','CONVERTED_TO_FD')
+			  AND COALESCE(processing_status,'') <> 'PENDING_DELETE_APPROVAL'
 			FOR UPDATE`, ids)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to load rate requests")
@@ -245,14 +278,15 @@ func DeleteRateRequests(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		type meta struct {
-			id     string
-			status string
-			amount float64
+			id       string
+			status   string
+			amount   float64
+			entityID string
 		}
 		var valid []meta
 		for rows.Next() {
 			var m meta
-			if err := rows.Scan(&m.id, &m.status, &m.amount); err != nil {
+			if err := rows.Scan(&m.id, &m.status, &m.amount, &m.entityID); err != nil {
 				rows.Close()
 				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed")
 				return
@@ -266,6 +300,35 @@ func DeleteRateRequests(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(valid) == 0 {
 			api.RespondWithPayload(w, false, "No eligible rate requests to delete", nil)
+			return
+		}
+
+		deleteMatrixByID := map[string]string{}
+		var policyErrors []string
+		for _, m := range valid {
+			ok, pmsg, matrixID := fdEnforceInlineWithMatrix(ctx, r, pool, enforceCtx{
+				EventCode:   common.TriggerPreDelete,
+				HandlerName: "DeleteRateRequests",
+				APIPath:     "/investment/fd/rate-negotiation/delete",
+				EntityCode:  m.entityID,
+				Actor:       userEmail,
+			}, map[string]interface{}{
+				"rate_request_id":    m.id,
+				"entity_id":          m.entityID,
+				"entity_code":        m.entityID,
+				"proposed_fd_amount": m.amount,
+				"request_status":     m.status,
+			})
+			if !ok {
+				policyErrors = append(policyErrors, m.id+": "+pmsg)
+				continue
+			}
+			deleteMatrixByID[m.id] = matrixID
+		}
+		if len(policyErrors) > 0 {
+			api.RespondWithPayload(w, false, "Policy check blocked delete", map[string]interface{}{
+				"errors": policyErrors,
+			})
 			return
 		}
 
@@ -285,7 +348,7 @@ func DeleteRateRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if _, err = tx.Exec(ctx, `
 				UPDATE investment.fd_rate_negotiation
-				SET request_status = 'PENDING_DELETE_APPROVAL', updated_by = $2, updated_at = now()
+				SET processing_status = 'PENDING_DELETE_APPROVAL', updated_by = $2, updated_at = now()
 				WHERE rate_request_id = $1::uuid`, m.id, userEmail); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Status update failed")
 				return
@@ -298,7 +361,7 @@ func DeleteRateRequests(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, m := range valid {
-			fireRateNegotiationInstance(pool, m.id, userID, userEmail, "DELETE", m.amount)
+			fireRateNegotiationInstance(pool, m.id, userID, userEmail, "DELETE", deleteMatrixByID[m.id], m.amount)
 			fireRateNegotiationNotification(pool, m.id, userEmail, "DELETE")
 		}
 

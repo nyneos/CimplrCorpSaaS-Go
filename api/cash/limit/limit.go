@@ -142,7 +142,7 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		ok, triggerMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "BANK_LIMIT",
@@ -167,7 +167,8 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Remarks:            req.Remarks,
 				InitialUtilization: req.InitialUtilization,
 			}),
-		}) {
+		})
+		if !ok {
 			return
 		}
 
@@ -199,12 +200,23 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		auditStatus := approvalengine.AuditStatus(triggerMatrixID, "PENDING_APPROVAL")
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO cimplrcorpsaas.auditactionbanklimit (
+				limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+			) VALUES ($1,'CREATE',$2,$3,$4,now(),$5)`,
+			limitID, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
+		); err != nil {
+			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			return
+		}
+
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 
-		submitBankLimitForApproval(pgxPool, limitID, req.EntityName, req.UserID, requestedBy, "BANK_LIMIT_CREATE", req.SanctionedAmount)
+		submitBankLimitForApproval(pgxPool, limitID, req.EntityName, req.UserID, requestedBy, "BANK_LIMIT_CREATE", req.SanctionedAmount, triggerMatrixID)
 
 		dmsevent.Fire(pgxPool, "CASH", "BANK_LIMIT", "POST_CREATE", []string{limitID}, requestedBy)
 
@@ -411,7 +423,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				fungibilityType := strings.ToUpper(strings.TrimSpace(lim.FungibilityType))
 				securityType := strings.ToUpper(strings.TrimSpace(lim.SecurityType))
 
-				if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+				ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
 					EventCode:           common.TriggerPreCreate,
 					ModuleCode:          common.ModuleCash,
 					SubModule:           "BANK_LIMIT",
@@ -436,7 +448,8 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						Remarks:            lim.Remarks,
 						InitialUtilization: lim.InitialUtilization,
 					}), vl.Index),
-				}); !ok {
+				})
+				if !ok {
 					result["success"] = false
 					result["error"] = msg
 					results = append(results, result)
@@ -475,6 +488,20 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 
+				auditStatus := approvalengine.AuditStatus(tID, "PENDING_APPROVAL")
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO cimplrcorpsaas.auditactionbanklimit (
+						limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+					) VALUES ($1,'CREATE',$2,$3,$4,now(),$5)`,
+					limitID, auditStatus, nil, requestedBy, api.ClientIPFromContext(ctx),
+				); err != nil {
+					tx.Rollback(ctx)
+					result["success"] = false
+					result["error"] = "failed to create audit: " + err.Error()
+					results = append(results, result)
+					continue
+				}
+
 				if err := tx.Commit(ctx); err != nil {
 					result["success"] = false
 					result["error"] = constants.ErrTxCommitFailed
@@ -482,7 +509,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 
-				submitBankLimitForApproval(pgxPool, limitID, lim.EntityName, req.UserID, requestedBy, "BANK_LIMIT_CREATE", lim.SanctionedAmount)
+				submitBankLimitForApproval(pgxPool, limitID, lim.EntityName, req.UserID, requestedBy, "BANK_LIMIT_CREATE", lim.SanctionedAmount, tID)
 
 				result["success"] = true
 				result["limit_id"] = limitID
@@ -560,7 +587,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		mergedRow := applyBankLimitEdits(existingRow, req.Fields)
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		ok, triggerMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "BANK_LIMIT",
@@ -569,7 +596,8 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/cash/limit/update",
 			DefaultBlockMessage: "Bank limit update blocked by policy",
 			Fields:              buildBankLimitPolicyFields(mergedRow),
-		}) {
+		})
+		if !ok {
 			return
 		}
 
@@ -742,6 +770,17 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		auditStatus := approvalengine.AuditStatus(triggerMatrixID, "PENDING_EDIT_APPROVAL")
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO cimplrcorpsaas.auditactionbanklimit (
+				limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+			) VALUES ($1,'EDIT',$2,$3,$4,now(),$5)`,
+			req.LimitID, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
+		); err != nil {
+			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
+			return
+		}
+
 		// Cancel any pending approval instances for this record
 		if err := approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", req.LimitID, requestedBy); err != nil {
 			api.LogError("[BankLimit] Failed to cancel pending instances for %s: %v", map[string]interface{}{"limit_id": req.LimitID, "error": err.Error()})
@@ -762,7 +801,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		submitBankLimitForApproval(pgxPool, req.LimitID, stringOrEmpty(curEntity), req.UserID, requestedBy, "BANK_LIMIT_EDIT", amt)
+		submitBankLimitForApproval(pgxPool, req.LimitID, stringOrEmpty(curEntity), req.UserID, requestedBy, "BANK_LIMIT_EDIT", amt, triggerMatrixID)
 
 		dmsevent.Fire(pgxPool, "CASH", "BANK_LIMIT", "POST_EDIT", []string{req.LimitID}, requestedBy)
 
@@ -826,7 +865,7 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+			ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "BANK_LIMIT",
@@ -835,7 +874,8 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				APIPath:             "/cash/limit/delete",
 				DefaultBlockMessage: "Bank limit delete blocked by policy",
 				Fields:              buildBankLimitPolicyFields(policyRow),
-			}); !ok {
+			})
+			if !ok {
 				result["success"] = false
 				result["error"] = msg
 				results = append(results, result)
@@ -855,6 +895,20 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[BankLimit] Failed to cancel pending instances for %s: %v", map[string]interface{}{"limit_id": limitID, "error": err.Error()})
 			}
 
+			auditStatus := approvalengine.AuditStatus(tID, "PENDING_DELETE_APPROVAL")
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO cimplrcorpsaas.auditactionbanklimit (
+					limit_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
+				) VALUES ($1,'DELETE',$2,$3,$4,now(),$5)`,
+				limitID, auditStatus, nullifyEmpty(req.Reason), requestedBy, api.ClientIPFromContext(ctx),
+			); err != nil {
+				tx.Rollback(ctx)
+				result["success"] = false
+				result["error"] = "failed to create audit: " + err.Error()
+				results = append(results, result)
+				continue
+			}
+
 			if err := tx.Commit(ctx); err != nil {
 				result["success"] = false
 				result["error"] = constants.ErrTxCommitFailed
@@ -864,7 +918,7 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// We need the amount for the approval instance. It comes from policyRow
 			amt := policyRow.SanctionedAmount
-			submitBankLimitForApproval(pgxPool, limitID, policyRow.EntityName, req.UserID, requestedBy, "BANK_LIMIT_DELETE", amt)
+			submitBankLimitForApproval(pgxPool, limitID, policyRow.EntityName, req.UserID, requestedBy, "BANK_LIMIT_DELETE", amt, tID)
 
 			result["success"] = true
 			results = append(results, result)
@@ -907,7 +961,8 @@ func GetAllBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT action_type, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment, reason
 				FROM cimplrcorpsaas.auditactionbanklimit
 				WHERE limit_id = l.limit_id
-				ORDER BY requested_at DESC
+				  AND action_type IN ('CREATE','EDIT','DELETE')
+				ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC
 				LIMIT 1
 		) a ON TRUE
 		LEFT JOIN LATERAL (
@@ -919,7 +974,11 @@ func GetAllBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		) e ON TRUE
 		WHERE COALESCE(l.is_deleted, false) = false
 			AND l.entity_name = ANY($1)
-		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC`
+		ORDER BY GREATEST(
+			COALESCE(a.requested_at, '1970-01-01'::timestamp),
+			COALESCE(a.checker_at,   '1970-01-01'::timestamp)
+		) DESC NULLS LAST,
+		l.limit_id DESC`
 		rows, err := pgxPool.Query(ctx, query, entityNames)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
@@ -1029,6 +1088,7 @@ func GetApprovedBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					SELECT processing_status
 					FROM cimplrcorpsaas.auditactionbanklimitutilization
 					WHERE utilization_id = u.utilization_id
+					  AND action_type IN ('CREATE','EDIT','DELETE')
 					ORDER BY requested_at DESC
 					LIMIT 1
 				) au ON au.processing_status = 'APPROVED'
@@ -1141,10 +1201,10 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get latest audit actions for each limit
-		sel := `SELECT DISTINCT ON (limit_id) action_id, limit_id, action_type 
-			FROM cimplrcorpsaas.auditactionbanklimit 
-			WHERE limit_id = ANY($1) 
-			ORDER BY limit_id, requested_at DESC`
+		sel := `SELECT DISTINCT ON (limit_id) action_id, limit_id, action_type
+			FROM cimplrcorpsaas.auditactionbanklimit
+			WHERE limit_id = ANY($1) AND action_type IN ('CREATE','EDIT','DELETE')
+			ORDER BY limit_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC`
 
 		rows, err := pgxPool.Query(ctx, sel, req.LimitIDs)
 		if err != nil {
@@ -1215,8 +1275,12 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		// ── Approval-matrix engine: attempt engine-side approve first.
+		// ── Approval-matrix engine: attempt engine-side approve first. A blocked
+		// Reason (e.g. "not your turn in approval sequence") must exclude the
+		// record from the legacy fallback entirely — only a genuine "no matrix
+		// applies" case may fall through to the direct SQL stamp below.
 		engineActed := make(map[string]bool)
+		blocked := make(map[string]string)
 		for _, limitID := range req.LimitIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "CASH", RecordID: limitID,
@@ -1225,10 +1289,16 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[BankLimit] ActOnPendingOrDiagnose approve failed for %s: %v", map[string]interface{}{"limit_id": limitID, "error": actionErr.Error()})
+				blocked[limitID] = actionErr.Error()
 				continue
 			}
 			if actionRes.Acted {
 				engineActed[limitID] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[BankLimit] cancelled stale approval instance for limit %s", limitID)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[BankLimit] engine blocked limit %s: %s", limitID, actionRes.Reason)
+				blocked[limitID] = actionRes.Reason
 			}
 		}
 
@@ -1236,12 +1306,12 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var legacyDeleteIDs []string
 		for _, id := range actionIDs {
 			limID := actionToLimitMap[id]
-			if !engineActed[limID] {
+			if !engineActed[limID] && blocked[limID] == "" {
 				legacyActionIDs = append(legacyActionIDs, id)
 			}
 		}
 		for _, id := range deleteIDs {
-			if !engineActed[id] {
+			if !engineActed[id] && blocked[id] == "" {
 				legacyDeleteIDs = append(legacyDeleteIDs, id)
 			}
 		}
@@ -1286,10 +1356,14 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			dmsevent.Fire(pgxPool, "CASH", "BANK_LIMIT", "POST_DELETE", deleted, checkerBy)
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"approved_count": len(actionIDs),
+		resp := map[string]interface{}{
+			"approved_count": len(actionIDs) - len(blocked),
 			"deleted":        deleted,
-		})
+		}
+		if len(blocked) > 0 {
+			resp["blocked"] = blocked
+		}
+		api.RespondWithPayload(w, true, "", resp)
 		// Notify: limits approved with FULL record data
 		// Pass req.UserID (not display name) so dispatcher resolves actor entity correctly
 		capturedUser := req.UserID
@@ -1334,10 +1408,10 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		sel := `SELECT DISTINCT ON (limit_id) action_id, limit_id 
-			FROM cimplrcorpsaas.auditactionbanklimit 
-			WHERE limit_id = ANY($1) 
-			ORDER BY limit_id, requested_at DESC`
+		sel := `SELECT DISTINCT ON (limit_id) action_id, limit_id
+			FROM cimplrcorpsaas.auditactionbanklimit
+			WHERE limit_id = ANY($1) AND action_type IN ('CREATE','EDIT','DELETE')
+			ORDER BY limit_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC`
 
 		rows, err := pgxPool.Query(ctx, sel, req.LimitIDs)
 		if err != nil {
@@ -1404,8 +1478,10 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		// ── Approval-matrix engine: attempt engine-side reject first.
+		// ── Approval-matrix engine: attempt engine-side reject first. A blocked
+		// Reason must exclude the record from the legacy fallback entirely.
 		engineActed := make(map[string]bool)
+		blocked := make(map[string]string)
 		for _, limitID := range req.LimitIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "CASH", RecordID: limitID,
@@ -1414,17 +1490,23 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[BankLimit] ActOnPendingOrDiagnose reject failed for %s: %v", map[string]interface{}{"limit_id": limitID, "error": actionErr.Error()})
+				blocked[limitID] = actionErr.Error()
 				continue
 			}
 			if actionRes.Acted {
 				engineActed[limitID] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[BankLimit] cancelled stale approval instance for limit %s", limitID)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[BankLimit] engine blocked limit %s: %s", limitID, actionRes.Reason)
+				blocked[limitID] = actionRes.Reason
 			}
 		}
 
 		var legacyActionIDs []string
 		for _, id := range actionIDs {
 			limID := actionToLimitMap[id]
-			if !engineActed[limID] {
+			if !engineActed[limID] && blocked[limID] == "" {
 				legacyActionIDs = append(legacyActionIDs, id)
 			}
 		}
@@ -1448,9 +1530,13 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		dmsevent.Fire(pgxPool, "CASH", "BANK_LIMIT", "POST_REJECT", req.LimitIDs, checkerBy)
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rejected_count": len(actionIDs),
-		})
+		respReject := map[string]interface{}{
+			"rejected_count": len(actionIDs) - len(blocked),
+		}
+		if len(blocked) > 0 {
+			respReject["blocked"] = blocked
+		}
+		api.RespondWithPayload(w, true, "", respReject)
 		// Notify: limits rejected with FULL record data
 		// Pass req.UserID (not display name) so dispatcher resolves actor entity correctly
 		capturedUser := req.UserID
@@ -1501,23 +1587,25 @@ func auditTimeOrEmpty(t *time.Time) string {
 	return api.FormatAuditTimestampIST(*t)
 }
 
-func submitBankLimitForApproval(pool *pgxpool.Pool, limitID, entityName, submittedByUserID, actorEmail, txType string, amount float64) {
-	go func() {
-		bgCtx := context.Background()
-		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "CASH",
-			EntityCode:       entityName, // limit has EntityName directly
-			TransactionType:  txType,
-			RecordID:         limitID,
-			RecordTable:      "cimplrcorpsaas.bank_limit",
-			AuditTable:       "cimplrcorpsaas.auditactionbanklimit",
-			AuditIDColumn:    "limit_id",
-			ActionType:       strings.TrimPrefix(txType, "BANK_LIMIT_"),
-			Amount:           amount,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-		}); err != nil {
-			api.LogError("[BankLimit] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"limit_id": limitID, "tx_type": txType, "error": err.Error()})
-		}
-	}()
+func submitBankLimitForApproval(pool *pgxpool.Pool, limitID, entityName, submittedByUserID, actorEmail, txType string, amount float64, matrixID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:          "CASH",
+		EntityCode:          entityName, // limit has EntityName directly
+		TransactionType:     txType,
+		RecordID:            limitID,
+		RecordTable:         "cimplrcorpsaas.bank_limit",
+		AuditTable:          "cimplrcorpsaas.auditactionbanklimit",
+		AuditIDColumn:       "limit_id",
+		ActionType:          strings.TrimPrefix(txType, "BANK_LIMIT_"),
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: false,
+	}); err != nil {
+		api.LogError("[BankLimit] approvalengine.CreateInstance failed for %s (%s): %v", map[string]interface{}{"limit_id": limitID, "tx_type": txType, "error": err.Error()})
+	}
 }

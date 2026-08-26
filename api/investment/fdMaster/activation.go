@@ -1163,18 +1163,20 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       entityID,
-				TransactionType:  "FD_MASTER_CREATE",
-				RecordID:         fdRecordID,
-				RecordTable:      constants.QuerryMaster,
-				AuditTable:       auditTableName,
-				AuditIDColumn:    auditIDColumn,
-				ActionType:       constants.AuditActionCreate,
-				Amount:           amount,
-				SubmittedBy:      req.UserID,
-				SubmittedByEmail: email,
-				MatrixID:         matrixID,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          entityID,
+				TransactionType:     "FD_MASTER_CREATE",
+				RecordID:            fdRecordID,
+				RecordTable:         constants.QuerryMaster,
+				AuditTable:          auditTableName,
+				AuditIDColumn:       auditIDColumn,
+				ActionType:          constants.AuditActionCreate,
+				Amount:              amount,
+				SubmittedBy:         req.UserID,
+				SubmittedByEmail:    email,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 			if err != nil {
 				api.LogError("[FDMaster] CreateInstance failed for fd %s: %v", fdRecordID, err)
@@ -1646,17 +1648,19 @@ func GetFDMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				).Scan(&pendingStatus, &submittedBy, &entityID, &amount)
 				if scanErr == nil && pendingStatus != "" {
 					newInstID, instErr := approvalengine.CreateInstance(ctx, pgxPool, approvalengine.InstanceRequest{
-						ModuleCode:       "FIXED_DEPOSIT",
-						EntityCode:       entityID,
-						TransactionType:  "FD_MASTER_CREATE",
-						RecordID:         fdID,
-						RecordTable:      constants.QuerryMaster,
-						AuditTable:       auditTable,
-						AuditIDColumn:    keyCol,
-						ActionType:       constants.AuditActionCreate,
-						Amount:           amount,
-						SubmittedBy:      submittedBy,
-						SubmittedByEmail: submittedBy,
+						ModuleCode:          "FIXED_DEPOSIT",
+						EntityCode:          entityID,
+						TransactionType:     "FD_MASTER_CREATE",
+						RecordID:            fdID,
+						RecordTable:         constants.QuerryMaster,
+						AuditTable:          auditTable,
+						AuditIDColumn:       keyCol,
+						ActionType:          constants.AuditActionCreate,
+						Amount:              amount,
+						SubmittedBy:         submittedBy,
+						SubmittedByEmail:    submittedBy,
+						RequirePinnedMatrix: true,
+						AutoApplyIfUnpinned: false,
 					})
 					if instErr != nil {
 						api.LogError("[FDMaster] Self-heal CreateInstance for %s: %v", fdID, instErr)
@@ -3282,18 +3286,20 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer bgCancel()
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-					ModuleCode:       "FIXED_DEPOSIT",
-					EntityCode:       p.EntityID,
-					TransactionType:  "FD_CASHFLOW_EDIT",
-					MatrixID:         p.MatrixID,
-					RecordID:         p.AuditID,
-					RecordTable:      constants.QuerryAuditCashflowSchedule,
-					AuditTable:       constants.QuerryAuditCashflowSchedule,
-					AuditIDColumn:    "audit_id",
-					ActionType:       constants.AuditActionEdit,
-					Amount:           p.Amount,
-					SubmittedBy:      p.UserID,
-					SubmittedByEmail: p.Email,
+					ModuleCode:          "FIXED_DEPOSIT",
+					EntityCode:          p.EntityID,
+					TransactionType:     "FD_CASHFLOW_EDIT",
+					MatrixID:            p.MatrixID,
+					RecordID:            p.AuditID,
+					RecordTable:         constants.QuerryAuditCashflowSchedule,
+					AuditTable:          constants.QuerryAuditCashflowSchedule,
+					AuditIDColumn:       "audit_id",
+					ActionType:          constants.AuditActionEdit,
+					Amount:              p.Amount,
+					SubmittedBy:         p.UserID,
+					SubmittedByEmail:    p.Email,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 				if err != nil {
 					api.LogError("[CashflowEdit] CreateInstance failed audit=%s: %v", p.AuditID, err)
@@ -4056,18 +4062,20 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-					ModuleCode:       "FIXED_DEPOSIT",
-					EntityCode:       p.EntityID,
-					TransactionType:  "FD_CASHFLOW_DELETE",
-					MatrixID:         p.MatrixID,
-					RecordID:         p.AuditID,
-					RecordTable:      constants.QuerryAuditCashflowSchedule,
-					AuditTable:       constants.QuerryAuditCashflowSchedule,
-					AuditIDColumn:    "audit_id",
-					ActionType:       "DELETE",
-					Amount:           p.Amount,
-					SubmittedBy:      p.UserID,
-					SubmittedByEmail: p.UserEmail,
+					ModuleCode:          "FIXED_DEPOSIT",
+					EntityCode:          p.EntityID,
+					TransactionType:     "FD_CASHFLOW_DELETE",
+					MatrixID:            p.MatrixID,
+					RecordID:            p.AuditID,
+					RecordTable:         constants.QuerryAuditCashflowSchedule,
+					AuditTable:          constants.QuerryAuditCashflowSchedule,
+					AuditIDColumn:       "audit_id",
+					ActionType:          "DELETE",
+					Amount:              p.Amount,
+					SubmittedBy:         p.UserID,
+					SubmittedByEmail:    p.UserEmail,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 				if err != nil {
 					api.LogError("[FDMaster] DeleteCashflowLineItem CreateInstance failed audit=%s: %v", p.AuditID, err)

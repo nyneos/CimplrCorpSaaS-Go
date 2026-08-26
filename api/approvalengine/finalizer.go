@@ -52,9 +52,13 @@ func finalizeRecord(
 			checker_by        = $2,
 			checker_at        = now(),
 			checker_comment   = $3
-		WHERE %s = $4
-		  AND processing_status LIKE 'PENDING%%'
-	`, p.AuditTable, p.AuditIDColumn)
+		WHERE ctid = (
+			SELECT ctid FROM %s
+			WHERE %s = $4 AND processing_status LIKE 'PENDING%%'
+			ORDER BY ctid DESC
+			LIMIT 1
+		)
+	`, p.AuditTable, p.AuditTable, p.AuditIDColumn)
 
 	tag, err := tx.Exec(ctx, auditQ, processingStatus, p.CheckerEmail, p.CheckerComment, p.RecordID)
 	if err != nil {

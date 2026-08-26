@@ -6,8 +6,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
-	"CimplrCorpSaas/internal/validation"
 	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
+	"CimplrCorpSaas/internal/validation"
 	"bufio"
 	"bytes"
 	"context"
@@ -30,25 +30,27 @@ import (
 // newly created or edited MF investment initiation, asynchronously.
 // submittedByUserID must be the session's numeric user_id (hard FK to
 // public.users(id) — never a display name or email).
-func submitMFInitiationForApproval(pool *pgxpool.Pool, initiationID, entityName, submittedByUserID, actorEmail, txType string, amount float64) {
-	go func() {
-		bgCtx := context.Background()
-		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "INVESTMENT_MF",
-			EntityCode:       entityName,
-			TransactionType:  txType,
-			RecordID:         initiationID,
-			RecordTable:      "investment.investment_initiation",
-			AuditTable:       "investment.auditactioninitiation",
-			AuditIDColumn:    "initiation_id",
-			ActionType:       strings.TrimPrefix(txType, "MF_INITIATION_"),
-			Amount:           amount,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-		}); err != nil {
-			api.LogError("[MFInitiation] approvalengine.CreateInstance failed for initiation %s (%s): %v", initiationID, txType, err)
-		}
-	}()
+func submitMFInitiationForApproval(pool *pgxpool.Pool, initiationID, entityName, submittedByUserID, actorEmail, txType, matrixID string, amount float64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:          "INVESTMENT_MF",
+		EntityCode:          entityName,
+		TransactionType:     txType,
+		RecordID:            initiationID,
+		RecordTable:         "investment.investment_initiation",
+		AuditTable:          "investment.auditactioninitiation",
+		AuditIDColumn:       "initiation_id",
+		ActionType:          strings.TrimPrefix(txType, "MF_INITIATION_"),
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: true,
+	}); err != nil {
+		api.LogError("[MFInitiation] approvalengine.CreateInstance failed for initiation %s (%s): %v", initiationID, txType, err)
+	}
 }
 
 // loadMFInitiationApprovalWorkflow finds the most recent INVESTMENT_MF
@@ -105,6 +107,7 @@ func loadMFInitiationApprovalWorkflow(ctx context.Context, pool *pgxpool.Pool, i
 				Amount:           amount,
 				SubmittedBy:      submittedByUserID,
 				SubmittedByEmail: submittedByEmail,
+				MatrixID:         "",
 			})
 			if instErr != nil {
 				api.LogError("[MFInitiation] Self-heal CreateInstance for %s: %v", initiationID, instErr)
@@ -249,14 +252,15 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Amount:          req.Amount,
 			Source:          source,
 		}
-		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{
+		ok, createMatrixID := mfEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{
 			EventCode:   common.TriggerPreCreate,
 			HandlerName: "CreateInitiationSingle",
 			APIPath:     "/investment/initiation/create",
 			SubModule:   mfSubInitiation,
 			EntityCode:  req.EntityName,
 			Actor:       userEmail,
-		}, buildMFInitiationPolicyFields(createRow)) {
+		}, buildMFInitiationPolicyFields(createRow))
+		if !ok {
 			return
 		}
 
@@ -318,7 +322,7 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Fire approval-matrix engine instance (async, no-op if engine disabled or no matrix)
-		submitMFInitiationForApproval(pgxPool, initiationID, req.EntityName, req.UserID, userEmail, "MF_INITIATION_CREATE", req.Amount)
+		submitMFInitiationForApproval(pgxPool, initiationID, req.EntityName, req.UserID, userEmail, "MF_INITIATION_CREATE", createMatrixID, req.Amount)
 
 		go func(iID, uID, uEmail string) {
 			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, []string{iID}, constants.AuditActionCreate, uEmail)
@@ -435,14 +439,15 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Amount:          row.Amount,
 				Source:          source,
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+			ok, pmsg, _ := mfEnforceInlineWithMatrix(ctx, r, pgxPool, enforceCtx{
 				EventCode:   common.TriggerPreCreate,
 				HandlerName: "CreateInitiationBulk",
 				APIPath:     "/investment/initiation/create-bulk",
 				SubModule:   mfSubInitiation,
 				EntityCode:  entityName,
 				Actor:       userEmail,
-			}, buildMFInitiationPolicyFields(bulkCreateRow)); !ok {
+			}, buildMFInitiationPolicyFields(bulkCreateRow))
+			if !ok {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, constants.ValueError: pmsg,
 				})
@@ -573,14 +578,14 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		updatedRow := applyMFInitiationEdits(existingRow, req.Fields)
-		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{
+		if ok, _ := mfEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{
 			EventCode:   common.TriggerPreEdit,
 			HandlerName: "UpdateInitiation",
 			APIPath:     "/investment/initiation/update",
 			SubModule:   mfSubInitiation,
 			EntityCode:  req.InitiationID,
 			Actor:       userEmail,
-		}, buildMFInitiationPolicyFields(updatedRow)) {
+		}, buildMFInitiationPolicyFields(updatedRow)); !ok {
 			return
 		}
 
@@ -715,14 +720,15 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			bulkUpdatedRow := applyMFInitiationEdits(bulkExistingRow, row.Fields)
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+			ok, pmsg, _ := mfEnforceInlineWithMatrix(ctx, r, pgxPool, enforceCtx{
 				EventCode:   common.TriggerPreEdit,
 				HandlerName: "UpdateInitiationBulk",
 				APIPath:     "/investment/initiation/update-bulk",
 				SubModule:   mfSubInitiation,
 				EntityCode:  row.InitiationID,
 				Actor:       userEmail,
-			}, buildMFInitiationPolicyFields(bulkUpdatedRow)); !ok {
+			}, buildMFInitiationPolicyFields(bulkUpdatedRow))
+			if !ok {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, "initiation_id": row.InitiationID, constants.ValueError: pmsg,
 				})
@@ -856,23 +862,26 @@ func DeleteInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		deleteMatrixByID := map[string]string{}
 		for _, id := range req.InitiationIDs {
 			delRow, loadErr := loadMFInitiationRow(ctx, pgxPool, id)
 			if loadErr != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, id+errInitiationLoadFailedSuffix+loadErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{
+			ok, pmsg, tID := mfEnforceInlineWithMatrix(ctx, r, pgxPool, enforceCtx{
 				EventCode:   common.TriggerPreDelete,
 				HandlerName: "DeleteInitiation",
 				APIPath:     "/investment/initiation/delete",
 				SubModule:   mfSubInitiation,
 				EntityCode:  id,
 				Actor:       requestedBy,
-			}, buildMFInitiationPolicyFields(delRow)); !ok {
+			}, buildMFInitiationPolicyFields(delRow))
+			if !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
+			deleteMatrixByID[id] = tID
 		}
 
 		tx, err := pgxPool.Begin(ctx)
@@ -903,7 +912,7 @@ func DeleteInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[MFInitiation] CancelPendingInstances for delete failed for %s: %v", id, err)
 			}
 			initiationRow, _ := loadMFInitiationRow(context.Background(), pgxPool, id)
-			submitMFInitiationForApproval(pgxPool, id, initiationRow.EntityName, req.UserID, requestedBy, "MF_INITIATION_DELETE", initiationRow.Amount)
+			submitMFInitiationForApproval(pgxPool, id, initiationRow.EntityName, req.UserID, requestedBy, "MF_INITIATION_DELETE", deleteMatrixByID[id], initiationRow.Amount)
 		}
 
 		go func(ids []string, uID, uEmail string) {
@@ -1022,6 +1031,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── Approval-matrix engine: handle engine-managed records first.
 		// Records the engine handled (Acted==true) are skipped in legacy stamp below.
 		engineActed := map[string]bool{}
+		engineBlocked := map[string]bool{}
 		for _, iid := range req.InitiationIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "INVESTMENT_MF", RecordID: iid,
@@ -1030,6 +1040,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[MFInitiation] ActOnPendingOrDiagnose approve failed for %s: %v", iid, actionErr)
+				engineBlocked[iid] = true
 				continue
 			}
 			if actionRes.Acted {
@@ -1037,14 +1048,14 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else if actionRes.CancelledStale {
 				api.LogInfo("[MFInitiation] cancelled stale instance for %s", iid)
 			} else if actionRes.Reason != "" {
-				api.LogInfo("[MFInitiation] engine skipped %s: %s", iid, actionRes.Reason)
+				api.LogInfo("[MFInitiation] engine blocked %s: %s", iid, actionRes.Reason)
+				engineBlocked[iid] = true
 			}
 		}
-		// Remove engine-handled IDs from legacy stamp lists
 		filterEA := func(ids []string) []string {
 			out := ids[:0]
 			for _, id := range ids {
-				if !engineActed[id] {
+				if !engineActed[id] && !engineBlocked[id] {
 					out = append(out, id)
 				}
 			}

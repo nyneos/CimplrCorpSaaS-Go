@@ -158,8 +158,8 @@ func handleGetInbox(pool *pgxpool.Pool) http.HandlerFunc {
 				`
 		rows, err := pool.Query(r.Context(), q, userID, limit, offset)
 		if err != nil {
+			api.LogErrorForResponse(w, "[PUSH] handleGetInbox query error: %v", err)
 			writeErr(w, http.StatusInternalServerError, constants.ErrDB)
-			fmt.Printf("[PUSH] handleGetInbox query error: %v\n", err)
 			return
 		}
 		defer rows.Close()

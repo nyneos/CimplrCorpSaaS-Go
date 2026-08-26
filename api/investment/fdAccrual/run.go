@@ -1149,13 +1149,14 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !fdAccrualEnforce(ctx, w, r, pgxPool, enforceCtx{
+		submitOK, submitMatrixID := fdAccrualEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{
 			EventCode:   common.TriggerPreSubmit,
 			HandlerName: "SubmitForApproval",
 			APIPath:     "/investment/fd/accrual/run/submit",
 			EntityCode:  entityID,
 			Actor:       userEmail,
-		}, buildFDAccrualPolicyFields(submitRow)) {
+		}, buildFDAccrualPolicyFields(submitRow))
+		if !submitOK {
 			return
 		}
 
@@ -1174,7 +1175,7 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1, 'SUBMIT', 'PENDING_APPROVAL', $2, now(), $3)`,
 			req.RunID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 
-		go func(runID, uID, uEmail, eID string, amount float64) {
+		go func(runID, uID, uEmail, eID, matrixID string, amount float64) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDAccrual] SubmitForApproval engine goroutine panic for run %s: %v", runID, rec)
@@ -1183,24 +1184,27 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_ACCRUAL_RUN",
-				RecordID:         runID,
-				RecordTable:      "investment.fd_accrual_run",
-				AuditTable:       "investment.fd_accrual_run_audit",
-				AuditIDColumn:    "run_id",
-				ActionType:       "CREATE",
-				Amount:           amount,
-				SubmittedBy:      uID,
-				SubmittedByEmail: uEmail,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_ACCRUAL_RUN",
+				RecordID:            runID,
+				RecordTable:         "investment.fd_accrual_run",
+				AuditTable:          "investment.fd_accrual_run_audit",
+				AuditIDColumn:       "run_id",
+				ActionType:          "CREATE",
+				Amount:              amount,
+				SubmittedBy:         uID,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 			if err != nil {
 				api.LogError("[FDAccrual] CreateInstance failed for run %s: %v", runID, err)
 				return
 			}
 			api.LogInfo("[FDAccrual] CreateInstance %s → run %s PENDING_APPROVAL", instID, runID)
-		}(req.RunID, req.UserID, userEmail, entityID, totalNet)
+		}(req.RunID, req.UserID, userEmail, entityID, submitMatrixID, totalNet)
 
 		go func(runID, eID, uEmail string, amount float64) {
 			defer func() {
@@ -2328,13 +2332,14 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		proposeRow = applyFDAccrualOverrideProposal(proposeRow, req.OverrideAmount, req.OverrideReasonCode, req.OverrideReasonText)
-		if !fdAccrualEnforce(ctx, w, r, pgxPool, enforceCtx{
+		proposeOK, proposeMatrixID := fdAccrualEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{
 			EventCode:   common.TriggerPreEdit,
 			HandlerName: "ProposeOverride",
 			APIPath:     "/investment/fd/accrual/override/propose",
 			EntityCode:  entityID,
 			Actor:       userEmail,
-		}, buildFDAccrualPolicyFields(proposeRow)) {
+		}, buildFDAccrualPolicyFields(proposeRow))
+		if !proposeOK {
 			return
 		}
 
@@ -2448,7 +2453,7 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ledgerID,
 		)
 
-		go func(lID, eID, uID, uEmail string, amount float64) {
+		go func(lID, eID, uID, uEmail, matrixID string, amount float64) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDAccrual] ProposeOverride engine panic for ledger %s: %v", lID, rec)
@@ -2460,24 +2465,27 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[FDAccrual] ProposeOverride CancelPendingInstances failed ledger=%s: %v", lID, err)
 			}
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       eID,
-				TransactionType:  "FD_ACCRUAL_OVERRIDE",
-				RecordID:         lID,
-				RecordTable:      "investment.fd_accrual_ledger",
-				AuditTable:       "investment.fd_accrual_ledger_audit",
-				AuditIDColumn:    "ledger_id",
-				ActionType:       "EDIT",
-				Amount:           amount,
-				SubmittedBy:      uID,
-				SubmittedByEmail: uEmail,
+				ModuleCode:          "FIXED_DEPOSIT",
+				EntityCode:          eID,
+				TransactionType:     "FD_ACCRUAL_OVERRIDE",
+				RecordID:            lID,
+				RecordTable:         "investment.fd_accrual_ledger",
+				AuditTable:          "investment.fd_accrual_ledger_audit",
+				AuditIDColumn:       "ledger_id",
+				ActionType:          "EDIT",
+				Amount:              amount,
+				SubmittedBy:         uID,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 			if err != nil {
 				api.LogError("[FDAccrual] ProposeOverride CreateInstance failed ledger=%s: %v", lID, err)
 				return
 			}
 			api.LogInfo("[FDAccrual] ProposeOverride engine instance %s for ledger %s", instID, lID)
-		}(ledgerID, entityID, req.UserID, userEmail, req.OverrideAmount)
+		}(ledgerID, entityID, req.UserID, userEmail, proposeMatrixID, req.OverrideAmount)
 
 		go func(lID, eID, runID, fdID, uEmail string) {
 			defer func() {

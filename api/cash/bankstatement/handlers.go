@@ -2,6 +2,7 @@ package bankstatement
 
 import (
 	apictx "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
@@ -132,7 +133,7 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 												) AS head_rn
 											FROM cimplrcorpsaas.auditactionbankstatement a
 											JOIN scoped_statements ss ON a.bankstatementid = ss.bank_statement_id
-											WHERE COALESCE(a.actiontype, '') NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
+											WHERE COALESCE(a.actiontype, '') NOT IN ('UPLOAD_FILE', 'DOWNLOAD', 'DMS_TRIGGER')
 										),
 										head_audit AS (
 											SELECT * FROM ordered_audit WHERE head_rn = 1
@@ -1657,7 +1658,7 @@ func DeleteBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 			if strings.TrimSpace(deleteComment) == "" {
 				deleteComment = body.Reason
 			}
-			if out := runtime.EnforceDetailed(ctx, r, pool, runtime.EnforceInput{
+			out := runtime.EnforceDetailed(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "BANK_STATEMENT",
@@ -1667,7 +1668,8 @@ func DeleteBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				APIPath:             "/cash/bank-statements/v2/delete",
 				DefaultBlockMessage: "Bank statement delete blocked by policy",
 				Fields:              loadBankStatementPolicyFields(ctx, pool, bsid, entityID, constants.AuditActionDelete),
-			}); !out.OK {
+			})
+			if !out.OK {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
 					"success":           false,
@@ -1690,6 +1692,21 @@ func DeleteBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				})
 				continue
 			}
+			approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+				ModuleCode:          common.ModuleCash,
+				TransactionType:     "BANK_STATEMENT_DELETE",
+				RecordID:            bsid,
+				RecordTable:         "cimplrcorpsaas.bank_statements",
+				AuditTable:          "cimplrcorpsaas.auditactionbankstatement",
+				AuditIDColumn:       "bankstatementid",
+				ActionType:          "DELETE",
+				Amount:              0,
+				SubmittedBy:         body.UserID,
+				SubmittedByEmail:    requestedBy,
+				MatrixID:            out.Result.TriggerApprovalMatrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: false,
+			})
 			results = append(results, map[string]interface{}{
 				"bank_statement_id": bsid,
 				"success":           true,
@@ -1749,7 +1766,7 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 			uploadAccount, _ := fields["account_number"].(string)
 			uploadEntityID := lookupEntityIDForAccount(r.Context(), pgxPool, uploadAccount)
 			fields["entity_id"] = uploadEntityID
-			return runtime.Enforce(r.Context(), w, r, pgxPool, runtime.EnforceInput{
+			ok, _ := runtime.EnforceWithMatrix(r.Context(), w, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreUpload,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "BANK_STATEMENT",
@@ -1760,6 +1777,7 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 				DefaultBlockMessage: "Bank statement upload blocked by policy",
 				Fields:              fields,
 			})
+			return ok
 		}
 
 		if isPDF {

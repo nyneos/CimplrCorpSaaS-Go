@@ -359,17 +359,23 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !ctxutil.FromContext(ctx).HasApprovedBank(req.BankName) {
+		scope := ctxutil.FromContext(ctx)
+		if !scope.HasApprovedBank(req.BankName) {
 			api.RespondWithResult(w, false, constants.ErrBankInvalidOrInactive)
 			return
 		}
-		if !ctxutil.FromContext(ctx).HasApprovedBankAccount(req.AccountNo) {
+		if !scope.HasApprovedBankAccount(req.AccountNo) {
+			api.RespondWithResult(w, false, constants.ErrInvalidAccount)
+			return
+		}
+		accountEntityID := lookupEntityIDForAccountNo(ctx, pgxPool, req.AccountNo)
+		if !scope.InLiveEntityScope(accountEntityID) {
 			api.RespondWithResult(w, false, constants.ErrInvalidAccount)
 			return
 		}
 
 		// currency validation (middleware may provide approved currencies)
-		if !ctxutil.FromContext(ctx).HasApprovedCurrency(req.CurrencyCode) {
+		if !scope.HasApprovedCurrency(req.CurrencyCode) {
 			api.RespondWithResult(w, false, "Invalid or inactive currency")
 			return
 		}
@@ -381,11 +387,11 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		ok, triggerMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreCreate,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "BANK_BALANCE",
-			EntityCode:          lookupEntityIDForAccountNo(ctx, pgxPool, req.AccountNo),
+			EntityCode:          accountEntityID,
 			ActorUserID:         req.UserID,
 			HandlerName:         "CreateBankBalance",
 			APIPath:             "/cash/bank-balances/create",
@@ -409,7 +415,8 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				TotalDebits:    req.TotalDebits,
 				ClosingBalance: req.ClosingBalance,
 			}),
-		}) {
+		})
+		if !ok {
 			return
 		}
 
@@ -477,7 +484,7 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.BalanceAmount != nil {
 			amt = *req.BalanceAmount
 		}
-		submitBankBalanceForApproval(pgxPool, balanceID, req.AccountNo, req.UserID, requestedBy, "BANK_BALANCE_CREATE", amt)
+		submitBankBalanceForApproval(ctx, pgxPool, balanceID, req.AccountNo, req.UserID, requestedBy, "BANK_BALANCE_CREATE", amt, triggerMatrixID, false)
 
 		api.RespondWithPayload(w, true, "", map[string]any{"balance_id": balanceID})
 	}
@@ -507,7 +514,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Fetch latest actionable audit per balance_id so download rows are not treated as approvable actions.
-		sel := `SELECT DISTINCT ON (balance_id) action_id, balance_id, actiontype, processing_status FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, requested_at DESC, action_id DESC`
+		sel := `SELECT DISTINCT ON (balance_id) action_id, balance_id, actiontype, processing_status FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.BalanceIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to fetch latest audits: "+pgUserFriendlyMessage(err))
@@ -570,8 +577,13 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// ── Approval-matrix engine: attempt engine-side approve first.
+		// ── Approval-matrix engine: attempt engine-side approve first. A blocked
+		// Reason (e.g. "not your turn in approval sequence") must exclude the
+		// record from the legacy fallback entirely — only a genuine "no matrix
+		// applies" case (no Reason, or a stale instance that just got cancelled)
+		// may fall through to the direct SQL stamp below.
 		engineActed := make(map[string]bool)
+		blocked := make(map[string]string)
 		for _, balanceID := range req.BalanceIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "CASH", RecordID: balanceID,
@@ -580,6 +592,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[BankBalance] ActOnPendingOrDiagnose approve failed for %s: %v", balanceID, actionErr)
+				blocked[balanceID] = actionErr.Error()
 				continue
 			}
 			if actionRes.Acted {
@@ -587,26 +600,27 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else if actionRes.CancelledStale {
 				api.LogInfo("[BankBalance] cancelled stale approval instance for balance %s", balanceID)
 			} else if actionRes.Reason != "" {
-				api.LogInfo("[BankBalance] engine skipped balance %s: %s", balanceID, actionRes.Reason)
+				api.LogInfo("[BankBalance] engine blocked balance %s: %s", balanceID, actionRes.Reason)
+				blocked[balanceID] = actionRes.Reason
 			}
 		}
 
-		// Filter out engine-handled IDs from legacy SQL lists
+		// Filter out engine-handled AND engine-blocked IDs from legacy SQL lists.
 		var legacyActionIDs []string
 		for _, id := range actionIDs {
 			balID := actionToBalanceMap[id]
-			if !engineActed[balID] {
+			if !engineActed[balID] && blocked[balID] == "" {
 				legacyActionIDs = append(legacyActionIDs, id)
 			}
 		}
 		var legacyDeleteActionIDs []string
 		for _, id := range deleteActionIDs {
 			balID := actionToBalanceMap[id]
-			if !engineActed[balID] {
+			if !engineActed[balID] && blocked[balID] == "" {
 				legacyDeleteActionIDs = append(legacyDeleteActionIDs, id)
 			}
 		}
-		
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+pgUserFriendlyMessage(err))
@@ -694,7 +708,11 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// return structured JSON
-		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"approved_count": len(actionIDs), "deleted": deleted})
+		resp := map[string]interface{}{"approved_count": len(actionIDs) - len(blocked), "deleted": deleted}
+		if len(blocked) > 0 {
+			resp["blocked"] = blocked
+		}
+		api.RespondEnvelopeSuccessCompat(w, "Success", resp)
 	}
 }
 
@@ -721,7 +739,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		sel := `SELECT DISTINCT ON (balance_id) action_id, balance_id, processing_status FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, requested_at DESC, action_id DESC`
+		sel := `SELECT DISTINCT ON (balance_id) action_id, balance_id, processing_status FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC`
 		rows, err := pgxPool.Query(ctx, sel, req.BalanceIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to fetch latest audits: "+pgUserFriendlyMessage(err))
@@ -793,8 +811,10 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		// ── Approval-matrix engine: attempt engine-side reject first.
+		// ── Approval-matrix engine: attempt engine-side reject first. A blocked
+		// Reason must exclude the record from the legacy fallback entirely.
 		engineActed := make(map[string]bool)
+		blocked := make(map[string]string)
 		for _, balanceID := range req.BalanceIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "CASH", RecordID: balanceID,
@@ -803,17 +823,23 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[BankBalance] ActOnPendingOrDiagnose reject failed for %s: %v", balanceID, actionErr)
+				blocked[balanceID] = actionErr.Error()
 				continue
 			}
 			if actionRes.Acted {
 				engineActed[balanceID] = true
+			} else if actionRes.CancelledStale {
+				api.LogInfo("[BankBalance] cancelled stale approval instance for balance %s", balanceID)
+			} else if actionRes.Reason != "" {
+				api.LogInfo("[BankBalance] engine blocked balance %s: %s", balanceID, actionRes.Reason)
+				blocked[balanceID] = actionRes.Reason
 			}
 		}
 
 		var legacyActionIDs []string
 		for _, id := range actionIDs {
 			balID := actionToBalanceMap[id]
-			if !engineActed[balID] {
+			if !engineActed[balID] && blocked[balID] == "" {
 				legacyActionIDs = append(legacyActionIDs, id)
 			}
 		}
@@ -840,7 +866,11 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		committed = true
 
 		dmsjobs.FireDmsEvent(pgxPool, "CASH", "BANK_BALANCE", "POST_REJECT", req.BalanceIDs, checkerBy)
-		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rejected_count": len(actionIDs)})
+		resp := map[string]interface{}{"rejected_count": len(actionIDs) - len(blocked)}
+		if len(blocked) > 0 {
+			resp["blocked"] = blocked
+		}
+		api.RespondEnvelopeSuccess(w, "Success", resp)
 	}
 }
 
@@ -867,13 +897,14 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		deleteMatrixByID := map[string]string{}
 		for _, balanceID := range req.BalanceIDs {
 			row, rowErr := loadBankBalanceRow(ctx, pgxPool, balanceID)
 			if rowErr != nil {
 				api.RespondWithResult(w, false, errPrefixLoadBankBalancePolicyCheck+pgUserFriendlyMessage(rowErr))
 				return
 			}
-			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
+			ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleCash,
 				SubModule:           "BANK_BALANCE",
@@ -883,10 +914,12 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				APIPath:             "/cash/bank-balances/bulk-delete",
 				DefaultBlockMessage: "Bank balance delete blocked by policy",
 				Fields:              buildBankBalancePolicyFields(row),
-			}); !ok {
+			})
+			if !ok {
 				api.RespondWithResult(w, false, msg)
 				return
 			}
+			deleteMatrixByID[balanceID] = tID
 		}
 
 		tx, err := pgxPool.Begin(ctx)
@@ -910,7 +943,7 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM auditactionbankbalances
 				WHERE balance_id = $1
 				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
-				ORDER BY requested_at DESC, action_id DESC
+				ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC
 				LIMIT 1
 			`, id).Scan(&latestActionType, &latestStatus)
 			if latestErr == nil && latestActionType == "DELETE" && latestStatus == constants.StatusPendingDeleteApproval {
@@ -921,22 +954,23 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithResult(w, false, "failed to insert delete audit: "+err.Error())
 				return
 			}
-			
-			// ── Approval-matrix engine delete request ──
-			_ = approvalengine.CancelPendingInstances(context.Background(), pgxPool, "CASH", id, requestedBy)
-			
-			row, _ := loadBankBalanceRow(ctx, pgxPool, id) // ignoring err as it's guaranteed to load by this point
-			var amt float64
-			if row.BalanceAmount != nil {
-				amt = *row.BalanceAmount
-			}
-			submitBankBalanceForApproval(pgxPool, id, row.AccountNo, req.UserID, requestedBy, "BANK_BALANCE_DELETE", amt)
+
+			_ = approvalengine.CancelPendingInstances(ctx, pgxPool, "CASH", id, requestedBy)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 		committed = true
+
+		for _, id := range req.BalanceIDs {
+			row, _ := loadBankBalanceRow(ctx, pgxPool, id)
+			var amt float64
+			if row.BalanceAmount != nil {
+				amt = *row.BalanceAmount
+			}
+			submitBankBalanceForApproval(ctx, pgxPool, id, row.AccountNo, req.UserID, requestedBy, "BANK_BALANCE_DELETE", amt, deleteMatrixByID[id], false)
+		}
 
 		api.RespondWithResult(w, true, fmt.Sprintf("created %d delete requests", len(req.BalanceIDs)))
 	}
@@ -994,8 +1028,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			   COALESCE(ai.status,'')             AS approval_engine_status,
 			   COALESCE(aie.instance_eye_id,'')   AS current_eye_id,
 			   COALESCE(aie.position::text,'')    AS current_eye_position,
-			   COALESCE(aie.approvals_required,0) AS approvals_required,
-			   COALESCE(aie.approvals_received,0) AS approvals_received,
+			   ` + approvalengine.SQLInstanceApprovalProgressSelect() + `,
 			   aie.sla_deadline                   AS sla_deadline,
 			   COALESCE(aie.is_escalated,false)   AS is_escalated
 		   FROM bank_balances_manual b
@@ -1010,9 +1043,9 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			   SELECT ai.* FROM uam.approval_instance ai
 			   WHERE ai.record_id = b.balance_id::text
 			     AND ai.module_code = 'CASH'
-			     AND ai.status = 'PENDING'
 			     AND ai.is_deleted = false
-			   ORDER BY ai.submitted_at DESC, ai.instance_id DESC
+			   ORDER BY CASE WHEN ai.status = 'PENDING' THEN 0 ELSE 1 END,
+			            ai.submitted_at DESC, ai.instance_id DESC
 			   LIMIT 1
 		   ) ai ON true
 		   LEFT JOIN LATERAL (
@@ -1022,6 +1055,15 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			   ORDER BY aie.position ASC, aie.instance_eye_id ASC
 			   LIMIT 1
 		   ) aie ON true
+		   ` + approvalengine.SQLInstanceApprovalProgressJoin("ai") + `
+		   LEFT JOIN LATERAL (
+			   SELECT GREATEST(COALESCE(a.checker_at, a.requested_at), a.requested_at) AS activity_at
+			   FROM auditactionbankbalances a
+			   WHERE a.balance_id = b.balance_id
+			     AND a.actiontype IN ('CREATE','EDIT','DELETE')
+			   ORDER BY GREATEST(COALESCE(a.checker_at, a.requested_at), a.requested_at) DESC NULLS LAST, a.action_id DESC
+			   LIMIT 1
+		   ) la ON true
 		`
 		var rows pgx.Rows
 		var err error
@@ -1101,7 +1143,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// WHERE clause constructed; debugging prints removed
-			query := baseSelect + whereStr + " ORDER BY b.as_of_date DESC, b.balance_id"
+			query := baseSelect + whereStr + " ORDER BY la.activity_at DESC NULLS LAST, b.balance_id"
 			rows, err = pgxPool.Query(ctx, query, args...)
 			if err != nil {
 				api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
@@ -1196,13 +1238,13 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"approvals_received":     zeroIfNilInt(recApprovals),
 					"sla_deadline":           slaDeadline.ValueOrZero(),
 					"is_escalated":           falseIfNilBool(isEscalated),
-					"reason":              "",
-					"created_by":          "",
-					"created_at":          "",
-					"edited_by":           "",
-					"edited_at":           "",
-					"deleted_by":          "",
-					"deleted_at":          "",
+					"reason":                 "",
+					"created_by":             "",
+					"created_at":             "",
+					"edited_by":              "",
+					"edited_at":              "",
+					"deleted_by":             "",
+					"deleted_at":             "",
 				}
 				partialRows = append(partialRows, m)
 			}
@@ -1249,7 +1291,11 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Batch fetch latest audit for all balance_ids
 			auditLatestMap := make(map[string]map[string]*string)
 			if len(balanceIDs) > 0 {
-				auditLatestQuery := `SELECT DISTINCT ON (balance_id) balance_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankbalances WHERE balance_id = ANY($1) ORDER BY balance_id, requested_at DESC, action_id DESC`
+				// DMS_TRIGGER / file actions must not override maker-checker status
+				// (see internal/jobs/dms/businessAudit.go — a DMS_TRIGGER row is
+				// appended with processing_status='APPROVED' after doc generation,
+				// which is unrelated to whether the record was actually approved).
+				auditLatestQuery := `SELECT DISTINCT ON (balance_id) balance_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankbalances WHERE balance_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY balance_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC`
 				auditLatestRows, err := pgxPool.Query(ctx, auditLatestQuery, balanceIDs)
 				if err == nil {
 					defer auditLatestRows.Close()
@@ -1261,16 +1307,26 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							api.RespondWithResult(w, false, "failed to read latest audit details: "+pgUserFriendlyMessage(err))
 							return
 						}
+						var ratStr, catStr *string
+						if rat != nil {
+							s := api.FormatAuditTimestampIST(*rat)
+							ratStr = &s
+						}
+						if cat != nil {
+							s := api.FormatAuditTimestampIST(*cat)
+							catStr = &s
+						}
 						auditLatestMap[bid] = map[string]*string{
 							"processing_status": ps,
 							"requested_by":      rb,
+							"requested_at":      ratStr,
 							"actiontype":        at,
 							"action_id":         aid,
 							"checker_by":        cb,
+							"checker_at":        catStr,
 							"checker_comment":   cc,
 							"reason":            r,
 						}
-						// For time, we can add later if needed, but for now, skip requested_at and checker_at as they are not in the map
 					}
 				}
 			}
@@ -1302,10 +1358,25 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					} else {
 						m["action_id"] = ""
 					}
+					if rb := alm["requested_by"]; rb != nil {
+						m["requested_by"] = *rb
+					} else {
+						m["requested_by"] = ""
+					}
+					if rat := alm["requested_at"]; rat != nil {
+						m["requested_at"] = *rat
+					} else {
+						m["requested_at"] = ""
+					}
 					if cb := alm["checker_by"]; cb != nil {
 						m["checker_by"] = *cb
 					} else {
 						m["checker_by"] = ""
+					}
+					if cat := alm["checker_at"]; cat != nil {
+						m["checker_at"] = *cat
+					} else {
+						m["checker_at"] = ""
 					}
 					if cc := alm["checker_comment"]; cc != nil {
 						m["checker_comment"] = *cc
@@ -1318,6 +1389,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						m["reason"] = ""
 					}
 				}
+				healBankBalanceInstance(ctx, pgxPool, m)
 			}
 
 			api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
@@ -1503,7 +1575,7 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		mergedRow := applyBankBalanceEdits(existingRow, req.Fields)
-		if !runtime.Enforce(ctx, w, r, pgxPool, runtime.EnforceInput{
+		ok, triggerMatrixID := runtime.EnforceWithMatrix(ctx, w, r, pgxPool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreEdit,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "BANK_BALANCE",
@@ -1513,7 +1585,8 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			APIPath:             "/cash/bank-balances/update",
 			DefaultBlockMessage: "Bank balance update blocked by policy",
 			Fields:              buildBankBalancePolicyFields(mergedRow),
-		}) {
+		})
+		if !ok {
 			return
 		}
 		tx, err := pgxPool.Begin(ctx)
@@ -1671,33 +1744,73 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if mergedRow.BalanceAmount != nil {
 			amt = *mergedRow.BalanceAmount
 		}
-		submitBankBalanceForApproval(pgxPool, req.BalanceID, mergedRow.AccountNo, req.UserID, requestedBy, "BANK_BALANCE_EDIT", amt)
+		submitBankBalanceForApproval(ctx, pgxPool, req.BalanceID, mergedRow.AccountNo, req.UserID, requestedBy, "BANK_BALANCE_EDIT", amt, triggerMatrixID, false)
 
 		api.RespondWithResult(w, true, req.BalanceID)
 	}
 }
 
+func healBankBalanceInstance(ctx context.Context, pool *pgxpool.Pool, row map[string]interface{}) {
+	instanceID, _ := row["approval_instance_id"].(string)
+	if strings.TrimSpace(instanceID) != "" {
+		return
+	}
+	status, _ := row["processing_status"].(string)
+	if !strings.HasPrefix(strings.ToUpper(status), "PENDING") {
+		return
+	}
+	balanceID, _ := row["balance_id"].(string)
+	accountNo, _ := row["account_no"].(string)
+	if balanceID == "" || accountNo == "" {
+		return
+	}
+	amt, _ := row["balance_amount"].(float64)
+	actionType, _ := row["action_type"].(string)
+	txType := "BANK_BALANCE_CREATE"
+	switch strings.ToUpper(strings.TrimSpace(actionType)) {
+	case "EDIT":
+		txType = "BANK_BALANCE_EDIT"
+	case "DELETE":
+		txType = "BANK_BALANCE_DELETE"
+	}
+	submitBankBalanceForApproval(ctx, pool, balanceID, accountNo, "", "", txType, amt, "", false)
+	if resolved, err := approvalengine.LookupLatestInstanceID(ctx, pool, "CASH", balanceID); err == nil && resolved != "" {
+		row["approval_instance_id"] = resolved
+	}
+}
+
 // submitBankBalanceForApproval submits an instance to the approval engine.
-func submitBankBalanceForApproval(pool *pgxpool.Pool, balanceID, accountNo, submittedByUserID, actorEmail, txType string, amount float64) {
-	go func() {
-		bgCtx := context.Background()
-		entityCode := lookupEntityIDForAccountNo(bgCtx, pool, accountNo)
-		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "CASH",
-			EntityCode:       entityCode,
-			TransactionType:  txType,
-			RecordID:         balanceID,
-			RecordTable:      "cimplrcorpsaas.bank_balances_manual",
-			AuditTable:       "public.auditactionbankbalances",
-			AuditIDColumn:    "balance_id",
-			ActionType:       strings.TrimPrefix(txType, "BANK_BALANCE_"),
-			Amount:           amount,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-		}); err != nil {
-			api.LogError("[BankBalance] approvalengine.CreateInstance failed for %s (%s): %v", balanceID, txType, err)
-		}
-	}()
+// Runs in-request so sequential eyes exist before a checker can act.
+func submitBankBalanceForApproval(ctx context.Context, pool *pgxpool.Pool, balanceID, accountNo, submittedByUserID, actorEmail, txType string, amount float64, matrixID string, autoApply bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	entityCode := lookupEntityIDForAccountNo(ctx, pool, accountNo)
+	instID, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:          "CASH",
+		EntityCode:          entityCode,
+		TransactionType:     txType,
+		RecordID:            balanceID,
+		RecordTable:         "public.bank_balances_manual",
+		AuditTable:          "public.auditactionbankbalances",
+		AuditIDColumn:       "balance_id",
+		ActionType:          strings.TrimPrefix(txType, "BANK_BALANCE_"),
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: autoApply,
+	})
+	if err != nil {
+		api.LogError("[BankBalance] approvalengine.CreateInstance failed for %s (%s): %v", balanceID, txType, err)
+		return
+	}
+	if instID == "" {
+		api.LogInfo("[BankBalance] no live matrix for %s (%s) — instance not created", balanceID, txType)
+		return
+	}
+	api.LogInfo("[BankBalance] approval instance %s created for %s (%s)", instID, balanceID, txType)
 }
 
 func zeroIfNilInt(v *int) int {

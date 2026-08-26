@@ -10,10 +10,12 @@ import (
 	"time"
 
 	api "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
-	"CimplrCorpSaas/api/auth"
-	"CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 
@@ -649,6 +651,42 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 
 		settlementID := strings.TrimSpace(req.SettlementID)
 		var oldSnap map[string]any
+		var triggerMatrixID string
+		if req.Submit {
+			eventCode := common.TriggerPreCreate
+			if settlementID != "" {
+				eventCode = common.TriggerPreEdit
+			}
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           eventCode,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "EXPOSURE_SETTLEMENT",
+				EntityCode:          strings.TrimSpace(req.Entity),
+				ActorUserID:         req.UserID,
+				HandlerName:         "SaveExposureSettlementDocument",
+				APIPath:             "/fx/exposures/settlements/save",
+				DefaultBlockMessage: "Settlement submit blocked by policy",
+				Fields: map[string]interface{}{
+					"settlement_id":        settlementID,
+					"settlement_method":    method,
+					"entity":               strings.TrimSpace(req.Entity),
+					"currency":             strings.TrimSpace(req.Currency),
+					"settlement_date":      req.SettlementDate,
+					"total_open_amount":    req.TotalOpenAmount,
+					"total_settled_amount": settled,
+					"new_exposure_type":    strings.TrimSpace(req.NewExposureType),
+					"new_maturity_date":    req.NewMaturityDate,
+					"new_quantity":         req.NewQuantity,
+					"new_price":            req.NewPrice,
+					"new_amount":           req.NewAmount,
+				},
+			}); !ok {
+				respondWithError(w, http.StatusForbidden, msg)
+				return
+			} else {
+				triggerMatrixID = tID
+			}
+		}
 
 		if settlementID == "" {
 			err := pool.QueryRow(ctx, `
@@ -742,16 +780,19 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			} else if method == "CANCELLATION" {
 				txnType = "FX_SETTLEMENT_CANCELLATION"
 			}
-			go func(id, email, tType string) {
+			go func(id, email, tType, tID string) {
 				bgCtx := context.Background()
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					TransactionType:  tType,
-					RecordID:         id,
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					TransactionType:     tType,
+					RecordID:            id,
+					MatrixID:            tID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
+					SubmittedByEmail:    email,
 				})
-			}(settlementID, makerEmail, txnType)
+			}(settlementID, makerEmail, txnType, triggerMatrixID)
 		}
 
 		respondWithSuccess(w, http.StatusOK, "Settlement saved", map[string]any{
@@ -830,39 +871,39 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		pageData := make([]map[string]any, 0)
 		for rows.Next() {
 			var (
-				id, method, entity, currency, status, createdBy string
-				updatedBy, comments, newExpID                   *string
-				settlementDate                                  *time.Time
-				createdAt                                       time.Time
-				updatedAt                                       *time.Time
-				openAmt, settledAmt                             float64
+				id, method, entity, currency, status, createdBy                            string
+				updatedBy, comments, newExpID                                              *string
+				settlementDate                                                             *time.Time
+				createdAt                                                                  time.Time
+				updatedAt                                                                  *time.Time
+				openAmt, settledAmt                                                        float64
 				approvalInstanceID, approvalEngineStatus, currentEyeID, currentEyePosition string
-				approvalsRequired, approvalsReceived int
-				slaDeadline *time.Time
-				isEscalated bool
+				approvalsRequired, approvalsReceived                                       int
+				slaDeadline                                                                *time.Time
+				isEscalated                                                                bool
 			)
 			if err := rows.Scan(&id, &method, &entity, &currency, &settlementDate, &openAmt, &settledAmt, &status, &createdBy, &createdAt, &updatedBy, &updatedAt, &comments, &newExpID,
 				&approvalInstanceID, &approvalEngineStatus, &currentEyeID, &currentEyePosition, &approvalsRequired, &approvalsReceived, &slaDeadline, &isEscalated); err != nil {
 				continue
 			}
 			row := map[string]any{
-				"settlement_id":        id,
-				"settlement_method":    method,
-				"entity":               entity,
-				"currency":             currency,
-				"total_open_amount":    openAmt,
-				"total_settled_amount": settledAmt,
-				"processing_status":    status,
-				"created_by":           createdBy,
-				"created_at":           createdAt,
-				"approval_instance_id": approvalInstanceID,
+				"settlement_id":          id,
+				"settlement_method":      method,
+				"entity":                 entity,
+				"currency":               currency,
+				"total_open_amount":      openAmt,
+				"total_settled_amount":   settledAmt,
+				"processing_status":      status,
+				"created_by":             createdBy,
+				"created_at":             createdAt,
+				"approval_instance_id":   approvalInstanceID,
 				"approval_engine_status": approvalEngineStatus,
-				"current_eye_id": currentEyeID,
-				"current_eye_position": currentEyePosition,
-				"approvals_required": approvalsRequired,
-				"approvals_received": approvalsReceived,
-				"sla_deadline": slaDeadline,
-				"is_escalated": isEscalated,
+				"current_eye_id":         currentEyeID,
+				"current_eye_position":   currentEyePosition,
+				"approvals_required":     approvalsRequired,
+				"approvals_received":     approvalsReceived,
+				"sla_deadline":           slaDeadline,
+				"is_escalated":           isEscalated,
 			}
 			if settlementDate != nil {
 				row["settlement_date"] = settlementDate.Format("2006-01-02")
@@ -909,9 +950,11 @@ func GetExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if detail, dErr := approvalengine.GetRichInstanceDetail(ctx, pool, "FX", settlementID); dErr == nil {
-			if detail != nil && detail.Status == "PENDING" && len(detail.Eyes) > 0 {
-				snap["processing_status"] = detail.Eyes[0].Status
+		if instanceID, lookupErr := approvalengine.LookupLatestInstanceID(ctx, pool, "FX", settlementID); lookupErr == nil && instanceID != "" {
+			if detail, dErr := approvalengine.GetRichInstanceDetail(ctx, pool, instanceID, req.UserID); dErr == nil {
+				if detail != nil && detail.Status == "PENDING" && len(detail.Eyes) > 0 {
+					snap["processing_status"] = detail.Eyes[0].Status
+				}
 			}
 		}
 
@@ -1086,6 +1129,30 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
+		triggerMatrices := make(map[string]string, len(req.SettlementIDs))
+		for _, id := range req.SettlementIDs {
+			snap := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.exposure_settlement_document", "settlement_id", id)
+			entity := ""
+			if v, ok := snap["entity"]; ok && v != nil {
+				entity = strings.TrimSpace(fmt.Sprint(v))
+			}
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "EXPOSURE_SETTLEMENT",
+				EntityCode:          entity,
+				ActorUserID:         req.UserID,
+				HandlerName:         "DeleteExposureSettlementDocuments",
+				APIPath:             "/fx/exposures/settlements/delete",
+				DefaultBlockMessage: "Settlement delete blocked by policy",
+				Fields:              snap,
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			} else {
+				triggerMatrices[id] = tID
+			}
+		}
 		n, err := updateExposureSettlementStatuses(ctx, pool, req.SettlementIDs, constants.StatusPendingDeleteApproval, actor, req.UserID, strings.TrimSpace(req.Comments), "DELETE")
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to delete settlements")
@@ -1099,18 +1166,21 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
-		go func(ids []string, email string) {
+		go func(ids []string, email string, matrices map[string]string) {
 			bgCtx := context.Background()
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					TransactionType:  "FX_SETTLEMENT_DELETE",
-					RecordID:         id,
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					TransactionType:     "FX_SETTLEMENT_DELETE",
+					RecordID:            id,
+					MatrixID:            matrices[id],
+					SubmittedByEmail:    email,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 			}
-		}(req.SettlementIDs, makerEmail)
+		}(req.SettlementIDs, makerEmail, triggerMatrices)
 
 		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d settlement(s) marked for delete", n), map[string]any{"count": n})
 	}

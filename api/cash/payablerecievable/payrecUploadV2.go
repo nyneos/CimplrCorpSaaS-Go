@@ -380,7 +380,7 @@ func BatchUploadTransactionsV2(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !runtime.Enforce(ctx, w, r, pool, runtime.EnforceInput{
+		if ok, _ := runtime.EnforceWithMatrix(ctx, w, r, pool, runtime.EnforceInput{
 			EventCode:           common.TriggerPreUpload,
 			ModuleCode:          common.ModuleCash,
 			SubModule:           "PAYABLE_RECEIVABLE",
@@ -392,7 +392,7 @@ func BatchUploadTransactionsV2(pool *pgxpool.Pool) http.HandlerFunc {
 				"file_field": fileField,
 				"filename":   fileHeader.Filename,
 			},
-		}) {
+		}); !ok {
 			return
 		}
 

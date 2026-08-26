@@ -63,6 +63,26 @@ func fdEnforceInline(
 	})
 }
 
+func fdEnforceInlineWithMatrix(
+	ctx context.Context,
+	r *http.Request,
+	pool *pgxpool.Pool,
+	cc enforceCtx,
+	fields map[string]interface{},
+) (bool, string, string) {
+	return runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+		EventCode:        cc.EventCode,
+		ModuleCode:       common.ModuleInvestmentFD,
+		SubModule:        cc.SubModule,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
+		Fields:           fields,
+		RequireVariables: false,
+	})
+}
+
 func exceptionPolicyEntityID(ctx context.Context, pool *pgxpool.Pool, hdr *varianceCaseHeader) string {
 	if hdr == nil {
 		return ""

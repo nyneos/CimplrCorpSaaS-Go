@@ -25,7 +25,7 @@ func NewMasterServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	name := os.Getenv("DB_NAME")
 	sslMode := dbutil.EffectiveSSLMode(host)
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
-	pgxPool, err := pgxpool.New(context.Background(), dsn)
+	pgxPool, err := dbutil.NewTracedPool(context.Background(), dsn, serviceName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to pgxpool DB: %w", err)
 	}

@@ -29,27 +29,29 @@ import (
 
 // submitMFRedemptionConfirmationForApproval fires the approval-matrix engine for a
 // newly created or edited MF redemption confirmation, asynchronously.
-func submitMFRedemptionConfirmationForApproval(pool *pgxpool.Pool, confirmID, redemptionID, submittedByUserID, actorEmail, txType string, amount float64) {
-	go func() {
-		bgCtx := context.Background()
-		var entityName string
-		_ = pool.QueryRow(bgCtx, "SELECT entity_name FROM investment.redemption_initiation WHERE redemption_id = $1", redemptionID).Scan(&entityName)
-		if _, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "INVESTMENT_MF",
-			EntityCode:       entityName,
-			TransactionType:  txType,
-			RecordID:         confirmID,
-			RecordTable:      "investment.redemption_confirmation",
-			AuditTable:       "investment.auditactionredemptionconfirmation",
-			AuditIDColumn:    "redemption_confirm_id",
-			ActionType:       strings.TrimPrefix(txType, "MF_REDEMPTION_CONFIRMATION_"),
-			Amount:           amount,
-			SubmittedBy:      submittedByUserID,
-			SubmittedByEmail: actorEmail,
-		}); err != nil {
-			api.LogError("[MFRedemptionConfirmation] approvalengine.CreateInstance failed for confirmation %s (%s): %v", confirmID, txType, err)
-		}
-	}()
+func submitMFRedemptionConfirmationForApproval(pool *pgxpool.Pool, confirmID, redemptionID, submittedByUserID, actorEmail, txType, matrixID string, amount float64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var entityName string
+	_ = pool.QueryRow(ctx, "SELECT entity_name FROM investment.redemption_initiation WHERE redemption_id = $1", redemptionID).Scan(&entityName)
+	if _, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:          "INVESTMENT_MF",
+		EntityCode:          entityName,
+		TransactionType:     txType,
+		RecordID:            confirmID,
+		RecordTable:         "investment.redemption_confirmation",
+		AuditTable:          "investment.auditactionredemptionconfirmation",
+		AuditIDColumn:       "redemption_confirm_id",
+		ActionType:          strings.TrimPrefix(txType, "MF_REDEMPTION_CONFIRMATION_"),
+		Amount:              amount,
+		SubmittedBy:         submittedByUserID,
+		SubmittedByEmail:    actorEmail,
+		MatrixID:            matrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: true,
+	}); err != nil {
+		api.LogError("[MFRedemptionConfirmation] approvalengine.CreateInstance failed for confirmation %s (%s): %v", confirmID, txType, err)
+	}
 }
 
 // loadMFRedemptionConfirmationApprovalWorkflow finds the most recent
@@ -113,6 +115,7 @@ func loadMFRedemptionConfirmationApprovalWorkflow(ctx context.Context, pool *pgx
 				Amount:           amount,
 				SubmittedBy:      submittedByUserID,
 				SubmittedByEmail: submittedByEmail,
+				MatrixID:         "",
 			})
 			if instErr != nil {
 				api.LogError("[MFRedemptionConfirmation] Self-heal CreateInstance for %s: %v", confirmID, instErr)
@@ -431,7 +434,7 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			status = req.Status
 		}
 
-		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateRedemptionConfirmationSingle",
+		ok, createMatrixID := mfEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateRedemptionConfirmationSingle",
 			APIPath: "/investment/redemption/confirmation/create", SubModule: mfSubRedemptionConf, EntityCode: req.RedemptionID, Actor: userEmail},
 			buildRedemptionConfirmationPolicyFields(redemptionConfirmationRow{
 				RedemptionID:                 req.RedemptionID,
@@ -448,7 +451,8 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				VarianceProceeds:             &req.VarianceProceeds,
 				FinalRealisedCapitalGainLoss: &req.FinalRealisedCapitalGainLoss,
 				UploadS3Key:                  uploadS3Key,
-			})) {
+			}))
+		if !ok {
 			cleanupUpload()
 			return
 		}
@@ -533,7 +537,7 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 		cleanupUploadedObject = false
 
-		submitMFRedemptionConfirmationForApproval(pgxPool, confirmID, req.RedemptionID, req.UserID, userEmail, "MF_REDEMPTION_CONFIRMATION_CREATE", req.GrossProceeds)
+		submitMFRedemptionConfirmationForApproval(pgxPool, confirmID, req.RedemptionID, req.UserID, userEmail, "MF_REDEMPTION_CONFIRMATION_CREATE", createMatrixID, req.GrossProceeds)
 
 		go func() {
 			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, []string{confirmID}, constants.AuditActionCreate, userEmail)
@@ -631,7 +635,7 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					bulkStatus = row.Status
 				}
 
-				if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateRedemptionConfirmationBulk",
+				ok, pmsg, bulkCreateMatrixID := mfEnforceInlineWithMatrix(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateRedemptionConfirmationBulk",
 					APIPath: "/investment/redemption/confirmation/create-bulk", SubModule: mfSubRedemptionConf, EntityCode: row.RedemptionID, Actor: userEmail},
 					buildRedemptionConfirmationPolicyFields(redemptionConfirmationRow{
 						RedemptionID:                 row.RedemptionID,
@@ -647,7 +651,8 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						ResolutionComment:            row.ResolutionComment,
 						VarianceProceeds:             &row.VarianceProceeds,
 						FinalRealisedCapitalGainLoss: &row.FinalRealisedCapitalGainLoss,
-					})); !ok {
+					}))
+				if !ok {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: pmsg})
 					return
 				}
@@ -709,7 +714,7 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 
-				submitMFRedemptionConfirmationForApproval(pgxPool, confirmID, row.RedemptionID, req.UserID, userEmail, "MF_REDEMPTION_CONFIRMATION_CREATE", row.GrossProceeds)
+				submitMFRedemptionConfirmationForApproval(pgxPool, confirmID, row.RedemptionID, req.UserID, userEmail, "MF_REDEMPTION_CONFIRMATION_CREATE", bulkCreateMatrixID, row.GrossProceeds)
 
 				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION_CONF", "POST_CREATE", []string{confirmID}, userEmail)
 
@@ -772,9 +777,9 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		mergedRow := applyRedemptionConfirmationEdits(existingRow, req.Fields)
-		if !mfEnforce(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateRedemptionConfirmation",
+		if ok, _ := mfEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateRedemptionConfirmation",
 			APIPath: "/investment/redemption/confirmation/update", SubModule: mfSubRedemptionConf, EntityCode: req.RedemptionConfirmID, Actor: userEmail},
-			buildRedemptionConfirmationPolicyFields(mergedRow)) {
+			buildRedemptionConfirmationPolicyFields(mergedRow)); !ok {
 			return
 		}
 
@@ -923,7 +928,7 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 				mergedRow := applyRedemptionConfirmationEdits(existingRow, row.Fields)
-				if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateRedemptionConfirmationBulk",
+				if ok, pmsg, _ := mfEnforceInlineWithMatrix(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateRedemptionConfirmationBulk",
 					APIPath: "/investment/redemption/confirmation/update-bulk", SubModule: mfSubRedemptionConf, EntityCode: row.RedemptionConfirmID, Actor: userEmail},
 					buildRedemptionConfirmationPolicyFields(mergedRow)); !ok {
 					results = append(results, map[string]interface{}{
@@ -1058,18 +1063,21 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		deleteMatrixByID := map[string]string{}
 		for _, id := range req.RedemptionConfirmIDs {
 			row, rowErr := loadRedemptionConfirmationRow(ctx, pgxPool, id)
 			if rowErr != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, id+errLoadRedemptionConfirmationForPolicyCheck+rowErr.Error())
 				return
 			}
-			if ok, pmsg := mfEnforceInline(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "DeleteRedemptionConfirmation",
+			ok, pmsg, tID := mfEnforceInlineWithMatrix(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "DeleteRedemptionConfirmation",
 				APIPath: "/investment/redemption/confirmation/delete", SubModule: mfSubRedemptionConf, EntityCode: id, Actor: requestedBy},
-				buildRedemptionConfirmationPolicyFields(row)); !ok {
+				buildRedemptionConfirmationPolicyFields(row))
+			if !ok {
 				api.RespondWithError(w, http.StatusUnprocessableEntity, id+": "+pmsg)
 				return
 			}
+			deleteMatrixByID[id] = tID
 		}
 
 		tx, err := pgxPool.Begin(ctx)
@@ -1104,7 +1112,7 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if confRow.GrossProceeds != nil {
 				amountToPass = *confRow.GrossProceeds
 			}
-			submitMFRedemptionConfirmationForApproval(pgxPool, id, confRow.RedemptionID, req.UserID, requestedBy, "MF_REDEMPTION_CONFIRMATION_DELETE", amountToPass)
+			submitMFRedemptionConfirmationForApproval(pgxPool, id, confRow.RedemptionID, req.UserID, requestedBy, "MF_REDEMPTION_CONFIRMATION_DELETE", deleteMatrixByID[id], amountToPass)
 		}
 
 		// Sweep and rebuild global portfolio synchronously to guarantee data integrity
@@ -1222,6 +1230,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		// ── Approval-matrix engine: handle engine-managed records first.
 		// Records the engine handled (Acted==true) are skipped in legacy stamp below.
 		engineActed := map[string]bool{}
+		engineBlocked := map[string]bool{}
 		for _, cid := range req.RedemptionConfirmIDs {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{
 				ModuleCode: "INVESTMENT_MF", RecordID: cid,
@@ -1230,6 +1239,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 			})
 			if actionErr != nil {
 				api.LogError("[MFRedemptionConfirmation] ActOnPendingOrDiagnose approve failed for %s: %v", cid, actionErr)
+				engineBlocked[cid] = true
 				continue
 			}
 			if actionRes.Acted {
@@ -1237,14 +1247,14 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 			} else if actionRes.CancelledStale {
 				api.LogInfo("[MFRedemptionConfirmation] cancelled stale instance for %s", cid)
 			} else if actionRes.Reason != "" {
-				api.LogInfo("[MFRedemptionConfirmation] engine skipped %s: %s", cid, actionRes.Reason)
+				api.LogInfo("[MFRedemptionConfirmation] engine blocked %s: %s", cid, actionRes.Reason)
+				engineBlocked[cid] = true
 			}
 		}
-		// Remove engine-handled IDs from legacy stamp lists
 		filterEA := func(ids []string) []string {
 			out := ids[:0]
 			for _, id := range ids {
-				if !engineActed[id] {
+				if !engineActed[id] && !engineBlocked[id] {
 					out = append(out, id)
 				}
 			}

@@ -22,7 +22,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/api/approvalengine"
-	"CimplrCorpSaas/api/auth")
+	"CimplrCorpSaas/api/auth"
+)
 
 // Helper: send JSON error response
 // func respondWithError(w http.ResponseWriter, status int, errMsg string) {
@@ -72,6 +73,7 @@ func HedgeLinksDetails(pool *pgxpool.Pool) http.HandlerFunc {
 					FROM public.auditactionhedgelink a
 					WHERE a.exposure_header_id = l.exposure_header_id::text
 					  AND a.booking_id = l.booking_id::text
+					  AND a.actiontype IN ('CREATE','EDIT','DELETE')
 					ORDER BY a.requested_at DESC NULLS LAST
 					LIMIT 1
 				), CASE WHEN COALESCE(l.is_active, false) THEN 'APPROVED' ELSE 'PENDING_APPROVAL' END) AS processing_status,
@@ -664,11 +666,13 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 
 		go func(tID string) {
 			_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FX",
-				TransactionType:  "FX_LINKAGE_CREATE",
-				RecordID:         req.ExposureHeaderID,
-				MatrixID:         tID,
-				SubmittedByEmail: makerEmail,
+				ModuleCode:          "FX",
+				TransactionType:     "FX_LINKAGE_CREATE",
+				RecordID:            req.ExposureHeaderID,
+				MatrixID:            tID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
+				SubmittedByEmail:    makerEmail,
 			})
 		}(triggerMatrixID)
 	}

@@ -30,7 +30,7 @@ func NewNotificationServer(pool *pgxpool.Pool, port string) (*http.Server, *pgxp
 			sslMode := dbutil.EffectiveSSLMode(host)
 			dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
 			var err error
-			pool, err = pgxpool.New(context.Background(), dsn)
+			pool, err = dbutil.NewTracedPool(context.Background(), dsn, serviceName)
 			if err != nil {
 				return nil, nil, false, fmt.Errorf("failed to connect to pgxpool DB: %w", err)
 			}

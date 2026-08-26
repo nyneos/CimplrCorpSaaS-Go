@@ -182,7 +182,9 @@ func CreateBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "BANK_CREATE",
 				RecordID: id, RecordTable: "apibox.bank_master",
 				AuditTable: "apibox.audit_bank_master", AuditIDColumn: "bank_id",
-				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail,
+				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
 		}(bankID, req.UserID, userEmail)
 

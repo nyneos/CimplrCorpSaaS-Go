@@ -141,9 +141,8 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 	// Targeted runs (specific bankStatementID) use a per-statement lock key so
 	// they don't block each other or the global cron batch.
 	//
-	// IMPORTANT: pg_try_advisory_lock is session-level. We must acquire the lock
-	// on a dedicated connection and explicitly unlock before releasing it, so the
-	// lock is not left held on a pooled connection indefinitely.
+	// Transaction-scoped advisory lock on a held connection (safe on Supabase
+	// transaction pooler / port 6543). Session pg_try_advisory_lock is not.
 	lockKey := "smart-cat-batch"
 	if filterBSID != "" {
 		lockKey = "smart-cat-bs-" + filterBSID
@@ -152,13 +151,18 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 	if err != nil {
 		return fmt.Errorf("acquire lock connection: %w", err)
 	}
+	lockTx, err := lockConn.Begin(ctx)
+	if err != nil {
+		lockConn.Release()
+		return fmt.Errorf("begin lock transaction: %w", err)
+	}
 	defer func() {
-		lockConn.QueryRow(ctx, `SELECT pg_advisory_unlock(hashtext($1))`, lockKey).Scan(new(bool)) //nolint:errcheck
+		_ = lockTx.Rollback(ctx)
 		lockConn.Release()
 	}()
 	var lockAcquired bool
-	if err := lockConn.QueryRow(ctx,
-		`SELECT pg_try_advisory_lock(hashtext($1))`, lockKey,
+	if err := lockTx.QueryRow(ctx,
+		`SELECT pg_try_advisory_xact_lock(hashtext($1))`, lockKey,
 	).Scan(&lockAcquired); err != nil {
 		return fmt.Errorf("advisory lock check: %w", err)
 	}

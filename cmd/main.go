@@ -16,6 +16,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/appmanager"
+	"CimplrCorpSaas/internal/dbutil"
+	// "CimplrCorpSaas/internal/logger"
 )
 
 func main() {
@@ -39,13 +41,16 @@ func main() {
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	// connect_timeout and statement_timeout guard against hung connections.
+	// connect_timeout is a libpq client-side dial timeout. Do not put
+	// statement_timeout in the DSN: pgx sends it as a startup GUC and
+	// Supabase PgBouncer (port 6543) rejects it with
+	// FATAL: unsupported startup parameter: statement_timeout.
 	sslMode := os.Getenv("DB_SSLMODE")
 	if sslMode == "" {
 		sslMode = "require"
 	}
 	pgxConnStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&statement_timeout=30000",
+		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10",
 		user, pass, host, port, name, sslMode,
 	)
 
@@ -54,11 +59,20 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to parse pgx config:", err)
 	}
-	pgxConfig.MaxConns = 20
-	pgxConfig.MinConns = 5
-	pgxConfig.MaxConnIdleTime = 5 * time.Minute
+	// Keep the shared core pool small: each module also opens its own pool
+	// (see dbutil.NewTracedPool). Together they must fit under Supabase
+	// max_connections (~90 on small plans, with slots reserved for SUPERUSER).
+	pgxConfig.MaxConns = 8
+	pgxConfig.MinConns = 1
+	pgxConfig.MaxConnIdleTime = 2 * time.Minute
 	pgxConfig.MaxConnLifetime = 30 * time.Minute
 	pgxConfig.HealthCheckPeriod = 1 * time.Minute
+	if pgxConfig.ConnConfig.RuntimeParams == nil {
+		pgxConfig.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	pgxConfig.ConnConfig.RuntimeParams["application_name"] = "cimplr-core"
+	dbutil.ApplyPoolerSafeQueryMode(pgxConfig)
+	// pgxConfig.ConnConfig.Tracer = logger.NewDBTracer("core")
 
 	pgxPool, err := pgxpool.NewWithConfig(ctx, pgxConfig)
 	if err != nil {

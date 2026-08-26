@@ -20,10 +20,10 @@ import (
 	"CimplrCorpSaas/api/investment/uploadutil"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
-	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/api/varianceengine"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -801,7 +801,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			effectiveDateStr = time.Now().Format(constants.DateFormat)
 		}
 
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "InitiateClosure", APIPath: "/investment/fd/closure/initiate",
+		initiateOK, initiateMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "InitiateClosure", APIPath: "/investment/fd/closure/initiate",
 			EntityCode: entityID, Actor: userEmail}, buildFDClosureRequestPolicyFields(fdClosureRequestRow{
 			FDID:                 req.FDID,
 			BookingID:            bookingID,
@@ -825,7 +825,8 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			ClosureReason:        req.ClosureReason,
 			ClosureNotes:         req.ClosureNotes,
 			VarianceRemark:       req.VarianceRemark,
-		})) {
+		}))
+		if !initiateOK {
 			cleanupUpload()
 			return
 		}
@@ -930,6 +931,9 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id",
 			ActionType: "CREATE", Amount: principalAmount,
 			SubmittedBy: req.UserID, SubmittedByEmail: userEmail,
+			MatrixID:            initiateMatrixID,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: true,
 		})
 		if instErr != nil {
 			cleanupUpload()
@@ -2446,23 +2450,27 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to load closure request for policy check")
 			return
 		}
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "DeleteClosureRequest", APIPath: "/investment/fd/closure/delete",
-			EntityCode: entityID, Actor: userEmail}, buildFDClosureRequestPolicyFields(deleteClosureRow)) {
+		deleteOK, deleteMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "DeleteClosureRequest", APIPath: "/investment/fd/closure/delete",
+			EntityCode: entityID, Actor: userEmail}, buildFDClosureRequestPolicyFields(deleteClosureRow))
+		if !deleteOK {
 			return
 		}
 
 		instID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "FIXED_DEPOSIT",
-			EntityCode:       firstNonEmpty(entityID, "DEFAULT"),
-			TransactionType:  "FD_CLOSURE_DELETE",
-			RecordID:         req.ClosureRequestID,
-			RecordTable:      constants.QuerryClosureRequest,
-			AuditTable:       constants.QuerryAuditClosureRequest,
-			AuditIDColumn:    "closure_request_id",
-			ActionType:       "DELETE",
-			Amount:           principalAmt,
-			SubmittedBy:      req.UserID,
-			SubmittedByEmail: userEmail,
+			ModuleCode:          "FIXED_DEPOSIT",
+			EntityCode:          firstNonEmpty(entityID, "DEFAULT"),
+			TransactionType:     "FD_CLOSURE_DELETE",
+			RecordID:            req.ClosureRequestID,
+			RecordTable:         constants.QuerryClosureRequest,
+			AuditTable:          constants.QuerryAuditClosureRequest,
+			AuditIDColumn:       "closure_request_id",
+			ActionType:          "DELETE",
+			Amount:              principalAmt,
+			SubmittedBy:         req.UserID,
+			SubmittedByEmail:    userEmail,
+			MatrixID:            deleteMatrixID,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: true,
 		})
 		if instErr != nil {
 			api.LogError("[FDClosure] CreateInstance DELETE failed: %v", instErr)

@@ -217,6 +217,17 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		balDateEnd := endStr
 
+		// Postgres infers $n as date from `$n::date`, so an empty string becomes
+		// `''::date` and fails with SQLSTATE 22007. Pass NULL when unbounded.
+		var balStartArg any
+		if balDateStart != "" {
+			balStartArg = balDateStart
+		}
+		var balEndArg any
+		if balDateEnd != "" {
+			balEndArg = balDateEnd
+		}
+
 		// ── 1) Fetch balance per account ──
 		//   • as_on_date provided → last transaction's running balance on/before that date (from statement transactions)
 		//   • otherwise          → latest APPROVED balance from bank_balances_manual within the date window
@@ -286,8 +297,8 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND ($2 = '' OR mba.account_number                                      = $2)
 				  AND ($3 = '' OR mba.entity_id::text                                     = $3)
 				  AND ($4 = '' OR UPPER(TRIM(COALESCE(bbm.currency_code, '')))            = UPPER(TRIM($4)))
-				  AND ($5 = '' OR bbm.as_of_date >= $5::date)
-				  AND ($6 = '' OR bbm.as_of_date <= $6::date)
+				  AND ($5::date IS NULL OR bbm.as_of_date >= $5::date)
+				  AND ($6::date IS NULL OR bbm.as_of_date <= $6::date)
 				  AND mba.entity_id::text = ANY($7)
 				  AND mba.account_number = ANY($8)
 				  AND LOWER(TRIM(COALESCE(mba.bank_name, ''))) = ANY($9)
@@ -307,7 +318,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN masterentitycash me  ON me.entity_id::text = mba.entity_id
 			ORDER BY lab.account_no
 			`
-			qArgs = []interface{}{filterBank, filterAccount, filterEntity, filterCurrency, balDateStart, balDateEnd, allowedEntityIDs, allowedAccounts, allowedBanks, allowedCurrencies}
+			qArgs = []interface{}{filterBank, filterAccount, filterEntity, filterCurrency, balStartArg, balEndArg, allowedEntityIDs, allowedAccounts, allowedBanks, allowedCurrencies}
 		}
 
 		rows, err := pgxPool.Query(ctx, q, qArgs...)

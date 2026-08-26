@@ -63,18 +63,18 @@ func RejectAdditionalFileDeleteHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 func exposureAdditionalFilesConfig() additionalfiles.Config {
 	return withExposureCrossStage(additionalfiles.Config{
-		Module:                "fx-exposure",
-		AuditSource:           "FX_EXPOSURE",
-		AuditTableName:        fxAdditionalFileAuditTable,
-		ParentIDField:         "exposure_header_id",
-		List:                  listExposureAdditionalFiles,
-		CreateReturning:       createExposureAdditionalFile,
-		GetOne:                getExposureAdditionalFile,
-		GetAnyFile:            getAnyExposureAdditionalFile,
-		GetMany:               getExposureAdditionalFiles,
-		SoftDelete:            deleteExposureAdditionalFile,
-		SoftDeleteTx:          deleteExposureAdditionalFileTx,
-		RecordMainUploadAudit: recordExposureMainUploadAudit,
+		Module:                  "fx-exposure",
+		AuditSource:             "FX_EXPOSURE",
+		AuditTableName:          fxAdditionalFileAuditTable,
+		ParentIDField:           "exposure_header_id",
+		List:                    listExposureAdditionalFiles,
+		CreateReturning:         createExposureAdditionalFile,
+		GetOne:                  getExposureAdditionalFile,
+		GetAnyFile:              getAnyExposureAdditionalFile,
+		GetMany:                 getExposureAdditionalFiles,
+		SoftDelete:              deleteExposureAdditionalFile,
+		SoftDeleteTx:            deleteExposureAdditionalFileTx,
+		RecordMainUploadAudit:   recordExposureMainUploadAudit,
 		RecordMainDownloadAudit: recordExposureMainDownloadAudit,
 	})
 }

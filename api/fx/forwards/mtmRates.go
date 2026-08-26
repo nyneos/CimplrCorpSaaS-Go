@@ -32,7 +32,10 @@ import (
 	"CimplrCorpSaas/internal/logger"
 
 	"CimplrCorpSaas/api/approvalengine"
-	"CimplrCorpSaas/api/auth")
+	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
+)
 
 var ErrMTMFileAlreadyUploaded = errors.New("mtm file already uploaded")
 
@@ -670,18 +673,45 @@ func processUploadMTMFiles(ctx context.Context, pool *pgxpool.Pool, r *http.Requ
 				}
 			}
 
-			go func(ids []string, email string) {
+			createMatrices := make(map[string]string, len(insertedMTMIDs))
+			for _, id := range insertedMTMIDs {
+				snap := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.forward_mtm", "mtm_id", id)
+				entity := ""
+				if v, ok := snap["entity"]; ok && v != nil {
+					entity = strings.TrimSpace(fmt.Sprint(v))
+				}
+				okPolicy, msgPolicy, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+					EventCode:           common.TriggerPreCreate,
+					ModuleCode:          common.ModuleFX,
+					SubModule:           "FORWARD_MTM",
+					EntityCode:          entity,
+					ActorUserID:         userID,
+					HandlerName:         "UploadMTMFiles",
+					APIPath:             "/fx/forwards/upload-mtm",
+					DefaultBlockMessage: "MTM create blocked by policy",
+					Fields:              snap,
+				})
+				if !okPolicy {
+					logger.LogError("[MTM] create policy breach for %s: %s", id, msgPolicy)
+					continue
+				}
+				createMatrices[id] = tID
+			}
+
+			go func(ids []string, email string, matrices map[string]string) {
 				bgCtx := context.Background()
 				for _, id := range ids {
 					_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-						ModuleCode:       "FX",
-						TransactionType:  "FX_MTM_UPDATE",
-						RecordID:         id,
-						MatrixID:         "", // MTM uses default workflow routing
-						SubmittedByEmail: email,
+						ModuleCode:          "FX",
+						TransactionType:     "FX_MTM_UPDATE",
+						RecordID:            id,
+						MatrixID:            matrices[id],
+						SubmittedByEmail:    email,
+						RequirePinnedMatrix: true,
+						AutoApplyIfUnpinned: true,
 					})
 				}
-			}(insertedMTMIDs, makerEmail)
+			}(insertedMTMIDs, makerEmail, createMatrices)
 		}
 	}
 
@@ -1101,6 +1131,31 @@ func RequestDeleteMTMRecords(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		triggerMatrices := make(map[string]string, len(eligibleIDs))
+		for _, id := range eligibleIDs {
+			snap := oldSnapshots[id]
+			entity := ""
+			if v, ok := snap["entity"]; ok && v != nil {
+				entity = strings.TrimSpace(fmt.Sprint(v))
+			}
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(r.Context(), r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreDelete,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "FORWARD_MTM",
+				EntityCode:          entity,
+				ActorUserID:         req.UserID,
+				HandlerName:         "RequestDeleteMTMRecords",
+				APIPath:             "/fx/forwards/mtm/delete",
+				DefaultBlockMessage: "MTM delete blocked by policy",
+				Fields:              snap,
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			} else {
+				triggerMatrices[id] = tID
+			}
+		}
+
 		setClauses := []string{"status = 'Pending Delete Approval'"}
 		if forwardMTMHasProcessingStatusColumn(r.Context(), pool) {
 			setClauses = append(setClauses, "processing_status = 'PENDING_DELETE_APPROVAL'")
@@ -1155,19 +1210,21 @@ func RequestDeleteMTMRecords(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		go func(ids []string, email string) {
+		go func(ids []string, email string, matrices map[string]string) {
 			bgCtx := context.Background()
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					TransactionType:  "FX_MTM_UPDATE",
-					RecordID:         id,
-					MatrixID:         "", // MTM uses default workflow routing
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					TransactionType:     "FX_MTM_UPDATE",
+					RecordID:            id,
+					MatrixID:            matrices[id],
+					SubmittedByEmail:    email,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
 				})
 			}
-		}(eligibleIDs, makerEmail)
+		}(eligibleIDs, makerEmail, triggerMatrices)
 
 		respondEnvelopeSuccess(w, "Success", map[string]interface{}{
 			"updated": updated,

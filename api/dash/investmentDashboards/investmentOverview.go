@@ -377,6 +377,13 @@ func overlayLiveAUMByAMCOnMonth(
 	if monthIdx < 0 {
 		return
 	}
+	// portfolio_snapshot already stores current-month AUM (units × NAV from the
+	// same holdings engine). Re-running QueryLiveAUMByAMC here was scanning
+	// amfi_nav_staging per holding (~60–75s). Only fall back to live when the
+	// snapshot month is empty.
+	if len(resultMap[monthIdx]) > 0 {
+		return
+	}
 	live, err := portfolio.QueryLiveAUMByAMC(ctx, pgxPool, entityFilter, allowedEntities)
 	if err != nil {
 		logger.LogError("[investmentOverview] overlayLiveAUMByAMCOnMonth error: %v", err)

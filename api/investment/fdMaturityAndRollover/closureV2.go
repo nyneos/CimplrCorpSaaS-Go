@@ -466,7 +466,7 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rolloverNewBankID, rolloverNewBankName := cimplrResolveInitiateRolloverBank(ctx, pool, req, src)
 
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CimplrInitiateCreate",
+		initiateCreateOK, initiateCreateMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CimplrInitiateCreate",
 			APIPath: "/investment/fd/closure/initiate/create", EntityCode: src.EntityID, Actor: userEmail}, buildFDClosureInitiatePolicyFields(fdClosureInitiateRow{
 			FDID:                    src.FDID,
 			BookingID:               src.BookingID,
@@ -498,7 +498,8 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			Remarks:                 req.Remarks,
 			RolloverNewBankID:       rolloverNewBankID,
 			RolloverNewBankName:     rolloverNewBankName,
-		})) {
+		}))
+		if !initiateCreateOK {
 			return
 		}
 
@@ -556,7 +557,7 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			api.LogError("[CimplrFDClosure] initiate variance failed: %v", err)
 		}
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: getClosureTxCode("initiate", req.ClosureType, "CREATE"), Action: constants.AuditActionCreate, RecordID: closureInitiateID, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: src.EntityID, Amount: principal, UserID: req.UserID, UserEmail: userEmail})
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: getClosureTxCode("initiate", req.ClosureType, "CREATE"), Action: constants.AuditActionCreate, RecordID: closureInitiateID, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: src.EntityID, Amount: principal, UserID: req.UserID, UserEmail: userEmail, MatrixID: initiateCreateMatrixID})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] initiate approval create failed: %v", instErr)
 		}
@@ -704,7 +705,7 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		rolloverNewBankID, rolloverNewBankName := cimplrResolveInitiateRolloverBank(ctx, pool, req, src)
 
 		editedMaturityStatus := firstNonEmpty(strings.ToUpper(strings.TrimSpace(req.MaturityStatus)), deriveCimplrMaturityStatus(src.MaturityDate))
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "CimplrInitiateEdit",
+		initiateEditOK, initiateEditMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "CimplrInitiateEdit",
 			APIPath: "/investment/fd/closure/initiate/edit", EntityCode: src.EntityID, Actor: userEmail}, buildFDClosureInitiatePolicyFields(fdClosureInitiateRow{
 			ClosureInitiateID:       req.ClosureInitiateID,
 			FDID:                    src.FDID,
@@ -735,7 +736,8 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			Remarks:                 req.Remarks,
 			RolloverNewBankID:       rolloverNewBankID,
 			RolloverNewBankName:     rolloverNewBankName,
-		})) {
+		}))
+		if !initiateEditOK {
 			return
 		}
 
@@ -780,7 +782,7 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 
 		varianceSummary, _ := persistCimplrInitiateVariances(ctx, pool, req.ClosureInitiateID, req, src, calc)
 		_ = approvalengine.CancelPendingInstances(ctx, pool, cimplrClosureModule, req.ClosureInitiateID, userEmail)
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: getClosureTxCode("initiate", req.ClosureType, "EDIT"), Action: constants.AuditActionEdit, RecordID: req.ClosureInitiateID, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: src.EntityID, Amount: principal, UserID: req.UserID, UserEmail: userEmail})
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: getClosureTxCode("initiate", req.ClosureType, "EDIT"), Action: constants.AuditActionEdit, RecordID: req.ClosureInitiateID, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: src.EntityID, Amount: principal, UserID: req.UserID, UserEmail: userEmail, MatrixID: initiateEditMatrixID})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] initiate edit approval failed: %v", instErr)
 		}
@@ -847,8 +849,9 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			if ok, pmsg := fdEnforceInline(r.Context(), r, pool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "CimplrInitiateDelete",
-				APIPath: "/investment/fd/closure/initiate/delete", EntityCode: policyRow.EntityID, Actor: userEmail}, buildFDClosureInitiatePolicyFields(policyRow)); !ok {
+			ok, pmsg, matrixID := fdEnforceInlineWithMatrix(r.Context(), r, pool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "CimplrInitiateDelete",
+				APIPath: "/investment/fd/closure/initiate/delete", EntityCode: policyRow.EntityID, Actor: userEmail}, buildFDClosureInitiatePolicyFields(policyRow))
+			if !ok {
 				res["success"] = false
 				res["error"] = pmsg
 				results = append(results, res)
@@ -860,7 +863,7 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: getClosureTxCode("initiate", fmt.Sprint(oldRow["closure_type"]), "DELETE"), Action: constants.AuditActionDelete, RecordID: id, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: cimplrFloat(oldRow["principal_amount"]), UserID: req.UserID, UserEmail: userEmail})
+			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: getClosureTxCode("initiate", fmt.Sprint(oldRow["closure_type"]), "DELETE"), Action: constants.AuditActionDelete, RecordID: id, RecordTable: constants.QuerryClosureInitiate, AuditTable: constants.QuerryAuditClosureInitiate, AuditIDColumn: "closure_initiate_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: cimplrFloat(oldRow["principal_amount"]), UserID: req.UserID, UserEmail: userEmail, MatrixID: matrixID})
 			if instanceID != "" {
 				_, _ = pool.Exec(r.Context(), `UPDATE cimplr.fd_closure_initiate SET approval_instance_id=$1 WHERE closure_initiate_id=$2`, instanceID, id)
 			}
@@ -1087,7 +1090,7 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CimplrConfirmCreate",
+		confirmCreateOK, confirmCreateMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CimplrConfirmCreate",
 			APIPath: "/investment/fd/closure/confirm/create", EntityCode: src.EntityID, Actor: userEmail}, buildFDClosureConfirmPolicyFields(fdClosureConfirmRow{
 			ClosureInitiateID:    req.ClosureInitiateID,
 			FDID:                 src.FDID,
@@ -1117,7 +1120,8 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			VarianceType:         req.VarianceType,
 			ResolutionAction:     req.ResolutionAction,
 			Remarks:              req.Remarks,
-		})) {
+		}))
+		if !confirmCreateOK {
 			return
 		}
 
@@ -1185,7 +1189,7 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				return "premature"
 			}
 			return "confirm"
-		}(), closureType, "CREATE"), Action: constants.AuditActionCreate, RecordID: closureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail})
+		}(), closureType, "CREATE"), Action: constants.AuditActionCreate, RecordID: closureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail, MatrixID: confirmCreateMatrixID})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] confirm approval create failed: %v", instErr)
 		}
@@ -1319,7 +1323,7 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CimplrPrematureCreate",
+		prematureCreateOK, prematureCreateMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CimplrPrematureCreate",
 			APIPath: closurePrematureCreatePath, EntityCode: src.EntityID, Actor: userEmail}, buildFDClosureConfirmPolicyFields(fdClosureConfirmRow{
 			FDID:                 src.FDID,
 			BookingID:            src.BookingID,
@@ -1345,7 +1349,8 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			VarianceType:         req.VarianceType,
 			ResolutionAction:     req.ResolutionAction,
 			Remarks:              req.Remarks,
-		})) {
+		}))
+		if !prematureCreateOK {
 			return
 		}
 
@@ -1409,7 +1414,7 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		if persisted, perr := persistCimplrConfirmVariances(ctx, pool, closureConfirmID, req, src, calc); perr == nil {
 			varianceSummary = persisted
 		}
-		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: getClosureTxCode("premature", "PREMATURE", "CREATE"), Action: constants.AuditActionCreate, RecordID: closureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail})
+		instanceID, instErr := createCimplrApprovalInstance(ctx, pool, approvalInstanceRequest{TxType: getClosureTxCode("premature", "PREMATURE", "CREATE"), Action: constants.AuditActionCreate, RecordID: closureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail, MatrixID: prematureCreateMatrixID})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] premature approval create failed: %v", instErr)
 		}
@@ -1560,7 +1565,7 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "CimplrConfirmEdit",
+		confirmEditOK, confirmEditMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "CimplrConfirmEdit",
 			APIPath: "/investment/fd/closure/confirm/edit", EntityCode: src.EntityID, Actor: userEmail}, buildFDClosureConfirmPolicyFields(fdClosureConfirmRow{
 			ClosureConfirmID:     req.ClosureConfirmID,
 			ClosureInitiateID:    cimplrMapString(oldRow, "closure_initiate_id"),
@@ -1592,7 +1597,8 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			VarianceType:         req.VarianceType,
 			ResolutionAction:     req.ResolutionAction,
 			Remarks:              req.Remarks,
-		})) {
+		}))
+		if !confirmEditOK {
 			return
 		}
 
@@ -1667,7 +1673,7 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 				return "premature"
 			}
 			return "confirm"
-		}(), closureType, "EDIT"), Action: constants.AuditActionEdit, RecordID: req.ClosureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail})
+		}(), closureType, "EDIT"), Action: constants.AuditActionEdit, RecordID: req.ClosureConfirmID, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: src.EntityID, Amount: principalExpected, UserID: req.UserID, UserEmail: userEmail, MatrixID: confirmEditMatrixID})
 		if instErr != nil {
 			api.LogError("[CimplrFDClosure] confirm edit approval failed: %v", instErr)
 		}
@@ -1727,8 +1733,9 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			if ok, pmsg := fdEnforceInline(r.Context(), r, pool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "CimplrConfirmDelete",
-				APIPath: "/investment/fd/closure/confirm/delete", EntityCode: policyRow.EntityID, Actor: userEmail}, buildFDClosureConfirmPolicyFields(policyRow)); !ok {
+			ok, pmsg, deleteMatrixID := fdEnforceInlineWithMatrix(r.Context(), r, pool, enforceCtx{EventCode: common.TriggerPreDelete, HandlerName: "CimplrConfirmDelete",
+				APIPath: "/investment/fd/closure/confirm/delete", EntityCode: policyRow.EntityID, Actor: userEmail}, buildFDClosureConfirmPolicyFields(policyRow))
+			if !ok {
 				res["success"] = false
 				res["error"] = pmsg
 				results = append(results, res)
@@ -1740,13 +1747,16 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, res)
 				continue
 			}
-			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{TxType: getClosureTxCode(func() string {
-				c := fmt.Sprint(oldRow["closure_type"])
-				if c == "PREMATURE" {
-					return "premature"
-				}
-				return "confirm"
-			}(), fmt.Sprint(oldRow["closure_type"]), "DELETE"), Action: constants.AuditActionDelete, RecordID: id, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit, AuditIDColumn: "closure_confirm_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: cimplrFloat(oldRow["principal_expected"]), UserID: req.UserID, UserEmail: userEmail})
+			confirmKind := "confirm"
+			if fmt.Sprint(oldRow["closure_type"]) == "PREMATURE" {
+				confirmKind = "premature"
+			}
+			instanceID, _ := createCimplrApprovalInstance(r.Context(), pool, approvalInstanceRequest{
+				TxType: getClosureTxCode(confirmKind, fmt.Sprint(oldRow["closure_type"]), "DELETE"), Action: constants.AuditActionDelete,
+				RecordID: id, RecordTable: constants.QuerryAuditClosureConfirm, AuditTable: constants.QuerryAuditClosureConfirmAudit,
+				AuditIDColumn: "closure_confirm_id", EntityID: fmt.Sprint(oldRow["entity_id"]), Amount: cimplrFloat(oldRow["principal_expected"]),
+				UserID: req.UserID, UserEmail: userEmail, MatrixID: deleteMatrixID,
+			})
 			if instanceID != "" {
 				_, _ = pool.Exec(r.Context(), `UPDATE cimplr.fd_closure_confirm SET approval_instance_id=$1 WHERE closure_confirm_id=$2`, instanceID, id)
 			}
@@ -4665,21 +4675,25 @@ type approvalInstanceRequest struct {
 	Amount        float64
 	UserID        string
 	UserEmail     string
+	MatrixID      string
 }
 
 func createCimplrApprovalInstance(ctx context.Context, pool *pgxpool.Pool, req approvalInstanceRequest) (string, error) {
 	return approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-		ModuleCode:       cimplrClosureModule,
-		EntityCode:       firstNonEmpty(req.EntityID, "DEFAULT"),
-		TransactionType:  req.TxType,
-		RecordID:         req.RecordID,
-		RecordTable:      req.RecordTable,
-		AuditTable:       req.AuditTable,
-		AuditIDColumn:    req.AuditIDColumn,
-		ActionType:       req.Action,
-		Amount:           req.Amount,
-		SubmittedBy:      req.UserID,
-		SubmittedByEmail: req.UserEmail,
+		ModuleCode:          cimplrClosureModule,
+		EntityCode:          firstNonEmpty(req.EntityID, "DEFAULT"),
+		TransactionType:     req.TxType,
+		RecordID:            req.RecordID,
+		RecordTable:         req.RecordTable,
+		AuditTable:          req.AuditTable,
+		AuditIDColumn:       req.AuditIDColumn,
+		ActionType:          req.Action,
+		Amount:              req.Amount,
+		SubmittedBy:         req.UserID,
+		SubmittedByEmail:    req.UserEmail,
+		MatrixID:            req.MatrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: true,
 	})
 }
 

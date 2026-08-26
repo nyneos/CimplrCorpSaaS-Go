@@ -43,14 +43,15 @@ type CheckRequest struct {
 
 // CheckResult holds evaluation output for module handlers.
 type CheckResult struct {
-	RunID            string
-	AggregatedAction string
-	Results          []policysvc.PolicyResult
-	DurationMS       int
-	ConflictReport   ConflictReport
-	// TriggerApprovalMatrixID is the approval matrix pinned on the first breached
-	// TriggerApproval policy. Empty when nothing breached that way or no matrix
-	// was chosen — callers then resolve their own matrix as before.
+	RunID                   string
+	AggregatedAction        string
+	AggregatedPolicyID      string
+	AggregatedPolicyCode    string
+	AggregatedApprovalRef   string
+	Results                 []policysvc.PolicyResult
+	DurationMS              int
+	ConflictReport          ConflictReport
+	// TriggerApprovalMatrixID is the matrix from the winning TriggerApproval policy.
 	TriggerApprovalMatrixID string
 }
 
@@ -351,43 +352,73 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 
 	dispatchNotifyBreaches(ctx, pool, req, policies, resp.Results)
 
+	matrixID := breachedTriggerApprovalMatrix(req.EventCode, resp, policies)
 	return CheckResult{
 		RunID:                   runID,
 		AggregatedAction:        resp.AggregatedAction,
+		AggregatedPolicyID:      resp.AggregatedPolicyID,
+		AggregatedPolicyCode:    resp.AggregatedPolicyCode,
+		AggregatedApprovalRef:   firstNonEmpty(resp.AggregatedApprovalRef, matrixID),
 		Results:                 resp.Results,
 		DurationMS:              duration,
 		ConflictReport:          conflictReport,
-		TriggerApprovalMatrixID: breachedTriggerApprovalMatrix(req.EventCode, policies, resp.Results),
+		TriggerApprovalMatrixID: matrixID,
 	}, nil
 }
 
-// breachedTriggerApprovalMatrix returns the approval matrix pinned on the first
-// breached TriggerApproval policy, or "" when none applies.
-func breachedTriggerApprovalMatrix(eventCode string, policies []map[string]interface{}, results []policysvc.PolicyResult) string {
-	if common.ForbidsTriggerApproval(eventCode) {
+// breachedTriggerApprovalMatrix returns the approval matrix from the winning
+// TriggerApproval policy. Remote evaluate sometimes omits aggregated_approval_ref;
+// recover from per-result approval_ref, then from the policy snapshot we already loaded
+// (slab approval_ref / approval_matrix_id).
+func breachedTriggerApprovalMatrix(eventCode string, resp *policysvc.EvaluateResponse, policies []map[string]interface{}) string {
+	if resp == nil || common.ForbidsTriggerApproval(eventCode) {
 		return ""
 	}
-	matrixByPolicy := make(map[string]string, len(policies))
-	for _, p := range policies {
-		id, _ := p["policy_id"].(string)
-		if id == "" {
+	if !strings.EqualFold(strings.TrimSpace(resp.AggregatedAction), common.BreachTriggerApproval) {
+		return ""
+	}
+	if ref := strings.TrimSpace(resp.AggregatedApprovalRef); ref != "" {
+		return ref
+	}
+	for _, r := range resp.Results {
+		if !strings.EqualFold(strings.TrimSpace(r.Result), "BREACH") {
 			continue
 		}
-		if m, ok := p["approval_matrix_id"].(string); ok {
-			matrixByPolicy[id] = strings.TrimSpace(m)
+		if !strings.EqualFold(strings.TrimSpace(r.Action), common.BreachTriggerApproval) {
+			continue
+		}
+		if ref := strings.TrimSpace(r.ApprovalRef); ref != "" {
+			return ref
 		}
 	}
-	for _, pr := range results {
-		if pr.Result != "BREACH" || pr.Action != common.BreachTriggerApproval {
+	winID := strings.TrimSpace(resp.AggregatedPolicyID)
+	for _, p := range policies {
+		id, _ := p["policy_id"].(string)
+		if winID != "" && id != winID {
 			continue
 		}
-		if ref := strings.TrimSpace(pr.ApprovalRef); ref != "" {
-			if _, err := uuid.Parse(ref); err == nil {
-				return ref
+		if ref := strings.TrimSpace(fmt.Sprint(p["approval_matrix_id"])); ref != "" && ref != "<nil>" {
+			return ref
+		}
+		if slabs, ok := p["slab_rows"].([]map[string]interface{}); ok {
+			for _, s := range slabs {
+				act := strings.TrimSpace(fmt.Sprint(s["action"]))
+				if !strings.EqualFold(act, common.BreachTriggerApproval) {
+					continue
+				}
+				if ref := strings.TrimSpace(fmt.Sprint(s["approval_ref"])); ref != "" && ref != "<nil>" {
+					return ref
+				}
 			}
 		}
-		if m := matrixByPolicy[pr.PolicyID]; m != "" {
-			return m
+	}
+	return ""
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
 		}
 	}
 	return ""
@@ -436,7 +467,8 @@ func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventC
 		       COALESCE(p.applicability, 'Global'),
 		       COALESCE(p.instrument_filter, ''), COALESCE(p.currency_filter, ''),
 		       COALESCE(p.tenor_filter, ''), COALESCE(p.rating_filter, ''),
-		       COALESCE(p.approval_matrix_id, '')
+		       COALESCE(p.approval_matrix_id, ''),
+		       COALESCE(p.criticality, ''), COALESCE(p.approved_at::text, '')
 		FROM policyengine_svc.policy_master p
 		INNER JOIN policyengine_svc.policy_trigger t
 			ON t.policy_id = p.policy_id AND t.is_deleted = false AND t.event_code = ANY($1::text[])
@@ -489,7 +521,7 @@ func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventC
 			notifGroup, breachMsg, formulaExpr, formulaRet, formulaOp       string
 			slabVar, slabPercentBase, compBase, compTotalVar, applicability string
 			fltInstrument, fltCurrency, fltTenor, fltRating                 string
-			approvalMatrixID                                                string
+			approvalMatrixID, criticality, approvedAt                       string
 			thrVal, formulaVal                                              float64
 			compTotalMin, compTotalMax                                      *float64
 			listCase                                                        bool
@@ -498,11 +530,13 @@ func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventC
 			&thrVar, &thrOp, &thrVal, &thrValueDate, &thrMode, &thrBase, &listField, &listMode, &listSource, &listDynRef, &listCase,
 			&notifGroup, &breachMsg, &formulaExpr, &formulaRet, &formulaOp, &formulaVal, &slabVar, &slabPercentBase,
 			&compBase, &compTotalVar, &compTotalMin, &compTotalMax, &applicability,
-			&fltInstrument, &fltCurrency, &fltTenor, &fltRating, &approvalMatrixID); err != nil {
+			&fltInstrument, &fltCurrency, &fltTenor, &fltRating, &approvalMatrixID, &criticality, &approvedAt); err != nil {
 			return policyLoadTrace{}, err
 		}
 		snap := map[string]interface{}{
 			"approval_matrix_id":        approvalMatrixID,
+			"criticality":              criticality,
+			"approved_at":              approvedAt,
 			"policy_id":                 id,
 			"code":                      code,
 			"name":                      name,

@@ -742,6 +742,11 @@ func isInfraError(err error) bool {
 			"57": // operator_intervention (admin shutdown, query canceled)
 			return true
 		}
+		// PgBouncer transaction pooler (6543) + named prepared stmts → 42P05.
+		// That is infra, not "user has no business units".
+		if pgErr.Code == "42P05" {
+			return true
+		}
 	}
 	var connErr *pgconn.ConnectError
 	if errors.As(err, &connErr) {
@@ -756,7 +761,9 @@ func isInfraError(err error) bool {
 	return strings.Contains(le, "failed to connect") ||
 		strings.Contains(le, "connection refused") ||
 		strings.Contains(le, "connection reset") ||
-		strings.Contains(le, "timeout")
+		strings.Contains(le, "timeout") ||
+		strings.Contains(le, "prepared statement") ||
+		strings.Contains(le, "42p05")
 }
 
 // SessionMiddleware validates the user session and loads allowed entities.

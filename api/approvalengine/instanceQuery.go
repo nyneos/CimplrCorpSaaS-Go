@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -35,27 +36,13 @@ func GetPendingForUser(ctx context.Context, pool *pgxpool.Pool, userID string) (
 		  AND ie.status = 'ACTIVE'
 		WHERE i.status     = 'PENDING'
 		  AND i.is_deleted = false
-		  AND COALESCE(i.submitted_by, '') <> $1
 		  AND (
 		    EXISTS (
 		      SELECT 1 FROM uam.approval_matrix_eye_member m
 		      WHERE m.eye_id      = ie.matrix_eye_id
-		        -- AND m.member_type = 'APPROVER'
 		        AND m.is_deleted  = false
 		        AND m.is_active   = true
-		        AND (
-		          (m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $1)
-		          OR
-		          (m.assignment_type = 'ROLE_ONLY' AND EXISTS (
-		            SELECT 1 FROM public.user_roles ur
-		            WHERE ur.role_id = m.role_id AND ur.user_id = $1
-		          ))
-		          OR
-		          (m.assignment_type = 'ROLE_USER' AND EXISTS (
-		            SELECT 1 FROM public.user_roles ur
-		            WHERE ur.role_id = m.role_id AND ur.user_id = $1
-		          ))
-		        )
+		        AND ` + sqlUserOnEyeMember("$1") + `
 		    )
 		    OR (
 		      ie.is_escalated = true
@@ -247,6 +234,38 @@ func GetInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID strin
 	}
 
 	return &d, nil
+}
+
+// LookupLatestInstanceID returns the newest non-deleted approval instance for a
+// business record. moduleCode is optional — when empty, any module matches.
+// Used by GET /uam/instance/detail when the caller has record_id (cash/fd/mf/fx)
+// instead of instance_id.
+func LookupLatestInstanceID(ctx context.Context, pool *pgxpool.Pool, moduleCode, recordID string) (string, error) {
+	recordID = strings.TrimSpace(recordID)
+	if recordID == "" {
+		return "", fmt.Errorf("record_id is required")
+	}
+	q := `
+		SELECT instance_id
+		FROM uam.approval_instance
+		WHERE record_id = $1
+		  AND is_deleted = false`
+	args := []any{recordID}
+	if code := strings.TrimSpace(moduleCode); code != "" {
+		q += ` AND module_code = $2`
+		args = append(args, code)
+	}
+	q += ` ORDER BY submitted_at DESC NULLS LAST, instance_id DESC LIMIT 1`
+
+	var instanceID string
+	err := pool.QueryRow(ctx, q, args...).Scan(&instanceID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", fmt.Errorf("instance not found for record_id=%s", recordID)
+		}
+		return "", fmt.Errorf("LookupLatestInstanceID: %w", err)
+	}
+	return instanceID, nil
 }
 
 // ─── GetRichInstanceDetail ────────────────────────────────────────────────────
@@ -486,16 +505,9 @@ func GetRichInstanceDetail(ctx context.Context, pool *pgxpool.Pool, instanceID, 
 				SELECT COUNT(*)
 				FROM uam.approval_matrix_eye_member m
 				WHERE m.eye_id      = $1
-				  -- AND m.member_type = 'APPROVER'
 				  AND m.is_deleted  = false
 				  AND m.is_active   = true
-				  AND (
-				    (m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2)
-				    OR
-				    (m.assignment_type IN ('ROLE_ONLY','ROLE_USER') AND EXISTS (
-				      SELECT 1 FROM public.user_roles ur WHERE ur.role_id = m.role_id AND ur.user_id = $2
-				    ))
-				  )`,
+				  AND `+sqlUserOnEyeMember("$2"),
 				meta.matrixEyeID, viewerUserID,
 			).Scan(&cnt)
 			if cnt > 0 {

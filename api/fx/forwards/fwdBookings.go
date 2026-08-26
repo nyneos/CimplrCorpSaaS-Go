@@ -469,12 +469,14 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			go func(id, email, matrixID string) {
 				_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
-					ModuleCode:       "FX",
-					EntityCode:       req.EntityLevel0,
-					TransactionType:  "FX_FORWARD_CREATE",
-					RecordID:         id,
-					MatrixID:         matrixID,
-					SubmittedByEmail: email,
+					ModuleCode:          "FX",
+					EntityCode:          req.EntityLevel0,
+					TransactionType:     "FX_FORWARD_CREATE",
+					RecordID:            id,
+					MatrixID:            matrixID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: true,
+					SubmittedByEmail:    email,
 				})
 			}(systemTransactionID, makerEmail, tID)
 		}
@@ -637,23 +639,52 @@ func UploadForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 			dmsjobs.FireDmsEvent(pool, "FX", "FX_CONFIRMATION", "POST_UPLOAD", uploadedIDs, uploadedBy)
 
 			makerEmail := ""
+			userID := r.FormValue(constants.KeyUserID)
 			for _, s := range auth.GetActiveSessions() {
-				if s.UserID == r.FormValue(constants.KeyUserID) {
+				if s.UserID == userID {
 					makerEmail = s.Email
 					break
 				}
 			}
-			go func(ids []string, email string) {
+			createMatrices := make(map[string]string, len(uploadedIDs))
+			createEntities := make(map[string]string, len(uploadedIDs))
+			for _, id := range uploadedIDs {
+				row, rowErr := loadForwardBookingRow(ctx, pool, id)
+				if rowErr != nil {
+					continue
+				}
+				createEntities[id] = row.EntityLevel0
+				okPolicy, _, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+					EventCode:           common.TriggerPreCreate,
+					ModuleCode:          common.ModuleFX,
+					SubModule:           "FORWARD_BOOKING",
+					EntityCode:          row.EntityLevel0,
+					ActorUserID:         userID,
+					HandlerName:         "UploadForwardBookingsMulti",
+					APIPath:             "/fx/forwards/upload-multi",
+					DefaultBlockMessage: "Forward booking create blocked by policy",
+					Fields:              buildForwardBookingPolicyFields(row),
+				})
+				if !okPolicy {
+					continue
+				}
+				createMatrices[id] = tID
+			}
+			go func(ids []string, email string, matrices, entities map[string]string) {
 				bgCtx := context.Background()
 				for _, id := range ids {
 					_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-						ModuleCode:       "FX",
-						TransactionType:  "FX_FORWARD_CREATE",
-						RecordID:         id,
-						SubmittedByEmail: email,
+						ModuleCode:          "FX",
+						EntityCode:          entities[id],
+						TransactionType:     "FX_FORWARD_CREATE",
+						RecordID:            id,
+						MatrixID:            matrices[id],
+						SubmittedByEmail:    email,
+						RequirePinnedMatrix: true,
+						AutoApplyIfUnpinned: true,
 					})
 				}
-			}(uploadedIDs, makerEmail)
+			}(uploadedIDs, makerEmail, createMatrices, createEntities)
 		}
 		respondEnvelopeSuccess(w, "Forward bookings uploaded successfully", map[string]interface{}{
 			"results": results,

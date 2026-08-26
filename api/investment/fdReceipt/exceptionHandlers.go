@@ -77,14 +77,15 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 		auditOld := auditOldFromHeader(hdr)
 
 		excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{
+		editVarOK, editVarMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{
 			EventCode:   common.TriggerPreEdit,
 			HandlerName: "EditVariance",
 			APIPath:     "/investment/fd/receipt/exception/edit",
 			SubModule:   fdSubException,
 			EntityCode:  excEntityID,
 			Actor:       userEmail,
-		}, buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID))) {
+		}, buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID)))
+		if !editVarOK {
 			return
 		}
 
@@ -116,7 +117,7 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		go func(eID, uEmail string) {
+		go func(eID, uEmail, matrixID string) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDReceipt] EditVariance engine panic for %s: %v", eID, rec)
@@ -126,17 +127,20 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", eID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				TransactionType:  "FD_EXCEPTION_EDIT",
-				RecordID:         eID,
-				RecordTable:      constants.QuerryReceiptException,
-				AuditTable:       constants.QuerryReceiptExceptionAudit,
-				AuditIDColumn:    "exception_id",
-				ActionType:       "EDIT",
-				SubmittedBy:      uEmail,
-				SubmittedByEmail: uEmail,
+				ModuleCode:          "FIXED_DEPOSIT",
+				TransactionType:     "FD_EXCEPTION_EDIT",
+				RecordID:            eID,
+				RecordTable:         constants.QuerryReceiptException,
+				AuditTable:          constants.QuerryReceiptExceptionAudit,
+				AuditIDColumn:       "exception_id",
+				ActionType:          "EDIT",
+				SubmittedBy:         uEmail,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
-		}(req.ExceptionID, userEmail)
+		}(req.ExceptionID, userEmail, editVarMatrixID)
 
 		go func(eID, uEmail string) {
 			defer func() {
@@ -212,14 +216,15 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		// ResolveException handler in receipt.go instead (see routes.go).
 		// Fields kept in sync here anyway for whenever/if this handler is wired up.
 		excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
-		if !fdEnforce(ctx, w, r, pool, enforceCtx{
+		resolveOK, resolveMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{
 			EventCode:   common.TriggerPreEdit,
 			HandlerName: "ResolveVariance",
 			APIPath:     "/investment/fd/receipt/exception/resolve",
 			SubModule:   fdSubException,
 			EntityCode:  excEntityID,
 			Actor:       userEmail,
-		}, buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID))) {
+		}, buildFDExceptionPolicyFields(fdExceptionRowFromHeader(hdr, excEntityID)))
+		if !resolveOK {
 			return
 		}
 
@@ -252,7 +257,7 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		go func(eID, uEmail string) {
+		go func(eID, uEmail, matrixID string) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDReceipt] ResolveException engine panic for %s: %v", eID, rec)
@@ -262,17 +267,20 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FIXED_DEPOSIT", eID, uEmail)
 			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				TransactionType:  "FD_EXCEPTION_RESOLVE",
-				RecordID:         eID,
-				RecordTable:      constants.QuerryReceiptException,
-				AuditTable:       constants.QuerryReceiptExceptionAudit,
-				AuditIDColumn:    "exception_id",
-				ActionType:       "EDIT",
-				SubmittedBy:      uEmail,
-				SubmittedByEmail: uEmail,
+				ModuleCode:          "FIXED_DEPOSIT",
+				TransactionType:     "FD_EXCEPTION_RESOLVE",
+				RecordID:            eID,
+				RecordTable:         constants.QuerryReceiptException,
+				AuditTable:          constants.QuerryReceiptExceptionAudit,
+				AuditIDColumn:       "exception_id",
+				ActionType:          "EDIT",
+				SubmittedBy:         uEmail,
+				SubmittedByEmail:    uEmail,
+				MatrixID:            matrixID,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: true,
 			})
-		}(req.ExceptionID, userEmail)
+		}(req.ExceptionID, userEmail, resolveMatrixID)
 
 		go func(eID, uEmail string) {
 			defer func() {
@@ -518,15 +526,17 @@ func closeOneVariance(ctx context.Context, r *http.Request, pool *pgxpool.Pool, 
 		bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer bgCancel()
 		_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-			ModuleCode:       "FIXED_DEPOSIT",
-			TransactionType:  "FD_EXCEPTION_CLOSE",
-			RecordID:         eID,
-			RecordTable:      constants.QuerryReceiptException,
-			AuditTable:       constants.QuerryReceiptExceptionAudit,
-			AuditIDColumn:    "exception_id",
-			ActionType:       "EDIT",
-			SubmittedBy:      uEmail,
-			SubmittedByEmail: uEmail,
+			ModuleCode:          "FIXED_DEPOSIT",
+			TransactionType:     "FD_EXCEPTION_CLOSE",
+			RecordID:            eID,
+			RecordTable:         constants.QuerryReceiptException,
+			AuditTable:          constants.QuerryReceiptExceptionAudit,
+			AuditIDColumn:       "exception_id",
+			ActionType:          "EDIT",
+			SubmittedBy:         uEmail,
+			SubmittedByEmail:    uEmail,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: true,
 		})
 	}(exceptionID, userEmail)
 

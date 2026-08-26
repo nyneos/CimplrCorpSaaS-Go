@@ -13,6 +13,8 @@ import (
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	emailmailbox "CimplrCorpSaas/api/email/mailbox"
+	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/policyengine/runtime"
 	emailjobs "CimplrCorpSaas/internal/jobs/email"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
@@ -155,6 +157,20 @@ type inboxApprovalRequest struct {
 	ActionType string
 	UserID     string
 	UserEmail  string
+	MatrixID   string
+}
+
+func inboxEnforceMatrix(ctx context.Context, r *http.Request, pool *pgxpool.Pool, event, handler, path, entity, actor string) (bool, string, string) {
+	return runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+		EventCode:        event,
+		ModuleCode:       common.ModuleEmail,
+		SubModule:        "EMAIL_INBOX",
+		EntityCode:       entity,
+		ActorUserID:      actor,
+		HandlerName:      handler,
+		APIPath:          path,
+		RequireVariables: false,
+	})
 }
 
 func submitInboxApproval(ctx context.Context, pool *pgxpool.Pool, req inboxApprovalRequest) (string, error) {
@@ -165,19 +181,29 @@ func submitInboxApproval(ctx context.Context, pool *pgxpool.Pool, req inboxAppro
 	if err := approvalengine.CancelPendingInstances(ctx, pool, emailInboxModuleCode, req.InboxID, userEmail); err != nil {
 		return "", err
 	}
-	return approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
-		ModuleCode:       emailInboxModuleCode,
-		EntityCode:       req.EntityID,
-		TransactionType:  req.TxType,
-		RecordID:         req.InboxID,
-		RecordTable:      emailInboxRecordTable,
-		AuditTable:       emailInboxAuditTable,
-		AuditIDColumn:    "inbox_id",
-		ActionType:       req.ActionType,
-		Amount:           0,
-		SubmittedBy:      req.UserID,
-		SubmittedByEmail: userEmail,
+	instID, err := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+		ModuleCode:          emailInboxModuleCode,
+		EntityCode:          req.EntityID,
+		TransactionType:     req.TxType,
+		RecordID:            req.InboxID,
+		RecordTable:         emailInboxRecordTable,
+		AuditTable:          emailInboxAuditTable,
+		AuditIDColumn:       "inbox_id",
+		ActionType:          req.ActionType,
+		Amount:              0,
+		SubmittedBy:         req.UserID,
+		SubmittedByEmail:    userEmail,
+		MatrixID:            req.MatrixID,
+		RequirePinnedMatrix: true,
+		AutoApplyIfUnpinned: true,
 	})
+	if err != nil {
+		return "", err
+	}
+	if instID == "" && !approvalengine.PolicyPinned(req.MatrixID) {
+		finalizeEmailInboxApproval(ctx, pool, req.InboxID, req.TxType, approvalengine.InstStatusApproved, userEmail, "Auto-applied: policy did not trigger approval")
+	}
+	return instID, nil
 }
 
 func finalizeEmailInboxApproval(ctx context.Context, pool *pgxpool.Pool, recordID, transactionType, finalStatus, actorEmail, comment string) {
@@ -652,6 +678,12 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			if strings.TrimSpace(item.EntityID) != "" {
 				entityID = strings.TrimSpace(item.EntityID)
 			}
+			okPolicy, pmsg, matrixID := inboxEnforceMatrix(r.Context(), r, pool, common.TriggerPreCreate,
+				"HandleWorkflowInboxCreate", "/email/inbox/workflow/create", entityID, userEmail)
+			if !okPolicy {
+				errors = append(errors, addr+": "+pmsg)
+				continue
+			}
 
 			imapFields := item.MailboxIMAPFields
 			if strings.EqualFold(sourceType, "IMAP") {
@@ -779,7 +811,7 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				InboxID: inboxID, Action: "CREATE", Status: constants.StatusPendingApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{"mailbox": addr},
 			})
 			if _, err := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
-				InboxID: inboxID, EntityID: entityID, TxType: "EMAIL_INBOX_CREATE", ActionType: "CREATE", UserID: userID, UserEmail: userEmail,
+				InboxID: inboxID, EntityID: entityID, TxType: "EMAIL_INBOX_CREATE", ActionType: "CREATE", UserID: userID, UserEmail: userEmail, MatrixID: matrixID,
 			}); err != nil {
 				errors = append(errors, addr+constants.ErrApprovalInstancePrefix+err.Error())
 			}
@@ -842,6 +874,13 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			okPolicy, pmsg, matrixID := inboxEnforceMatrix(r.Context(), r, pool, common.TriggerPreEdit,
+				"HandleWorkflowInboxUpdate", "/email/inbox/workflow/update", inboxEntityID, userEmail)
+			if !okPolicy {
+				errors = append(errors, inboxID+": "+pmsg)
+				continue
+			}
+
 			pending, _ := json.Marshal(item)
 			_, err := pool.Exec(r.Context(), `
 				UPDATE email_svc.inbox_config
@@ -864,7 +903,7 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 				},
 			})
 			if _, instErr := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
-				InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_EDIT", ActionType: "EDIT", UserID: userID, UserEmail: userEmail,
+				InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_EDIT", ActionType: "EDIT", UserID: userID, UserEmail: userEmail, MatrixID: matrixID,
 			}); instErr != nil {
 				errors = append(errors, inboxID+constants.ErrApprovalInstancePrefix+instErr.Error())
 			}
@@ -923,6 +962,12 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			// APPROVED (live) mailboxes cannot be deleted at all.
 			switch statusNorm {
 			case constants.StatusPendingApproval, constants.StatusPendingEditApproval, constants.StatusRejected:
+				okPolicy, pmsg, matrixID := inboxEnforceMatrix(r.Context(), r, pool, common.TriggerPreDelete,
+					"HandleWorkflowInboxDeleteRequest", "/email/inbox/workflow/delete", inboxEntityID, userEmail)
+				if !okPolicy {
+					errors = append(errors, inboxID+": "+pmsg)
+					continue
+				}
 				_, err := pool.Exec(r.Context(), `
 					UPDATE email_svc.inbox_config
 					SET processing_status = 'PENDING_DELETE_APPROVAL',
@@ -946,7 +991,7 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 					},
 				})
 				if _, instErr := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
-					InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_DELETE", ActionType: "DELETE", UserID: userID, UserEmail: userEmail,
+					InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_DELETE", ActionType: "DELETE", UserID: userID, UserEmail: userEmail, MatrixID: matrixID,
 				}); instErr != nil {
 					errors = append(errors, inboxID+constants.ErrApprovalInstancePrefix+instErr.Error())
 				}

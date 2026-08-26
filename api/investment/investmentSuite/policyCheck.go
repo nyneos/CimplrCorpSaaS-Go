@@ -85,3 +85,46 @@ func mfEnforceInline(
 		RequireVariables: false,
 	})
 }
+
+// mfEnforceMatrix behaves like mfEnforce but also returns the approval matrix
+// pinned by a breached TriggerApproval policy ("" when none applies).
+func mfEnforceMatrix(
+	ctx context.Context,
+	w http.ResponseWriter,
+	r *http.Request,
+	pool *pgxpool.Pool,
+	cc enforceCtx,
+	fields map[string]interface{},
+) (bool, string) {
+	return runtime.EnforceWithMatrix(ctx, w, r, pool, runtime.EnforceInput{
+		EventCode:        cc.EventCode,
+		ModuleCode:       common.ModuleInvestmentMF,
+		SubModule:        cc.SubModule,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
+		Fields:           fields,
+		RequireVariables: false,
+	})
+}
+
+func mfEnforceInlineWithMatrix(
+	ctx context.Context,
+	r *http.Request,
+	pool *pgxpool.Pool,
+	cc enforceCtx,
+	fields map[string]interface{},
+) (bool, string, string) {
+	return runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+		EventCode:        cc.EventCode,
+		ModuleCode:       common.ModuleInvestmentMF,
+		SubModule:        cc.SubModule,
+		EntityCode:       cc.EntityCode,
+		ActorUserID:      cc.Actor,
+		HandlerName:      cc.HandlerName,
+		APIPath:          cc.APIPath,
+		Fields:           fields,
+		RequireVariables: false,
+	})
+}

@@ -96,11 +96,10 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 
 // RetryWithBackoff executes a function with exponential backoff retry logic
 func RetryWithBackoff(maxRetries int, initialDelay time.Duration, fn func() error) error {
-	var lastErr error
+	var lastErr, lastCause error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff with jitter
 			delay := time.Duration(math.Pow(2, float64(attempt-1))) * initialDelay
 			logger.GlobalLogger.LogAudit(fmt.Sprintf("Retrying after %v (attempt %d/%d)", delay, attempt, maxRetries))
 			time.Sleep(delay)
@@ -112,8 +111,18 @@ func RetryWithBackoff(maxRetries int, initialDelay time.Duration, fn func() erro
 		}
 
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("Attempt %d failed: %v", attempt+1, lastErr))
+		if strings.Contains(lastErr.Error(), "circuit breaker is open") {
+			if lastCause != nil {
+				return fmt.Errorf("failed after %d attempts: %v", attempt+1, lastCause)
+			}
+			return fmt.Errorf("failed after %d attempts: %v", attempt+1, lastErr)
+		}
+		lastCause = lastErr
 	}
 
+	if lastCause != nil {
+		return fmt.Errorf("failed after %d attempts: %v", maxRetries+1, lastCause)
+	}
 	return fmt.Errorf("failed after %d attempts: %v", maxRetries+1, lastErr)
 }
 
@@ -277,10 +286,18 @@ func processSchemeBatches(records [][]string, db *pgxpool.Pool, batchSize int) e
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	// Drop temp table if it exists, then create new one
-	_, _ = db.Exec(ctx, "DROP TABLE IF EXISTS temp_scheme_staging")
+	// TEMP tables are session-scoped. Hold one pool connection for CREATE/COPY/upsert
+	// so this works on Supabase transaction pooler (6543). Same bulk COPY path — not slower.
+	conn, err := db.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for scheme staging: %w", err)
+	}
+	defer conn.Release()
 
-	_, err := db.Exec(ctx, `
+	// Drop temp table if it exists, then create new one
+	_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS temp_scheme_staging")
+
+	_, err = conn.Exec(ctx, `
 		CREATE TEMP TABLE temp_scheme_staging (
 			amc_name TEXT,
 			scheme_code TEXT,
@@ -369,7 +386,7 @@ func processSchemeBatches(records [][]string, db *pgxpool.Pool, batchSize int) e
 
 	// Bulk copy to temp table
 	start := time.Now()
-	_, err = db.CopyFrom(ctx, pgx.Identifier{"temp_scheme_staging"},
+	_, err = conn.CopyFrom(ctx, pgx.Identifier{"temp_scheme_staging"},
 		[]string{"amc_name", "scheme_code", "scheme_name", "scheme_type", "scheme_category", "scheme_sub_category",
 			"scheme_nav_name", "scheme_minimum_amount", "launch_date", "closure_date",
 			"isin_div_payout_growth", "isin_div_reinvestment"},
@@ -384,7 +401,7 @@ func processSchemeBatches(records [][]string, db *pgxpool.Pool, batchSize int) e
 
 	// Now perform upsert from temp table to main table
 	start = time.Now()
-	result, err := db.Exec(ctx, `
+	result, err := conn.Exec(ctx, `
 		INSERT INTO investment.amfi_scheme_master_staging
 		(amc_name, scheme_code, scheme_name, scheme_type, scheme_category, scheme_sub_category,
 		scheme_nav_name, scheme_minimum_amount, launch_date, closure_date,
@@ -432,7 +449,7 @@ func processSchemeBatches(records [][]string, db *pgxpool.Pool, batchSize int) e
 	logger.GlobalLogger.LogAudit(fmt.Sprintf("Total scheme processing time: %v", copyDuration+upsertDuration))
 
 	// Drop temp table
-	_, err = db.Exec(ctx, "DROP TABLE IF EXISTS temp_scheme_staging")
+	_, err = conn.Exec(ctx, "DROP TABLE IF EXISTS temp_scheme_staging")
 	if err != nil {
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("Warning: Failed to drop temp scheme table: %v", err))
 	}
@@ -447,7 +464,7 @@ func processNAVDataWithCircuitBreaker(url string, db *pgxpool.Pool, batchSize in
 
 	// HTTP request with circuit breaker protection
 	err := httpCB.Execute(func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -455,7 +472,7 @@ func processNAVDataWithCircuitBreaker(url string, db *pgxpool.Pool, batchSize in
 			return fmt.Errorf("error creating request: %v", err)
 		}
 
-		client := &http.Client{Timeout: 30 * time.Second}
+		client := &http.Client{Timeout: 120 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
 			return fmt.Errorf("error fetching AMFI NAV data: %v", err)
@@ -467,6 +484,7 @@ func processNAVDataWithCircuitBreaker(url string, db *pgxpool.Pool, batchSize in
 		}
 
 		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		currentAMC := ""
 
 		for scanner.Scan() {
@@ -515,9 +533,7 @@ func processNAVDataWithCircuitBreaker(url string, db *pgxpool.Pool, batchSize in
 
 	// Process records in batches with circuit breaker protection
 	logger.GlobalLogger.LogAudit(fmt.Sprintf("Downloaded %d NAV records, processing in batches...", len(navRecords)))
-	return dbCB.Execute(func() error {
-		return processNAVBatches(navRecords, db, batchSize)
-	})
+	return processNAVBatches(navRecords, db, batchSize)
 }
 
 type NAVRecord struct {
@@ -538,10 +554,17 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	// Drop temp table if it exists, then create new one
-	_, _ = db.Exec(ctx, "DROP TABLE IF EXISTS temp_nav_staging")
+	// Hold one connection for TEMP + COPY + upsert (required on transaction pooler).
+	conn, err := db.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for NAV staging: %w", err)
+	}
+	defer conn.Release()
 
-	_, err := db.Exec(ctx, `
+	// Drop temp table if it exists, then create new one
+	_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS temp_nav_staging")
+
+	_, err = conn.Exec(ctx, `
 		CREATE TEMP TABLE temp_nav_staging (
 			scheme_code TEXT,
 			isin_div_payout_growth TEXT,
@@ -579,7 +602,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 
 	// Bulk copy to temp table
 	start := time.Now()
-	_, err = db.CopyFrom(ctx, pgx.Identifier{"temp_nav_staging"},
+	_, err = conn.CopyFrom(ctx, pgx.Identifier{"temp_nav_staging"},
 		[]string{"scheme_code", "isin_div_payout_growth", "isin_div_reinvestment", "scheme_name", "nav_value", "nav_date", "amc_name"},
 		pgx.CopyFromRows(validRecords))
 
@@ -594,7 +617,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 	logger.GlobalLogger.LogAudit("Checking for new schemes not in master database...")
 
 	var newSchemesCount int
-	err = db.QueryRow(ctx, `
+	err = conn.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT t.scheme_code)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.scheme_code::bigint = s.scheme_code
@@ -607,7 +630,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("Found %d new schemes, adding to scheme master...", newSchemesCount))
 
 		// Insert new schemes into amfi_scheme_master_staging
-		schemeResult, err := db.Exec(ctx, `
+		schemeResult, err := conn.Exec(ctx, `
 			INSERT INTO investment.amfi_scheme_master_staging
 			(amc_name, scheme_code, scheme_name, isin_div_payout_growth, isin_div_reinvestment, file_date)
 			SELECT DISTINCT
@@ -637,7 +660,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 
 	// Count distinct new AMCs for reporting
 	var newAmcCount int
-	err = db.QueryRow(ctx, `
+	err = conn.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT t.amc_name)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.amc_name = s.amc_name
@@ -655,24 +678,27 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 	logger.GlobalLogger.LogAudit("Processing NAV data for all matched schemes...")
 
 	// Insert NAV records for all schemes that now exist in the master (including newly added ones)
-	result, err := db.Exec(ctx, `
+	result, err := conn.Exec(ctx, `
 		INSERT INTO investment.amfi_nav_staging
 		(scheme_code, isin_div_payout_growth, isin_div_reinvestment,
 		scheme_name, nav_value, nav_date, amc_name, file_date)
-		SELECT t.scheme_code::bigint, 
-			   t.isin_div_payout_growth, 
+		SELECT DISTINCT ON (t.scheme_code, t.nav_date)
+			   t.scheme_code::bigint,
+			   t.isin_div_payout_growth,
 			   t.isin_div_reinvestment,
-			   t.scheme_name, 
-			   CASE 
-				   WHEN t.nav_value IS NULL OR t.nav_value = '' THEN NULL
-				   ELSE t.nav_value::numeric(18,4)
+			   t.scheme_name,
+			   CASE
+				   WHEN t.nav_value ~ '^-?[0-9]+(\.[0-9]+)?$' THEN t.nav_value::numeric(18,4)
+				   ELSE NULL
 			   END,
-			   t.nav_date, 
-			   t.amc_name, 
+			   t.nav_date,
+			   t.amc_name,
 			   t.file_date
 		FROM temp_nav_staging t
 		INNER JOIN investment.amfi_scheme_master_staging s ON t.scheme_code::bigint = s.scheme_code
 		WHERE t.scheme_code ~ '^[0-9]+$'
+		  AND t.nav_date IS NOT NULL
+		ORDER BY t.scheme_code, t.nav_date, t.file_date DESC NULLS LAST
 		ON CONFLICT (scheme_code, nav_date) DO UPDATE SET
 			isin_div_payout_growth = EXCLUDED.isin_div_payout_growth,
 			isin_div_reinvestment = EXCLUDED.isin_div_reinvestment,
@@ -690,7 +716,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 
 	// Count unmatched records
 	var unmatchedCount int
-	err = db.QueryRow(ctx, `
+	err = conn.QueryRow(ctx, `
 		SELECT COUNT(*)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.scheme_code::bigint = s.scheme_code
@@ -706,7 +732,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 	logger.GlobalLogger.LogAudit(fmt.Sprintf("Total NAV processing time: %v", copyDuration+upsertDuration))
 
 	// Drop temp table
-	_, err = db.Exec(ctx, "DROP TABLE IF EXISTS temp_nav_staging")
+	_, err = conn.Exec(ctx, "DROP TABLE IF EXISTS temp_nav_staging")
 	if err != nil {
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("Warning: Failed to drop temp table: %v", err))
 	}
@@ -779,6 +805,31 @@ func parseMinAmount(input string) *string {
 	}
 
 	return &result
+}
+
+// RunAMFISchemeSyncOnce downloads scheme master data only (no NAV).
+// Used by POST /investment/amfi/sync-schemes — NAV is a separate button
+// (RunAMFINAVSyncOnce / /investment/amfi/update-nav).
+func RunAMFISchemeSyncOnce(cfg *Config, db *pgxpool.Pool) error {
+	if cfg.DefaultSchemeURL == "" {
+		cfg.DefaultSchemeURL = config.DefaultSchemeURL
+	}
+	if cfg.BatchSize == 0 {
+		cfg.BatchSize = 1000
+	}
+	if cfg.MaxRetries == 0 {
+		cfg.MaxRetries = 3
+	}
+	if cfg.RetryDelay == 0 {
+		cfg.RetryDelay = 2 * time.Second
+	}
+
+	httpCircuitBreaker := NewCircuitBreaker(5, 30*time.Second)
+	dbCircuitBreaker := NewCircuitBreaker(3, 60*time.Second)
+
+	return RetryWithBackoff(cfg.MaxRetries, cfg.RetryDelay, func() error {
+		return processSchemeDataWithCircuitBreaker(cfg.DefaultSchemeURL, db, cfg.BatchSize, httpCircuitBreaker, dbCircuitBreaker)
+	})
 }
 
 // RunAMFIDataDownloaderOnce runs the AMFI data downloader job once without scheduling.

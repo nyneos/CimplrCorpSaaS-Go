@@ -88,7 +88,7 @@ var txTypeRegistry = map[string]txTableConfig{
 
 	// ── Cash / Payables & Receivables ─────────────────────────────────────
 	// (add specific types here as the cash module is wired up further)
-	
+
 	// ── Cash / Fund Planning ──────────────────────────────────────────────
 	"FUND_PLANNING_CREATE": {AuditTable: "public.auditaction_fund_plan_groups", AuditIDColumn: "group_id"},
 	"FUND_PLANNING_EDIT":   {AuditTable: "public.auditaction_fund_plan_groups", AuditIDColumn: "group_id"},
@@ -104,12 +104,11 @@ var txTypeRegistry = map[string]txTableConfig{
 	"CASH_FLOW_PROJECTION_EDIT":   {AuditTable: "cimplrcorpsaas.audit_action_cashflow_proposal", AuditIDColumn: "proposal_id"},
 	"CASH_FLOW_PROJECTION_DELETE": {AuditTable: "cimplrcorpsaas.audit_action_cashflow_proposal", AuditIDColumn: "proposal_id"},
 
-	
 	// ── Cash / Bank Balances ──────────────────────────────────────────────
 	"BANK_BALANCE_CREATE": {AuditTable: "public.auditactionbankbalances", AuditIDColumn: "balance_id"},
 	"BANK_BALANCE_EDIT":   {AuditTable: "public.auditactionbankbalances", AuditIDColumn: "balance_id"},
 	"BANK_BALANCE_DELETE": {AuditTable: "public.auditactionbankbalances", AuditIDColumn: "balance_id"},
-	
+
 	// ── Cash / Bank Limits ────────────────────────────────────────────────
 	"BANK_LIMIT_CREATE": {AuditTable: "cimplrcorpsaas.auditactionbanklimit", AuditIDColumn: "limit_id"},
 	"BANK_LIMIT_EDIT":   {AuditTable: "cimplrcorpsaas.auditactionbanklimit", AuditIDColumn: "limit_id"},
@@ -141,9 +140,10 @@ var txTypeRegistry = map[string]txTableConfig{
 	"FX_LINKAGE_EDIT":   {AuditTable: "public.auditactionhedgelink", AuditIDColumn: "exposure_header_id"},
 	"FX_LINKAGE_DELETE": {AuditTable: "public.auditactionhedgelink", AuditIDColumn: "exposure_header_id"},
 
-	"FX_FORWARD_CREATE": {AuditTable: "public.auditactionforwardbooking", AuditIDColumn: "system_transaction_id"},
-	"FX_FORWARD_EDIT":   {AuditTable: "public.auditactionforwardbooking", AuditIDColumn: "system_transaction_id"},
-	"FX_FORWARD_DELETE": {AuditTable: "public.auditactionforwardbooking", AuditIDColumn: "system_transaction_id"},
+	"FX_FORWARD_CREATE":              {AuditTable: "public.auditactionforwardbooking", AuditIDColumn: "system_transaction_id"},
+	"FX_FORWARD_EDIT":                {AuditTable: "public.auditactionforwardbooking", AuditIDColumn: "system_transaction_id"},
+	"FX_FORWARD_DELETE":              {AuditTable: "public.auditactionforwardbooking", AuditIDColumn: "system_transaction_id"},
+	"FX_FORWARD_CONFIRMATION_CREATE": {AuditTable: "public.auditactionforwardbooking", AuditIDColumn: "system_transaction_id"},
 
 	"FX_FORWARD_ROLLOVER":     {AuditTable: "public.auditactionforwardrollover", AuditIDColumn: "booking_id"},
 	"FX_FORWARD_CANCELLATION": {AuditTable: "public.auditactionforwardcancellation", AuditIDColumn: "booking_id"},

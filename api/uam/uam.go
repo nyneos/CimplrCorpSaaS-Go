@@ -27,7 +27,7 @@ func NewUAMServer(port string) (*http.Server, *pgxpool.Pool, error) {
 		name := os.Getenv("DB_NAME")
 		sslMode := dbutil.EffectiveSSLMode(host)
 		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
-		pool, err := pgxpool.New(context.Background(), dsn)
+		pool, err := dbutil.NewTracedPool(context.Background(), dsn, serviceName)
 		if err != nil {
 			return nil
 		}

@@ -135,6 +135,7 @@ func RegisterFXRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool.P
 	mux.Handle("/fx/exposures/edit", midFX(exposures.EditExposureHeadersLineItemsJoined(pgxPool)))
 	mux.Handle("/fx/exposures/headers-line-items", midFX(exposures.GetExposureHeadersLineItems(pgxPool)))
 	mux.Handle("/fx/exposures/pending-headers-line-items", midFX(exposures.GetPendingApprovalHeadersLineItems(pgxPool)))
+	mux.Handle("/fx/exposures/header-detail", midFX(exposures.GetExposureHeaderDetail(pgxPool)))
 	mux.Handle("/fx/exposures/delete-multiple-headers", midFX(exposures.DeleteExposureHeaders(pgxPool)))
 	mux.Handle("/fx/exposures/reject-multiple-headers", midFX(exposures.RejectMultipleExposureHeaders(pgxPool)))
 	mux.Handle("/fx/exposures/approve-multiple-headers", midFX(exposures.ApproveMultipleExposureHeaders(pgxPool)))

@@ -117,6 +117,7 @@ func DashboardSummary(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(created_at AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD HH24:MI'),'')
 			FROM investment.fd_rate_negotiation
 			WHERE COALESCE(is_deleted,false)=false
+			  AND request_status NOT IN ('REJECTED','CANCELLED')
 			ORDER BY created_at DESC, rate_request_id DESC
 			LIMIT 12`)
 		if err == nil {
@@ -154,6 +155,7 @@ func DashboardSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_rate_communication c
 			JOIN investment.fd_rate_negotiation m ON m.rate_request_id = c.rate_request_id
 			WHERE COALESCE(c.is_deleted,false)=false
+			  AND c.communication_status <> 'REJECTED'
 			ORDER BY COALESCE(c.sent_at, c.created_at) DESC, c.communication_id DESC
 			LIMIT 12`)
 		if err == nil {
@@ -188,6 +190,7 @@ func DashboardSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_rate_offer o
 			JOIN investment.fd_rate_negotiation m ON m.rate_request_id = o.rate_request_id
 			WHERE COALESCE(o.is_deleted,false)=false
+			  AND o.offer_status NOT IN ('REJECTED','EXPIRED')
 			ORDER BY o.created_at DESC, o.offer_id DESC
 			LIMIT 12`)
 		if err == nil {

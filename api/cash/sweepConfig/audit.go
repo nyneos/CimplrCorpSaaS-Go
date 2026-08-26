@@ -152,7 +152,7 @@ func loadSweepConfigApprovalWorkflow(ctx context.Context, pgxPool *pgxpool.Pool,
 			if txType == "" {
 				txType = "SWEEP_CONFIG_CREATE"
 			}
-			
+
 			var swp, buf *float64
 			if sweepAmount.Valid {
 				v := sweepAmount.Float64
@@ -181,6 +181,7 @@ func loadSweepConfigApprovalWorkflow(ctx context.Context, pgxPool *pgxpool.Pool,
 				Amount:           amount,
 				SubmittedBy:      submittedByUserID,
 				SubmittedByEmail: submittedByEmail,
+				MatrixID:         "",
 			})
 			if instErr == nil {
 				instanceID = newInstID
@@ -350,6 +351,7 @@ func loadSweepInitiationApprovalWorkflow(ctx context.Context, pgxPool *pgxpool.P
 				Amount:           resolveSweepInitiationAmount(ovr, swp, buf),
 				SubmittedBy:      submittedByUserID,
 				SubmittedByEmail: submittedByEmail,
+				MatrixID:         "",
 			})
 			if instErr != nil {
 				api.LogError("[SweepInitiation] Self-heal CreateInstance for %s: %v", initiationID, instErr)

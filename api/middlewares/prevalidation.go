@@ -768,7 +768,8 @@ func loadApprovedBankAccounts(ctx context.Context, db *pgxpool.Pool) ([]map[stri
 			COALESCE(m.account_number, ''),
 			COALESCE(m.account_nickname, '') AS account_name,
 			COALESCE(b.bank_name, '') AS bank_name,
-			COALESCE(e.entity_name, ec.entity_name, '') AS entity_name
+			COALESCE(e.entity_name, ec.entity_name, '') AS entity_name,
+			COALESCE(m.entity_id, '')
 		FROM public.masterbankaccount m
 		JOIN latest_approved l ON l.account_id = m.account_id
 		LEFT JOIN public.masterbank b ON b.bank_id = m.bank_id
@@ -776,16 +777,23 @@ func loadApprovedBankAccounts(ctx context.Context, db *pgxpool.Pool) ([]map[stri
 		LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = m.entity_id
 		WHERE UPPER(m.status) = 'ACTIVE'
 		  AND COALESCE(m.is_deleted, false) = false
+		  AND COALESCE(ec.is_deleted, false) = false
+		  AND COALESCE(e.is_deleted, false) = false
 		  AND NOT EXISTS (
 		  	SELECT 1 FROM public.auditactionbankaccount d
 		  	WHERE d.account_id = m.account_id
 		  	  AND d.processing_status = 'APPROVED'
 		  	  AND d.actiontype = 'DELETE'
 		  )
-		ORDER BY m.account_number
 	`
+	args := []any{}
+	if entityIDs := api.GetEntityIDsFromCtx(ctx); len(entityIDs) > 0 {
+		query += ` AND m.entity_id = ANY($1)`
+		args = append(args, entityIDs)
+	}
+	query += ` ORDER BY m.account_number`
 
-	rows, err := db.Query(ctx, query)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return []map[string]string{}, err
 	}
@@ -793,14 +801,15 @@ func loadApprovedBankAccounts(ctx context.Context, db *pgxpool.Pool) ([]map[stri
 
 	bankAccounts := make([]map[string]string, 0)
 	for rows.Next() {
-		var accountID, accountNumber, accountName, bankName, entityName string
-		if err := rows.Scan(&accountID, &accountNumber, &accountName, &bankName, &entityName); err == nil {
+		var accountID, accountNumber, accountName, bankName, entityName, entityID string
+		if err := rows.Scan(&accountID, &accountNumber, &accountName, &bankName, &entityName, &entityID); err == nil {
 			bankAccounts = append(bankAccounts, map[string]string{
 				"account_id":     accountID,
 				"account_number": accountNumber,
 				"account_name":   accountName,
 				"bank_name":      bankName,
 				"entity_name":    entityName,
+				"entity_id":      entityID,
 			})
 		}
 	}
