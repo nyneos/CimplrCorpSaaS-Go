@@ -420,7 +420,7 @@ func parseSettlementDate(s string) (time.Time, error) {
 	if len(s) >= 10 {
 		s = s[:10]
 	}
-	t, err := time.Parse("2006-01-02", s)
+	t, err := time.Parse(constants.DateFormat, s)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("invalid settlement_date")
 	}
@@ -746,7 +746,7 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 		}
 		var maturity interface{}
 		if newMaturity != nil {
-			maturity = newMaturity.Format("2006-01-02")
+			maturity = newMaturity.Format(constants.DateFormat)
 		}
 		qty := 0.0
 		price := 0.0
@@ -1199,7 +1199,7 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				"is_escalated":           isEscalated,
 			}
 			if settlementDate != nil {
-				row["settlement_date"] = settlementDate.Format("2006-01-02")
+				row["settlement_date"] = settlementDate.Format(constants.DateFormat)
 			}
 			if updatedBy != nil {
 				row["updated_by"] = *updatedBy
