@@ -8,6 +8,8 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -33,8 +35,13 @@ type RateEntry struct {
 
 // init tries to load the rate file; if it fails, it fallbacks to a minimal set.
 func init() {
-	// Try a few common relative paths so running from different working directories works.
+	// Try a few common relative paths so running from different working directories works,
+	// plus a path anchored to this source file's own location (works regardless of the
+	// process's CWD — e.g. when the binary is built/run from outside the repo root).
 	paths := []string{"api/dash/rate.json", "../api/dash/rate.json", "./api/dash/rate.json"}
+	if _, thisFile, _, ok := runtime.Caller(0); ok {
+		paths = append(paths, filepath.Join(filepath.Dir(thisFile), "..", "rate.json"))
+	}
 	var lastErr error
 	for _, p := range paths {
 		if err := LoadInrRates(p); err == nil {
