@@ -82,9 +82,7 @@ func FilterForwardBookingsForSettlement(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		respondWithSuccess(w, http.StatusOK, "Forward bookings for settlement fetched successfully", map[string]interface{}{
-			"data": data,
-		})
+		respondWithSuccess(w, http.StatusOK, "Forward bookings for settlement fetched successfully", data)
 	}
 }
 
@@ -258,8 +256,6 @@ func GetForwardBookingsByEntityAndCurrency(pool *pgxpool.Pool) http.HandlerFunc 
 			}
 			data = append(data, rowMap)
 		}
-		respondWithSuccess(w, http.StatusOK, "Forward bookings for settlement fetched successfully", map[string]interface{}{
-			"data": data,
-		})
+		respondWithSuccess(w, http.StatusOK, "Forward bookings for settlement fetched successfully", data)
 	}
 }
