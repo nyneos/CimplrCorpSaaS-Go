@@ -106,15 +106,29 @@ func queryFXExposureBucketing(ctx context.Context, pool *pgxpool.Pool, entityIDs
 			COALESCE(h.currency, '') AS currency,
 			h.document_date,
 			COALESCE(b.status_bucketing, '') AS status_bucketing,
+			COALESCE(b.status_bucketing, '') AS status,
+			COALESCE(b.reference_no, '') AS reference_no,
+			COALESCE(b.comments, '') AS comments,
+			COALESCE(b.updated_by, '') AS updated_by,
+			b.date AS "date",
+			b.time AS "time",
+			b.updated_at,
 			COALESCE(h.total_original_amount, 0) AS total_original_amount,
 			COALESCE(h.total_open_amount, 0) AS total_open_amount,
 			COALESCE(h.amount_in_local_currency, 0) AS amount_in_local_currency,
+			COALESCE(b.advance, 0) AS advance,
 			COALESCE(b.month_1, 0) AS month_1,
 			COALESCE(b.month_2, 0) AS month_2,
 			COALESCE(b.month_3, 0) AS month_3,
 			COALESCE(b.month_4, 0) AS month_4,
 			COALESCE(b.month_4_6, 0) AS month_4_6,
-			COALESCE(b.month_6plus, 0) AS month_6plus
+			COALESCE(b.month_6plus, 0) AS month_6plus,
+			COALESCE(b.old_month1, 0) AS old_month1,
+			COALESCE(b.old_month2, 0) AS old_month2,
+			COALESCE(b.old_month3, 0) AS old_month3,
+			COALESCE(b.old_month4, 0) AS old_month4,
+			COALESCE(b.old_month4to6, 0) AS old_month4to6,
+			COALESCE(b.old_month6plus, 0) AS old_month6plus
 		FROM public.exposure_headers h
 		JOIN public.exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
 		LEFT JOIN public.exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id
