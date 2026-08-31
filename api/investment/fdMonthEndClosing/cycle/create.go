@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	fdclosingcommon "CimplrCorpSaas/api/investment/fdMonthEndClosing/common"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -34,10 +35,11 @@ const moduleCode = "FIXED_DEPOSIT"
 
 // Transaction types registered in api/approvalengine/moduleconfig.go's
 // txTypeRegistry (AuditTable=investment.fd_closing_cycle_audit,
-// AuditIDColumn=cycle_id). CREATE deliberately has no transaction type — cycle
-// creation is never gated by the approval engine (matches the mock UI and the
-// migration's own design comment).
+// AuditIDColumn=cycle_id). Every action — CREATE included — requires an
+// explicit approve; nothing in this module auto-applies just because no
+// approval matrix is pinned.
 const (
+	TxCreateCycle = "FD_CLOSING_CYCLE_CREATE"
 	TxEditCycle   = "FD_CLOSING_CYCLE_EDIT"
 	TxDeleteCycle = "FD_CLOSING_CYCLE_DELETE"
 )
@@ -47,11 +49,11 @@ const (
 	cycleAuditTable = "investment.fd_closing_cycle_audit"
 )
 
-// CreateCycle handles POST /investment/fd-closing/cycle/create.
-// Inserts the cycle directly as DRAFT — no approval gate on CREATE (matches
-// the mock UI's onCreateCycle, which never shows an approval step for the
-// cycle itself) — and writes a self-approved CREATE audit row for a complete
-// trail. No approvalengine.CreateInstance call for this action.
+// CreateCycle handles POST /investment/fd-closing/cycle/create. The master
+// row is inserted as DRAFT so it's visible immediately, but the audit row is
+// PENDING_APPROVAL — a cycle is only usable once a checker approves it. When
+// no approval matrix is pinned for FD_CLOSING_CYCLE_CREATE, approve.go's own
+// direct fallback is what applies it, never this handler.
 func CreateCycle(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -170,9 +172,8 @@ func CreateCycle(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_closing_cycle_audit (
-				cycle_id, action_type, processing_status, requested_by, requested_at, requested_ip,
-				checker_by, checker_at
-			) VALUES ($1,'CREATE','APPROVED',$2,now(),$3,$2,now())`,
+				cycle_id, action_type, processing_status, requested_by, requested_at, requested_ip
+			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`,
 			cycleID, api.SystemIfBlank(actor.Email), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 		); err != nil {
 			api.LogErrorForResponse(w, "[FDClosingCycle] CreateCycle audit insert: %v", err)
@@ -186,12 +187,37 @@ func CreateCycle(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		fdclosingcommon.RespondSuccess(w, "FD closing cycle created", map[string]interface{}{
+		fdclosingcommon.RespondSuccess(w, "Cycle submitted for approval", map[string]interface{}{
 			"cycle_id":  cycleID,
 			"entity_id": req.EntityID,
 			"status":    "DRAFT",
 		})
-		api.LogInfo("[FDClosingCycle] Cycle created: id=%s entity=%s by=%s", cycleID, req.EntityID, actor.Email)
+		api.LogInfo("[FDClosingCycle] Cycle create requested: id=%s entity=%s by=%s", cycleID, req.EntityID, actor.Email)
+
+		newCycleID, entity, actorEmail, actorUserID := cycleID, req.EntityID, actor.Email, actor.UserID
+		runEngineInBackground(func(bgCtx context.Context) {
+			instID, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+				ModuleCode:          moduleCode,
+				EntityCode:          entity,
+				TransactionType:     TxCreateCycle,
+				RecordID:            newCycleID,
+				RecordTable:         cycleTable,
+				AuditTable:          cycleAuditTable,
+				AuditIDColumn:       "cycle_id",
+				ActionType:          "CREATE",
+				SubmittedBy:         actorUserID,
+				SubmittedByEmail:    actorEmail,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: false,
+			})
+			if err != nil {
+				api.LogError("[FDClosingCycle] CreateInstance(CREATE) failed for cycle %s: %v", newCycleID, err)
+				return
+			}
+			if instID != "" {
+				api.LogInfo("[FDClosingCycle] CreateInstance(CREATE) %s → cycle %s PENDING_APPROVAL", instID, newCycleID)
+			}
+		})
 	}
 }
 

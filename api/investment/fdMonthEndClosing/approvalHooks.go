@@ -32,6 +32,15 @@ import (
 // RunPostFinalizeHook in api/approvalengine/moduleconfig.go), so it opens its
 // own short transaction here.
 func init() {
+	approvalengine.RegisterPostFinalizeHook(cycle.TxCreateCycle, func(ctx context.Context, pool *pgxpool.Pool, cycleID, transactionType, finalStatus, actorEmail, comment string) {
+		if finalStatus != approvalengine.InstStatusRejected {
+			return
+		}
+		if _, err := pool.Exec(ctx, `UPDATE investment.fd_closing_cycle SET is_deleted = true WHERE cycle_id = $1`, cycleID); err != nil {
+			api.LogError("[FDClosingCycle] post-finalize CREATE reject soft-delete failed for cycle=%s: %v", cycleID, err)
+		}
+	})
+
 	approvalengine.RegisterPostFinalizeHook(cycle.TxEditCycle, func(ctx context.Context, pool *pgxpool.Pool, cycleID, transactionType, finalStatus, actorEmail, comment string) {
 		if finalStatus != approvalengine.InstStatusApproved {
 			return

@@ -137,10 +137,10 @@ func DeleteCycle(pool *pgxpool.Pool) http.HandlerFunc {
 				SubmittedBy:         actorUserID,
 				SubmittedByEmail:    actorEmail,
 				RequirePinnedMatrix: true,
-				// Safe to auto-apply generically here: finalizeRecord's DELETE
-				// branch only flips the generic is_deleted column, so the engine's
-				// built-in auto-apply (no custom columns involved) is correct as-is.
-				AutoApplyIfUnpinned: true,
+				// No auto-apply, matrix or not — every delete waits for an
+				// explicit /approve call (unpinned falls to approve.go's own
+				// directApproveCycle fallback).
+				AutoApplyIfUnpinned: false,
 			})
 			if err != nil {
 				api.LogError("[FDClosingCycle] CreateInstance(DELETE) failed for cycle %s: %v", cycleID, err)
@@ -148,8 +148,6 @@ func DeleteCycle(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if instID != "" {
 				api.LogInfo("[FDClosingCycle] CreateInstance(DELETE) %s → cycle %s PENDING_DELETE_APPROVAL", instID, cycleID)
-			} else {
-				api.LogInfo("[FDClosingCycle] Auto-applied DELETE for cycle %s — no approval matrix configured", cycleID)
 			}
 		})
 	}

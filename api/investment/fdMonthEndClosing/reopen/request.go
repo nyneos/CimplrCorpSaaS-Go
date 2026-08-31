@@ -161,11 +161,10 @@ func RequestReopen(pool *pgxpool.Pool) http.HandlerFunc {
 				SubmittedBy:         actorUserID,
 				SubmittedByEmail:    actorEmail,
 				RequirePinnedMatrix: true,
-				// Safe to auto-apply generically here — same reasoning as
-				// lock/request.go: AuditTable==RecordTable, so the generic
-				// finalizeRecord flip is exactly correct with no custom columns
-				// to copy.
-				AutoApplyIfUnpinned: true,
+				// No auto-apply, matrix or not — every reopen request waits for
+				// an explicit /approve call (unpinned falls to approve.go's own
+				// directApproveReopenRequest fallback).
+				AutoApplyIfUnpinned: false,
 			})
 			if err != nil {
 				api.LogError("[FDClosingReopen] CreateInstance failed for request %s: %v", reqID, err)
@@ -173,8 +172,6 @@ func RequestReopen(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if instID != "" {
 				api.LogInfo("[FDClosingReopen] CreateInstance %s → request %s PENDING_APPROVAL", instID, reqID)
-			} else {
-				api.LogInfo("[FDClosingReopen] Auto-applied CREATE for request %s — no approval matrix configured", reqID)
 			}
 		})
 	}

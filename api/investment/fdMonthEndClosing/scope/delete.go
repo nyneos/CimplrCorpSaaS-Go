@@ -174,12 +174,10 @@ func DeleteScope(pool *pgxpool.Pool) http.HandlerFunc {
 					SubmittedBy:         actorUserID,
 					SubmittedByEmail:    actorEmail,
 					RequirePinnedMatrix: true,
-					// Safe to auto-apply generically here: finalizeRecord's DELETE
-					// branch only flips the generic is_deleted column (RecordTable's
-					// PK column IS scope_id, matching AuditIDColumn), so the engine's
-					// built-in auto-apply is correct as-is — no custom columns
-					// involved, unlike the ADD/CREATE path.
-					AutoApplyIfUnpinned: true,
+					// No auto-apply, matrix or not — every removal waits for an
+					// explicit /approve call (unpinned falls to approve.go's own
+					// direct fallback, same as scope create/add).
+					AutoApplyIfUnpinned: false,
 				})
 				if err != nil {
 					api.LogError("[FDClosingScope] CreateInstance(REMOVE) failed for scope %s: %v", scopeID, err)
@@ -187,8 +185,6 @@ func DeleteScope(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if instID != "" {
 					api.LogInfo("[FDClosingScope] CreateInstance(REMOVE) %s → scope %s PENDING_DELETE_APPROVAL", instID, scopeID)
-				} else {
-					api.LogInfo("[FDClosingScope] Auto-applied REMOVE for scope %s — no approval matrix configured", scopeID)
 				}
 			})
 		}

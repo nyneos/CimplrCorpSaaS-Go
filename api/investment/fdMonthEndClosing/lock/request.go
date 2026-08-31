@@ -156,12 +156,10 @@ func RequestLock(pool *pgxpool.Pool) http.HandlerFunc {
 				SubmittedBy:         actorUserID,
 				SubmittedByEmail:    actorEmail,
 				RequirePinnedMatrix: true,
-				// Safe to auto-apply generically here: finalizeRecord's UPDATE
-				// targets the request row itself (AuditTable==RecordTable), so an
-				// auto-apply flip of processing_status→APPROVED is exactly
-				// correct with no custom columns to copy (unlike cycle's EDIT
-				// case, which needs a dedicated post-finalize hook).
-				AutoApplyIfUnpinned: true,
+				// No auto-apply, matrix or not — every lock request waits for an
+				// explicit /approve call (unpinned falls to approve.go's own
+				// directApproveLockRequest fallback).
+				AutoApplyIfUnpinned: false,
 			})
 			if err != nil {
 				api.LogError("[FDClosingLock] CreateInstance failed for request %s: %v", reqID, err)
@@ -169,8 +167,6 @@ func RequestLock(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if instID != "" {
 				api.LogInfo("[FDClosingLock] CreateInstance %s → request %s PENDING_APPROVAL", instID, reqID)
-			} else {
-				api.LogInfo("[FDClosingLock] Auto-applied CREATE for request %s — no approval matrix configured", reqID)
 			}
 		})
 	}

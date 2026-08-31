@@ -790,13 +790,25 @@ const rateRequestSelect = `
 	) la ON true
 `
 
-// ListRateRequests returns all non-deleted rate requests.
+// ListRateRequests returns all non-deleted rate requests scoped to session entities.
 func ListRateRequests(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		rows, err := pgxPool.Query(ctx, rateRequestSelect+`
-			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY GREATEST(m.created_at, COALESCE(la.requested_at, m.created_at)) DESC, m.rate_request_id DESC`)
+		entityIDs := api.GetEntityIDsFromCtx(ctx)
+		admin := false
+		if v, ok := ctx.Value("is_admin_override").(bool); ok && v {
+			admin = true
+		}
+		query := rateRequestSelect + `
+			WHERE COALESCE(m.is_deleted,false)=false`
+		args := []interface{}{}
+		if !admin && len(entityIDs) > 0 {
+			query += fmt.Sprintf(" AND m.entity_id = ANY($%d::text[])", len(args)+1)
+			args = append(args, entityIDs)
+		}
+		query += `
+			ORDER BY GREATEST(m.created_at, COALESCE(la.requested_at, m.created_at)) DESC, m.rate_request_id DESC`
+		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to list rate requests")
 			return

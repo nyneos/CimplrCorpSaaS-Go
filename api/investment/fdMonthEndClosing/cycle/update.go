@@ -207,27 +207,7 @@ func UpdateCycle(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if instID != "" {
 				api.LogInfo("[FDClosingCycle] CreateInstance(EDIT) %s → cycle %s PENDING_EDIT_APPROVAL", instID, cycleID)
-				return
 			}
-			// No approval matrix configured for FD_CLOSING_CYCLE_EDIT — apply
-			// immediately, same as every other FD_* transaction type's
-			// "policy did not trigger approval" auto-apply behavior.
-			applyTx, err := pool.Begin(bgCtx)
-			if err != nil {
-				api.LogError("[FDClosingCycle] auto-apply(EDIT) begin tx failed for cycle %s: %v", cycleID, err)
-				return
-			}
-			defer applyTx.Rollback(bgCtx) //nolint:errcheck
-			if err := ApplyEditToMaster(bgCtx, applyTx, cycleID, api.SystemIfBlank(actorEmail),
-				"Auto-applied: policy did not trigger approval", "PENDING_EDIT_APPROVAL", true); err != nil {
-				api.LogError("[FDClosingCycle] auto-apply(EDIT) failed for cycle %s: %v", cycleID, err)
-				return
-			}
-			if err := applyTx.Commit(bgCtx); err != nil {
-				api.LogError("[FDClosingCycle] auto-apply(EDIT) commit failed for cycle %s: %v", cycleID, err)
-				return
-			}
-			api.LogInfo("[FDClosingCycle] Auto-applied EDIT for cycle %s — no approval matrix configured", cycleID)
 		})
 	}
 }

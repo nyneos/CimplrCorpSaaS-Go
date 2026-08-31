@@ -152,6 +152,72 @@ func fireRateNegotiationNotification(pool *pgxpool.Pool, rateRequestID, actorEma
 	}()
 }
 
+const (
+	notifTplBankStandard = "[FD Rate] Bank Rate Request — Standard"
+	notifTplBankUrgent   = "[FD Rate] Bank Rate Request — Urgent"
+)
+
+// resolveBankEmailNotificationTemplates maps the DMS template picked in Bank
+// Communication to exactly one notification_svc template. Without this filter,
+// every approved EMAIL template for the source route fires (Standard + Urgent).
+func resolveBankEmailNotificationTemplates(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	communicationID, templateID string,
+) []string {
+	id := strings.TrimSpace(templateID)
+	if id != "" && !looksLikeUUID(id) {
+		return []string{id}
+	}
+
+	templateName := ""
+	_ = pool.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(TRIM(email_template_name), ''), '')
+		FROM investment.fd_rate_communication
+		WHERE communication_id = $1::uuid`, communicationID).Scan(&templateName)
+
+	if templateName == "" && looksLikeUUID(id) {
+		_ = pool.QueryRow(ctx, `
+			SELECT COALESCE(name, '')
+			FROM dms_svc.template
+			WHERE template_id = $1::uuid AND COALESCE(is_deleted, false) = false
+			LIMIT 1`, id).Scan(&templateName)
+	}
+
+	notifName := notifTplBankStandard
+	if strings.Contains(strings.ToLower(templateName), "urgent") {
+		notifName = notifTplBankUrgent
+	}
+
+	var notifID string
+	err := pool.QueryRow(ctx, `
+		SELECT t.template_id::text
+		FROM notification_svc.template t
+		JOIN notification_svc.event e ON e.event_id = t.event_id
+		WHERE e.source_route = $1
+		  AND COALESCE(e.is_deleted, false) = false
+		  AND COALESCE(t.is_deleted, false) = false
+		  AND t.template_name = $2
+		  AND t.channel = 'EMAIL'
+		LIMIT 1`, sourceRouteBankEmail, notifName).Scan(&notifID)
+	if err != nil || notifID == "" {
+		_ = pool.QueryRow(ctx, `
+			SELECT t.template_id::text
+			FROM notification_svc.template t
+			JOIN notification_svc.event e ON e.event_id = t.event_id
+			WHERE e.source_route = $1
+			  AND COALESCE(e.is_deleted, false) = false
+			  AND COALESCE(t.is_deleted, false) = false
+			  AND t.template_name = $2
+			  AND t.channel = 'EMAIL'
+			LIMIT 1`, sourceRouteBankEmail, notifTplBankStandard).Scan(&notifID)
+	}
+	if notifID != "" {
+		return []string{notifID}
+	}
+	return nil
+}
+
 func fireBankCommunicationEmail(
 	pool *pgxpool.Pool,
 	communicationID, rateRequestID, actorEmail, templateID, emailContent string,
@@ -174,11 +240,12 @@ func fireBankCommunicationEmail(
 			return
 		}
 
-		var bankID, bankName string
+		var bankID, bankName, emailTemplateName string
 		if err = pool.QueryRow(ctx, `
-			SELECT COALESCE(bank_id,''), COALESCE(bank_name,'')
+			SELECT COALESCE(bank_id,''), COALESCE(bank_name,''),
+			       COALESCE(NULLIF(TRIM(email_template_name), ''), '')
 			FROM investment.fd_rate_communication
-			WHERE communication_id = $1::uuid`, communicationID).Scan(&bankID, &bankName); err != nil {
+			WHERE communication_id = $1::uuid`, communicationID).Scan(&bankID, &bankName, &emailTemplateName); err != nil {
 			api.LogError("[FDRateNeg] bank email load communication bank %s: %v", communicationID, err)
 			// continue — email can still send; BankName may be empty
 		}
@@ -201,15 +268,19 @@ func fireBankCommunicationEmail(
 			payload["Bank"] = bankName
 		}
 
-		// Bank Communication picks a DMS template. Delivery still goes through
-		// the notification EMAIL pipeline for this source_route. A DMS UUID
-		// must not be used as a notification_svc.template_id filter — that
-		// would match nothing and silently skip the send.
-		var allowed []string
-		id := strings.TrimSpace(templateID)
-		if id != "" && !looksLikeUUID(id) {
-			allowed = []string{id}
+		content := strings.TrimSpace(emailContent)
+		if strings.Contains(content, "<") {
+			// DMS cover email is fully rendered HTML — bypass notification wrapper
+			// text so Outlook does not show raw tags in the plain-text MIME part.
+			payload["EmailBodyHTML"] = content
+			subject := fmt.Sprintf("FD rate request %s", row.RateRequestRef)
+			if strings.Contains(strings.ToLower(emailTemplateName), "urgent") {
+				subject = fmt.Sprintf("URGENT FD rate request %s", row.RateRequestRef)
+			}
+			payload["EmailSubject"] = subject
 		}
+
+		allowed := resolveBankEmailNotificationTemplates(ctx, pool, communicationID, templateID)
 		notifcatalog.TriggerNotificationForTemplates(
 			ctx, pool, sourceRouteBankEmail, communicationID, payload, allowed,
 		)

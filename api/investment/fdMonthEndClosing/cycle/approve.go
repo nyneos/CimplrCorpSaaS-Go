@@ -133,6 +133,15 @@ func directApproveCycle(ctx context.Context, pool *pgxpool.Pool, cycleID, checke
 	}
 
 	switch pending.ActionType {
+	case "CREATE":
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.fd_closing_cycle_audit
+			SET processing_status = 'APPROVED', checker_by = $2, checker_at = now(), checker_comment = $3
+			WHERE audit_id = $1`,
+			pending.AuditID, api.SystemIfBlank(checkerEmail), comment,
+		); err != nil {
+			return fmt.Errorf("audit flip failed: %w", err)
+		}
 	case "EDIT":
 		if err := ApplyEditToMaster(ctx, tx, cycleID, api.SystemIfBlank(checkerEmail), comment, "PENDING_EDIT_APPROVAL", true); err != nil {
 			return err

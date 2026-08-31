@@ -297,12 +297,10 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 					SubmittedBy:         actorUserID,
 					SubmittedByEmail:    actorEmail,
 					RequirePinnedMatrix: true,
-					// Deliberately NOT AutoApplyIfUnpinned: the engine's generic
-					// auto-apply (policyPin.go's autoApplyUnpinned) only flips the
-					// audit row's processing_status — it has no idea about
-					// selection_status or the 5 checklist rows this module must
-					// seed on approval. When no matrix applies (instID=="" below)
-					// we apply it ourselves via applyScopeAddApproval.
+					// No auto-apply, matrix or not: every scope addition must wait
+					// for an explicit /approve call. When no matrix is pinned,
+					// instID=="" and approve.go's own direct fallback (which also
+					// calls applyScopeAddApproval) is what actually applies it.
 					AutoApplyIfUnpinned: false,
 				})
 				if err != nil {
@@ -311,24 +309,7 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if instID != "" {
 					api.LogInfo("[FDClosingScope] CreateInstance(ADD) %s → scope %s PENDING_APPROVAL", instID, scopeID)
-					return
 				}
-				applyTx, err := pool.Begin(bgCtx)
-				if err != nil {
-					api.LogError("[FDClosingScope] auto-apply(ADD) begin tx failed for scope %s: %v", scopeID, err)
-					return
-				}
-				defer applyTx.Rollback(bgCtx) //nolint:errcheck
-				if err := applyScopeAddApproval(bgCtx, applyTx, scopeID, api.SystemIfBlank(actorEmail),
-					"Auto-applied: policy did not trigger approval", "PENDING_APPROVAL", true); err != nil {
-					api.LogError("[FDClosingScope] auto-apply(ADD) failed for scope %s: %v", scopeID, err)
-					return
-				}
-				if err := applyTx.Commit(bgCtx); err != nil {
-					api.LogError("[FDClosingScope] auto-apply(ADD) commit failed for scope %s: %v", scopeID, err)
-					return
-				}
-				api.LogInfo("[FDClosingScope] Auto-applied ADD for scope %s — no approval matrix configured", scopeID)
 			})
 		}
 	}

@@ -44,7 +44,10 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			Module            string `json:"module"`
 			EntityID          string `json:"entity_id"`
+			BusinessEntityID  string `json:"business_entity_id"`
+			RateRequestID     string `json:"rate_request_id"`
 			Status            string `json:"status"`
+			MailDirection     string `json:"mail_direction"`
 			DateFrom          string `json:"date_from"`
 			DateTo            string `json:"date_to"`
 			InboxID           string `json:"inbox_id"`
@@ -59,11 +62,14 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 
 		module := strings.TrimSpace(req.Module)
 		entityID := strings.TrimSpace(req.EntityID)
+		businessEntityID := strings.TrimSpace(req.BusinessEntityID)
+		rateRequestID := strings.TrimSpace(req.RateRequestID)
 		status := strings.TrimSpace(req.Status)
+		mailDirection := strings.ToUpper(strings.TrimSpace(req.MailDirection))
 		dateFrom := strings.TrimSpace(req.DateFrom)
 		dateTo := strings.TrimSpace(req.DateTo)
 		inboxID := strings.TrimSpace(req.InboxID)
-		userID, userEmail, _, _ := emailcommon.RequestIdentity(r, "", "")
+		userID, userEmail, _, entityIDs := emailcommon.RequestIdentity(r, "", "")
 		admin := emailcommon.IsEmailAdmin(r.Context(), userID)
 		offset := req.Offset
 		if offset < 0 {
@@ -73,6 +79,39 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.FilterMatchedOnly != nil {
 			filterMatchedOnly = *req.FilterMatchedOnly
 		}
+
+		baseWhere := `
+			WHERE ($1 = '' OR m.module = $1)
+			  AND ($2 = '' OR m.entity_id = $2)
+			  AND ($3 = '' OR m.processing_status = $3)
+			  AND ($4 = '' OR COALESCE(m.received_at, m.created_at) >= $4::date)
+			  AND ($5 = '' OR COALESCE(m.received_at, m.created_at) < ($5::date + interval '1 day'))
+			  AND ($6 = '' OR m.inbox_id::text = $6)
+			  AND (NOT $7 OR m.filter_matched = true OR m.processing_status = 'MANUAL_UPLOAD')
+			  AND ($8 = '' OR UPPER(COALESCE(m.mail_direction, 'RECEIVED')) = $8)`
+
+		args := []interface{}{module, entityID, status, dateFrom, dateTo, inboxID, filterMatchedOnly, mailDirection}
+		scopeSQL := ""
+		if !admin && len(entityIDs) > 0 {
+			scopeSQL += emailcommon.MessagePrevalidationEntityScopeSQL(len(args) + 1)
+			args = append(args, entityIDs)
+		}
+		if businessEntityID != "" {
+			treeIDs, treeErr := emailcommon.ResolveEntityTreeIDs(r.Context(), pool, businessEntityID)
+			if treeErr != nil || len(treeIDs) == 0 {
+				treeIDs = []string{businessEntityID}
+			}
+			scopeSQL += emailcommon.MessageBusinessEntityFilterSQL(len(args) + 1)
+			args = append(args, treeIDs)
+		}
+		if rateRequestID != "" {
+			scopeSQL += emailcommon.MessageUnlinkedOrRateRequestSQL(len(args) + 1)
+			args = append(args, rateRequestID)
+		}
+		adminN := len(args) + 1
+		userIDN := len(args) + 2
+		userEmailN := len(args) + 3
+		args = append(args, admin, userID, userEmail)
 
 		query := `
 			SELECT m.message_id::text, COALESCE(m.inbox_id::text,''), m.s3_raw_key, COALESCE(m.s3_parsed_key,''),
@@ -85,8 +124,26 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 			       COALESCE(att.parsed_count, 0),
 			       COALESCE(att.additional_count, 0),
 			       COALESCE(m.mail_direction, 'RECEIVED'),
-			       COALESCE(array_to_string(m.envelope_to, ', '), '')
+			       COALESCE(array_to_string(m.envelope_to, ', '), ''),
+			       COALESCE(
+			         me_ent.entity_name,
+			         n_ent.entity_name,
+			         ''
+			       ),
+			       COALESCE(
+			         n_ent.entity_id,
+			         NULLIF(m.entity_id, ''),
+			         ic_ent.entity_id,
+			         ''
+			       )
 			FROM email_svc.message m
+			LEFT JOIN investment.fd_rate_negotiation n_ent
+			  ON n_ent.rate_request_id::text = m.entity_id
+			 AND COALESCE(n_ent.is_deleted, false) = false
+			LEFT JOIN email_svc.inbox_config ic_ent ON ic_ent.inbox_id = m.inbox_id
+			LEFT JOIN masterentitycash me_ent
+			  ON me_ent.entity_id = COALESCE(n_ent.entity_id, NULLIF(m.entity_id, ''), ic_ent.entity_id)
+			 AND (me_ent.is_deleted IS NOT TRUE)
 			LEFT JOIN LATERAL (
 				SELECT COALESCE(pl.detail->>'uploaded_by', '') AS uploaded_by
 				FROM email_svc.processing_log pl
@@ -103,15 +160,8 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM email_svc.message_attachment ma
 				WHERE ma.message_id = m.message_id
 			) att ON true
-			WHERE ($1 = '' OR m.module = $1)
-			  AND ($2 = '' OR m.entity_id = $2)
-			  AND ($3 = '' OR m.processing_status = $3)
-			  AND ($4 = '' OR COALESCE(m.received_at, m.created_at) >= $4::date)
-			  AND ($5 = '' OR COALESCE(m.received_at, m.created_at) < ($5::date + interval '1 day'))
-			  AND ($6 = '' OR m.inbox_id::text = $6)
-			  AND (NOT $7 OR m.filter_matched = true OR m.processing_status = 'MANUAL_UPLOAD')
-			` + emailcommon.ActiveInboxMessageSQL + `
-			` + emailcommon.ListMessageScopedToUserSQL + `
+			` + baseWhere + scopeSQL + emailcommon.ActiveInboxMessageSQL + `
+			` + emailcommon.ListMessageScopedToUserSQLAt(adminN, userIDN, userEmailN) + `
 			ORDER BY CASE WHEN m.processing_status = 'MANUAL_UPLOAD' THEN m.created_at ELSE COALESCE(m.received_at, m.created_at) END DESC`
 
 		limit := req.Limit
@@ -125,24 +175,23 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 		countQuery := `
 			SELECT COUNT(*)
 			FROM email_svc.message m
-			WHERE ($1 = '' OR m.module = $1)
-			  AND ($2 = '' OR m.entity_id = $2)
-			  AND ($3 = '' OR m.processing_status = $3)
-			  AND ($4 = '' OR COALESCE(m.received_at, m.created_at) >= $4::date)
-			  AND ($5 = '' OR COALESCE(m.received_at, m.created_at) < ($5::date + interval '1 day'))
-			  AND ($6 = '' OR m.inbox_id::text = $6)
-			  AND (NOT $7 OR m.filter_matched = true OR m.processing_status = 'MANUAL_UPLOAD')
-			` + emailcommon.ActiveInboxMessageSQL + `
-			` + emailcommon.ListMessageScopedToUserSQL
+			LEFT JOIN investment.fd_rate_negotiation n_ent
+			  ON n_ent.rate_request_id::text = m.entity_id
+			 AND COALESCE(n_ent.is_deleted, false) = false
+			LEFT JOIN email_svc.inbox_config ic_ent ON ic_ent.inbox_id = m.inbox_id
+			LEFT JOIN masterentitycash me_ent
+			  ON me_ent.entity_id = COALESCE(n_ent.entity_id, NULLIF(m.entity_id, ''), ic_ent.entity_id)
+			 AND (me_ent.is_deleted IS NOT TRUE)
+			` + baseWhere + scopeSQL + emailcommon.ActiveInboxMessageSQL + `
+			` + emailcommon.ListMessageScopedToUserSQLAt(adminN, userIDN, userEmailN)
 
-		countArgs := []interface{}{module, entityID, status, dateFrom, dateTo, inboxID, filterMatchedOnly, admin, userID, userEmail}
+		countArgs := args
 		var totalCount int
 		if err := pool.QueryRow(r.Context(), countQuery, countArgs...).Scan(&totalCount); err != nil {
 			emailcommon.RespondInternal(w, err.Error())
 			return
 		}
 
-		args := []interface{}{module, entityID, status, dateFrom, dateTo, inboxID, filterMatchedOnly, admin, userID, userEmail}
 		query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
 		args = append(args, limit, offset)
 
@@ -174,6 +223,8 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 			AdditionalFileCount   int        `json:"additional_file_count"`
 			MailDirection         string     `json:"mail_direction"`
 			EnvelopeTo            string     `json:"envelope_to"`
+			EntityName            string     `json:"entity_name"`
+			BusinessEntityID      string     `json:"business_entity_id"`
 		}
 
 		items := make([]row, 0)
@@ -184,7 +235,7 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 				&item.FilterMatched, &item.ProcessingStatus, &item.Module, &item.EntityID,
 				&item.BodyTextPreview, &item.CreatedAt, &item.UploadedBy,
 				&item.AttachmentCount, &item.ParsedAttachmentCount, &item.AdditionalFileCount,
-				&item.MailDirection, &item.EnvelopeTo); err != nil {
+				&item.MailDirection, &item.EnvelopeTo, &item.EntityName, &item.BusinessEntityID); err != nil {
 				emailcommon.RespondInternal(w, err.Error())
 				return
 			}
