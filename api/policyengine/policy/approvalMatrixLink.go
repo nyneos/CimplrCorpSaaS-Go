@@ -135,8 +135,29 @@ func matrixTxnTypePrefixes(subModule string) []string {
 	if code == "PAYABLE_RECEIVABLE" {
 		return []string{"PAYABLE_", "RECEIVABLE_", "PAYABLE_RECEIVABLE"}
 	}
-	if code == "FORWARD_BOOKING" {
+	if code == "FORWARD_BOOKING" || code == "FX_CONFIRMATION" {
 		return []string{"FX_FORWARD"}
+	}
+	if code == "FX_HEDGING_PROPOSAL" || code == "HEDGE_PROPOSAL" {
+		return []string{"FX_HEDGE_PROPOSAL"}
+	}
+	if code == "FORWARD_MTM" {
+		return []string{"FX_MTM"}
+	}
+	if code == "HEDGE_LINK" {
+		return []string{"FX_LINKAGE"}
+	}
+	if code == "EXPOSURE_BUCKETING" {
+		return []string{"FX_BUCKETING"}
+	}
+	if code == "FORWARD_CANCELLATION" {
+		return []string{"FX_FORWARD_CANCELLATION"}
+	}
+	if code == "FORWARD_ROLLOVER" {
+		return []string{"FX_FORWARD_ROLLOVER"}
+	}
+	if code == "FORWARD_CANCEL_ROLL" {
+		return []string{"FX_FORWARD_CANCELLATION", "FX_FORWARD_ROLLOVER", "FORWARD_CANCEL_ROLL"}
 	}
 	return []string{code}
 }

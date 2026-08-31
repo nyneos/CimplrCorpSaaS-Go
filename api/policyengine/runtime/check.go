@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/domaincatalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/services/policysvc"
 
@@ -43,14 +44,14 @@ type CheckRequest struct {
 
 // CheckResult holds evaluation output for module handlers.
 type CheckResult struct {
-	RunID                   string
-	AggregatedAction        string
-	AggregatedPolicyID      string
-	AggregatedPolicyCode    string
-	AggregatedApprovalRef   string
-	Results                 []policysvc.PolicyResult
-	DurationMS              int
-	ConflictReport          ConflictReport
+	RunID                 string
+	AggregatedAction      string
+	AggregatedPolicyID    string
+	AggregatedPolicyCode  string
+	AggregatedApprovalRef string
+	Results               []policysvc.PolicyResult
+	DurationMS            int
+	ConflictReport        ConflictReport
 	// TriggerApprovalMatrixID is the matrix from the winning TriggerApproval policy.
 	TriggerApprovalMatrixID string
 }
@@ -424,7 +425,6 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-
 var entityFieldKeys = []string{"entity_id", "entity_name", "entity_code", "entity", "entity_level_0"}
 
 func entityFromRecord(fields map[string]interface{}, vars map[string]string) string {
@@ -491,17 +491,19 @@ func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventC
 		args = append(args, moduleCode)
 		argN++
 	}
-	// Sub-module filter (same shape as module): no rows → match any; else must include handler SubModule.
+	// Sub-module filter (same shape as module): no rows → match any; else must
+	// include the handler SubModule or its POLICY catalog alias (FORWARD_BOOKING
+	// ↔ FX_CONFIRMATION after the 2026-08-26 rename).
 	if strings.TrimSpace(subModule) != "" {
 		q += fmt.Sprintf(`
 		AND (
 			NOT EXISTS (SELECT 1 FROM policyengine_svc.policy_sub_module sm WHERE sm.policy_id = p.policy_id AND sm.is_deleted = false)
 			OR EXISTS (
 				SELECT 1 FROM policyengine_svc.policy_sub_module sm
-				WHERE sm.policy_id = p.policy_id AND sm.is_deleted = false AND sm.sub_module_code = $%d
+				WHERE sm.policy_id = p.policy_id AND sm.is_deleted = false AND sm.sub_module_code = ANY($%d::text[])
 			)
 		)`, argN)
-		args = append(args, strings.TrimSpace(subModule))
+		args = append(args, domaincatalog.ExpandPolicySubModuleCodes(ctx, pool, subModule))
 		argN++
 	}
 
@@ -535,8 +537,8 @@ func loadActivePoliciesWithTrace(ctx context.Context, pool *pgxpool.Pool, eventC
 		}
 		snap := map[string]interface{}{
 			"approval_matrix_id":        approvalMatrixID,
-			"criticality":              criticality,
-			"approved_at":              approvedAt,
+			"criticality":               criticality,
+			"approved_at":               approvedAt,
 			"policy_id":                 id,
 			"code":                      code,
 			"name":                      name,

@@ -63,6 +63,10 @@ func DownloadFDBookingPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return investmentAdditionalOnlyPackageHandler(pool, fdBookingFilesDefinition, "FD Booking", "booking_id")
 }
 
+func DownloadFDRateNegotiationPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return investmentAdditionalOnlyPackageHandler(pool, fdRateNegotiationFilesDefinition, "FD Rate Negotiation", "rate_request_id")
+}
+
 func DownloadFDConfirmationPackageZipHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return cashfiles.NewPackageZipHandler(pool, investmentAdditionalFilesConfig(fdConfirmationFilesDefinition), cashfiles.PackageZipOptions{
 		ModuleLabel: "FD Confirmation",

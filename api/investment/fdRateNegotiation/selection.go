@@ -104,6 +104,11 @@ func SubmitSelection(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if oldOfferID != nil && strings.EqualFold(strings.TrimSpace(*oldOfferID), strings.TrimSpace(req.SelectedOfferID)) {
+			api.RespondWithError(w, http.StatusBadRequest, "This offer is already selected from a previous comparison")
+			return
+		}
+
 		var bankID, bankName *string
 		var offerStatus string
 		err = tx.QueryRow(ctx, `
@@ -122,8 +127,20 @@ func SubmitSelection(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to load selected offer")
 			return
 		}
-		if strings.ToUpper(strings.TrimSpace(offerStatus)) != "APPROVED" {
-			api.RespondWithError(w, http.StatusBadRequest, "Only APPROVED offers can be selected for comparison")
+		var latestProc string
+		_ = tx.QueryRow(ctx, `
+			SELECT COALESCE(processing_status,'')
+			FROM investment.fd_rate_offer_audit
+			WHERE offer_id = $1::uuid
+			ORDER BY requested_at DESC, audit_id DESC
+			LIMIT 1`, req.SelectedOfferID).Scan(&latestProc)
+		if !strings.EqualFold(strings.TrimSpace(latestProc), "APPROVED") {
+			api.RespondWithError(w, http.StatusBadRequest, "Only capture-approved offers can be selected")
+			return
+		}
+		st := strings.ToUpper(strings.TrimSpace(offerStatus))
+		if st == "REJECTED" || st == "EXPIRED" || st == "INACTIVE" {
+			api.RespondWithError(w, http.StatusBadRequest, "This offer is not active")
 			return
 		}
 

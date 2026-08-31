@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"CimplrCorpSaas/api/domaincatalog"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -50,25 +52,31 @@ func LoadSubModuleCDMPaths(ctx context.Context, pool *pgxpool.Pool, subModuleCod
 	}
 	cdmPathCacheMu.RUnlock()
 
+	codes := domaincatalog.ExpandPolicySubModuleCodes(ctx, pool, sm)
 	rows, err := pool.Query(ctx, `
 		SELECT field_code, cdm_path
 		FROM domain_catalog.field
-		WHERE sub_module_code = $1
+		WHERE sub_module_code = ANY($1::text[])
 		  AND cdm_path IS NOT NULL
 		  AND TRIM(cdm_path) <> ''
 		  AND is_deleted = false
-		ORDER BY sort_order, field_code`, sm)
+		ORDER BY sort_order, field_code`, codes)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	out := make([]cdmFieldRow, 0)
+	seen := map[string]struct{}{}
 	for rows.Next() {
 		var code, path string
 		if err := rows.Scan(&code, &path); err != nil {
 			return nil, err
 		}
+		if _, dup := seen[code]; dup {
+			continue
+		}
+		seen[code] = struct{}{}
 		out = append(out, cdmFieldRow{FieldCode: code, CDMPath: path})
 	}
 

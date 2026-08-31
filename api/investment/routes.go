@@ -10,9 +10,10 @@ import (
 	fdAccrual "CimplrCorpSaas/api/investment/fdAccrual"
 	fdBooking "CimplrCorpSaas/api/investment/fdBookingWorkbench"
 	fdInterestWorkbench "CimplrCorpSaas/api/investment/fdInterestAndTdsWorkbench"
-	fdRateNegotiation "CimplrCorpSaas/api/investment/fdRateNegotiation"
 	fdMaster "CimplrCorpSaas/api/investment/fdMaster"
 	fdMaturityAndRollover "CimplrCorpSaas/api/investment/fdMaturityAndRollover"
+	fdMonthEndClosing "CimplrCorpSaas/api/investment/fdMonthEndClosing"
+	fdRateNegotiation "CimplrCorpSaas/api/investment/fdRateNegotiation"
 	fdReceipt "CimplrCorpSaas/api/investment/fdReceipt"
 	investmentsuite "CimplrCorpSaas/api/investment/investmentSuite"
 	onboard "CimplrCorpSaas/api/investment/onboarding"
@@ -240,6 +241,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/booking/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDBookingAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/booking/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDBookingAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/booking/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDBookingAdditionalFileHandler(pool))))
+	mux.Handle("/investment/fd/rate-negotiation/package-zip", fdMid(http.HandlerFunc(investmentfiles.DownloadFDRateNegotiationPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/rate-negotiation/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDRateNegotiationAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/rate-negotiation/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDRateNegotiationAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/rate-negotiation/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDRateNegotiationAdditionalFileHandler(pool))))
@@ -429,6 +431,9 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 
 	// FD Booking Workbench (booking + confirmation)
 	fdBooking.RegisterFDBookingRoutes(mux, pool)
+	// FD Month/Quarter End Closing (cycle — Sections 0+1 of the handler spec;
+	// scope/checklist/lock/reopen/evidencePack land here as sibling agents build them)
+	fdMonthEndClosing.RegisterFDMonthEndClosingRoutes(mux, pool)
 	fdRateNegotiation.RegisterFDRateNegotiationRoutes(mux, pool)
 	fdMaster.RegisterFDMasterRoutes(mux, pool)
 	fdAccrual.RegisterFDAccrualRoutes(mux, pool)

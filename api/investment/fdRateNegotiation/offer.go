@@ -425,13 +425,13 @@ func scanOffer(row pgx.Row) (map[string]interface{}, error) {
 	var (
 		id, ref, rateRequestID, bankName, validTill, source, status, createdBy, createdAt string
 		rate                                                                              float64
-		bankID, tenure, remarks, commID, emailMsgID, updatedBy, updatedAt                 *string
+		bankID, tenure, remarks, commID, emailMsgID, updatedBy, updatedAt, rateRequestRef *string
 		yield                                                                             *float64
 	)
 	err := row.Scan(
 		&id, &ref, &rateRequestID, &bankID, &bankName, &rate, &tenure, &validTill,
 		&remarks, &source, &commID, &emailMsgID, &status, &yield,
-		&createdBy, &createdAt, &updatedBy, &updatedAt,
+		&createdBy, &createdAt, &updatedBy, &updatedAt, &rateRequestRef,
 	)
 	if err != nil {
 		return nil, err
@@ -440,6 +440,7 @@ func scanOffer(row pgx.Row) (map[string]interface{}, error) {
 		"offer_id":              id,
 		"offer_reference_id":    ref,
 		"rate_request_id":       rateRequestID,
+		"rate_request_ref":      "",
 		"bank_id":               "",
 		"bank_name":             bankName,
 		"offered_interest_rate": rate,
@@ -480,6 +481,9 @@ func scanOffer(row pgx.Row) (map[string]interface{}, error) {
 	if updatedAt != nil {
 		out["updated_at"] = *updatedAt
 	}
+	if rateRequestRef != nil {
+		out["rate_request_ref"] = *rateRequestRef
+	}
 	return out, nil
 }
 
@@ -502,7 +506,9 @@ const offerSelect = `
 		created_by,
 		TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 		updated_by,
-		TO_CHAR(updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		TO_CHAR(updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+		(SELECT n.rate_request_ref FROM investment.fd_rate_negotiation n
+		 WHERE n.rate_request_id = investment.fd_rate_offer.rate_request_id)
 	FROM investment.fd_rate_offer
 `
 
@@ -757,7 +763,15 @@ func decideOffers(pgxPool *pgxpool.Pool, approve bool) http.HandlerFunc {
 			}
 			acted++
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		msg := ""
+		if acted == 0 {
+			if approve {
+				msg = "No offers were approved"
+			} else {
+				msg = "No offers were rejected"
+			}
+		}
+		api.RespondWithPayload(w, acted > 0, msg, map[string]interface{}{
 			"updated": acted,
 			"status":  processing,
 		})
@@ -814,6 +828,16 @@ func DeleteOffers(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT COUNT(*) FROM investment.fd_rate_offer_audit
 				WHERE offer_id = $1::uuid AND processing_status LIKE 'PENDING%'`, id).Scan(&pending)
 			if pending > 0 {
+				continue
+			}
+			var latestProc string
+			_ = pgxPool.QueryRow(ctx, `
+				SELECT COALESCE(processing_status,'')
+				FROM investment.fd_rate_offer_audit
+				WHERE offer_id = $1::uuid
+				ORDER BY requested_at DESC, audit_id DESC
+				LIMIT 1`, id).Scan(&latestProc)
+			if strings.EqualFold(strings.TrimSpace(latestProc), "APPROVED") {
 				continue
 			}
 			_, err = pgxPool.Exec(ctx, `

@@ -2,6 +2,7 @@ package fdRateNegotiation
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/policyengine/common"
 	"context"
@@ -36,7 +37,7 @@ type rateRequestPayload struct {
 	InternalNotes        string   `json:"internal_notes,omitempty"`
 	EntityID             string   `json:"entity_id,omitempty"`
 	EntityName           string   `json:"entity_name,omitempty"`
-	Action               string   `json:"action,omitempty"` // CREATE | EDIT (compat: DRAFT|SUBMIT map to create/edit)
+	Action               string   `json:"action,omitempty"` // CREATE | EDIT | SUBMIT
 	Reason               string   `json:"reason,omitempty"`
 }
 
@@ -102,6 +103,9 @@ func computeMaturityDate(start string, tenureType string, tenureValue int) strin
 }
 
 func validateRateRequest(req rateRequestPayload, requireBanks bool) string {
+	if strings.TrimSpace(req.EntityID) == "" && strings.TrimSpace(req.EntityName) == "" {
+		return "entity is required"
+	}
 	if req.ProposedFDAmount <= 0 {
 		return "proposed_fd_amount must be greater than 0"
 	}
@@ -113,7 +117,7 @@ func validateRateRequest(req rateRequestPayload, requireBanks bool) string {
 		return "tenure_type must be DAYS or MONTHS"
 	}
 	if req.TenureValue <= 0 {
-		return "tenure_value must be greater than 0"
+		return "tenure_value must be an integer greater than 0"
 	}
 	if strings.TrimSpace(req.ExpectedStartDate) == "" {
 		return "expected_start_date is required"
@@ -202,7 +206,7 @@ func insertCreateAudit(ctx context.Context, tx pgx.Tx, rateRequestID, userEmail,
 			new_expected_start_date, new_expected_maturity_date, new_interest_type, new_interest_payout_mode,
 			new_target_bank_ids, new_target_bank_names, new_internal_notes, new_request_status, new_is_active
 		) VALUES (
-			$1::uuid, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3,
+			$1::uuid, 'CREATE', $15, $2, now(), $3,
 			$4, $5, $6, $7,
 			NULLIF($8,'')::date, NULLIF($9,'')::date, $10, NULLIF($11,''),
 			$12, $13, NULLIF($14,''), $15, true
@@ -227,16 +231,16 @@ func CreateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		action := strings.ToUpper(strings.TrimSpace(req.Action))
-		if action == "" || action == "DRAFT" || action == "SUBMIT" || action == "CREATE" {
-			// all create paths land in PENDING_APPROVAL
-		} else {
+		if action == "DRAFT" {
+			api.RespondWithError(w, http.StatusBadRequest, "draft is not supported; submit the rate request")
+			return
+		}
+		if action != "" && action != "SUBMIT" && action != "CREATE" {
 			api.RespondWithError(w, http.StatusBadRequest, "invalid action for create")
 			return
 		}
 
-		// SUBMIT must include banks; Save Draft (DRAFT) may omit until edit/submit
-		requireBanks := action == "SUBMIT" || action == "CREATE"
-		if msg := validateRateRequest(req, requireBanks); msg != "" {
+		if msg := validateRateRequest(req, true); msg != "" {
 			api.RespondWithError(w, http.StatusBadRequest, msg)
 			return
 		}
@@ -273,6 +277,12 @@ func CreateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tenureType := normalizeTenureType(req.TenureType)
 		interestType := normalizeInterestType(req.InterestType)
 		payoutMode := normalizePayoutMode(req.InterestPayoutMode)
+		if tenureType == "" {
+			tenureType = "DAYS"
+		}
+		if interestType == "" {
+			interestType = "SIMPLE"
+		}
 		maturity := strings.TrimSpace(req.ExpectedMaturityDate)
 		if maturity == "" {
 			maturity = computeMaturityDate(req.ExpectedStartDate, tenureType, req.TenureValue)
@@ -314,16 +324,16 @@ func CreateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES (
 				$1, CURRENT_DATE, $2,
 				$3, $4, $5, $6,
-				$7::date, NULLIF($8,'')::date, $9, NULLIF($10,''),
+				COALESCE(NULLIF($7,'')::date, CURRENT_DATE + 1), NULLIF($8,'')::date, $9, NULLIF($10,''),
 				$11, $12, NULLIF($13,''),
-				NULLIF($14,''), NULLIF($15,''), 'PENDING_APPROVAL', $16, now()
+				NULLIF($14,''), NULLIF($15,''), $17, $16, now()
 			) RETURNING rate_request_id::text`,
 			ref, status,
 			req.ProposedFDAmount, strings.ToUpper(strings.TrimSpace(req.CurrencyCode)),
 			tenureType, req.TenureValue,
 			req.ExpectedStartDate, maturity, interestType, payoutMode,
 			bankIDs, bankNames, req.InternalNotes,
-			strings.TrimSpace(req.EntityID), strings.TrimSpace(req.EntityName), userEmail,
+			strings.TrimSpace(req.EntityID), strings.TrimSpace(req.EntityName), userEmail, status,
 		).Scan(&id)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Create failed: %v", err))
@@ -399,6 +409,7 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			oldStart, oldMaturity, oldPayout, oldNotes             *string
 			oldBankIDs, oldBankNames                               []string
 			oldIsActive                                            bool
+			oldProcessing                                          string
 		)
 		err = tx.QueryRow(ctx, `
 			SELECT proposed_fd_amount, currency_code, tenure_type, tenure_value,
@@ -406,13 +417,13 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				TO_CHAR(expected_maturity_date,'YYYY-MM-DD'),
 				interest_type, interest_payout_mode,
 				target_bank_ids, target_bank_names, internal_notes, request_status,
-				COALESCE(is_active, true)
+				COALESCE(is_active, true), COALESCE(processing_status,'')
 			FROM investment.fd_rate_negotiation
 			WHERE rate_request_id = $1::uuid AND COALESCE(is_deleted,false)=false
 			FOR UPDATE`, req.RateRequestID).Scan(
 			&oldAmount, &oldCurrency, &oldTenureType, &oldTenureValue,
 			&oldStart, &oldMaturity, &oldInterestType, &oldPayout,
-			&oldBankIDs, &oldBankNames, &oldNotes, &oldStatus, &oldIsActive,
+			&oldBankIDs, &oldBankNames, &oldNotes, &oldStatus, &oldIsActive, &oldProcessing,
 		)
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, "Rate request not found")
@@ -420,6 +431,10 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if oldStatus == "DELETED" || oldStatus == "CONVERTED_TO_FD" {
 			api.RespondWithError(w, http.StatusBadRequest, "Rate request cannot be edited in current status")
+			return
+		}
+		if strings.EqualFold(oldProcessing, "APPROVED") && !strings.HasPrefix(strings.ToUpper(oldStatus), "PENDING") {
+			api.RespondWithError(w, http.StatusBadRequest, "Approved rate requests cannot be edited")
 			return
 		}
 
@@ -457,6 +472,10 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		newStatus := "PENDING_EDIT_APPROVAL"
 		actionType := "EDIT"
+		if strings.EqualFold(oldStatus, "DRAFT") || strings.EqualFold(oldStatus, "PENDING_APPROVAL") {
+			newStatus = "PENDING_APPROVAL"
+			actionType = "CREATE"
+		}
 
 		bankIDs := req.TargetBankIDs
 		if bankIDs == nil {
@@ -482,6 +501,7 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				internal_notes = NULLIF($12,''),
 				entity_id = COALESCE(NULLIF($13,''), entity_id),
 				entity_name = COALESCE(NULLIF($14,''), entity_name),
+				request_status = CASE WHEN request_status = 'DRAFT' THEN 'PENDING_APPROVAL' ELSE request_status END,
 				processing_status = $15,
 				updated_by = $16,
 				updated_at = now()
@@ -568,8 +588,8 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if userID == "" {
 			userID = api.GetUserIDFromCtx(r.Context())
 		}
-		fireRateNegotiationInstance(pgxPool, req.RateRequestID, userID, userEmail, "EDIT", editMatrixID, req.ProposedFDAmount)
-		fireRateNegotiationNotification(pgxPool, req.RateRequestID, userEmail, "EDIT")
+		fireRateNegotiationInstance(pgxPool, req.RateRequestID, userID, userEmail, actionType, editMatrixID, req.ProposedFDAmount)
+		fireRateNegotiationNotification(pgxPool, req.RateRequestID, userEmail, actionType)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"rate_request_id":   req.RateRequestID,
@@ -588,6 +608,7 @@ func scanRateRequest(row pgx.Row) (map[string]interface{}, error) {
 		maturity, payout, notes, updatedBy, updatedAt                                                            *string
 		bankIDs, bankNames                                                                                       []string
 		processingStatus, actionType                                                                             *string
+		requestedBy, requestedAt, checkerBy, checkerAt, checkerComment                                           *string
 		selectedOfferID, selectedBankID, selectedBankName, selectionRemarks                                      *string
 		approvalDecision, approvalRemarks, approvalDate, approvedBy, bookingID                                   *string
 	)
@@ -596,6 +617,7 @@ func scanRateRequest(row pgx.Row) (map[string]interface{}, error) {
 		&startDate, &maturity, &interestType, &payout, &bankIDs, &bankNames, &notes,
 		&entityID, &entityName,
 		&createdBy, &createdAt, &updatedBy, &updatedAt, &processingStatus, &actionType,
+		&requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment,
 		&selectedOfferID, &selectedBankID, &selectedBankName, &selectionRemarks,
 		&approvalDecision, &approvalRemarks, &approvalDate, &approvedBy, &bookingID,
 	)
@@ -632,6 +654,11 @@ func scanRateRequest(row pgx.Row) (map[string]interface{}, error) {
 		"updated_at":             "",
 		"processing_status":      "",
 		"action_type":            "",
+		"requested_by":           "",
+		"requested_at":           "",
+		"checker_by":             "",
+		"checker_at":             "",
+		"checker_comment":        "",
 		"selected_offer_id":      "",
 		"selected_bank_id":       "",
 		"selected_bank_name":     "",
@@ -647,6 +674,21 @@ func scanRateRequest(row pgx.Row) (map[string]interface{}, error) {
 	}
 	if actionType != nil {
 		out["action_type"] = *actionType
+	}
+	if requestedBy != nil {
+		out["requested_by"] = *requestedBy
+	}
+	if requestedAt != nil {
+		out["requested_at"] = *requestedAt
+	}
+	if checkerBy != nil {
+		out["checker_by"] = *checkerBy
+	}
+	if checkerAt != nil {
+		out["checker_at"] = *checkerAt
+	}
+	if checkerComment != nil {
+		out["checker_comment"] = *checkerComment
 	}
 	if maturity != nil {
 		out["expected_maturity_date"] = *maturity
@@ -716,8 +758,18 @@ const rateRequestSelect = `
 		TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 		m.updated_by,
 		TO_CHAR(m.updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-		COALESCE(NULLIF(m.processing_status,''), la.processing_status),
+		CASE
+			WHEN UPPER(COALESCE(m.processing_status,'')) LIKE 'PENDING%'
+			 AND UPPER(COALESCE(la.processing_status,'')) IN ('APPROVED','REJECTED')
+			THEN la.processing_status
+			ELSE COALESCE(NULLIF(m.processing_status,''), la.processing_status)
+		END,
 		la.action_type,
+		la.requested_by,
+		COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
+		la.checker_by,
+		COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
+		la.checker_comment,
 		m.selected_offer_id::text,
 		m.selected_bank_id,
 		m.selected_bank_name,
@@ -729,7 +781,8 @@ const rateRequestSelect = `
 		m.booking_id
 	FROM investment.fd_rate_negotiation m
 	LEFT JOIN LATERAL (
-		SELECT a.processing_status, a.action_type, a.requested_at
+		SELECT a.processing_status, a.action_type, a.requested_at,
+			a.requested_by, a.checker_by, a.checker_at, a.checker_comment
 		FROM investment.fd_audit_rate_negotiation a
 		WHERE a.rate_request_id = m.rate_request_id
 		ORDER BY a.requested_at DESC, a.audit_id DESC
@@ -754,6 +807,7 @@ func ListRateRequests(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			item, err := scanRateRequest(rows)
 			if err != nil {
+				api.LogError("[FDRateNeg] scan rate request: %v", err)
 				continue
 			}
 			results = append(results, item)
@@ -766,29 +820,22 @@ func ListRateRequests(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 const comparableRateRequestFilter = `
 			WHERE COALESCE(m.is_deleted,false)=false
-			  AND EXISTS (
-				SELECT 1
-				FROM investment.fd_rate_offer o
-				WHERE o.rate_request_id = m.rate_request_id
-				  AND COALESCE(o.is_deleted,false)=false
-				  AND UPPER(COALESCE(o.offer_status,'')) = 'APPROVED'
-			  )
 			  AND UPPER(COALESCE(m.request_status,'')) NOT IN (
+				'DRAFT',
 				'PENDING_APPROVAL',
 				'PENDING_EDIT_APPROVAL',
 				'PENDING_DELETE_APPROVAL',
-				'PENDING_RATE_APPROVAL',
 				'REJECTED',
 				'CANCELLED',
 				'DELETED'
 			  )
 			ORDER BY GREATEST(m.created_at, COALESCE(la.requested_at, m.created_at)) DESC, m.rate_request_id DESC`
 
-// ListComparableRateRequests is the Rate Comparison feed: only requests that
-// already have a checker-approved captured offer and are not awaiting selection
-// checker approval (PENDING_RATE_APPROVAL). Create/edit/delete pendings stay on
-// the Rate Request page. Finalized rows (APPROVED / CONVERTED_TO_FD with selection)
-// remain visible for read-only comparison trail.
+// ListComparableRateRequests is the Rate Comparison feed: approved (and later
+// lifecycle) rate requests so Request Ref / amount / tenure / banks stay visible
+// even before an offer is captured. Create/edit/delete pendings stay on the
+// Rate Request page. Rows without selectable offers remain listed; Compare is
+// disabled in the UI until an APPROVED offer exists.
 func ListComparableRateRequests(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -804,9 +851,37 @@ func ListComparableRateRequests(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			item, err := scanRateRequest(rows)
 			if err != nil {
+				api.LogError("[FDRateNeg] scan comparable rate request: %v", err)
 				continue
 			}
 			results = append(results, item)
+		}
+		approvedIDs := map[string]bool{}
+		arows, aerr := pgxPool.Query(ctx, `
+			SELECT DISTINCT o.rate_request_id::text
+			FROM investment.fd_rate_offer o
+			LEFT JOIN LATERAL (
+				SELECT processing_status
+				FROM investment.fd_rate_offer_audit a
+				WHERE a.offer_id = o.offer_id
+				ORDER BY a.requested_at DESC, a.audit_id DESC
+				LIMIT 1
+			) la ON true
+			WHERE COALESCE(o.is_deleted,false)=false
+			  AND UPPER(COALESCE(la.processing_status,'')) = 'APPROVED'
+			  AND UPPER(COALESCE(o.offer_status,'')) NOT IN ('REJECTED','EXPIRED','INACTIVE')`)
+		if aerr == nil {
+			defer arows.Close()
+			for arows.Next() {
+				var id string
+				if arows.Scan(&id) == nil && id != "" {
+					approvedIDs[id] = true
+				}
+			}
+		}
+		for _, item := range results {
+			id, _ := item["rate_request_id"].(string)
+			item["has_approved_offer"] = approvedIDs[id]
 		}
 		api.RespondEnvelopeSuccess(w, "Comparable rate requests fetched successfully", map[string]interface{}{
 			"rows": results,
@@ -832,6 +907,23 @@ func GetRateRequestDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, "Rate request not found")
 			return
 		}
+
+		viewerUserID := api.GetUserIDFromCtx(r.Context())
+		var instanceID string
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT instance_id
+			FROM uam.approval_instance
+			WHERE record_id = $1 AND module_code = $2 AND COALESCE(is_deleted,false) = false
+			ORDER BY submitted_at DESC
+			LIMIT 1`, req.RateRequestID, rateNegModule).Scan(&instanceID)
+		if instanceID != "" {
+			if rich, richErr := approvalengine.GetRichInstanceDetail(ctx, pgxPool, instanceID, viewerUserID); richErr != nil {
+				api.LogError("[FDRateNeg] GetRichInstanceDetail %s: %v", req.RateRequestID, richErr)
+			} else if rich != nil {
+				item["approval_workflow"] = rich
+			}
+		}
+
 		api.RespondWithPayload(w, true, "", item)
 	}
 }

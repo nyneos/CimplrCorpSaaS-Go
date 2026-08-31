@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"CimplrCorpSaas/api/domaincatalog"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -22,7 +24,7 @@ type LaneSpec struct {
 // one trigger (incl. aliases) with the lane.
 func LoadHardBlockThresholdConstraints(ctx context.Context, pool *pgxpool.Pool, lane LaneSpec) ([]ThrConstraint, error) {
 	modules := trimNonEmpty(lane.Modules)
-	subs := trimNonEmpty(lane.SubModules)
+	subs := domaincatalog.ExpandPolicySubModuleCodeList(ctx, pool, trimNonEmpty(lane.SubModules))
 	triggers := ExpandTriggerAliasList(trimNonEmpty(lane.Triggers))
 	if len(modules) == 0 || len(subs) == 0 || len(triggers) == 0 {
 		return nil, nil

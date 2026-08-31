@@ -212,7 +212,7 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           eventCode,
 				ModuleCode:          common.ModuleFX,
-				SubModule:           "HEDGE_PROPOSAL",
+				SubModule:           "FX_HEDGING_PROPOSAL",
 				EntityCode:          entity,
 				ActorUserID:         req.UserID,
 				HandlerName:         "SaveHedgingProposalDocument",
@@ -714,7 +714,7 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleFX,
-				SubModule:           "HEDGE_PROPOSAL",
+				SubModule:           "FX_HEDGING_PROPOSAL",
 				ActorUserID:         req.UserID,
 				HandlerName:         "DeleteHedgingProposalDocuments",
 				APIPath:             "/fx/exposures/hedging-proposals/delete",

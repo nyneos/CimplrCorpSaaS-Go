@@ -211,7 +211,15 @@ func decideCommunications(pgxPool *pgxpool.Pool, approve bool) http.HandlerFunc 
 			}
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		msg := ""
+		if acted == 0 {
+			if approve {
+				msg = "No communications were approved"
+			} else {
+				msg = "No communications were rejected"
+			}
+		}
+		api.RespondWithPayload(w, acted > 0, msg, map[string]interface{}{
 			"updated": acted,
 			"status":  processing,
 		})
@@ -262,6 +270,16 @@ func DeleteCommunications(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE communication_id = $1::uuid
 				  AND processing_status LIKE 'PENDING%'`, id).Scan(&pending)
 			if pending > 0 {
+				continue
+			}
+			var latestProc string
+			_ = pgxPool.QueryRow(ctx, `
+				SELECT COALESCE(processing_status,'')
+				FROM investment.fd_rate_communication_audit
+				WHERE communication_id = $1::uuid
+				ORDER BY requested_at DESC, audit_id DESC
+				LIMIT 1`, id).Scan(&latestProc)
+			if strings.EqualFold(strings.TrimSpace(latestProc), "APPROVED") {
 				continue
 			}
 			_, err = pgxPool.Exec(ctx, `

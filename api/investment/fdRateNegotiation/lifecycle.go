@@ -84,7 +84,7 @@ func fireRateNegotiationInstance(pool *pgxpool.Pool, recordID, userID, userEmail
 		SubmittedByEmail:    userEmail,
 		MatrixID:            matrixID,
 		RequirePinnedMatrix: true,
-		AutoApplyIfUnpinned: true,
+		AutoApplyIfUnpinned: false,
 	})
 	if err != nil {
 		api.LogError("[FDRateNeg] CreateInstance(%s) %s: %v", actionType, recordID, err)
@@ -171,34 +171,39 @@ func applyApproveMaster(ctx context.Context, tx pgx.Tx, id, actionType string) e
 			WHERE rate_request_id = $1::uuid`, id)
 		return err
 	default:
-		// Never collapse CONVERTED_TO_FD back to APPROVED (zombie booking-link approve).
-		// PENDING_RATE_APPROVAL (selection) → APPROVED.
-		// Field EDIT: restore pre-edit lifecycle (SENT_TO_BANKS / OFFERS_RECEIVED / …).
+		// Never collapse CONVERTED_TO_FD. Selection pending → APPROVED.
+		// Field EDIT restores the pre-edit lifecycle when it is a real status.
+		var reqStatus, oldFromEdit string
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(m.request_status, ''),
+			       COALESCE((
+			         SELECT a2.old_request_status
+			         FROM investment.fd_audit_rate_negotiation a2
+			         WHERE a2.rate_request_id = m.rate_request_id
+			           AND a2.action_type = 'EDIT'
+			         ORDER BY a2.requested_at DESC, a2.audit_id DESC
+			         LIMIT 1
+			       ), '')
+			FROM investment.fd_rate_negotiation m
+			WHERE m.rate_request_id = $1::uuid`, id).Scan(&reqStatus, &oldFromEdit); err != nil {
+			return err
+		}
+		next := "APPROVED"
+		switch {
+		case strings.EqualFold(reqStatus, "CONVERTED_TO_FD"):
+			next = "CONVERTED_TO_FD"
+		case strings.EqualFold(reqStatus, "PENDING_RATE_APPROVAL"):
+			next = "APPROVED"
+		case oldFromEdit != "" &&
+			!strings.HasPrefix(strings.ToUpper(oldFromEdit), "PENDING") &&
+			!strings.EqualFold(oldFromEdit, "CONVERTED_TO_FD"):
+			next = oldFromEdit
+		}
 		_, err := tx.Exec(ctx, `
-			UPDATE investment.fd_rate_negotiation m
-			SET request_status = CASE
-					WHEN m.request_status = 'CONVERTED_TO_FD' THEN 'CONVERTED_TO_FD'
-					WHEN m.request_status = 'PENDING_RATE_APPROVAL' THEN 'APPROVED'
-					WHEN a.old_request_status IS NOT NULL
-						AND a.old_request_status <> ''
-						AND a.old_request_status NOT LIKE 'PENDING%'
-						AND a.old_request_status <> 'CONVERTED_TO_FD'
-					THEN a.old_request_status
-					ELSE 'APPROVED'
-				END,
-				processing_status = 'APPROVED',
-				updated_at = now()
-			FROM (SELECT 1) AS _
-			LEFT JOIN LATERAL (
-				SELECT a2.old_request_status
-				FROM investment.fd_audit_rate_negotiation a2
-				WHERE a2.rate_request_id = m.rate_request_id
-				  AND a2.action_type = 'EDIT'
-				ORDER BY a2.requested_at DESC, a2.audit_id DESC
-				LIMIT 1
-			) a ON true
-			WHERE m.rate_request_id = $1::uuid
-			  AND COALESCE(m.is_deleted,false) = false`, id)
+			UPDATE investment.fd_rate_negotiation
+			SET request_status = $2, processing_status = 'APPROVED', updated_at = now()
+			WHERE rate_request_id = $1::uuid
+			  AND COALESCE(is_deleted,false) = false`, id, next)
 		return err
 	}
 }
@@ -463,8 +468,17 @@ func bulkDecide(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, appr
 		})
 		if actionErr != nil {
 			api.LogError("[FDRateNeg] ActOnPending %s: %v", id, actionErr)
-			errors = append(errors, id+": "+actionErr.Error())
-			continue
+			diag, _ := approvalengine.DiagnosePendingInstance(ctx, pool, rateNegModule, id, userID)
+			if diag.HasPending {
+				reason := actionErr.Error()
+				if diag.Reason != "" {
+					reason = diag.Reason
+				}
+				errors = append(errors, id+": "+reason)
+				continue
+			}
+			// No pending instance — fall through to direct audit stamp (legacy / no-matrix).
+			actionRes.Reason = ""
 		}
 
 		tx, err := pool.Begin(ctx)
@@ -521,13 +535,31 @@ func bulkDecide(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, appr
 		// Selection waits on request_status=PENDING_RATE_APPROVAL with processing
 		// already APPROVED (no PENDING_EDIT zombie). Still allow checker decide.
 		if actionType == "" {
-			var reqStatus string
+			var reqStatus, masterProc, latestProc, latestAction string
 			_ = tx.QueryRow(ctx, `
-				SELECT COALESCE(request_status,'')
-				FROM investment.fd_rate_negotiation
-				WHERE rate_request_id = $1::uuid
-				  AND COALESCE(is_deleted,false)=false`, id).Scan(&reqStatus)
-			if strings.EqualFold(strings.TrimSpace(reqStatus), "PENDING_RATE_APPROVAL") {
+				SELECT COALESCE(m.request_status,''),
+				       COALESCE(m.processing_status,''),
+				       COALESCE(la.processing_status,''),
+				       COALESCE(la.action_type,'')
+				FROM investment.fd_rate_negotiation m
+				LEFT JOIN LATERAL (
+					SELECT a.processing_status, a.action_type
+					FROM investment.fd_audit_rate_negotiation a
+					WHERE a.rate_request_id = m.rate_request_id
+					ORDER BY a.requested_at DESC, a.audit_id DESC
+					LIMIT 1
+				) la ON true
+				WHERE m.rate_request_id = $1::uuid
+				  AND COALESCE(m.is_deleted,false)=false`, id).
+				Scan(&reqStatus, &masterProc, &latestProc, &latestAction)
+
+			reqU := strings.ToUpper(strings.TrimSpace(reqStatus))
+			latestU := strings.ToUpper(strings.TrimSpace(latestProc))
+			masterPending := strings.HasPrefix(reqU, "PENDING") ||
+				reqU == "DRAFT" ||
+				strings.HasPrefix(strings.ToUpper(strings.TrimSpace(masterProc)), "PENDING")
+
+			if strings.EqualFold(reqU, "PENDING_RATE_APPROVAL") {
 				actionType = "EDIT"
 				_ = tx.QueryRow(ctx, `
 					SELECT COALESCE(old_request_status,'')
@@ -537,6 +569,25 @@ func bulkDecide(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, appr
 					  AND COALESCE(new_request_status,'') = 'PENDING_RATE_APPROVAL'
 					ORDER BY requested_at DESC, audit_id DESC
 					LIMIT 1`, id).Scan(&oldStatus)
+			} else if approve && latestU == "APPROVED" && masterPending {
+				// Audit already finalized (auto-apply stamped the audit, master apply
+				// failed). Apply the master so Approve is not a dead end.
+				actionType = strings.TrimSpace(latestAction)
+				if actionType == "" {
+					actionType = "CREATE"
+				}
+				if applyErr := applyApproveMaster(ctx, tx, id, actionType); applyErr != nil {
+					_ = tx.Rollback(ctx)
+					errors = append(errors, id+": master apply failed: "+applyErr.Error())
+					continue
+				}
+				if err := tx.Commit(ctx); err != nil {
+					errors = append(errors, id+": commit failed")
+					continue
+				}
+				directActed++
+				fireRateNegotiationNotification(pool, id, userEmail, "APPROVE")
+				continue
 			} else {
 				_ = tx.Rollback(ctx)
 				errors = append(errors, id+": no pending audit action found")

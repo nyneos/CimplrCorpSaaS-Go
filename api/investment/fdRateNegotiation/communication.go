@@ -425,6 +425,9 @@ func communicationRowMap(it scannedCommunication, recipients []map[string]interf
 		"updated_at":             derefOrEmpty(it.updatedAt),
 		"bank_id":                derefOrEmpty(it.bankID),
 		"bank_name":              derefOrEmpty(it.bankName),
+		"is_deleted":             it.isDeleted,
+		"rate_request_ref":       it.rateRequestRef,
+		"request_status":         it.requestStatus,
 		"recipients":             recipients,
 		"email_to":               emailTo,
 		"email_cc":               emailCC,
@@ -433,26 +436,30 @@ func communicationRowMap(it scannedCommunication, recipients []map[string]interf
 
 const communicationSelect = `
 	SELECT
-		communication_id::text,
-		rate_request_id::text,
-		communication_mode,
-		communication_status,
-		email_template_id,
-		email_template_name,
-		email_template_version,
-		email_content,
-		response_source,
-		COALESCE(TO_CHAR(response_date,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
-		email_message_id::text,
-		sent_by,
-		COALESCE(TO_CHAR(sent_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
-		created_by,
-		TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-		updated_by,
-		COALESCE(TO_CHAR(updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
-		bank_id,
-		bank_name
-	FROM investment.fd_rate_communication
+		c.communication_id::text,
+		c.rate_request_id::text,
+		c.communication_mode,
+		c.communication_status,
+		c.email_template_id,
+		c.email_template_name,
+		c.email_template_version,
+		c.email_content,
+		c.response_source,
+		COALESCE(TO_CHAR(c.response_date,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
+		c.email_message_id::text,
+		c.sent_by,
+		COALESCE(TO_CHAR(c.sent_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
+		c.created_by,
+		TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+		c.updated_by,
+		COALESCE(TO_CHAR(c.updated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
+		c.bank_id,
+		c.bank_name,
+		COALESCE(c.is_deleted, false),
+		COALESCE(n.rate_request_ref, ''),
+		COALESCE(n.request_status, '')
+	FROM investment.fd_rate_communication c
+	LEFT JOIN investment.fd_rate_negotiation n ON n.rate_request_id = c.rate_request_id
 `
 
 type scannedCommunication struct {
@@ -461,6 +468,8 @@ type scannedCommunication struct {
 	responseSource, responseDate, emailMessageID               *string
 	sentBy, sentAt, createdBy, createdAt, updatedBy, updatedAt *string
 	bankID, bankName                                           *string
+	isDeleted                                                  bool
+	rateRequestRef, requestStatus                              string
 }
 
 func scanCommunication(row pgx.Row) (scannedCommunication, error) {
@@ -473,6 +482,7 @@ func scanCommunication(row pgx.Row) (scannedCommunication, error) {
 		&it.responseSource, &respDate, &it.emailMessageID,
 		&it.sentBy, &sentAt, &createdByVal, &createdAtVal, &it.updatedBy, &updatedAt,
 		&it.bankID, &it.bankName,
+		&it.isDeleted, &it.rateRequestRef, &it.requestStatus,
 	)
 	if err != nil {
 		return it, err
@@ -673,12 +683,14 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ListCommunications returns non-deleted communications for a rate request, including recipients.
+// ListCommunications returns communications, including recipients.
+// Unscoped (All Communications) includes soft-deleted rows.
 func ListCommunications(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			RateRequestID       string `json:"rate_request_id"`
 			CommunicationStatus string `json:"communication_status"`
+			IncludeDeleted      *bool  `json:"include_deleted"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
@@ -691,26 +703,31 @@ func ListCommunications(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		rateRequestID := strings.TrimSpace(req.RateRequestID)
 		statusFilter := normalizeCommunicationStatus(req.CommunicationStatus)
-		where := `WHERE is_deleted = false`
+		// All Communications (no request filter) always includes soft-deleted
+		// rows. Per-request logs stay live-only unless include_deleted is set.
+		includeDeleted := rateRequestID == ""
+		if req.IncludeDeleted != nil {
+			includeDeleted = *req.IncludeDeleted
+		}
+		where := `WHERE 1=1`
 		args := make([]interface{}, 0, 2)
+		if !includeDeleted {
+			where += ` AND COALESCE(c.is_deleted, false) = false`
+		}
 		if rateRequestID != "" {
 			args = append(args, rateRequestID)
-			where += ` AND rate_request_id = $1::uuid`
+			where += fmt.Sprintf(` AND c.rate_request_id = $%d::uuid`, len(args))
 		}
 		if statusFilter != "" {
 			args = append(args, statusFilter)
-			if len(args) == 1 {
-				where += ` AND communication_status = $1`
-			} else {
-				where += ` AND communication_status = $2`
-			}
+			where += fmt.Sprintf(` AND c.communication_status = $%d`, len(args))
 		}
 		var (
 			rows pgx.Rows
 			err  error
 		)
 		rows, err = pgxPool.Query(ctx, communicationSelect+where+`
-			ORDER BY created_at DESC, communication_id DESC`, args...)
+			ORDER BY c.created_at DESC, c.communication_id DESC`, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to list communications")
 			return
@@ -722,6 +739,7 @@ func ListCommunications(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			it, err := scanCommunication(rows)
 			if err != nil {
+				api.LogError("[FDRateNeg] scan communication: %v", err)
 				continue
 			}
 			items = append(items, it)
@@ -744,6 +762,7 @@ func ListCommunications(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					communication_id::text, COALESCE(processing_status,'')
 				FROM investment.fd_rate_communication_audit
 				WHERE communication_id = ANY($1::uuid[])
+				  AND action_type <> 'DELETE'
 				ORDER BY communication_id, requested_at DESC`, ids)
 			if aerr == nil {
 				defer arows.Close()
@@ -759,7 +778,9 @@ func ListCommunications(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		results := make([]map[string]interface{}, 0, len(items))
 		for _, it := range items {
 			row := it.asMap(recMap[it.id])
-			if ps := procMap[it.id]; ps != "" {
+			if it.isDeleted {
+				row["processing_status"] = "DELETED"
+			} else if ps := procMap[it.id]; ps != "" {
 				row["processing_status"] = ps
 			} else {
 				row["processing_status"] = it.status

@@ -247,6 +247,9 @@ var moduleDefaultPrefixes = map[string]string{
 	"fd-accrual-run-additional":                "fd/fd-accrual-run/",
 	"fd-accrual-ledger-additional":             "fd/fd-accrual-ledger/",
 	"fd-accounting-journal-additional":         "fd/fd-accounting-journal/",
+	"fd-closing-checklist-additional":          "fd/fd-closing/checklist/",
+	"fd-closing-reopen-additional":             "fd/fd-closing/reopen/",
+	"fd-closing-evidence-additional":           "fd/fd-closing/evidence/",
 	// allMasters
 	"master-bank":                          "masters/bank/",
 	"master-currency":                      "masters/currency/",
