@@ -380,6 +380,71 @@ func reduceExposureOpenAmount(ctx context.Context, pool *pgxpool.Pool, exposureH
 	return err
 }
 
+// invalidateStalePendingSettlements auto-rejects other still-pending settlement drafts
+// (payment / rollover / cancellation) tied to the same exposure once its open amount has
+// just been reduced by an approval. A pending draft that no longer fits within the
+// exposure's remaining open amount can never be approved as drafted, so it is bounced
+// back to the maker instead of sitting in the approval queue forever. A draft that still
+// fits within what's left is untouched and stays pending.
+func invalidateStalePendingSettlements(ctx context.Context, pool *pgxpool.Pool, exposureHeaderID, approvedSettlementID, actor string) {
+	exposureHeaderID = strings.TrimSpace(exposureHeaderID)
+	if exposureHeaderID == "" {
+		return
+	}
+	var remainingOpen float64
+	if err := pool.QueryRow(ctx, `
+		SELECT ABS(COALESCE(total_open_amount, 0))
+		FROM public.exposure_headers
+		WHERE exposure_header_id::text = $1 AND COALESCE(is_deleted, false) = false
+	`, exposureHeaderID).Scan(&remainingOpen); err != nil {
+		return
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT DISTINCT esd.settlement_id::text, COALESCE(esd.total_settled_amount, 0)
+		FROM public.exposure_settlement_document esd
+		JOIN public.exposure_settlement_line esl ON esl.settlement_id = esd.settlement_id
+		WHERE esl.exposure_header_id = $1
+		  AND esd.settlement_id <> $2::uuid
+		  AND COALESCE(esd.is_deleted, false) = false
+		  AND UPPER(TRIM(COALESCE(esd.processing_status, ''))) = $3
+	`, exposureHeaderID, approvedSettlementID, constants.StatusPendingApproval)
+	if err != nil {
+		return
+	}
+	type staleCandidate struct {
+		ID     string
+		Amount float64
+	}
+	var stale []staleCandidate
+	for rows.Next() {
+		var c staleCandidate
+		if scanErr := rows.Scan(&c.ID, &c.Amount); scanErr != nil {
+			continue
+		}
+		// Still fits within what's left of the exposure — leave it pending.
+		if math.Abs(c.Amount) <= remainingOpen+1e-6 {
+			continue
+		}
+		stale = append(stale, c)
+	}
+	rows.Close()
+
+	for _, c := range stale {
+		_, _ = pool.Exec(ctx, `
+			UPDATE public.exposure_settlement_document
+			SET processing_status = $1,
+			    comments = 'Auto-rejected: exposure open amount no longer covers this drafted settlement after settlement '
+			      || $2 || ' was approved.',
+			    updated_by = $3,
+			    updated_at = NOW()
+			WHERE settlement_id = $4::uuid
+			  AND UPPER(TRIM(COALESCE(processing_status, ''))) = $5
+		`, constants.StatusRejected, approvedSettlementID, actor, c.ID, constants.StatusPendingApproval)
+		_ = approvalengine.CancelPendingInstances(ctx, pool, "FX", c.ID, "")
+	}
+}
+
 // syncExposureLifecycleStatus closes or cancels an exposure when open amount is fully settled.
 // Payment / full settlement → Closed (cannot continue). Cancellation → Cancelled.
 func syncExposureLifecycleStatus(ctx context.Context, pool *pgxpool.Pool, exposureHeaderID, method string) {
@@ -709,6 +774,7 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 		}
 		for id := range touched {
 			syncExposureLifecycleStatus(ctx, pool, id, method)
+			invalidateStalePendingSettlements(ctx, pool, id, settlementID, actor)
 		}
 
 	case "ROLLOVER":
@@ -839,6 +905,7 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 
 		for id := range touched {
 			syncExposureLifecycleStatus(ctx, pool, id, "ROLLOVER")
+			invalidateStalePendingSettlements(ctx, pool, id, settlementID, actor)
 		}
 	}
 	return nil
@@ -1126,6 +1193,7 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				updated_at,
 				comments,
 				new_exposure_header_id,
+				COALESCE(exl.ids, '')                AS exposure_header_ids,
 				COALESCE(ai.instance_id,'')         AS approval_instance_id,
 				COALESCE(ai.status,'')              AS approval_engine_status,
 				COALESCE(aie.instance_eye_id,'')    AS current_eye_id,
@@ -1135,6 +1203,12 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				aie.sla_deadline                    AS sla_deadline,
 				COALESCE(aie.is_escalated,false)    AS is_escalated
 			FROM public.exposure_settlement_document esd
+			LEFT JOIN LATERAL (
+				SELECT STRING_AGG(DISTINCT esl.exposure_header_id, ', ' ORDER BY esl.exposure_header_id) AS ids
+				FROM public.exposure_settlement_line esl
+				WHERE esl.settlement_id = esd.settlement_id
+				  AND COALESCE(esl.exposure_header_id, '') <> ''
+			) exl ON true
 			LEFT JOIN LATERAL (
 				SELECT ai.* FROM uam.approval_instance ai
 				WHERE ai.record_id = esd.settlement_id::text
@@ -1170,12 +1244,13 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				createdAt                                                                  time.Time
 				updatedAt                                                                  *time.Time
 				openAmt, settledAmt                                                        float64
+				exposureHeaderIDs                                                          string
 				approvalInstanceID, approvalEngineStatus, currentEyeID, currentEyePosition string
 				approvalsRequired, approvalsReceived                                       int
 				slaDeadline                                                                *time.Time
 				isEscalated                                                                bool
 			)
-			if err := rows.Scan(&id, &method, &entity, &currency, &settlementDate, &openAmt, &settledAmt, &status, &createdBy, &createdAt, &updatedBy, &updatedAt, &comments, &newExpID,
+			if err := rows.Scan(&id, &method, &entity, &currency, &settlementDate, &openAmt, &settledAmt, &status, &createdBy, &createdAt, &updatedBy, &updatedAt, &comments, &newExpID, &exposureHeaderIDs,
 				&approvalInstanceID, &approvalEngineStatus, &currentEyeID, &currentEyePosition, &approvalsRequired, &approvalsReceived, &slaDeadline, &isEscalated); err != nil {
 				continue
 			}
@@ -1189,6 +1264,7 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				"processing_status":      status,
 				"created_by":             createdBy,
 				"created_at":             createdAt,
+				"exposure_header_id":     exposureHeaderIDs,
 				"approval_instance_id":   approvalInstanceID,
 				"approval_engine_status": approvalEngineStatus,
 				"current_eye_id":         currentEyeID,
