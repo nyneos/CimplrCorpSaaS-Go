@@ -569,7 +569,8 @@ func GetBankNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.bank_id,
 				m.bank_name,
 				COALESCE(m.bank_short_name, '') AS bank_short_name,
-				COALESCE(m.connectivity_type, '') AS connectivity_type
+				COALESCE(m.connectivity_type, '') AS connectivity_type,
+				COALESCE(m.contact_person_email, '') AS contact_person_email
 			FROM masterbank m
 			LEFT JOIN latest_audit la ON la.bank_id = m.bank_id
 			WHERE
@@ -590,8 +591,8 @@ func GetBankNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var results []map[string]interface{}
 		var anyError error
 		for rows.Next() {
-			var bankID, bankName, bankShortName, connectivityType string
-			if err := rows.Scan(&bankID, &bankName, &bankShortName, &connectivityType); err != nil {
+			var bankID, bankName, bankShortName, connectivityType, contactPersonEmail string
+			if err := rows.Scan(&bankID, &bankName, &bankShortName, &connectivityType, &contactPersonEmail); err != nil {
 				anyError = err
 				break
 			}
@@ -604,7 +605,8 @@ func GetBankNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					return ""
 				}(),
-				"connectivity_type": connectivityType,
+				"connectivity_type":    connectivityType,
+				"contact_person_email": contactPersonEmail,
 			})
 		}
 		if anyError != nil {

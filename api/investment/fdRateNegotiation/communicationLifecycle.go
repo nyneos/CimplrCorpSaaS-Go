@@ -136,7 +136,8 @@ func decideCommunications(pgxPool *pgxpool.Pool, approve bool) http.HandlerFunc 
 			}
 
 			switch strings.ToUpper(actionType) {
-			case "CREATE":
+			case "CREATE", "EDIT":
+				isEdit := strings.ToUpper(actionType) == "EDIT"
 				if approve {
 					if status == "PENDING_APPROVAL" || status == "DRAFT" {
 						if _, err = tx.Exec(ctx, `
@@ -158,19 +159,17 @@ func decideCommunications(pgxPool *pgxpool.Pool, approve bool) http.HandlerFunc 
 						}
 						toSend = append(toSend, [5]string{id, rateRequestID, userEmail, templateID, content})
 					}
+				} else if isEdit {
+					if err = revertCommunicationEdit(ctx, tx, id); err != nil {
+						tx.Rollback(ctx)
+						continue
+					}
 				} else {
 					if _, err = tx.Exec(ctx, `
 						UPDATE investment.fd_rate_communication
 						SET communication_status = 'REJECTED', updated_by = $2, updated_at = now()
 						WHERE communication_id = $1::uuid`,
 						id, userEmail); err != nil {
-						tx.Rollback(ctx)
-						continue
-					}
-				}
-			case "EDIT":
-				if !approve {
-					if err = revertCommunicationEdit(ctx, tx, id); err != nil {
 						tx.Rollback(ctx)
 						continue
 					}
@@ -268,6 +267,7 @@ func DeleteCommunications(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = pgxPool.QueryRow(ctx, `
 				SELECT COUNT(*) FROM investment.fd_rate_communication_audit
 				WHERE communication_id = $1::uuid
+				  AND action_type = 'DELETE'
 				  AND processing_status LIKE 'PENDING%'`, id).Scan(&pending)
 			if pending > 0 {
 				continue
