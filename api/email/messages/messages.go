@@ -84,8 +84,8 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE ($1 = '' OR m.module = $1)
 			  AND ($2 = '' OR m.entity_id = $2)
 			  AND ($3 = '' OR m.processing_status = $3)
-			  AND ($4 = '' OR COALESCE(m.received_at, m.created_at) >= $4::date)
-			  AND ($5 = '' OR COALESCE(m.received_at, m.created_at) < ($5::date + interval '1 day'))
+			  AND ($4 = '' OR (COALESCE(m.received_at, m.created_at) AT TIME ZONE 'Asia/Kolkata') >= $4::date)
+			  AND ($5 = '' OR (COALESCE(m.received_at, m.created_at) AT TIME ZONE 'Asia/Kolkata') < ($5::date + interval '1 day'))
 			  AND ($6 = '' OR m.inbox_id::text = $6)
 			  AND (NOT $7 OR m.filter_matched = true OR m.processing_status = 'MANUAL_UPLOAD')
 			  AND ($8 = '' OR UPPER(COALESCE(m.mail_direction, 'RECEIVED')) = $8)`

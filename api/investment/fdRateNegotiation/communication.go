@@ -762,7 +762,6 @@ func ListCommunications(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					communication_id::text, COALESCE(processing_status,'')
 				FROM investment.fd_rate_communication_audit
 				WHERE communication_id = ANY($1::uuid[])
-				  AND action_type <> 'DELETE'
 				ORDER BY communication_id, requested_at DESC`, ids)
 			if aerr == nil {
 				defer arows.Close()
@@ -1045,7 +1044,7 @@ func ListCommunicationAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				processing_status,
 				requested_by,
 				TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS requested_at,
-				COALESCE(requested_ip,''),
+				COALESCE(requested_ip,'') AS requested_ip,
 				old_communication_mode,
 				new_communication_mode,
 				old_communication_status,
@@ -1056,14 +1055,18 @@ func ListCommunicationAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				new_email_content,
 				old_response_source,
 				new_response_source,
-				COALESCE(TO_CHAR(old_response_date,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
-				COALESCE(TO_CHAR(new_response_date,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
-				COALESCE(old_email_message_id::text,''),
-				COALESCE(new_email_message_id::text,''),
-				COALESCE(checker_by,''),
-				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
-				COALESCE(checker_comment,''),
-				COALESCE(checker_ip,'')
+				old_bank_id,
+				new_bank_id,
+				old_bank_name,
+				new_bank_name,
+				COALESCE(TO_CHAR(old_response_date,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS old_response_date,
+				COALESCE(TO_CHAR(new_response_date,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS new_response_date,
+				COALESCE(old_email_message_id::text,'') AS old_email_message_id,
+				COALESCE(new_email_message_id::text,'') AS new_email_message_id,
+				COALESCE(checker_by,'') AS checker_by,
+				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS checker_at,
+				COALESCE(checker_comment,'') AS checker_comment,
+				COALESCE(checker_ip,'') AS checker_ip
 			FROM investment.fd_rate_communication_audit`
 		var (
 			rows pgx.Rows

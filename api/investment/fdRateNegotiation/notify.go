@@ -5,6 +5,7 @@ import (
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"fmt"
+	"html"
 	"strings"
 	"time"
 
@@ -256,10 +257,15 @@ func fireBankCommunicationEmail(
 			return
 		}
 		to, cc := splitRecipientEmails(recs[communicationID])
-		all := append([]string{}, to...)
-		all = append(all, cc...)
+		// One outbox row per TO recipient; CC riders are stamped on those rows
+		// after dispatch so the bank gets a single mail carrying a Cc header
+		// instead of one separate mail per CC address.
+		if len(to) == 0 {
+			to = cc
+			cc = nil
+		}
 
-		payload := row.toPayload("SEND", actorEmail, emailContent, all)
+		payload := row.toPayload("SEND", actorEmail, emailContent, to)
 		payload["CommunicationID"] = communicationID
 		payload["BankID"] = bankID
 		payload["BankName"] = bankName
@@ -269,9 +275,13 @@ func fireBankCommunicationEmail(
 		}
 
 		content := strings.TrimSpace(emailContent)
-		if strings.Contains(content, "<") {
-			// DMS cover email is fully rendered HTML — bypass notification wrapper
-			// text so Outlook does not show raw tags in the plain-text MIME part.
+		if content != "" {
+			// The DMS cover email is what the bank must receive — it replaces the
+			// notification wrapper body outright so no template markup reaches the
+			// recipient. Plain-text content is wrapped so it is valid HTML too.
+			if !strings.Contains(content, "<") {
+				content = "<p>" + strings.ReplaceAll(html.EscapeString(content), "\n", "<br/>") + "</p>"
+			}
 			payload["EmailBodyHTML"] = content
 			subject := fmt.Sprintf("FD rate request %s", row.RateRequestRef)
 			if strings.Contains(strings.ToLower(emailTemplateName), "urgent") {
@@ -281,8 +291,60 @@ func fireBankCommunicationEmail(
 		}
 
 		allowed := resolveBankEmailNotificationTemplates(ctx, pool, communicationID, templateID)
-		notifcatalog.TriggerNotificationForTemplates(
+		notifcatalog.TriggerNotificationForTemplatesWithAttachments(
 			ctx, pool, sourceRouteBankEmail, communicationID, payload, allowed,
+			loadCommunicationAttachments(ctx, pool, communicationID),
 		)
+
+		if len(cc) > 0 {
+			if _, err = pool.Exec(ctx, `
+				UPDATE notification_svc.outbox
+				SET cc_emails = $2
+				WHERE correlation_id = $1
+				  AND channel = 'EMAIL'
+				  AND processing_status IN ('PENDING','QUEUED','PROCESSING')`,
+				communicationID, strings.Join(cc, ", ")); err != nil {
+				api.LogError("[FDRateNeg] bank email apply cc %s: %v", communicationID, err)
+			}
+		}
 	}()
+}
+
+// loadCommunicationAttachments returns the files linked to this communication so
+// the bank mail carries whatever the maker attached when composing it.
+func loadCommunicationAttachments(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	communicationID string,
+) []notifcatalog.AttachmentRef {
+	rows, err := pool.Query(ctx, `
+		SELECT COALESCE(upload_s3_key,''), COALESCE(stored_file_name,''), COALESCE(content_type,'')
+		FROM investment.fd_rate_negotiation_files
+		WHERE communication_id = $1::uuid
+		  AND COALESCE(is_deleted,false) = false
+		  AND COALESCE(upload_s3_key,'') <> ''
+		ORDER BY uploaded_at, file_id`, communicationID)
+	if err != nil {
+		api.LogError("[FDRateNeg] bank email load attachments %s: %v", communicationID, err)
+		return nil
+	}
+	defer rows.Close()
+
+	out := make([]notifcatalog.AttachmentRef, 0)
+	for rows.Next() {
+		var s3Key, fileName, contentType string
+		if err := rows.Scan(&s3Key, &fileName, &contentType); err != nil {
+			continue
+		}
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		out = append(out, notifcatalog.AttachmentRef{
+			S3Key:          s3Key,
+			Filename:       fileName,
+			ContentType:    contentType,
+			StorageBackend: "MAIN_S3",
+		})
+	}
+	return out
 }
