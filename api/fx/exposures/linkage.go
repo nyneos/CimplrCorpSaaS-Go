@@ -381,6 +381,10 @@ func ExpFwdLinking(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM exposure_headers
 			WHERE (approval_status = 'Approved' OR approval_status = 'approved' OR approval_status = 'APPROVED')
 			  AND COALESCE(is_deleted, false) = false
+			  -- Once a settlement (payment/rollover/cancellation) has been approved on this
+			  -- exposure it is terminal — no further hedges can be linked to it.
+			  AND UPPER(TRIM(COALESCE(status, ''))) NOT IN ('CLOSED', 'CANCELLED', 'PAYMENT', 'ROLLOVER')
+			  AND ABS(COALESCE(total_open_amount, 0)) > 0
 		`)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure headers")
@@ -551,6 +555,23 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || req.ExposureHeaderID == "" || req.BookingID == "" || req.HedgedAmount == 0 {
 			respondWithError(w, http.StatusBadRequest, "user_id, exposure_header_id, booking_id, and hedged_amount are required")
+			return
+		}
+		// A settled exposure (payment/rollover/cancellation approved) is terminal —
+		// reject new hedge links even if the picker's candidate list was stale.
+		var exposureStatus string
+		var exposureOpenAmount float64
+		if err := pool.QueryRow(ctx, `
+			SELECT UPPER(TRIM(COALESCE(status, ''))), COALESCE(total_open_amount, 0)
+			FROM exposure_headers
+			WHERE exposure_header_id::text = $1 AND COALESCE(is_deleted, false) = false
+		`, req.ExposureHeaderID).Scan(&exposureStatus, &exposureOpenAmount); err != nil {
+			respondWithError(w, http.StatusNotFound, "Exposure not found")
+			return
+		}
+		if map[string]bool{"CLOSED": true, "CANCELLED": true, "PAYMENT": true, "ROLLOVER": true}[exposureStatus] ||
+			math.Abs(exposureOpenAmount) <= 0 {
+			respondWithError(w, http.StatusUnprocessableEntity, "This exposure has already been settled and can no longer be hedged")
 			return
 		}
 		// Get booking amount and prior utilization up front (read-only) so the

@@ -445,8 +445,11 @@ func invalidateStalePendingSettlements(ctx context.Context, pool *pgxpool.Pool, 
 	}
 }
 
-// syncExposureLifecycleStatus closes or cancels an exposure when open amount is fully settled.
-// Payment / full settlement → Closed (cannot continue). Cancellation → Cancelled.
+// syncExposureLifecycleStatus marks an exposure terminal once its open amount is fully
+// settled, tagged by the settlement method that closed it (Payment / Rollover / Cancelled)
+// so the frontend's Exposure Status column (OPEN, PAYMENT, ROLLOVER, CANCELLED) can show
+// which one — a settled exposure is done: no further hedging, payment, rollover, or
+// cancellation can be applied to it.
 func syncExposureLifecycleStatus(ctx context.Context, pool *pgxpool.Pool, exposureHeaderID, method string) {
 	exposureHeaderID = strings.TrimSpace(exposureHeaderID)
 	if exposureHeaderID == "" {
@@ -464,8 +467,13 @@ func syncExposureLifecycleStatus(ctx context.Context, pool *pgxpool.Pool, exposu
 		return
 	}
 	next := "Closed"
-	if strings.EqualFold(method, "CANCELLATION") {
+	switch strings.ToUpper(method) {
+	case "CANCELLATION":
 		next = "Cancelled"
+	case "ROLLOVER":
+		next = "Rollover"
+	case "PAYMENT":
+		next = "Payment"
 	}
 	_, _ = pool.Exec(ctx, `
 		UPDATE public.exposure_headers
@@ -1084,30 +1092,9 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Cancellation takes effect immediately on the exposure when initiated (submit).
-		cancellationApplied := false
-		if req.Submit && method == "CANCELLATION" {
-			if err := applySettlementOnApprove(ctx, pool, settlementID, actor); err != nil {
-				respondWithError(w, http.StatusInternalServerError, "failed to apply cancellation to exposure: "+err.Error())
-				return
-			}
-			_, _ = pool.Exec(ctx, `
-				UPDATE public.exposure_settlement_document
-				SET processing_status = $1,
-				    updated_by = $2,
-				    updated_at = NOW()
-				WHERE settlement_id = $3::uuid
-			`, constants.StatusApproved, actor, settlementID)
-			status = constants.StatusApproved
-			cancellationApplied = true
-		}
-
 		finalStatus := status
 		if !req.Submit {
 			_ = pool.QueryRow(ctx, `SELECT processing_status FROM public.exposure_settlement_document WHERE settlement_id = $1::uuid`, settlementID).Scan(&finalStatus)
-		}
-		if cancellationApplied {
-			finalStatus = constants.StatusApproved
 		}
 		// Prefer pre-change snapshot for EDIT/SUBMIT; CREATE has empty oldSnap.
 		auditSnap := oldSnap
@@ -1119,7 +1106,7 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			Actor: actor, OldSnap: auditSnap, MethodHint: method,
 		})
 
-		if req.Submit && !cancellationApplied {
+		if req.Submit {
 			makerEmail := ""
 			for _, s := range auth.GetActiveSessions() {
 				if s.UserID == req.UserID {
@@ -1152,8 +1139,8 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		msg := "Settlement saved"
-		if cancellationApplied {
-			msg = "Cancellation applied immediately to exposure"
+		if req.Submit {
+			msg = "Settlement submitted for approval"
 		}
 		respondWithSuccess(w, http.StatusOK, msg, map[string]any{
 			"settlement_id":        settlementID,
