@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -316,6 +317,23 @@ func UpdateOffer(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if status == "" {
 			status = oldStatus
+		}
+
+		var lastProcessingStatus string
+		if err = tx.QueryRow(ctx, `
+			SELECT COALESCE(processing_status,'')
+			FROM investment.fd_rate_offer_audit
+			WHERE offer_id = $1::uuid
+			ORDER BY requested_at DESC
+			LIMIT 1`, offerID).Scan(&lastProcessingStatus); err != nil && err != pgx.ErrNoRows {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to read offer approval state")
+			return
+		}
+		if strings.EqualFold(strings.TrimSpace(lastProcessingStatus), "APPROVED") &&
+			math.Abs(req.OfferedInterestRate-oldRate) > 0.000001 {
+			api.RespondWithError(w, http.StatusBadRequest,
+				"offered_interest_rate is immutable once the offer is approved")
+			return
 		}
 
 		if strings.TrimSpace(req.CommunicationID) != "" {
