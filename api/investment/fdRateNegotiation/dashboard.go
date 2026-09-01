@@ -182,6 +182,7 @@ func DashboardSummary(pool *pgxpool.Pool) http.HandlerFunc {
 		offerRows, err := pool.Query(ctx, `
 			SELECT
 				o.offer_id::text,
+				o.rate_request_id::text,
 				COALESCE(m.rate_request_ref,''),
 				COALESCE(o.bank_name,''),
 				COALESCE(o.offered_interest_rate,0),
@@ -197,13 +198,14 @@ func DashboardSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			defer offerRows.Close()
 			items := make([]map[string]interface{}, 0)
 			for offerRows.Next() {
-				var id, ref, bank, status, valid string
+				var id, requestID, ref, bank, status, valid string
 				var rate float64
-				if err := offerRows.Scan(&id, &ref, &bank, &rate, &status, &valid); err != nil {
+				if err := offerRows.Scan(&id, &requestID, &ref, &bank, &rate, &status, &valid); err != nil {
 					continue
 				}
 				items = append(items, map[string]interface{}{
 					"offer_id":              id,
+					"rate_request_id":       requestID,
 					"rate_request_ref":      ref,
 					"bank_name":             bank,
 					"offered_interest_rate": rate,
