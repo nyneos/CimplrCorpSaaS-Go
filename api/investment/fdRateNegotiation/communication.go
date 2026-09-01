@@ -282,6 +282,36 @@ type communicationAuditValues struct {
 	NewBankID         interface{}
 	OldBankName       interface{}
 	NewBankName       interface{}
+	OldEmailTo        interface{}
+	NewEmailTo        interface{}
+	OldEmailCC        interface{}
+	NewEmailCC        interface{}
+}
+
+func recipientAuditLists(recs []communicationRecipientInput) (to string, cc string) {
+	toList := make([]string, 0, len(recs))
+	ccList := make([]string, 0, len(recs))
+	for _, rec := range recs {
+		addr := strings.TrimSpace(rec.EmailAddress)
+		if addr == "" {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(rec.RecipientRole), "CC") {
+			ccList = append(ccList, addr)
+			continue
+		}
+		toList = append(toList, addr)
+	}
+	return strings.Join(toList, ", "), strings.Join(ccList, ", ")
+}
+
+func loadRecipientAuditLists(ctx context.Context, q communicationQuerier, communicationID string) (to string, cc string, err error) {
+	recMap, err := loadRecipientsMap(ctx, q, []string{communicationID})
+	if err != nil {
+		return "", "", err
+	}
+	toList, ccList := splitRecipientEmails(recMap[communicationID])
+	return strings.Join(toList, ", "), strings.Join(ccList, ", "), nil
 }
 
 func insertCommunicationAudit(ctx context.Context, tx pgx.Tx, v communicationAuditValues) error {
@@ -296,7 +326,8 @@ func insertCommunicationAudit(ctx context.Context, tx pgx.Tx, v communicationAud
 			old_response_source, new_response_source,
 			old_response_date, new_response_date,
 			old_email_message_id, new_email_message_id,
-			old_bank_id, new_bank_id, old_bank_name, new_bank_name
+			old_bank_id, new_bank_id, old_bank_name, new_bank_name,
+			old_email_to, new_email_to, old_email_cc, new_email_cc
 		) VALUES (
 			$1::uuid, $2::uuid, $3, $4,
 			$5, now(), $6,
@@ -307,7 +338,8 @@ func insertCommunicationAudit(ctx context.Context, tx pgx.Tx, v communicationAud
 			$15, $16,
 			$17, $18,
 			NULLIF($19,'')::uuid, NULLIF($20,'')::uuid,
-			$21, $22, $23, $24
+			$21, $22, $23, $24,
+			$25, $26, $27, $28
 		)`,
 		v.CommunicationID, v.RateRequestID, v.ActionType, v.ProcessingStatus,
 		api.SystemIfBlank(v.RequestedBy), api.SystemIfBlank(v.RequestedIP),
@@ -319,6 +351,7 @@ func insertCommunicationAudit(ctx context.Context, tx pgx.Tx, v communicationAud
 		v.OldResponseDate, v.NewResponseDate,
 		stringifyAuditUUID(v.OldEmailMessageID), stringifyAuditUUID(v.NewEmailMessageID),
 		v.OldBankID, v.NewBankID, v.OldBankName, v.NewBankName,
+		v.OldEmailTo, v.NewEmailTo, v.OldEmailCC, v.NewEmailCC,
 	)
 	return err
 }
@@ -641,6 +674,7 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Recipient insert failed")
 			return
 		}
+		createdTo, createdCC := recipientAuditLists(recs)
 
 		processingStatus := "PENDING_APPROVAL"
 		if intent == "RECEIVE" {
@@ -663,6 +697,8 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			NewEmailMessageID: nullIfEmpty(strings.TrimSpace(req.EmailMessageID)),
 			NewBankID:         nullIfEmpty(resolvedBankID),
 			NewBankName:       nullIfEmpty(resolvedBankName),
+			NewEmailTo:        nullIfEmpty(createdTo),
+			NewEmailCC:        nullIfEmpty(createdCC),
 		}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed")
 			return
@@ -916,6 +952,15 @@ func UpdateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Read the recipients still on the row before they are replaced, so the
+		// EDIT audit can carry the To / CC change like every other field.
+		oldEmailTo, oldEmailCC, recErr := loadRecipientAuditLists(ctx, tx, req.CommunicationID)
+		if recErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to read recipients")
+			return
+		}
+		newEmailTo, newEmailCC := oldEmailTo, oldEmailCC
+
 		if req.recipientsProvided() {
 			recs := collectRecipients(req)
 			if newMode == "SYSTEM_EMAIL" && countTO(recs) == 0 {
@@ -926,6 +971,7 @@ func UpdateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, "Recipient update failed")
 				return
 			}
+			newEmailTo, newEmailCC = recipientAuditLists(recs)
 		}
 
 		var sentBy, sentAt interface{}
@@ -996,6 +1042,10 @@ func UpdateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			NewBankID:         nullIfEmpty(newBankID),
 			OldBankName:       nullIfEmpty(derefOrEmpty(oldBankName)),
 			NewBankName:       nullIfEmpty(newBankName),
+			OldEmailTo:        nullIfEmpty(oldEmailTo),
+			NewEmailTo:        nullIfEmpty(newEmailTo),
+			OldEmailCC:        nullIfEmpty(oldEmailCC),
+			NewEmailCC:        nullIfEmpty(newEmailCC),
 		}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed")
 			return
@@ -1059,6 +1109,10 @@ func ListCommunicationAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				new_bank_id,
 				old_bank_name,
 				new_bank_name,
+				old_email_to,
+				new_email_to,
+				old_email_cc,
+				new_email_cc,
 				COALESCE(TO_CHAR(old_response_date,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS old_response_date,
 				COALESCE(TO_CHAR(new_response_date,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS new_response_date,
 				COALESCE(old_email_message_id::text,'') AS old_email_message_id,
