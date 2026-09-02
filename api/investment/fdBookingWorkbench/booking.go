@@ -178,12 +178,13 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if rateRequestID != "" {
 			var negStatus string
 			var selectedOfferID *string
+			var linkedBookingID *string
 			err := pgxPool.QueryRow(ctx, `
-				SELECT COALESCE(request_status,''), selected_offer_id::text
+				SELECT COALESCE(request_status,''), selected_offer_id::text, booking_id::text
 				FROM investment.fd_rate_negotiation
 				WHERE rate_request_id = $1::uuid AND COALESCE(is_deleted,false)=false`,
 				rateRequestID,
-			).Scan(&negStatus, &selectedOfferID)
+			).Scan(&negStatus, &selectedOfferID, &linkedBookingID)
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					api.RespondWithError(w, http.StatusBadRequest, "rate_request_id not found")
@@ -202,6 +203,23 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest,
 					fmt.Sprintf("rate request status must be APPROVED before booking (got %s)", st))
 				return
+			}
+			if st == "CONVERTED_TO_FD" && linkedBookingID != nil && strings.TrimSpace(*linkedBookingID) != "" {
+				linkedID := strings.TrimSpace(*linkedBookingID)
+				var linkedExists bool
+				if err := pgxPool.QueryRow(ctx, `
+					SELECT EXISTS (
+						SELECT 1 FROM investment.fd_booking_request
+						WHERE booking_id = $1 AND COALESCE(is_deleted,false)=false
+					)`, linkedID).Scan(&linkedExists); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Validate existing FD link failed: "+err.Error())
+					return
+				}
+				if linkedExists {
+					api.RespondWithError(w, http.StatusBadRequest,
+						fmt.Sprintf("rate request is already converted to FD booking %s — create a new rate request to book another FD", linkedID))
+					return
+				}
 			}
 		}
 

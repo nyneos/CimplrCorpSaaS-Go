@@ -973,6 +973,9 @@ func GetRateRequestAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(old_internal_notes,'') AS old_internal_notes,
 				COALESCE(old_request_status,'') AS old_request_status,
 				old_is_active,
+				COALESCE(old_selected_offer_id::text,'') AS old_selected_offer_id,
+				COALESCE(old_selection_remarks,'') AS old_selection_remarks,
+				COALESCE(old_booking_id::text,'') AS old_booking_id,
 				new_proposed_fd_amount,
 				COALESCE(new_currency_code,'') AS new_currency_code,
 				COALESCE(new_tenure_type,'') AS new_tenure_type,
@@ -985,6 +988,9 @@ func GetRateRequestAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				new_target_bank_names,
 				COALESCE(new_internal_notes,'') AS new_internal_notes,
 				COALESCE(new_request_status,'') AS new_request_status,
+				COALESCE(new_selected_offer_id::text,'') AS new_selected_offer_id,
+				COALESCE(new_selection_remarks,'') AS new_selection_remarks,
+				COALESCE(new_booking_id::text,'') AS new_booking_id,
 				COALESCE(checker_ip,'') AS checker_ip
 			FROM investment.fd_audit_rate_negotiation
 			WHERE rate_request_id = $1::uuid
