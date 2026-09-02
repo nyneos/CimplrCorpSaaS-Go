@@ -80,6 +80,10 @@ func convertRateNegotiationOnBookingCreate(ctx context.Context, tx pgx.Tx, rateR
 	case "PENDING_DELETE_APPROVAL", "DELETED", "CANCELLED":
 		return fmt.Errorf("rate request cannot be converted in status %s", oldStatus)
 	case "CONVERTED_TO_FD":
+		if oldBookingID != nil && strings.TrimSpace(*oldBookingID) != "" &&
+			!strings.EqualFold(strings.TrimSpace(*oldBookingID), bookingID) {
+			return fmt.Errorf("rate request is already converted to FD booking %s", strings.TrimSpace(*oldBookingID))
+		}
 		// Already converted — still ensure booking link points here.
 		if _, err = tx.Exec(ctx, `
 			UPDATE investment.fd_booking_request

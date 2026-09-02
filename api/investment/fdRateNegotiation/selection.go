@@ -342,6 +342,24 @@ func LinkBooking(pool *pgxpool.Pool) http.HandlerFunc {
 		case "PENDING_DELETE_APPROVAL", "DELETED", "CANCELLED":
 			api.RespondWithError(w, http.StatusBadRequest, "Rate request cannot be linked to a booking in current status")
 			return
+		case "CONVERTED_TO_FD":
+			existingBookingID := ""
+			if oldBookingID != nil {
+				existingBookingID = strings.TrimSpace(*oldBookingID)
+			}
+			if existingBookingID != "" {
+				if !strings.EqualFold(existingBookingID, strings.TrimSpace(req.BookingID)) {
+					api.RespondWithError(w, http.StatusBadRequest,
+						fmt.Sprintf("Rate request is already converted to FD booking %s — create a new rate request to book another FD", existingBookingID))
+					return
+				}
+				api.RespondWithPayload(w, true, "Rate request is already linked to this FD booking", map[string]interface{}{
+					"rate_request_id": req.RateRequestID,
+					"booking_id":      existingBookingID,
+					"request_status":  "CONVERTED_TO_FD",
+				})
+				return
+			}
 		}
 
 		bookingID := strings.TrimSpace(req.BookingID)
