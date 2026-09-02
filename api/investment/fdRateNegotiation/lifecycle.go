@@ -136,15 +136,15 @@ func revertEditOnMaster(ctx context.Context, tx pgx.Tx, ids []string, checker st
 			target_bank_names = a.old_target_bank_names,
 			internal_notes = a.old_internal_notes,
 			request_status = CASE
-				WHEN a.old_request_status IS NULL OR a.old_request_status = '' OR a.old_request_status LIKE 'PENDING%'
-				THEN 'APPROVED'
-				ELSE a.old_request_status
+				WHEN UPPER(COALESCE(a.new_request_status,'')) = 'PENDING_RATE_APPROVAL'
+				THEN COALESCE(NULLIF(a.old_request_status,''), m.request_status)
+				ELSE 'REJECTED'
 			END,
 			is_active = COALESCE(a.old_is_active, m.is_active),
 			selected_offer_id = a.old_selected_offer_id,
 			selection_remarks = a.old_selection_remarks,
 			booking_id = a.old_booking_id,
-			processing_status = 'APPROVED',
+			processing_status = 'REJECTED',
 			updated_by = $2,
 			updated_at = now()
 		FROM investment.fd_audit_rate_negotiation a
@@ -213,14 +213,11 @@ func applyRejectMaster(ctx context.Context, tx pgx.Tx, id, actionType, oldStatus
 	case "EDIT":
 		return revertEditOnMaster(ctx, tx, []string{id}, checker)
 	case "DELETE":
-		restore := oldStatus
-		if restore == "" || strings.HasPrefix(restore, "PENDING") {
-			restore = "APPROVED"
-		}
 		_, err := tx.Exec(ctx, `
 			UPDATE investment.fd_rate_negotiation
-			SET request_status = $2, processing_status = 'APPROVED', is_deleted = false, updated_at = now()
-			WHERE rate_request_id = $1::uuid`, id, restore)
+			SET request_status = 'REJECTED',
+				processing_status = 'REJECTED', is_deleted = false, updated_at = now()
+			WHERE rate_request_id = $1::uuid`, id)
 		return err
 	default:
 		_, err := tx.Exec(ctx, `

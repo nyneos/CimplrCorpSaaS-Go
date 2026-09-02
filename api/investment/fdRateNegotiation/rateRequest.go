@@ -472,10 +472,6 @@ func UpdateRateRequest(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		newStatus := "PENDING_EDIT_APPROVAL"
 		actionType := "EDIT"
-		if strings.EqualFold(oldStatus, "DRAFT") || strings.EqualFold(oldStatus, "PENDING_APPROVAL") {
-			newStatus = "PENDING_APPROVAL"
-			actionType = "CREATE"
-		}
 
 		bankIDs := req.TargetBankIDs
 		if bankIDs == nil {
