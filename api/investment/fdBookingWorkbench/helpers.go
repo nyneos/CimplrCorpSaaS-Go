@@ -100,7 +100,7 @@ func convertRateNegotiationOnBookingCreate(ctx context.Context, tx pgx.Tx, rateR
 		UPDATE investment.fd_rate_negotiation SET
 			booking_id = $2,
 			request_status = $3,
-			processing_status = $3,
+			processing_status = 'APPROVED',
 			updated_by = $4,
 			updated_at = now()
 		WHERE rate_request_id = $1::uuid`,
