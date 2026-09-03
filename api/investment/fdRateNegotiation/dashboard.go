@@ -35,7 +35,7 @@ func DashboardSummary(pool *pgxpool.Pool) http.HandlerFunc {
 					'PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL','PENDING_RATE_APPROVAL'
 				))::int,
 				COUNT(*) FILTER (WHERE request_status = 'APPROVED')::int,
-				COUNT(*) FILTER (WHERE request_status IN ('SENT_TO_BANKS','OFFERS_RECEIVED'))::int,
+				COUNT(*) FILTER (WHERE request_status IN ('SENT_TO_BANKS','RESPONSE_RECEIVED','OFFERS_RECEIVED'))::int,
 				COUNT(*) FILTER (WHERE request_status = 'CONVERTED_TO_FD')::int,
 				COALESCE(SUM(proposed_fd_amount),0)
 			FROM investment.fd_rate_negotiation
@@ -156,8 +156,7 @@ func DashboardSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			JOIN investment.fd_rate_negotiation m ON m.rate_request_id = c.rate_request_id
 			WHERE COALESCE(c.is_deleted,false)=false
 			  AND c.communication_status <> 'REJECTED'
-			ORDER BY COALESCE(c.sent_at, c.created_at) DESC, c.communication_id DESC
-			LIMIT 12`)
+			ORDER BY COALESCE(c.sent_at, c.created_at) DESC, c.communication_id DESC`)
 		if err == nil {
 			defer commRows.Close()
 			items := make([]map[string]interface{}, 0)
@@ -192,8 +191,8 @@ func DashboardSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			JOIN investment.fd_rate_negotiation m ON m.rate_request_id = o.rate_request_id
 			WHERE COALESCE(o.is_deleted,false)=false
 			  AND o.offer_status NOT IN ('REJECTED','EXPIRED')
-			ORDER BY o.created_at DESC, o.offer_id DESC
-			LIMIT 12`)
+			  AND (o.valid_till_date IS NULL OR o.valid_till_date >= CURRENT_DATE)
+			ORDER BY o.created_at DESC, o.offer_id DESC`)
 		if err == nil {
 			defer offerRows.Close()
 			items := make([]map[string]interface{}, 0)

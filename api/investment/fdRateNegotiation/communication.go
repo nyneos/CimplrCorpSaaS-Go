@@ -182,6 +182,31 @@ func resolveCommunicationBank(ctx context.Context, tx pgx.Tx, rateRequestID, ban
 	return "", "", fmt.Errorf("bank must be one of the request target banks")
 }
 
+func sameCommunicationBank(commBankID, commBankName, bankID, bankName string) bool {
+	cid := strings.TrimSpace(commBankID)
+	cname := strings.TrimSpace(commBankName)
+	if cid == "" && cname == "" {
+		return true
+	}
+	id := strings.TrimSpace(bankID)
+	name := strings.TrimSpace(bankName)
+	if id == "" && name == "" {
+		return false
+	}
+	for _, want := range []string{id, name} {
+		if want == "" {
+			continue
+		}
+		if cid != "" && strings.EqualFold(want, cid) {
+			return true
+		}
+		if cname != "" && strings.EqualFold(want, cname) {
+			return true
+		}
+	}
+	return false
+}
+
 func collectRecipients(p communicationPayload) []communicationRecipientInput {
 	seen := map[string]struct{}{}
 	out := make([]communicationRecipientInput, 0)
@@ -627,11 +652,11 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		if intent == "RECEIVE" {
-			if err = assertParentStatus(ctx, tx, req.RateRequestID, "APPROVED", "SENT_TO_BANKS", "OFFERS_RECEIVED"); err != nil {
+			if err = assertParentStatus(ctx, tx, req.RateRequestID, "APPROVED", "SENT_TO_BANKS", "RESPONSE_RECEIVED", "OFFERS_RECEIVED"); err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, err.Error())
 				return
 			}
-		} else if err = assertParentStatus(ctx, tx, req.RateRequestID, "APPROVED", "SENT_TO_BANKS", "OFFERS_RECEIVED"); err != nil {
+		} else if err = assertParentStatus(ctx, tx, req.RateRequestID, "APPROVED", "SENT_TO_BANKS", "RESPONSE_RECEIVED", "OFFERS_RECEIVED"); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -677,9 +702,6 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		createdTo, createdCC := recipientAuditLists(recs)
 
 		processingStatus := "PENDING_APPROVAL"
-		if intent == "RECEIVE" {
-			processingStatus = "APPROVED"
-		}
 
 		if err = insertCommunicationAudit(ctx, tx, communicationAuditValues{
 			CommunicationID:   id,
@@ -702,6 +724,18 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed")
 			return
+		}
+
+		if intent == "RECEIVE" {
+			if _, err = tx.Exec(ctx, `
+				UPDATE investment.fd_rate_negotiation
+				SET request_status = 'RESPONSE_RECEIVED', updated_by = $2, updated_at = now()
+				WHERE rate_request_id = $1::uuid
+				  AND request_status IN ('APPROVED','SUBMITTED','SENT_TO_BANKS')`,
+				req.RateRequestID, userEmail); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to mark response received: %v", err))
+				return
+			}
 		}
 
 		if err = tx.Commit(ctx); err != nil {

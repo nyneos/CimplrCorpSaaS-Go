@@ -162,18 +162,19 @@ func CreateOffer(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		if err = assertParentStatus(ctx, tx, req.RateRequestID, "APPROVED", "SENT_TO_BANKS", "OFFERS_RECEIVED"); err != nil {
+		if err = assertParentStatus(ctx, tx, req.RateRequestID, "APPROVED", "SENT_TO_BANKS", "RESPONSE_RECEIVED", "OFFERS_RECEIVED"); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		if strings.TrimSpace(req.CommunicationID) != "" {
 			var commRequestID, commStatus string
+			var commBankID, commBankName *string
 			err = tx.QueryRow(ctx, `
-				SELECT rate_request_id::text, communication_status
+				SELECT rate_request_id::text, communication_status, bank_id, bank_name
 				FROM investment.fd_rate_communication
 				WHERE communication_id = $1::uuid AND COALESCE(is_deleted,false)=false`,
-				req.CommunicationID).Scan(&commRequestID, &commStatus)
+				req.CommunicationID).Scan(&commRequestID, &commStatus, &commBankID, &commBankName)
 			if err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, "communication_id not found")
 				return
@@ -184,6 +185,11 @@ func CreateOffer(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if strings.ToUpper(strings.TrimSpace(commStatus)) != "RESPONSE_RECEIVED" {
 				api.RespondWithError(w, http.StatusBadRequest, "only RESPONSE_RECEIVED communications can be wired to an offer")
+				return
+			}
+			if !sameCommunicationBank(derefOrEmpty(commBankID), derefOrEmpty(commBankName), req.BankID, req.BankName) {
+				api.RespondWithError(w, http.StatusBadRequest,
+					"the received response belongs to a different bank than this offer")
 				return
 			}
 		}
@@ -232,7 +238,7 @@ func CreateOffer(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UPDATE investment.fd_rate_negotiation
 			SET request_status = 'OFFERS_RECEIVED', updated_by = $2, updated_at = now()
 			WHERE rate_request_id = $1::uuid
-			  AND request_status IN ('APPROVED','SUBMITTED','SENT_TO_BANKS')`,
+			  AND request_status IN ('APPROVED','SUBMITTED','SENT_TO_BANKS','RESPONSE_RECEIVED')`,
 			req.RateRequestID, userEmail); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to mark offers received")
 			return
@@ -338,16 +344,22 @@ func UpdateOffer(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if strings.TrimSpace(req.CommunicationID) != "" {
 			var commRequestID string
+			var commBankID, commBankName *string
 			err = tx.QueryRow(ctx, `
-				SELECT rate_request_id::text FROM investment.fd_rate_communication
+				SELECT rate_request_id::text, bank_id, bank_name FROM investment.fd_rate_communication
 				WHERE communication_id = $1::uuid AND COALESCE(is_deleted,false)=false`,
-				req.CommunicationID).Scan(&commRequestID)
+				req.CommunicationID).Scan(&commRequestID, &commBankID, &commBankName)
 			if err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, "communication_id not found")
 				return
 			}
 			if commRequestID != rateRequestID {
 				api.RespondWithError(w, http.StatusBadRequest, "communication_id does not belong to this rate request")
+				return
+			}
+			if !sameCommunicationBank(derefOrEmpty(commBankID), derefOrEmpty(commBankName), req.BankID, req.BankName) {
+				api.RespondWithError(w, http.StatusBadRequest,
+					"the received response belongs to a different bank than this offer")
 				return
 			}
 		}

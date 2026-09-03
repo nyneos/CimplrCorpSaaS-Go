@@ -213,6 +213,18 @@ func resolveBankEmailNotificationTemplates(
 			  AND t.channel = 'EMAIL'
 			LIMIT 1`, sourceRouteBankEmail, notifTplBankStandard).Scan(&notifID)
 	}
+	if notifID == "" {
+		_ = pool.QueryRow(ctx, `
+			SELECT t.template_id::text
+			FROM notification_svc.template t
+			JOIN notification_svc.event e ON e.event_id = t.event_id
+			WHERE e.source_route = $1
+			  AND COALESCE(e.is_deleted, false) = false
+			  AND COALESCE(t.is_deleted, false) = false
+			  AND t.channel = 'EMAIL'
+			ORDER BY (COALESCE(t.template_name,'') ILIKE '%urgent%') = $2::boolean DESC, COALESCE(t.template_name,'') ASC
+			LIMIT 1`, sourceRouteBankEmail, notifName == notifTplBankUrgent).Scan(&notifID)
+	}
 	if notifID != "" {
 		return []string{notifID}
 	}
