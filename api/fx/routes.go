@@ -143,6 +143,7 @@ func RegisterFXRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool.P
 	/*bucketing */
 	mux.Handle("/fx/exposures/update-bucketing", midFX(exposures.UpdateExposureHeadersLineItemsBucketing(pgxPool)))
 	mux.Handle("/fx/exposures/get-bucketing", midFX(exposures.GetExposureHeadersLineItemsBucketing(pgxPool)))
+	mux.Handle("/fx/exposures/pending-bucketing", midFX(exposures.GetPendingExposureHeadersLineItemsBucketing(pgxPool)))
 	mux.Handle("/fx/exposures/bucketing/delete-multiple-headers", midFX(exposures.DeleteBucketingStatus(pgxPool)))
 	mux.Handle("/fx/exposures/approve-bucketing-status", midFX(exposures.ApproveBucketingStatus(pgxPool)))
 	mux.Handle("/fx/exposures/reject-bucketing-status", midFX(exposures.RejectBucketingStatus(pgxPool)))

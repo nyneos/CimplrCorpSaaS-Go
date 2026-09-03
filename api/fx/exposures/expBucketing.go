@@ -439,6 +439,19 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 
 // Handler: Get exposure headers, line items, and bucketing for accessible business units
 func GetExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFunc {
+	return getExposureHeadersLineItemsBucketingHandler(pool, false)
+}
+
+// GetPendingExposureHeadersLineItemsBucketing mirrors GetExposureHeadersLineItemsBucketing
+// but only returns rows whose bucketing has not been approved yet — the same All/Pending
+// split already used for exposure headers (headers-line-items vs pending-headers-line-items).
+// Once a bucketing edit is approved (status_bucketing = 'APPROVED'), the row drops off this
+// list and only shows on the "All Exposure Bucketing" screen.
+func GetPendingExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFunc {
+	return getExposureHeadersLineItemsBucketingHandler(pool, true)
+}
+
+func getExposureHeadersLineItemsBucketingHandler(pool *pgxpool.Pool, pendingOnly bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
@@ -482,8 +495,13 @@ func GetExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFunc {
 				SELECT exposure_header_id FROM exposure_bucketing
 			  )`, buNames)
 
+		pendingFilter := ""
+		if pendingOnly {
+			pendingFilter = `AND UPPER(TRIM(COALESCE(b.status_bucketing, ''))) <> 'APPROVED'`
+		}
+
 		// Join exposure_headers, exposure_line_items, exposure_bucketing
-		rows, err := pool.Query(ctx, `SELECT h.*, l.*, b.*,
+		rows, err := pool.Query(ctx, fmt.Sprintf(`SELECT h.*, l.*, b.*,
 				COALESCE(ai.instance_id,'')         AS approval_instance_id,
 				COALESCE(ai.status,'')              AS approval_engine_status,
 				COALESCE(aie.instance_eye_id,'')    AS current_eye_id,
@@ -514,7 +532,8 @@ func GetExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFunc {
 			) aie ON true
 			WHERE h.entity = ANY($1)
 			  AND (h.approval_status = 'approved' OR h.approval_status = 'Approved')
-			  AND COALESCE(h.is_deleted, false) = false`, buNames)
+			  AND COALESCE(h.is_deleted, false) = false
+			  %s`, pendingFilter), buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch joined exposures")
 			return
