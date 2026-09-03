@@ -158,6 +158,16 @@ func decideCommunications(pgxPool *pgxpool.Pool, approve bool) http.HandlerFunc 
 							continue
 						}
 						toSend = append(toSend, [5]string{id, rateRequestID, userEmail, templateID, content})
+					} else if status == "RESPONSE_RECEIVED" {
+						if _, err = tx.Exec(ctx, `
+							UPDATE investment.fd_rate_negotiation
+							SET request_status = 'RESPONSE_RECEIVED', updated_by = $2, updated_at = now()
+							WHERE rate_request_id = $1::uuid
+							  AND request_status IN ('APPROVED','SUBMITTED','SENT_TO_BANKS')`,
+							rateRequestID, userEmail); err != nil {
+							tx.Rollback(ctx)
+							continue
+						}
 					}
 				} else if isEdit {
 					if err = revertCommunicationEdit(ctx, tx, id); err != nil {
