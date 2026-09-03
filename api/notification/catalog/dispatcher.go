@@ -1106,6 +1106,7 @@ func lookupTemplates(ctx context.Context, pool *pgxpool.Pool, eventID, channel s
 	defer dbRows.Close()
 
 	var out []resolvedTemplate
+	idx := make(map[string]int)
 	for dbRows.Next() {
 		var tpl resolvedTemplate
 		if err := dbRows.Scan(
@@ -1116,6 +1117,11 @@ func lookupTemplates(ctx context.Context, pool *pgxpool.Pool, eventID, channel s
 			api.LogError("[NOTIF] lookupTemplates scan: %v", err)
 			continue
 		}
+		if at, seen := idx[tpl.templateID]; seen && tpl.templateID != "" {
+			out[at] = tpl
+			continue
+		}
+		idx[tpl.templateID] = len(out)
 		out = append(out, tpl)
 	}
 	return out, dbRows.Err()

@@ -190,44 +190,41 @@ func resolveBankEmailNotificationTemplates(
 		notifName = notifTplBankUrgent
 	}
 
-	var notifID string
-	err := pool.QueryRow(ctx, `
-		SELECT t.template_id::text
+	rows, qerr := pool.Query(ctx, `
+		SELECT DISTINCT ON (t.event_id) t.template_id::text
 		FROM notification_svc.template t
 		JOIN notification_svc.event e ON e.event_id = t.event_id
+		JOIN notification_svc.audit_template a ON a.template_id = t.template_id
 		WHERE e.source_route = $1
 		  AND COALESCE(e.is_deleted, false) = false
-		  AND COALESCE(t.is_deleted, false) = false
-		  AND t.template_name = $2
-		  AND t.channel = 'EMAIL'
-		LIMIT 1`, sourceRouteBankEmail, notifName).Scan(&notifID)
-	if err != nil || notifID == "" {
-		_ = pool.QueryRow(ctx, `
-			SELECT t.template_id::text
-			FROM notification_svc.template t
-			JOIN notification_svc.event e ON e.event_id = t.event_id
-			WHERE e.source_route = $1
-			  AND COALESCE(e.is_deleted, false) = false
-			  AND COALESCE(t.is_deleted, false) = false
-			  AND t.template_name = $2
-			  AND t.channel = 'EMAIL'
-			LIMIT 1`, sourceRouteBankEmail, notifTplBankStandard).Scan(&notifID)
+		  AND UPPER(t.channel) = 'EMAIL'
+		  AND a.processing_status = 'APPROVED'
+		  AND COALESCE(a.is_deleted, false) = false
+		ORDER BY
+			t.event_id,
+			(COALESCE(t.template_name,'') = $2) DESC,
+			((COALESCE(t.template_name,'') ILIKE '%urgent%') = $3::boolean) DESC,
+			COALESCE(t.template_name,'') ASC`,
+		sourceRouteBankEmail, notifName, notifName == notifTplBankUrgent)
+	if qerr != nil {
+		api.LogError("[FDRateNeg] resolve bank email template: %v", qerr)
+		return nil
 	}
-	if notifID == "" {
-		_ = pool.QueryRow(ctx, `
-			SELECT t.template_id::text
-			FROM notification_svc.template t
-			JOIN notification_svc.event e ON e.event_id = t.event_id
-			WHERE e.source_route = $1
-			  AND COALESCE(e.is_deleted, false) = false
-			  AND COALESCE(t.is_deleted, false) = false
-			  AND t.channel = 'EMAIL'
-			ORDER BY (COALESCE(t.template_name,'') ILIKE '%urgent%') = $2::boolean DESC, COALESCE(t.template_name,'') ASC
-			LIMIT 1`, sourceRouteBankEmail, notifName == notifTplBankUrgent).Scan(&notifID)
+	defer rows.Close()
+
+	out := make([]string, 0, 1)
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr != nil || strings.TrimSpace(id) == "" {
+			continue
+		}
+		out = append(out, id)
 	}
-	if notifID != "" {
-		return []string{notifID}
+	if len(out) > 0 {
+		api.LogInfo("[FDRateNeg] bank email restricted to %d template(s) %v", len(out), out)
+		return out
 	}
+	api.LogError("[FDRateNeg] no approved EMAIL template for route %s — dispatch left unrestricted", sourceRouteBankEmail)
 	return nil
 }
 

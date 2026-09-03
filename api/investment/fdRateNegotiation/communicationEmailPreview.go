@@ -26,7 +26,91 @@ type communicationSentEmailRow struct {
 	ProcessingStatus string                             `json:"processing_status"`
 	SentAt           string                             `json:"sent_at"`
 	LastError        string                             `json:"last_error"`
+	IsDraft          bool                               `json:"is_draft"`
 	Attachments      []communicationSentEmailAttachment `json:"attachments"`
+}
+
+func loadCommunicationFileNames(
+	ctx context.Context,
+	pgxPool *pgxpool.Pool,
+	communicationID string,
+) []communicationSentEmailAttachment {
+	out := make([]communicationSentEmailAttachment, 0)
+	rows, err := pgxPool.Query(ctx, `
+		SELECT COALESCE(stored_file_name,''), COALESCE(content_type,'')
+		FROM investment.fd_rate_negotiation_files
+		WHERE communication_id = $1::uuid
+		  AND COALESCE(is_deleted,false) = false
+		  AND COALESCE(upload_s3_key,'') <> ''
+		ORDER BY uploaded_at, file_id`, communicationID)
+	if err != nil {
+		api.LogError("[FDRateNeg] draft email attachments %s: %v", communicationID, err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var filename, contentType string
+		if err := rows.Scan(&filename, &contentType); err != nil {
+			continue
+		}
+		if filename == "" {
+			continue
+		}
+		out = append(out, communicationSentEmailAttachment{Filename: filename, ContentType: contentType})
+	}
+	return out
+}
+
+func loadDraftSentEmail(
+	ctx context.Context,
+	pgxPool *pgxpool.Pool,
+	communicationID string,
+) (communicationSentEmailRow, bool) {
+	var row communicationSentEmailRow
+	var content, templateName, status, sentAt, requestRef string
+	err := pgxPool.QueryRow(ctx, `
+		SELECT
+			COALESCE(c.email_content,''),
+			COALESCE(c.email_template_name,''),
+			COALESCE(c.communication_status,''),
+			COALESCE(TO_CHAR(c.sent_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),''),
+			COALESCE(n.rate_request_ref,'')
+		FROM investment.fd_rate_communication c
+		LEFT JOIN investment.fd_rate_negotiation n ON n.rate_request_id = c.rate_request_id
+		WHERE c.communication_id = $1::uuid
+		  AND COALESCE(c.is_deleted,false) = false`, communicationID).
+		Scan(&content, &templateName, &status, &sentAt, &requestRef)
+	if err != nil || strings.TrimSpace(content) == "" {
+		return row, false
+	}
+
+	recs, err := loadRecipientsMap(ctx, pgxPool, []string{communicationID})
+	if err != nil {
+		api.LogError("[FDRateNeg] draft email recipients %s: %v", communicationID, err)
+	}
+	to, cc := splitRecipientEmails(recs[communicationID])
+
+	subject := templateName
+	if requestRef != "" {
+		subject = "FD rate request " + requestRef
+		if strings.Contains(strings.ToLower(templateName), "urgent") {
+			subject = "URGENT FD rate request " + requestRef
+		}
+	}
+
+	row = communicationSentEmailRow{
+		OutboxID:         "draft-" + communicationID,
+		CommunicationID:  communicationID,
+		RecipientEmail:   strings.Join(to, ", "),
+		CCEmails:         strings.Join(cc, ", "),
+		RenderedSubject:  subject,
+		RenderedBody:     content,
+		ProcessingStatus: status,
+		SentAt:           sentAt,
+		IsDraft:          true,
+		Attachments:      loadCommunicationFileNames(ctx, pgxPool, communicationID),
+	}
+	return row, true
 }
 
 func loadSentEmailAttachments(
@@ -126,6 +210,12 @@ func GetCommunicationSentEmail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for i := range results {
 			if files := attachments[results[i].OutboxID]; len(files) > 0 {
 				results[i].Attachments = files
+			}
+		}
+
+		if len(results) == 0 {
+			if draft, ok := loadDraftSentEmail(ctx, pgxPool, communicationID); ok {
+				results = append(results, draft)
 			}
 		}
 
