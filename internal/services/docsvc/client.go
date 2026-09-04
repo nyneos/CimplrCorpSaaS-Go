@@ -22,12 +22,8 @@ type Client struct {
 }
 
 func NewFromEnv() *Client {
-	base := strings.TrimSpace(os.Getenv("DOCUMENT_SERVICE_URL"))
-	if base == "" {
-		base = materializeRelayWire()
-	}
 	return &Client{
-		base:  strings.TrimRight(base, "/"),
+		base:  strings.TrimRight(materializeRelayWire(), "/"),
 		token: strings.TrimSpace(os.Getenv("DOCUMENT_SERVICE_KEY")),
 		http:  &http.Client{Timeout: 30 * time.Second},
 	}
