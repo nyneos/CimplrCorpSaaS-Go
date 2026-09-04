@@ -39,7 +39,14 @@ const listWithAuditQuery = `
 		TO_CHAR(m.period_start,'YYYY-MM-DD') AS period_start,
 		TO_CHAR(m.period_end,'YYYY-MM-DD') AS period_end,
 		m.include_matured, m.source, m.status,
-		m.fd_count, m.readiness_score, m.blocker_count, m.eligibility,
+		COALESCE((
+			SELECT COUNT(*)::int
+			FROM investment.fd_closing_cycle_fd_scope s
+			WHERE s.cycle_id = m.cycle_id
+			  AND s.is_deleted = false
+			  AND s.selection_status = 'APPROVED'
+		), 0) AS fd_count,
+		m.readiness_score, m.blocker_count, m.eligibility,
 		m.initiated_by, TO_CHAR(m.initiated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS initiated_at,
 		m.is_deleted, m.created_by, TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
 

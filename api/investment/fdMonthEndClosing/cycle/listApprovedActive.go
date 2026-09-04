@@ -14,13 +14,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// approvedActiveStatuses is the "eligible to lock/reopen" status set for the
-// generic cycle picker used by downstream screens (Lock Request, Reopen
-// Request, Evidence Pack forms, etc.). Kept as its own named constant, easy
-// to find/adjust, per the handler spec's explicit warning: different handoff
-// points may need different status sets — do not silently reuse this one for
-// a different picker without checking against the relevant mock screen first.
-var approvedActiveStatuses = []string{"IN_PROGRESS", "AWAITING_APPROVAL"}
+// approvedActiveStatuses is the "eligible for downstream work" status set for
+// cycle pickers (Checklist Work, Accrual Completion, Lock, Evidence Pack, etc.).
+// DRAFT is intentionally excluded. Callers must ALSO pass the approved-CREATE
+// gate below — status alone is not enough (scope add can flip DRAFT→IN_PROGRESS
+// before the cycle CREATE request is checker-approved).
+var approvedActiveStatuses = []string{"IN_PROGRESS", "AWAITING_APPROVAL", "REOPENED"}
 
 // ListApprovedActiveCycles handles POST /investment/fd-closing/cycle/list-approved-active.
 func ListApprovedActiveCycles(pool *pgxpool.Pool) http.HandlerFunc {
@@ -40,6 +39,15 @@ func ListApprovedActiveCycles(pool *pgxpool.Pool) http.HandlerFunc {
 		q += " AND m.status = ANY($" + strconv.Itoa(argIdx) + "::text[])"
 		args = append(args, approvedActiveStatuses)
 		argIdx++
+
+		// Gate: cycle CREATE must already be checker-approved. Pending CREATE
+		// cycles must not appear in Checklist / Accrual / Receipt / Lock pickers.
+		q += ` AND EXISTS (
+			SELECT 1 FROM investment.fd_closing_cycle_audit ca
+			WHERE ca.cycle_id = m.cycle_id
+			  AND ca.action_type = 'CREATE'
+			  AND ca.processing_status = 'APPROVED'
+		)`
 
 		if !scope.IsAdminOverride && len(scope.EntityIDs) > 0 {
 			q += " AND m.entity_id = ANY($" + strconv.Itoa(argIdx) + "::text[])"

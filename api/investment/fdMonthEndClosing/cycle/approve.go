@@ -142,6 +142,22 @@ func directApproveCycle(ctx context.Context, pool *pgxpool.Pool, cycleID, checke
 		); err != nil {
 			return fmt.Errorf("audit flip failed: %w", err)
 		}
+		// If FDs were already scoped while CREATE was pending, promote now.
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.fd_closing_cycle c
+			SET status = 'IN_PROGRESS'
+			WHERE c.cycle_id = $1
+			  AND c.status = 'DRAFT'
+			  AND EXISTS (
+				SELECT 1 FROM investment.fd_closing_cycle_fd_scope s
+				WHERE s.cycle_id = c.cycle_id
+				  AND s.is_deleted = false
+				  AND s.selection_status IN ('SELECTED', 'APPROVED')
+			  )`,
+			cycleID,
+		); err != nil {
+			return fmt.Errorf("create-approve status promotion failed: %w", err)
+		}
 	case "EDIT":
 		if err := ApplyEditToMaster(ctx, tx, cycleID, api.SystemIfBlank(checkerEmail), comment, "PENDING_EDIT_APPROVAL", true); err != nil {
 			return err

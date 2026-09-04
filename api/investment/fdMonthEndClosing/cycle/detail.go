@@ -49,7 +49,14 @@ func DetailCycle(pool *pgxpool.Pool) http.HandlerFunc {
 					TO_CHAR(period_start,'YYYY-MM-DD') AS period_start,
 					TO_CHAR(period_end,'YYYY-MM-DD') AS period_end,
 					include_matured, source, status,
-					fd_count, readiness_score, blocker_count, eligibility,
+					COALESCE((
+						SELECT COUNT(*)::int
+						FROM investment.fd_closing_cycle_fd_scope s
+						WHERE s.cycle_id = investment.fd_closing_cycle.cycle_id
+						  AND s.is_deleted = false
+						  AND s.selection_status = 'APPROVED'
+					), 0) AS fd_count,
+					readiness_score, blocker_count, eligibility,
 					initiated_by, TO_CHAR(initiated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS initiated_at,
 					is_deleted, created_by, TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
 				FROM investment.fd_closing_cycle

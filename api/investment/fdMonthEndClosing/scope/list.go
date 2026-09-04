@@ -3,6 +3,7 @@ package scope
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"CimplrCorpSaas/api"
@@ -78,51 +79,58 @@ const listWithAuditQuery = `
 	) aie ON true
 	WHERE m.is_deleted = false`
 
-// ListScope handles POST /investment/fd-closing/scope/list.
-// cycle_id is required — this endpoint renders one cycle's FD-scope grid, per
-// the handler spec's Section 2 List row.
+// ListScope handles POST /investment/fd-closing/scope/list. cycle_id scopes
+// to one cycle's FD-scope grid when supplied; omitted, it lists every scope
+// row across every cycle the caller's entity scope can see (the "All Scope
+// Selections" tab), entity-filtered the same way cycle/list.go does.
 func ListScope(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			CycleID string `json:"cycle_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			fdclosingcommon.RespondError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
-		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		req.CycleID = strings.TrimSpace(req.CycleID)
-		if req.CycleID == "" {
-			fdclosingcommon.RespondError(w, http.StatusBadRequest, "cycle_id is required")
-			return
-		}
 
 		ctx := r.Context()
-
-		var entityID string
-		if err := pool.QueryRow(ctx, `
-			SELECT entity_id FROM investment.fd_closing_cycle
-			WHERE cycle_id = $1 AND is_deleted = false`,
-			req.CycleID,
-		).Scan(&entityID); err != nil {
-			fdclosingcommon.RespondError(w, http.StatusNotFound, "Cycle not found")
-			return
-		}
-
 		scope := ctxutil.FromContext(ctx)
-		if !scope.HasEntityAccess(entityID) {
-			fdclosingcommon.RespondError(w, http.StatusForbidden,
-				"Entity ID '"+entityID+"' is not within your authorized access scope.")
-			return
+
+		q := strings.Replace(listWithAuditQuery, "$moduleCode$", "$1", 1)
+		args := []interface{}{moduleCode}
+		argIdx := 2
+
+		if req.CycleID != "" {
+			var entityID string
+			if err := pool.QueryRow(ctx, `
+				SELECT entity_id FROM investment.fd_closing_cycle
+				WHERE cycle_id = $1 AND is_deleted = false`,
+				req.CycleID,
+			).Scan(&entityID); err != nil {
+				fdclosingcommon.RespondError(w, http.StatusNotFound, "Cycle not found")
+				return
+			}
+			if !scope.HasEntityAccess(entityID) {
+				fdclosingcommon.RespondError(w, http.StatusForbidden,
+					"Entity ID '"+entityID+"' is not within your authorized access scope.")
+				return
+			}
+			q += " AND m.cycle_id = $" + strconv.Itoa(argIdx)
+			args = append(args, req.CycleID)
+			argIdx++
+		} else if !scope.IsAdminOverride && len(scope.EntityIDs) > 0 {
+			q += ` AND EXISTS (
+				SELECT 1 FROM investment.fd_closing_cycle c
+				WHERE c.cycle_id = m.cycle_id AND c.entity_id = ANY($` + strconv.Itoa(argIdx) + `::text[])
+			)`
+			args = append(args, scope.EntityIDs)
+			argIdx++
 		}
 
-		q := strings.Replace(listWithAuditQuery, "$moduleCode$", "$2", 1)
-		q += ` AND m.cycle_id = $1
-			ORDER BY GREATEST(
-				COALESCE(l.requested_at,'1970-01-01'::timestamp),
-				COALESCE(l.checker_at,'1970-01-01'::timestamp)
-			) DESC`
+		q += ` ORDER BY GREATEST(
+			COALESCE(l.requested_at,'1970-01-01'::timestamp),
+			COALESCE(l.checker_at,'1970-01-01'::timestamp)
+		) DESC`
 
-		rows, err := pool.Query(ctx, q, req.CycleID, moduleCode)
+		rows, err := pool.Query(ctx, q, args...)
 		if err != nil {
 			api.LogErrorForResponse(w, "[FDClosingScope] ListScope query: %v", err)
 			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrQueryFailed)

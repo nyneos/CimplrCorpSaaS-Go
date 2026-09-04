@@ -195,6 +195,18 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			input.FinancialPeriod = buildAccrualPeriod(input.AccrualPeriodStart)
 		}
 
+		// Closing cycle lock (LOCKED/CLOSED) blocks accrual re-runs for the
+		// same entity + overlapping period window — independent of the
+		// narrower fd_accrual_period_lock table.
+		if blocked, reason, lockErr := closingCycleBlocksAccrual(ctx, pgxPool, req.EntityID, input.AccrualPeriodStart, input.AccrualPeriodEnd); lockErr != nil {
+			api.LogError("[FDAccrual] CreateAccrualRun closing-lock check: %v", lockErr)
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+			return
+		} else if blocked {
+			api.RespondWithError(w, http.StatusConflict, reason)
+			return
+		}
+
 		draftRow := fdAccrualRow{
 			EntityID:           req.EntityID,
 			EntityName:         req.EntityName,
@@ -476,6 +488,23 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, code, msg)
 			return
 		}
+
+		var lockEntityID string
+		var lockPeriodStart, lockPeriodEnd time.Time
+		if err := pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(entity_id,''), accrual_period_start, accrual_period_end
+			FROM investment.fd_accrual_run WHERE run_id=$1`, req.RunID,
+		).Scan(&lockEntityID, &lockPeriodStart, &lockPeriodEnd); err == nil {
+			if blocked, reason, lockErr := closingCycleBlocksAccrual(ctx, pgxPool, lockEntityID, lockPeriodStart, lockPeriodEnd); lockErr != nil {
+				api.LogError("[FDAccrual] RunAccrual closing-lock check: %v", lockErr)
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+				return
+			} else if blocked {
+				api.RespondWithError(w, http.StatusConflict, reason)
+				return
+			}
+		}
+
 		runFields, runEntityID, pfErr := accrualRunPolicyFields(ctx, pgxPool, req.RunID)
 		if pfErr != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
@@ -4796,10 +4825,45 @@ var _ = strSliceToCSV // suppress unused warning
 
 // ─── Period Lock Status (TC-21) ───────────────────────────────────────────────
 
+// closingCycleBlocksAccrual returns true when a month/quarter-end closing cycle
+// for the entity overlaps [periodStart, periodEnd] and is LOCKED or CLOSED.
+// This is the handoff gate that prevents accrual re-runs after period close.
+func closingCycleBlocksAccrual(ctx context.Context, pool *pgxpool.Pool, entityID string, periodStart, periodEnd time.Time) (bool, string, error) {
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" || periodStart.IsZero() || periodEnd.IsZero() {
+		return false, "", nil
+	}
+	var cycleID, status, financialPeriod string
+	err := pool.QueryRow(ctx, `
+		SELECT cycle_id, status, financial_period
+		FROM investment.fd_closing_cycle
+		WHERE entity_id = $1
+		  AND is_deleted = false
+		  AND status IN ('LOCKED', 'CLOSED')
+		  AND period_start <= $3::date
+		  AND period_end >= $2::date
+		ORDER BY CASE status WHEN 'CLOSED' THEN 0 ELSE 1 END, period_end DESC
+		LIMIT 1`,
+		entityID, periodStart, periodEnd,
+	).Scan(&cycleID, &status, &financialPeriod)
+	if err == pgx.ErrNoRows {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+	reason := fmt.Sprintf(
+		"Accrual is blocked: closing cycle %s (%s) is %s for this entity/period. Reopen the cycle before re-running accrual.",
+		cycleID, financialPeriod, status,
+	)
+	return true, reason, nil
+}
+
 // CheckPeriodLockStatus reports whether a financial period (YYYY-MM) is locked
 // for FINAL accrual runs. A period is considered locked when any FINAL run for
 // the same entity + period has already been APPROVED/POSTED — i.e. once the
 // books are closed, you cannot create another FINAL run for that period.
+// It also returns locked when a matching fd_closing_cycle is LOCKED/CLOSED.
 //
 // Request:
 //
@@ -4833,6 +4897,27 @@ func CheckPeriodLockStatus(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, code, msg)
 			return
 		}
+
+		// Closing-cycle lock takes precedence over FINAL-run lock.
+		if entityID := strings.TrimSpace(req.EntityID); entityID != "" {
+			if t, err := time.Parse("2006-01", fp); err == nil {
+				start := time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+				end := start.AddDate(0, 1, -1)
+				if blocked, reason, lockErr := closingCycleBlocksAccrual(ctx, pgxPool, entityID, start, end); lockErr != nil {
+					api.LogError("[FDAccrual] CheckPeriodLockStatus closing-lock: %v", lockErr)
+				} else if blocked {
+					api.RespondWithPayload(w, true, "", map[string]interface{}{
+						"is_locked":        true,
+						"financial_period": fp,
+						"entity_id":        req.EntityID,
+						"reason":           reason,
+						"lock_source":      "fd_closing_cycle",
+					})
+					return
+				}
+			}
+		}
+
 		var posted int
 		var lastStatus, lastRunID string
 		query := `

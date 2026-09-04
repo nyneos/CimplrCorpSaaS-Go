@@ -1,12 +1,9 @@
 // Package scope implements the fd_closing_cycle_fd_scope handlers — Section 2
-// of database/2026-08-27/HANDLER_SPEC_fd_month_quarter_end_closing.md. Unlike
-// cycle's own CREATE (self-approved, no checker step), scope Add is REAL
-// maker-checker: a user selects an FD into a cycle, a checker approves or
-// rejects it, and approval of a CREATE also seeds the 5 fd_closing_checklist_item
-// rows for that (cycle, fd) pair. Every handler follows the same conventions as
-// ../cycle (pgxpool, ctx := r.Context(), api.LogErrorForResponse for
-// server-side error logs, RespondEnvelope* via fdclosingcommon — never legacy
-// RespondWith*).
+// of database/2026-08-27/HANDLER_SPEC_fd_month_quarter_end_closing.md.
+// Scope ADD is applied immediately with checklist seed (same tx as create).
+// Scope REMOVE remains maker-checker. Every handler follows the same conventions
+// as ../cycle (pgxpool, ctx := r.Context(), api.LogErrorForResponse,
+// RespondEnvelope* via fdclosingcommon — never legacy RespondWith*).
 package scope
 
 import (
@@ -19,7 +16,6 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	fdclosingcommon "CimplrCorpSaas/api/investment/fdMonthEndClosing/common"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -74,19 +70,12 @@ var checklistSteps = []checklistStep{
 }
 
 // CreateScope handles both POST /investment/fd-closing/scope/create (single
-// fd_id) and POST /investment/fd-closing/scope/bulk-create (fd_ids) — same
-// handler accepts one or many, matching cycle's approve/reject bulk shape and
-// fdBookingWorkbench's DeleteBooking validate-then-bulk-insert pattern:
-// eligibility for every fd_id is checked with read-only queries BEFORE the
-// write transaction opens, so the transaction itself only ever contains valid
-// inserts (no per-statement abort-on-error inside the tx).
+// fd_id) and POST /investment/fd-closing/scope/bulk-create (fd_ids).
 //
-// Real maker-checker: inserts the scope row directly as SELECTED (this is the
-// "the FD is now proposed into the cycle" state, not yet effective) and a
-// PENDING_APPROVAL audit row, then triggers approvalengine.CreateInstance for
-// TxScopeAdd. AutoApplyIfUnpinned is deliberately false — see
-// applyScopeAddApproval's doc comment for why the generic engine auto-apply
-// cannot be trusted to also flip selection_status/seed checklist rows.
+// Scope ADD is applied immediately with the cycle/checklist create flow
+// (no separate maker-checker for ADD): inserts APPROVED scope rows, APPROVED
+// audit rows, and seeds the 5 checklist items in the same transaction.
+// REMOVE remains maker-checker via DeleteScope.
 func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -135,17 +124,11 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Immutability guard: mirrors cycle/update.go's "no further edits once
-		// CLOSED" — a closed cycle's FD scope is final, per the handler spec's
-		// Section 7 handoff-gate shape (no update/delete route once terminal).
-		if cycleStatus == "CLOSED" {
-			fdclosingcommon.RespondError(w, http.StatusBadRequest, "Cannot add FDs to a closed cycle")
+		if cycleStatus == "CLOSED" || cycleStatus == "LOCKED" {
+			fdclosingcommon.RespondError(w, http.StatusBadRequest, "Cannot add FDs to a "+strings.ToLower(cycleStatus)+" cycle")
 			return
 		}
 
-		// Read-only eligibility pass — excludes fd_ids already in (non-deleted)
-		// scope for this cycle, and validates each remaining fd_id against
-		// fd_master (must exist, not deleted, and belong to the cycle's entity).
 		alreadyInScope := map[string]struct{}{}
 		{
 			rows, err := pool.Query(ctx, `
@@ -171,10 +154,11 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 			rows.Close()
 		}
 
-		fdEntity := map[string]string{}
+		type fdInfo struct{ entityID, status string }
+		fdMeta := map[string]fdInfo{}
 		{
 			rows, err := pool.Query(ctx, `
-				SELECT fd_id, entity_id FROM investment.fd_master
+				SELECT fd_id, entity_id, COALESCE(fd_status,'') FROM investment.fd_master
 				WHERE fd_id = ANY($1::text[]) AND COALESCE(is_deleted,false) = false`,
 				fdIDs,
 			)
@@ -184,14 +168,14 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			for rows.Next() {
-				var fdID, entityID string
-				if err := rows.Scan(&fdID, &entityID); err != nil {
+				var fdID, entityID, status string
+				if err := rows.Scan(&fdID, &entityID, &status); err != nil {
 					rows.Close()
 					api.LogErrorForResponse(w, "[FDClosingScope] CreateScope fd_master scan: %v", err)
 					fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrRowError)
 					return
 				}
-				fdEntity[fdID] = entityID
+				fdMeta[fdID] = fdInfo{entityID: entityID, status: status}
 			}
 			rows.Close()
 		}
@@ -204,13 +188,17 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 				errs = append(errs, fdID+": already in scope for this cycle")
 				continue
 			}
-			entityID, found := fdEntity[fdID]
+			meta, found := fdMeta[fdID]
 			if !found {
 				errs = append(errs, fdID+": FD not found or inactive")
 				continue
 			}
-			if entityID != cycleEntityID {
+			if meta.entityID != cycleEntityID {
 				errs = append(errs, fdID+": FD entity does not match cycle entity")
+				continue
+			}
+			if err := validateEligibleStatus(meta.status); err != nil {
+				errs = append(errs, fdID+": "+err.Error())
 				continue
 			}
 			eligible = append(eligible, eligibleFD{fdID: fdID})
@@ -232,12 +220,14 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 
 		type createdScope struct{ scopeID, fdID string }
 		created := make([]createdScope, 0, len(eligible))
+		actorEmail := api.SystemIfBlank(actor.Email)
+		actorIP := api.SystemIfBlank(api.ClientIPFromContext(ctx))
 		for _, e := range eligible {
 			var scopeID string
 			err := tx.QueryRow(ctx, `
 				INSERT INTO investment.fd_closing_cycle_fd_scope (
-					cycle_id, fd_id, selection_status, added_by
-				) VALUES ($1,$2,'SELECTED',$3)
+					cycle_id, fd_id, selection_status, added_by, approved_by, approved_at
+				) VALUES ($1,$2,'APPROVED',$3,$3,now())
 				RETURNING scope_id`,
 				req.CycleID, e.fdID, actor.Email,
 			).Scan(&scopeID)
@@ -249,15 +239,65 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if _, err = tx.Exec(ctx, `
 				INSERT INTO investment.fd_closing_cycle_fd_scope_audit (
-					scope_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
-				) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now(),$4)`,
-				scopeID, nullIfEmpty(req.Reason), api.SystemIfBlank(actor.Email), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
+					scope_id, action_type, processing_status, reason,
+					requested_by, requested_at, requested_ip,
+					checker_by, checker_at, checker_comment
+				) VALUES ($1,'CREATE','APPROVED',$2,$3,now(),$4,$3,now(),$5)`,
+				scopeID, nullIfEmpty(req.Reason), actorEmail, actorIP,
+				"Applied with cycle/checklist create (no separate scope ADD approval)",
 			); err != nil {
 				api.LogErrorForResponse(w, "[FDClosingScope] CreateScope audit insert for scope=%s: %v", scopeID, err)
 				fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed)
 				return
 			}
+
+			for _, step := range checklistSteps {
+				if _, err = tx.Exec(ctx, `
+					INSERT INTO investment.fd_closing_checklist_item (
+						cycle_id, fd_id, scope_id, step_code, step_name, owner_role,
+						sequence, is_critical, depends_on_step_code, status, created_at
+					) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'NOT_STARTED',now())
+					ON CONFLICT (cycle_id, fd_id, step_code) DO NOTHING`,
+					req.CycleID, e.fdID, scopeID, step.StepCode, step.StepName, step.OwnerRole,
+					step.Sequence, step.IsCritical, step.DependsOnStep,
+				); err != nil {
+					api.LogErrorForResponse(w, "[FDClosingScope] CreateScope checklist seed scope=%s step=%s: %v",
+						scopeID, step.StepCode, err)
+					fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to seed checklist items")
+					return
+				}
+			}
+
 			created = append(created, createdScope{scopeID: scopeID, fdID: e.fdID})
+		}
+
+		if _, err = tx.Exec(ctx, `
+			UPDATE investment.fd_closing_cycle
+			SET status = 'IN_PROGRESS'
+			WHERE cycle_id = $1
+			  AND status = 'DRAFT'
+			  AND EXISTS (
+				SELECT 1 FROM investment.fd_closing_cycle_audit ca
+				WHERE ca.cycle_id = $1
+				  AND ca.action_type = 'CREATE'
+				  AND ca.processing_status = 'APPROVED'
+			  )`,
+			req.CycleID,
+		); err != nil {
+			api.LogErrorForResponse(w, "[FDClosingScope] CreateScope cycle status transition: %v", err)
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to update cycle status")
+			return
+		}
+
+		if err := fdclosingcommon.RefreshCycleFdCount(ctx, tx, req.CycleID); err != nil {
+			api.LogErrorForResponse(w, "[FDClosingScope] CreateScope fd_count refresh: %v", err)
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to refresh FD count")
+			return
+		}
+		if err := fdclosingcommon.RefreshCycleReadiness(ctx, tx, req.CycleID); err != nil {
+			api.LogErrorForResponse(w, "[FDClosingScope] CreateScope readiness refresh: %v", err)
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to refresh readiness")
+			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
@@ -269,49 +309,17 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 		results := make([]map[string]interface{}, 0, len(created)+len(errs))
 		for _, c := range created {
 			results = append(results, map[string]interface{}{
-				"success": true, "fd_id": c.fdID, "scope_id": c.scopeID, "status": "PENDING_APPROVAL",
+				"success": true, "fd_id": c.fdID, "scope_id": c.scopeID, "status": "APPROVED",
 			})
 		}
 		for _, e := range errs {
 			results = append(results, map[string]interface{}{"success": false, "error": e})
 		}
-		fdclosingcommon.RespondSuccess(w, "FD(s) submitted for scope approval", map[string]interface{}{
+		fdclosingcommon.RespondSuccess(w, "FD(s) added to scope; checklist seeded", map[string]interface{}{
 			"cycle_id": req.CycleID, "results": results,
 		})
-		api.LogInfo("[FDClosingScope] CreateScope: cycle=%s created=%d errors=%d by=%s",
+		api.LogInfo("[FDClosingScope] CreateScope (immediate): cycle=%s created=%d errors=%d by=%s",
 			req.CycleID, len(created), len(errs), actor.Email)
-
-		entity, actorEmail, actorUserID := cycleEntityID, actor.Email, actor.UserID
-		for _, c := range created {
-			scopeID, fdID := c.scopeID, c.fdID
-			runEngineInBackground(func(bgCtx context.Context) {
-				instID, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-					ModuleCode:          moduleCode,
-					EntityCode:          entity,
-					TransactionType:     TxScopeAdd,
-					RecordID:            scopeID,
-					RecordTable:         scopeTable,
-					AuditTable:          scopeAuditTable,
-					AuditIDColumn:       "scope_id",
-					ActionType:          "CREATE",
-					SubmittedBy:         actorUserID,
-					SubmittedByEmail:    actorEmail,
-					RequirePinnedMatrix: true,
-					// No auto-apply, matrix or not: every scope addition must wait
-					// for an explicit /approve call. When no matrix is pinned,
-					// instID=="" and approve.go's own direct fallback (which also
-					// calls applyScopeAddApproval) is what actually applies it.
-					AutoApplyIfUnpinned: false,
-				})
-				if err != nil {
-					api.LogError("[FDClosingScope] CreateInstance(ADD) failed for scope %s (fd=%s): %v", scopeID, fdID, err)
-					return
-				}
-				if instID != "" {
-					api.LogInfo("[FDClosingScope] CreateInstance(ADD) %s → scope %s PENDING_APPROVAL", instID, scopeID)
-				}
-			})
-		}
 	}
 }
 
@@ -382,18 +390,31 @@ func applyScopeAddApproval(ctx context.Context, tx pgx.Tx, scopeID, checkerEmail
 		}
 	}
 
-	// The closing process genuinely begins once the first FD is approved into
-	// scope — move the cycle out of DRAFT here. Without this, DRAFT->IN_PROGRESS
-	// has no other trigger anywhere in the module, and lock/request.go requires
-	// IN_PROGRESS, which would otherwise be permanently unreachable (confirmed
-	// via curl testing — a freshly created cycle could never be locked/closed).
+	// Move DRAFT → IN_PROGRESS only after CREATE is approved AND first FD is
+	// in scope. Do not promote a still-pending CREATE cycle into work screens.
 	if _, err := tx.Exec(ctx, `
 		UPDATE investment.fd_closing_cycle
 		SET status = 'IN_PROGRESS'
-		WHERE cycle_id = $1 AND status = 'DRAFT'`,
+		WHERE cycle_id = $1
+		  AND status = 'DRAFT'
+		  AND EXISTS (
+			SELECT 1 FROM investment.fd_closing_cycle_audit ca
+			WHERE ca.cycle_id = $1
+			  AND ca.action_type = 'CREATE'
+			  AND ca.processing_status = 'APPROVED'
+		  )`,
 		cycleID,
 	); err != nil {
 		return fmt.Errorf("applyScopeAddApproval cycle status transition: %w", err)
+	}
+
+	// Keep cached fd_count + readiness in sync (list/detail also compute live
+	// counts; this heals the master row for any other reader).
+	if err := fdclosingcommon.RefreshCycleFdCount(ctx, tx, cycleID); err != nil {
+		return fmt.Errorf("applyScopeAddApproval fd_count refresh: %w", err)
+	}
+	if err := fdclosingcommon.RefreshCycleReadiness(ctx, tx, cycleID); err != nil {
+		return fmt.Errorf("applyScopeAddApproval readiness refresh: %w", err)
 	}
 
 	if flipAuditStatus {

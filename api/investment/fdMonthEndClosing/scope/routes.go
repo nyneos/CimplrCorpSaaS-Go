@@ -42,4 +42,6 @@ func RegisterScopeRoutes(mux *http.ServeMux, pool *pgxpool.Pool, mid Middleware)
 		mid(http.HandlerFunc(RejectScope(pool))))
 	mux.Handle("/investment/fd-closing/scope/list",
 		mid(http.HandlerFunc(ListScope(pool))))
+	mux.Handle("/investment/fd-closing/scope/list-eligible",
+		mid(http.HandlerFunc(ListEligibleFDs(pool))))
 }
