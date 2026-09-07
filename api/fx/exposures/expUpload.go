@@ -1445,7 +1445,7 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Approve remaining headers
 		if len(toApprove) > 0 {
-			appRows, err := tx.Query(ctx, `UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approved_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, approvalComment, toApprove)
+			appRows, err := tx.Query(ctx, `UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approval_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, approvalComment, toApprove)
 			if err != nil {
 				logger.LogError("[WARN] approving exposure headers failed: %v", err)
 				approvalErr = err
