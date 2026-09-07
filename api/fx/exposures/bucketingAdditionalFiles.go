@@ -31,6 +31,7 @@ func DownloadExposureBucketingPackageZipHandler(pool *pgxpool.Pool) http.Handler
 	return additionalfiles.NewPackageZipHandler(pool, exposureBucketingAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
 		ModuleLabel: "FX Exposure Bucketing",
 		IDField:     "exposure_header_id",
+		LoadMain:    loadExposureMainPackageFile,
 	})
 }
 
