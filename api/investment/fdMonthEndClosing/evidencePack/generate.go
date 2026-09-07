@@ -151,21 +151,28 @@ func GenerateEvidencePack(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Fire-and-forget: FireDmsEvent schedules its own goroutine and never
-		// blocks. It is a silent no-op until a dms_svc.generation_rule row is
-		// seeded for module=INVESTMENT_FD/sub_module=FD_CLOSING_EVIDENCE_PACK/
-		// trigger=POST_CREATE (see the const block above) — seeding that row is
-		// out of scope here (DB config, not handler code).
+		// Prefer DMS when a generation_rule is seeded; still materialise a
+		// downloadable ZIP synchronously so demo/local works with no DMS hits.
 		dmsjobs.FireDmsEvent(pool, dmsModuleCode, dmsSubModuleCode, dmsTriggerType, []string{packID}, actor.Email)
 
-		fdclosingcommon.RespondSuccess(w, "Evidence pack generation started", map[string]interface{}{
+		status := "GENERATING"
+		var s3Key interface{}
+		if key, matErr := MaterializeEvidencePack(ctx, pool, packID); matErr != nil {
+			api.LogErrorForResponse(w, "[FDClosingEvidencePack] sync materialize failed pack=%s: %v", packID, matErr)
+			// Pack row exists; UI can retry download which self-heals via materialize.
+		} else {
+			status = "READY"
+			s3Key = key
+		}
+
+		fdclosingcommon.RespondSuccess(w, "Evidence pack generated", map[string]interface{}{
 			"pack_id":  packID,
 			"cycle_id": req.CycleID,
 			"format":   req.Format,
-			"s3_key":   nil,
-			"status":   "GENERATING",
+			"s3_key":   s3Key,
+			"status":   status,
 		})
-		api.LogInfo("[FDClosingEvidencePack] Pack generation requested: pack_id=%s cycle=%s by=%s", packID, req.CycleID, actor.Email)
+		api.LogInfo("[FDClosingEvidencePack] Pack generation requested: pack_id=%s cycle=%s status=%s by=%s", packID, req.CycleID, status, actor.Email)
 	}
 }
 

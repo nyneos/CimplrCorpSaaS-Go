@@ -16,7 +16,7 @@ type Middleware func(http.Handler) http.Handler
 // RegisterCycleRoutes registers every /investment/fd-closing/cycle/* route on
 // mux. Route paths follow CLAUDE.md's standard action vocabulary: /create,
 // /update (not /edit), /delete, /approve + /bulk-approve, /reject +
-// /bulk-reject, /list, /list-approved-active, /detail, /audit. All POST —
+// /bulk-reject, /list, /list-approved-active, /list-reopenable, /detail, /audit. All POST —
 // every parameter travels in the JSON body, per this repo's convention.
 func RegisterCycleRoutes(mux *http.ServeMux, pool *pgxpool.Pool, mid Middleware) {
 	mux.Handle("/investment/fd-closing/cycle/create",
@@ -39,6 +39,8 @@ func RegisterCycleRoutes(mux *http.ServeMux, pool *pgxpool.Pool, mid Middleware)
 		mid(http.HandlerFunc(ListCycles(pool))))
 	mux.Handle("/investment/fd-closing/cycle/list-approved-active",
 		mid(http.HandlerFunc(ListApprovedActiveCycles(pool))))
+	mux.Handle("/investment/fd-closing/cycle/list-reopenable",
+		mid(http.HandlerFunc(ListReopenableCycles(pool))))
 	mux.Handle("/investment/fd-closing/cycle/detail",
 		mid(http.HandlerFunc(DetailCycle(pool))))
 	mux.Handle("/investment/fd-closing/cycle/audit",

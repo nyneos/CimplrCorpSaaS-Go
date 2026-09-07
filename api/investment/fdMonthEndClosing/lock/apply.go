@@ -85,20 +85,51 @@ func ApplyLock(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		var entityID string
+		var entityID, eligibility, cycleStatus string
+		var isDeleted bool
 		err = tx.QueryRow(ctx, `
-			SELECT entity_id FROM investment.fd_closing_cycle WHERE cycle_id = $1 AND is_deleted = false FOR UPDATE`,
+			SELECT entity_id, COALESCE(eligibility,''), COALESCE(status,''), is_deleted
+			FROM investment.fd_closing_cycle WHERE cycle_id = $1 AND is_deleted = false FOR UPDATE`,
 			cycleID,
-		).Scan(&entityID)
+		).Scan(&entityID, &eligibility, &cycleStatus, &isDeleted)
 		if err != nil {
 			fdclosingcommon.RespondError(w, http.StatusNotFound, "Cycle not found")
 			return
 		}
+		_ = isDeleted
 
 		scope := ctxutil.FromContext(ctx)
 		if !scope.HasEntityAccess(entityID) {
 			fdclosingcommon.RespondError(w, http.StatusForbidden,
 				"Entity ID '"+entityID+"' is not within your authorized access scope.")
+			return
+		}
+
+		// Recompute readiness inside the apply transaction so a stale
+		// READY_TO_CLOSE cache cannot lock an incomplete checklist (E2E
+		// Anmol demo previously applied HARD lock at 50% / NOT_READY).
+		if err = fdclosingcommon.RefreshCycleReadiness(ctx, tx, cycleID); err != nil {
+			api.LogErrorForResponse(w, "[FDClosingLock] ApplyLock readiness refresh: %v", err)
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to refresh cycle readiness")
+			return
+		}
+		if err = tx.QueryRow(ctx, `
+			SELECT COALESCE(eligibility,''), COALESCE(status,'')
+			FROM investment.fd_closing_cycle WHERE cycle_id = $1`,
+			cycleID,
+		).Scan(&eligibility, &cycleStatus); err != nil {
+			api.LogErrorForResponse(w, "[FDClosingLock] ApplyLock re-read eligibility: %v", err)
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrQueryFailed)
+			return
+		}
+		if eligibility != "READY_TO_CLOSE" {
+			fdclosingcommon.RespondError(w, http.StatusBadRequest,
+				"Cannot apply lock — cycle eligibility is "+eligibility+" (need READY_TO_CLOSE). Complete every checklist step first.")
+			return
+		}
+		if cycleStatus != "IN_PROGRESS" && cycleStatus != "AWAITING_APPROVAL" && cycleStatus != "REOPENED" {
+			fdclosingcommon.RespondError(w, http.StatusBadRequest,
+				"Cannot apply lock — cycle status is "+cycleStatus)
 			return
 		}
 

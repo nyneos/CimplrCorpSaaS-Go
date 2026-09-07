@@ -52,8 +52,11 @@ func RefreshCycleReadiness(ctx context.Context, tx pgx.Tx, cycleID string) error
 				     ELSE ROUND(COUNT(*) FILTER (WHERE status = 'COMPLETED') * 100.0 / COUNT(*), 2)
 				END AS readiness_score,
 				COUNT(*) FILTER (WHERE is_critical = true AND status <> 'COMPLETED') AS critical_incomplete
-			FROM investment.fd_closing_checklist_item
-			WHERE cycle_id = $1
+			FROM investment.fd_closing_checklist_item i
+			JOIN investment.fd_closing_cycle_fd_scope s
+			  ON s.scope_id = i.scope_id
+			 AND s.is_deleted = false
+			WHERE i.cycle_id = $1
 		) agg
 		WHERE c.cycle_id = $1`,
 		cycleID,

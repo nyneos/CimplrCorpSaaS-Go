@@ -172,9 +172,11 @@ func CreateCycle(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_closing_cycle_audit (
-				cycle_id, action_type, processing_status, requested_by, requested_at, requested_ip
-			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`,
+				cycle_id, action_type, processing_status, requested_by, requested_at, requested_ip,
+				new_bank_id, new_currency_code, new_include_matured
+			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3,$4,$5,$6)`,
 			cycleID, api.SystemIfBlank(actor.Email), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
+			nullIfEmpty(req.BankID), nullIfEmpty(req.CurrencyCode), includeMatured,
 		); err != nil {
 			api.LogErrorForResponse(w, "[FDClosingCycle] CreateCycle audit insert: %v", err)
 			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed)
@@ -216,7 +218,17 @@ func CreateCycle(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if instID != "" {
 				api.LogInfo("[FDClosingCycle] CreateInstance(CREATE) %s → cycle %s PENDING_APPROVAL", instID, newCycleID)
+				return
 			}
+			// No approval matrix — stamp CREATE approved so scope-add can
+			// promote DRAFT→IN_PROGRESS (otherwise cycles stay stuck in DRAFT
+			// forever with processing_status still PENDING_APPROVAL).
+			if approveErr := directApproveCycle(bgCtx, pool, newCycleID, actorEmail,
+				"Applied automatically — no approval matrix configured"); approveErr != nil {
+				api.LogError("[FDClosingCycle] no-matrix CREATE approve failed for cycle=%s: %v", newCycleID, approveErr)
+				return
+			}
+			api.LogInfo("[FDClosingCycle] no-matrix CREATE approved for cycle=%s", newCycleID)
 		})
 	}
 }
@@ -329,8 +341,8 @@ func ApplyEditToMaster(ctx context.Context, tx pgx.Tx, cycleID, checkerEmail, ch
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE investment.fd_closing_cycle
-		SET bank_id         = COALESCE($2, bank_id),
-		    currency_code   = COALESCE($3, currency_code),
+		SET bank_id         = $2,
+		    currency_code   = $3,
 		    include_matured = COALESCE($4, include_matured),
 		    updated_by      = $5,
 		    updated_at      = now()

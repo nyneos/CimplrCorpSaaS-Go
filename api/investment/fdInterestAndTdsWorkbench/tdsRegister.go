@@ -1415,6 +1415,8 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 			ReceiptID string `json:"receipt_id"`
 			TDSID     string `json:"tds_id"`
 			FDID      string `json:"fd_id"`
+			FromDate  string `json:"from_date"` // optional YYYY-MM-DD — filter je.entry_date
+			ToDate    string `json:"to_date"`   // optional YYYY-MM-DD — filter je.entry_date
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1467,6 +1469,19 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 			filterVal = req.FDID
 		}
 
+		args := []interface{}{filterVal}
+		dateClause := ""
+		fromDate := strings.TrimSpace(req.FromDate)
+		toDate := strings.TrimSpace(req.ToDate)
+		if fromDate != "" {
+			args = append(args, fromDate)
+			dateClause += fmt.Sprintf(" AND je.entry_date >= $%d::date", len(args))
+		}
+		if toDate != "" {
+			args = append(args, toDate)
+			dateClause += fmt.Sprintf(" AND je.entry_date <= $%d::date", len(args))
+		}
+
 		rows, err := pool.Query(ctx, `
 			SELECT
 				je.entry_id, je.activity_id, je.entity_id, je.entity_name,
@@ -1481,8 +1496,8 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 				jl.folio_id, jl.demat_id
 			FROM investment.accounting_journal_entry je
 			LEFT JOIN investment.accounting_journal_entry_line jl ON jl.entry_id = je.entry_id
-			WHERE `+filterCol+` = $1 AND je.is_deleted = false
-			ORDER BY je.entry_date DESC, jl.line_number ASC`, filterVal)
+			WHERE `+filterCol+` = $1 AND je.is_deleted = false`+dateClause+`
+			ORDER BY je.entry_date DESC, jl.line_number ASC`, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Journal query failed: "+err.Error())
 			return

@@ -175,11 +175,24 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_closing_checklist_item_audit (
 				item_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip,
-				checker_by, checker_at,
-				old_status, old_blocked_comment, old_exception_count
-			) VALUES ($1,'EDIT','APPROVED',$2,$3,now(),$4,$3,now(),$5,$6,$7)`,
-			req.ItemID, nullIfEmpty(req.Reason), api.SystemIfBlank(actor.Email), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
+				checker_by, checker_at, checker_comment,
+				old_status, old_blocked_comment, old_exception_count,
+				new_status, new_blocked_comment, new_exception_count,
+				new_evidence_ref, new_evidence_type
+			) VALUES (
+				$1,'EDIT','APPROVED',$2,$3,now(),$4,$3,now(),$5,
+				$6,$7,$8,
+				$9,$10,$11,
+				$12,$13
+			)`,
+			req.ItemID,
+			nullIfEmpty(req.Reason),
+			api.SystemIfBlank(actor.Email),
+			api.SystemIfBlank(api.ClientIPFromContext(ctx)),
+			"Checklist status applied immediately (no maker-checker; same as design — not FD Booking)",
 			oldStatus, oldBlockedComment, oldExceptionCount,
+			req.Status, blockedComment, exceptionCount,
+			evidenceRef, evidenceType,
 		); err != nil {
 			api.LogErrorForResponse(w, "[FDClosingChecklist] UpdateChecklistItem audit insert: %v", err)
 			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed)
@@ -236,17 +249,19 @@ func recomputeCycleReadiness(ctx context.Context, tx pgx.Tx, cycleID string) err
 		    readiness_checked_at = now()
 		FROM (
 			SELECT
-				cycle_id,
+				i.cycle_id,
 				COUNT(*) AS total_count,
-				COUNT(*) FILTER (WHERE status = 'COMPLETED') AS completed_count,
-				COUNT(*) FILTER (WHERE status = 'BLOCKED') AS blocker_count,
+				COUNT(*) FILTER (WHERE i.status = 'COMPLETED') AS completed_count,
+				COUNT(*) FILTER (WHERE i.status = 'BLOCKED') AS blocker_count,
 				CASE WHEN COUNT(*) = 0 THEN 0
-				     ELSE ROUND(COUNT(*) FILTER (WHERE status = 'COMPLETED') * 100.0 / COUNT(*), 2)
+				     ELSE ROUND(COUNT(*) FILTER (WHERE i.status = 'COMPLETED') * 100.0 / COUNT(*), 2)
 				END AS readiness_score,
-				COUNT(*) FILTER (WHERE is_critical = true AND status <> 'COMPLETED') AS critical_incomplete
-			FROM investment.fd_closing_checklist_item
-			WHERE cycle_id = $1
-			GROUP BY cycle_id
+				COUNT(*) FILTER (WHERE i.is_critical = true AND i.status <> 'COMPLETED') AS critical_incomplete
+			FROM investment.fd_closing_checklist_item i
+			JOIN investment.fd_closing_cycle_fd_scope s
+			  ON s.scope_id = i.scope_id AND s.is_deleted = false
+			WHERE i.cycle_id = $1
+			GROUP BY i.cycle_id
 		) agg
 		WHERE c.cycle_id = $1 AND c.cycle_id = agg.cycle_id`,
 		cycleID,

@@ -29,8 +29,21 @@ const checklistAuditSelect = `
 		COALESCE(a.reason,'') AS reason,
 		COALESCE(a.old_status,'') AS old_status,
 		COALESCE(a.old_blocked_comment,'') AS old_blocked_comment,
-		COALESCE(a.old_exception_count,0) AS old_exception_count
-	FROM investment.fd_closing_checklist_item_audit a`
+		COALESCE(a.old_exception_count,0) AS old_exception_count,
+		COALESCE(a.new_status,'') AS new_status,
+		COALESCE(a.new_blocked_comment,'') AS new_blocked_comment,
+		COALESCE(a.new_exception_count,0) AS new_exception_count,
+		COALESCE(a.new_evidence_ref,'') AS new_evidence_ref,
+		COALESCE(a.new_evidence_type,'') AS new_evidence_type,
+		COALESCE(i.fd_id,'') AS fd_id,
+		COALESCE(i.step_code,'') AS step_code,
+		COALESCE(i.step_name,'') AS step_name,
+		COALESCE(i.cycle_id,'') AS cycle_id,
+		COALESCE(i.evidence_ref,'') AS evidence_ref,
+		COALESCE(i.evidence_type,'') AS evidence_type,
+		COALESCE(i.status,'') AS item_status
+	FROM investment.fd_closing_checklist_item_audit a
+	JOIN investment.fd_closing_checklist_item i ON i.item_id = a.item_id`
 
 // AuditChecklistItem handles POST /investment/fd-closing/checklist/audit — a
 // standalone paginated audit-trail endpoint pairing with the shared frontend
@@ -40,8 +53,9 @@ const checklistAuditSelect = `
 func AuditChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			ItemID string `json:"item_id"`
-			Limit  int    `json:"limit"`
+			ItemID  string `json:"item_id"`
+			CycleID string `json:"cycle_id"`
+			Limit   int    `json:"limit"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req) // body is optional for audit
 		limit := req.Limit
@@ -56,7 +70,6 @@ func AuditChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 		var args []interface{}
 		if itemID := strings.TrimSpace(req.ItemID); itemID != "" {
 			q = checklistAuditSelect + `
-				JOIN investment.fd_closing_checklist_item i ON i.item_id = a.item_id
 				JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 				WHERE a.item_id = $1`
 			args = append(args, itemID)
@@ -65,9 +78,22 @@ func AuditChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 				q += " AND c.entity_id = ANY($" + strconv.Itoa(len(args)) + "::text[])"
 			}
 			q += " ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC"
+			args = append(args, limit)
+			q += " LIMIT $" + strconv.Itoa(len(args))
+		} else if cycleID := strings.TrimSpace(req.CycleID); cycleID != "" {
+			q = checklistAuditSelect + `
+				JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
+				WHERE i.cycle_id = $1`
+			args = append(args, cycleID)
+			if !scope.IsAdminOverride && len(scope.EntityIDs) > 0 {
+				args = append(args, scope.EntityIDs)
+				q += " AND c.entity_id = ANY($" + strconv.Itoa(len(args)) + "::text[])"
+			}
+			q += " ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC"
+			args = append(args, limit)
+			q += " LIMIT $" + strconv.Itoa(len(args))
 		} else {
 			q = checklistAuditSelect + `
-				JOIN investment.fd_closing_checklist_item i ON i.item_id = a.item_id
 				JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 				WHERE 1=1`
 			if !scope.IsAdminOverride && len(scope.EntityIDs) > 0 {

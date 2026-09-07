@@ -33,7 +33,9 @@ func ListEligibleFDs(pool *pgxpool.Pool) http.HandlerFunc {
 			PeriodStart    string `json:"period_start"`
 			PeriodEnd      string `json:"period_end"`
 			IncludeMatured *bool  `json:"include_matured"`
-			CycleID        string `json:"cycle_id"` // optional — exclude FDs already in this cycle
+			BankID         string `json:"bank_id"`       // optional scope filter
+			CurrencyCode   string `json:"currency_code"` // accepted; fd_master has no currency column today
+			CycleID        string `json:"cycle_id"`      // optional — exclude FDs already in this cycle
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			fdclosingcommon.RespondError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -42,6 +44,8 @@ func ListEligibleFDs(pool *pgxpool.Pool) http.HandlerFunc {
 		req.EntityID = strings.TrimSpace(req.EntityID)
 		req.PeriodStart = strings.TrimSpace(req.PeriodStart)
 		req.PeriodEnd = strings.TrimSpace(req.PeriodEnd)
+		req.BankID = strings.TrimSpace(req.BankID)
+		req.CurrencyCode = strings.TrimSpace(req.CurrencyCode)
 		req.CycleID = strings.TrimSpace(req.CycleID)
 		if req.EntityID == "" || req.PeriodStart == "" || req.PeriodEnd == "" {
 			fdclosingcommon.RespondError(w, http.StatusBadRequest,
@@ -94,16 +98,26 @@ func ListEligibleFDs(pool *pgxpool.Pool) http.HandlerFunc {
 			  AND m.start_date <= $4::date
 			  AND (m.maturity_date IS NULL OR m.maturity_date >= $3::date)`
 		args := []interface{}{req.EntityID, statuses, req.PeriodStart, req.PeriodEnd}
+		argIdx := 5
+
+		// Optional bank filter — must match fd_master.bank_id when the cycle
+		// header (or form) sets Bank (Optional). Without this, Citi Bank on
+		// the cycle still returned Union Bank FDs for the same entity.
+		if req.BankID != "" {
+			q += fmt.Sprintf(` AND COALESCE(m.bank_id,'') = $%d`, argIdx)
+			args = append(args, req.BankID)
+			argIdx++
+		}
 
 		if req.CycleID != "" {
-			q += `
+			q += fmt.Sprintf(`
 			  AND NOT EXISTS (
 				SELECT 1 FROM investment.fd_closing_cycle_fd_scope s
-				WHERE s.cycle_id = $5
+				WHERE s.cycle_id = $%d
 				  AND s.fd_id = m.fd_id
 				  AND s.is_deleted = false
 				  AND s.selection_status IN ('SELECTED','APPROVED')
-			  )`
+			  )`, argIdx)
 			args = append(args, req.CycleID)
 		}
 		q += ` ORDER BY m.fd_id ASC`
@@ -125,7 +139,13 @@ func ListEligibleFDs(pool *pgxpool.Pool) http.HandlerFunc {
 			"rows":              out,
 			"count":             len(out),
 			"include_matured":   includeMatured,
-			"eligible_statuses": statuses,
+			"bank_id":           req.BankID,
+			"currency_code":     req.CurrencyCode,
+			// investment.fd_master has no currency column — currency_code is
+			// stored on the cycle header only and cannot filter eligible FDs yet.
+			"currency_filter_applied": false,
+			"bank_filter_applied":     req.BankID != "",
+			"eligible_statuses":       statuses,
 		})
 	}
 }

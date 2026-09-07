@@ -36,7 +36,9 @@ const checklistItemSelect = `
 		TO_CHAR((i.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS') AS created_at,
 		c.entity_id AS entity_id
 	FROM investment.fd_closing_checklist_item i
-	JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id`
+	JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
+	JOIN investment.fd_closing_cycle_fd_scope s
+	  ON s.scope_id = i.scope_id AND s.is_deleted = false`
 
 // ListChecklistItems handles POST /investment/fd-closing/checklist/list —
 // this is what the per-cycle "5 steps x N FDs" grid renders from. fd_id is an

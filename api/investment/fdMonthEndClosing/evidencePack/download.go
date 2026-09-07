@@ -80,9 +80,15 @@ func DownloadEvidencePack(pool *pgxpool.Pool) http.HandlerFunc {
 		s3Key, _ := pack["s3_key"].(string)
 		s3Key = strings.TrimSpace(s3Key)
 		if s3Key == "" {
-			fdclosingcommon.RespondError(w, http.StatusConflict,
-				"Evidence pack file is not ready yet. Generation may still be in progress — try again shortly.")
-			return
+			// Self-heal: DMS never fired / rule missing — build ZIP now.
+			if key, matErr := MaterializeEvidencePack(ctx, pool, req.PackID); matErr != nil {
+				api.LogErrorForResponse(w, "[FDClosingEvidencePack] DownloadEvidencePack materialize: %v", matErr)
+				fdclosingcommon.RespondError(w, http.StatusConflict,
+					"Evidence pack file is not ready yet and could not be generated. "+matErr.Error())
+				return
+			} else {
+				s3Key = key
+			}
 		}
 
 		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, s3Key, downloadPresignExpiry)

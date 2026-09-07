@@ -1,7 +1,8 @@
 // Package scope implements the fd_closing_cycle_fd_scope handlers — Section 2
 // of database/2026-08-27/HANDLER_SPEC_fd_month_quarter_end_closing.md.
 // Scope ADD is applied immediately with checklist seed (same tx as create).
-// Scope REMOVE remains maker-checker. Every handler follows the same conventions
+// Scope REMOVE is also applied immediately (soft-delete scope + purge checklist)
+// when no checklist progress exists. Every handler follows the same conventions
 // as ../cycle (pgxpool, ctx := r.Context(), api.LogErrorForResponse,
 // RespondEnvelope* via fdclosingcommon — never legacy RespondWith*).
 package scope
@@ -75,7 +76,8 @@ var checklistSteps = []checklistStep{
 // Scope ADD is applied immediately with the cycle/checklist create flow
 // (no separate maker-checker for ADD): inserts APPROVED scope rows, APPROVED
 // audit rows, and seeds the 5 checklist items in the same transaction.
-// REMOVE remains maker-checker via DeleteScope.
+// REMOVE is applied immediately via DeleteScope (soft-delete + checklist purge)
+// when no checklist step has progressed past NOT_STARTED.
 func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -251,24 +253,40 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			for _, step := range checklistSteps {
-				if _, err = tx.Exec(ctx, `
-					INSERT INTO investment.fd_closing_checklist_item (
-						cycle_id, fd_id, scope_id, step_code, step_name, owner_role,
-						sequence, is_critical, depends_on_step_code, status, created_at
-					) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'NOT_STARTED',now())
-					ON CONFLICT (cycle_id, fd_id, step_code) DO NOTHING`,
-					req.CycleID, e.fdID, scopeID, step.StepCode, step.StepName, step.OwnerRole,
-					step.Sequence, step.IsCritical, step.DependsOnStep,
-				); err != nil {
-					api.LogErrorForResponse(w, "[FDClosingScope] CreateScope checklist seed scope=%s step=%s: %v",
-						scopeID, step.StepCode, err)
-					fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to seed checklist items")
-					return
-				}
+			if err = seedChecklistItemsWithCreateAudit(ctx, tx, req.CycleID, e.fdID, scopeID, actorEmail, actorIP); err != nil {
+				api.LogErrorForResponse(w, "[FDClosingScope] CreateScope checklist seed scope=%s: %v", scopeID, err)
+				fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to seed checklist items")
+				return
 			}
 
 			created = append(created, createdScope{scopeID: scopeID, fdID: e.fdID})
+		}
+
+		// Heal orphan PENDING CREATE (no live approval instance): stamp it
+		// APPROVED so DRAFT→IN_PROGRESS can run. Covers cycles created before
+		// the no-matrix CREATE auto-approve fix, and any CreateInstance miss.
+		if _, err = tx.Exec(ctx, `
+			UPDATE investment.fd_closing_cycle_audit ca
+			SET processing_status = 'APPROVED',
+			    checker_by = $2,
+			    checker_at = now(),
+			    checker_comment = COALESCE(NULLIF(ca.checker_comment,''),
+			      'Auto-approved on scope add — no pending approval instance')
+			WHERE ca.cycle_id = $1
+			  AND ca.action_type = 'CREATE'
+			  AND ca.processing_status = 'PENDING_APPROVAL'
+			  AND NOT EXISTS (
+				SELECT 1 FROM uam.approval_instance ai
+				WHERE ai.record_id = $1
+				  AND ai.module_code = $3
+				  AND ai.status = 'PENDING'
+				  AND ai.is_deleted = false
+			  )`,
+			req.CycleID, actorEmail, moduleCode,
+		); err != nil {
+			api.LogErrorForResponse(w, "[FDClosingScope] CreateScope orphan CREATE heal: %v", err)
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to heal pending create approval")
+			return
 		}
 
 		if _, err = tx.Exec(ctx, `
@@ -321,6 +339,47 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 		api.LogInfo("[FDClosingScope] CreateScope (immediate): cycle=%s created=%d errors=%d by=%s",
 			req.CycleID, len(created), len(errs), actor.Email)
 	}
+}
+
+// seedChecklistItemsWithCreateAudit inserts the 5 fixed checklist rows for a
+// (cycle, fd, scope) and a self-approved CREATE audit per item. Idempotent:
+// ON CONFLICT DO NOTHING on the item unique key, and CREATE audits are skipped
+// when one already exists — so CreateScope and applyScopeAddApproval can both
+// call this without double-writing.
+func seedChecklistItemsWithCreateAudit(ctx context.Context, tx pgx.Tx, cycleID, fdID, scopeID, actorEmail, actorIP string) error {
+	for _, step := range checklistSteps {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO investment.fd_closing_checklist_item (
+				cycle_id, fd_id, scope_id, step_code, step_name, owner_role,
+				sequence, is_critical, depends_on_step_code, status, created_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'NOT_STARTED',now())
+			ON CONFLICT (cycle_id, fd_id, step_code) DO NOTHING`,
+			cycleID, fdID, scopeID, step.StepCode, step.StepName, step.OwnerRole,
+			step.Sequence, step.IsCritical, step.DependsOnStep,
+		); err != nil {
+			return fmt.Errorf("checklist seed (%s): %w", step.StepCode, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO investment.fd_closing_checklist_item_audit (
+			item_id, action_type, processing_status, reason,
+			requested_by, requested_at, requested_ip,
+			checker_by, checker_at, checker_comment
+		)
+		SELECT i.item_id, 'CREATE', 'APPROVED', NULL,
+		       $2, i.created_at, $3,
+		       $2, i.created_at, 'Checklist items created with FD scope'
+		FROM investment.fd_closing_checklist_item i
+		WHERE i.scope_id = $1
+		  AND NOT EXISTS (
+			SELECT 1 FROM investment.fd_closing_checklist_item_audit a
+			WHERE a.item_id = i.item_id AND a.action_type = 'CREATE'
+		  )`,
+		scopeID, actorEmail, actorIP,
+	); err != nil {
+		return fmt.Errorf("checklist CREATE audit: %w", err)
+	}
+	return nil
 }
 
 // ─── shared helpers (used by create.go/delete.go/approve.go/reject.go) ──────
@@ -376,18 +435,32 @@ func applyScopeAddApproval(ctx context.Context, tx pgx.Tx, scopeID, checkerEmail
 		return fmt.Errorf("applyScopeAddApproval master update: %w", err)
 	}
 
-	for _, step := range checklistSteps {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO investment.fd_closing_checklist_item (
-				cycle_id, fd_id, scope_id, step_code, step_name, owner_role,
-				sequence, is_critical, depends_on_step_code, status, created_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'NOT_STARTED',now())
-			ON CONFLICT (cycle_id, fd_id, step_code) DO NOTHING`,
-			cycleID, fdID, scopeID, step.StepCode, step.StepName, step.OwnerRole,
-			step.Sequence, step.IsCritical, step.DependsOnStep,
-		); err != nil {
-			return fmt.Errorf("applyScopeAddApproval checklist seed (%s): %w", step.StepCode, err)
-		}
+	if err := seedChecklistItemsWithCreateAudit(ctx, tx, cycleID, fdID, scopeID, checkerEmail, api.SystemIfBlank("")); err != nil {
+		return fmt.Errorf("applyScopeAddApproval checklist seed: %w", err)
+	}
+
+	// Heal orphan PENDING CREATE (no live approval instance) before promote —
+	// same as CreateScope's immediate-add path.
+	if _, err := tx.Exec(ctx, `
+		UPDATE investment.fd_closing_cycle_audit ca
+		SET processing_status = 'APPROVED',
+		    checker_by = $2,
+		    checker_at = now(),
+		    checker_comment = COALESCE(NULLIF(ca.checker_comment,''),
+		      'Auto-approved on scope add — no pending approval instance')
+		WHERE ca.cycle_id = $1
+		  AND ca.action_type = 'CREATE'
+		  AND ca.processing_status = 'PENDING_APPROVAL'
+		  AND NOT EXISTS (
+			SELECT 1 FROM uam.approval_instance ai
+			WHERE ai.record_id = $1
+			  AND ai.module_code = $3
+			  AND ai.status = 'PENDING'
+			  AND ai.is_deleted = false
+		  )`,
+		cycleID, checkerEmail, moduleCode,
+	); err != nil {
+		return fmt.Errorf("applyScopeAddApproval orphan CREATE heal: %w", err)
 	}
 
 	// Move DRAFT → IN_PROGRESS only after CREATE is approved AND first FD is

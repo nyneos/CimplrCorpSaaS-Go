@@ -140,11 +140,8 @@ func directApproveScope(ctx context.Context, pool *pgxpool.Pool, scopeID, checke
 		); err != nil {
 			return fmt.Errorf("audit flip failed: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE investment.fd_closing_cycle_fd_scope SET is_deleted = true WHERE scope_id = $1`,
-			scopeID,
-		); err != nil {
-			return fmt.Errorf("is_deleted flip failed: %w", err)
+		if err := applyScopeRemoveOnApprove(ctx, tx, scopeID, api.SystemIfBlank(checkerEmail), comment); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("unsupported pending action_type %q", pending.ActionType)

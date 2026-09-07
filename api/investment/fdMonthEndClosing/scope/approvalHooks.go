@@ -6,7 +6,6 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
-	fdclosingcommon "CimplrCorpSaas/api/investment/fdMonthEndClosing/common"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -69,9 +68,8 @@ func init() {
 		api.LogInfo("[FDClosingScope] post-finalize ADD applied selection_status + checklist seed for scope=%s", scopeID)
 	})
 
-	// After a REMOVE is approved, the generic finalizer already soft-deleted
-	// the scope row — refresh cached fd_count so Period Close / Checklist
-	// summary cards stay correct without relying only on live subqueries.
+	// After a REMOVE is approved (legacy pending path / engine finalizer),
+	// soft-delete scope if still live, purge checklist, refresh aggregates.
 	approvalengine.RegisterPostFinalizeHook(TxScopeRemove, func(ctx context.Context, pool *pgxpool.Pool, scopeID, transactionType, finalStatus, actorEmail, comment string) {
 		if finalStatus != approvalengine.InstStatusApproved {
 			return
@@ -83,26 +81,14 @@ func init() {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
 
-		var cycleID string
-		if err := tx.QueryRow(ctx, `
-			SELECT cycle_id FROM investment.fd_closing_cycle_fd_scope WHERE scope_id = $1`,
-			scopeID,
-		).Scan(&cycleID); err != nil {
-			api.LogError("[FDClosingScope] post-finalize REMOVE cycle lookup failed for scope=%s: %v", scopeID, err)
-			return
-		}
-		if err := fdclosingcommon.RefreshCycleFdCount(ctx, tx, cycleID); err != nil {
-			api.LogError("[FDClosingScope] post-finalize REMOVE fd_count refresh failed for cycle=%s: %v", cycleID, err)
-			return
-		}
-		if err := fdclosingcommon.RefreshCycleReadiness(ctx, tx, cycleID); err != nil {
-			api.LogError("[FDClosingScope] post-finalize REMOVE readiness refresh failed for cycle=%s: %v", cycleID, err)
+		if err := applyScopeRemoveOnApprove(ctx, tx, scopeID, api.SystemIfBlank(actorEmail), comment); err != nil {
+			api.LogError("[FDClosingScope] post-finalize REMOVE apply failed for scope=%s: %v", scopeID, err)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
 			api.LogError("[FDClosingScope] post-finalize REMOVE commit failed for scope=%s: %v", scopeID, err)
 			return
 		}
-		api.LogInfo("[FDClosingScope] post-finalize REMOVE refreshed aggregates for cycle=%s scope=%s", cycleID, scopeID)
+		api.LogInfo("[FDClosingScope] post-finalize REMOVE purged checklist + refreshed aggregates for scope=%s", scopeID)
 	})
 }

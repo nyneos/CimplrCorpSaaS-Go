@@ -54,11 +54,9 @@ func getPtrTime(t *time.Time) string {
 	return ""
 }
 
-
 func FormatAuditTimestampIST(t time.Time) string {
 	return t.In(auditISTLocation).Format(constants.DateTimeFormat)
 }
-
 
 func FormatAuditTimestampPtrIST(t *time.Time) interface{} {
 	if t == nil {
@@ -66,7 +64,6 @@ func FormatAuditTimestampPtrIST(t *time.Time) interface{} {
 	}
 	return FormatAuditTimestampIST(*t)
 }
-
 
 func FormatAuditTimestampNullIST(t sql.NullTime) interface{} {
 	if !t.Valid {
@@ -124,11 +121,10 @@ func sanitizeInternalError(msg string) string {
 			return prefix
 		}
 	}
-	// No known DB signature — split on the first ": " to strip any appended err.Error() tail.
-	if idx := strings.Index(msg, ": "); idx != -1 {
-		return msg[:idx]
-	}
-	// No separator either — message looks like a plain human string, return as-is.
+	// No known DB signature — return the full business message as-is.
+	// Do NOT truncate on the first ": " — bulk action helpers join summary +
+	// per-row reasons with ": " (e.g. "No bookings were approved: FDBR-…: not
+	// your turn…") and that detail must reach the client toast.
 	return msg
 }
 
@@ -136,12 +132,22 @@ func sanitizeInternalError(msg string) string {
 // same heuristic RespondWithResult/RespondWithPayload always used, now shared so
 // both emit the CLAUDE.md envelope with a consistent status/code.
 func classifyErrorStatus(errMsg string) int {
+	lower := strings.ToLower(errMsg)
 	switch {
-	case strings.Contains(errMsg, "duplicate"), strings.Contains(errMsg, "invalid"), strings.Contains(errMsg, "required"):
+	case strings.Contains(lower, "not your turn"),
+		strings.Contains(lower, "approval sequence"),
+		strings.Contains(lower, "forbidden"),
+		strings.Contains(lower, "not within your authorized"):
+		return http.StatusForbidden
+	case strings.Contains(lower, "not found"):
+		return http.StatusNotFound
+	case strings.Contains(lower, "duplicate"), strings.Contains(lower, "invalid"), strings.Contains(lower, "required"),
+		strings.Contains(lower, "no bookings were"), strings.Contains(lower, "no confirmations were"),
+		strings.Contains(lower, "already approved"), strings.Contains(lower, "must be"):
 		return http.StatusBadRequest
-	case strings.Contains(errMsg, "limit exceeded"), strings.Contains(errMsg, "validation"):
+	case strings.Contains(lower, "limit exceeded"), strings.Contains(lower, "validation"):
 		return http.StatusUnprocessableEntity
-	case strings.Contains(errMsg, "unauthorized"), strings.Contains(errMsg, "session"):
+	case strings.Contains(lower, "unauthorized"), strings.Contains(lower, "session"):
 		return http.StatusUnauthorized
 	default:
 		return http.StatusInternalServerError
