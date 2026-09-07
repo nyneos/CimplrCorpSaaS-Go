@@ -31,6 +31,7 @@ func DownloadPendingExposureBucketingPackageZipHandler(pool *pgxpool.Pool) http.
 	return additionalfiles.NewPackageZipHandler(pool, pendingExposureBucketingAdditionalFilesConfig(), additionalfiles.PackageZipOptions{
 		ModuleLabel: "FX Pending Exposure Bucketing",
 		IDField:     "exposure_header_id",
+		LoadMain:    loadExposureMainPackageFile,
 	})
 }
 
