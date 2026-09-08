@@ -1330,8 +1330,12 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		toCreateApprove := []string{}
 		toEditApprove := []string{}
 		skipped := []string{}
+		awaiting := []string{}
 		for _, h := range headers {
 			if engineAwaitingMap[h.ExposureHeaderId] {
+				// Engine recorded this approver's decision but the multi-step chain
+				// isn't finalized yet — a real, successful action, not an error.
+				awaiting = append(awaiting, h.ExposureHeaderId)
 				continue
 			}
 			status := strings.ToLower(h.ApprovalStatus)
@@ -1351,6 +1355,7 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			"approved": []map[string]interface{}{},
 			"rolled":   []map[string]interface{}{},
 			"skipped":  skipped,
+			"awaiting": awaiting,
 		}
 		var approvalErr error
 		// Handle delete approval as a soft delete on the master row.
@@ -1532,7 +1537,12 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if len(toDelete) == 0 && len(toApprove) == 0 {
+		// Empty toApprove/toDelete is only a real error when nothing selected matched
+		// any known bucket at all. A header already Approved (skipped) or one the
+		// approval engine acted on but hasn't finalized yet (awaiting further
+		// approvers in a multi-step chain) is a valid, successful outcome — not
+		// an "eligible headers not found" failure.
+		if len(toDelete) == 0 && len(toApprove) == 0 && len(skipped) == 0 && len(awaiting) == 0 {
 			respondWithError(w, http.StatusBadRequest, "No eligible exposure headers found for approval")
 			return
 		}
@@ -1589,6 +1599,7 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			"approved": results["approved"],
 			"rolled":   results["rolled"],
 			"skipped":  results["skipped"],
+			"awaiting": results["awaiting"],
 		})
 
 		approvedIDs := make([]string, 0)
