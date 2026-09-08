@@ -990,15 +990,15 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		settlementID := strings.TrimSpace(req.SettlementID)
+		if settlementID != "" {
+			respondWithError(w, http.StatusBadRequest, "settlement_id must not be set; use /fx/exposures/settlements/edit to edit an existing settlement")
+			return
+		}
 		var oldSnap map[string]any
 		var triggerMatrixID string
 		if req.Submit {
-			eventCode := common.TriggerPreCreate
-			if settlementID != "" {
-				eventCode = common.TriggerPreEdit
-			}
 			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
-				EventCode:           eventCode,
+				EventCode:           common.TriggerPreCreate,
 				ModuleCode:          common.ModuleFX,
 				SubModule:           "EXPOSURE_SETTLEMENT",
 				EntityCode:          strings.TrimSpace(req.Entity),
@@ -1028,63 +1028,28 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if settlementID == "" {
-			err := pool.QueryRow(ctx, `
-				INSERT INTO public.exposure_settlement_document (
-					settlement_method, entity, currency, settlement_date,
-					total_open_amount, total_settled_amount, processing_status,
-					new_exposure_type, new_maturity_date, new_quantity, new_price, new_amount,
-					created_by, comments, created_at
-				) VALUES (
-					$1, $2, $3, $4::date,
-					$5, $6, $7,
-					NULLIF($8,''), $9::date, $10, $11, $12,
-					$13, NULLIF($14,''), NOW()
-				) RETURNING settlement_id::text
-			`, method, strings.TrimSpace(req.Entity), strings.TrimSpace(req.Currency), nullDate(req.SettlementDate),
-				req.TotalOpenAmount, settled, status,
-				strings.TrimSpace(req.NewExposureType), nullDate(req.NewMaturityDate), req.NewQuantity, req.NewPrice, req.NewAmount,
-				actor, strings.TrimSpace(req.Comments)).Scan(&settlementID)
-			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, "failed to create settlement: "+err.Error())
-				return
-			}
-			if req.Submit {
-				actionType = "SUBMIT"
-			}
-		} else {
-			oldSnap = settlementSnapshot(ctx, pool, settlementID)
-			actionType = "EDIT"
-			if req.Submit {
-				actionType = "SUBMIT"
-			}
-			tag, err := pool.Exec(ctx, `
-				UPDATE public.exposure_settlement_document
-				SET settlement_method = $1,
-				    entity = $2,
-				    currency = $3,
-				    settlement_date = $4::date,
-				    total_open_amount = $5,
-				    total_settled_amount = $6,
-				    processing_status = CASE WHEN $7 THEN $8 ELSE processing_status END,
-				    new_exposure_type = NULLIF($9,''),
-				    new_maturity_date = $10::date,
-				    new_quantity = $11,
-				    new_price = $12,
-				    new_amount = $13,
-				    comments = NULLIF($14,''),
-				    updated_by = $15,
-				    updated_at = NOW()
-				WHERE settlement_id = $16::uuid
-				  AND COALESCE(is_deleted, false) = false
-			`, method, strings.TrimSpace(req.Entity), strings.TrimSpace(req.Currency), nullDate(req.SettlementDate),
-				req.TotalOpenAmount, settled, req.Submit, status,
-				strings.TrimSpace(req.NewExposureType), nullDate(req.NewMaturityDate), req.NewQuantity, req.NewPrice, req.NewAmount,
-				strings.TrimSpace(req.Comments), actor, settlementID)
-			if err != nil || tag.RowsAffected() == 0 {
-				respondWithError(w, http.StatusNotFound, "settlement not found")
-				return
-			}
+		err := pool.QueryRow(ctx, `
+			INSERT INTO public.exposure_settlement_document (
+				settlement_method, entity, currency, settlement_date,
+				total_open_amount, total_settled_amount, processing_status,
+				new_exposure_type, new_maturity_date, new_quantity, new_price, new_amount,
+				created_by, comments, created_at
+			) VALUES (
+				$1, $2, $3, $4::date,
+				$5, $6, $7,
+				NULLIF($8,''), $9::date, $10, $11, $12,
+				$13, NULLIF($14,''), NOW()
+			) RETURNING settlement_id::text
+		`, method, strings.TrimSpace(req.Entity), strings.TrimSpace(req.Currency), nullDate(req.SettlementDate),
+			req.TotalOpenAmount, settled, status,
+			strings.TrimSpace(req.NewExposureType), nullDate(req.NewMaturityDate), req.NewQuantity, req.NewPrice, req.NewAmount,
+			actor, strings.TrimSpace(req.Comments)).Scan(&settlementID)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "failed to create settlement: "+err.Error())
+			return
+		}
+		if req.Submit {
+			actionType = "SUBMIT"
 		}
 
 		if err := replaceSettlementLines(ctx, pool, settlementID, req.Lines); err != nil {
@@ -1132,13 +1097,210 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 					RecordID:            id,
 					MatrixID:            tID,
 					RequirePinnedMatrix: true,
-					AutoApplyIfUnpinned: true,
+					AutoApplyIfUnpinned: false,
 					SubmittedByEmail:    email,
 				})
 			}(settlementID, makerEmail, txnType, triggerMatrixID)
 		}
 
 		msg := "Settlement saved"
+		if req.Submit {
+			msg = "Settlement submitted for approval"
+		}
+		respondWithSuccess(w, http.StatusOK, msg, map[string]any{
+			"settlement_id":        settlementID,
+			"settlement_method":    method,
+			"processing_status":    finalStatus,
+			"total_settled_amount": settled,
+		})
+	}
+}
+
+// EditExposureSettlementDocument updates an existing settlement (submit → PENDING_APPROVAL).
+func EditExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req struct {
+			UserID             string                `json:"user_id"`
+			SettlementID       string                `json:"settlement_id"`
+			SettlementMethod   string                `json:"settlement_method"`
+			Entity             string                `json:"entity"`
+			Currency           string                `json:"currency"`
+			SettlementDate     string                `json:"settlement_date"`
+			TotalOpenAmount    float64               `json:"total_open_amount"`
+			TotalSettledAmount float64               `json:"total_settled_amount"`
+			NewExposureType    string                `json:"new_exposure_type"`
+			NewMaturityDate    string                `json:"new_maturity_date"`
+			NewQuantity        *float64              `json:"new_quantity"`
+			NewPrice           *float64              `json:"new_price"`
+			NewAmount          *float64              `json:"new_amount"`
+			Comments           string                `json:"comments"`
+			Submit             bool                  `json:"submit"`
+			Lines              []settlementLineInput `json:"lines"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.UserID) == "" {
+			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
+			return
+		}
+		settlementID := strings.TrimSpace(req.SettlementID)
+		if settlementID == "" {
+			respondWithError(w, http.StatusBadRequest, "settlement_id is required")
+			return
+		}
+		method := normalizeSettlementMethod(req.SettlementMethod)
+		if method == "" {
+			respondWithError(w, http.StatusBadRequest, "settlement_method must be PAYMENT, ROLLOVER, or CANCELLATION")
+			return
+		}
+		if len(req.Lines) == 0 && method != "ROLLOVER" {
+			respondWithError(w, http.StatusBadRequest, "at least one settlement line is required")
+			return
+		}
+		if method == "ROLLOVER" && len(req.Lines) == 0 {
+			respondWithError(w, http.StatusBadRequest, "at least one exposure line is required for rollover")
+			return
+		}
+		if err := validateSettlementBusinessRules(
+			ctx, pool, method, req.SettlementDate, req.Lines, req.NewAmount, req.NewMaturityDate,
+		); err != nil {
+			respondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		actor := auditutil.Actor(req.UserID)
+		status := "DRAFT"
+		if req.Submit {
+			status = constants.StatusPendingApproval
+			if status == "" {
+				status = "PENDING_APPROVAL"
+			}
+		}
+
+		settled := req.TotalSettledAmount
+		if settled == 0 {
+			for _, l := range req.Lines {
+				amt := l.SettlementAmount
+				if l.PartialAmount != nil && *l.PartialAmount > 0 {
+					amt = *l.PartialAmount
+				}
+				settled += math.Abs(amt)
+			}
+			if req.NewAmount != nil && method == "ROLLOVER" && settled == 0 {
+				settled = math.Abs(*req.NewAmount)
+			}
+		}
+
+		oldSnap := settlementSnapshot(ctx, pool, settlementID)
+		actionType := "EDIT"
+		if req.Submit {
+			actionType = "SUBMIT"
+		}
+
+		var triggerMatrixID string
+		if req.Submit {
+			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreEdit,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "EXPOSURE_SETTLEMENT",
+				EntityCode:          strings.TrimSpace(req.Entity),
+				ActorUserID:         req.UserID,
+				HandlerName:         "EditExposureSettlementDocument",
+				APIPath:             "/fx/exposures/settlements/edit",
+				DefaultBlockMessage: "Settlement edit blocked by policy",
+				Fields: map[string]interface{}{
+					"settlement_id":        settlementID,
+					"settlement_method":    method,
+					"entity":               strings.TrimSpace(req.Entity),
+					"currency":             strings.TrimSpace(req.Currency),
+					"settlement_date":      req.SettlementDate,
+					"total_open_amount":    req.TotalOpenAmount,
+					"total_settled_amount": settled,
+					"new_exposure_type":    strings.TrimSpace(req.NewExposureType),
+					"new_maturity_date":    req.NewMaturityDate,
+					"new_quantity":         req.NewQuantity,
+					"new_price":            req.NewPrice,
+					"new_amount":           req.NewAmount,
+				},
+			}); !ok {
+				respondWithError(w, http.StatusForbidden, msg)
+				return
+			} else {
+				triggerMatrixID = tID
+			}
+		}
+
+		tag, err := pool.Exec(ctx, `
+			UPDATE public.exposure_settlement_document
+			SET settlement_method = $1,
+			    entity = $2,
+			    currency = $3,
+			    settlement_date = $4::date,
+			    total_open_amount = $5,
+			    total_settled_amount = $6,
+			    processing_status = CASE WHEN $7 THEN $8 ELSE processing_status END,
+			    new_exposure_type = NULLIF($9,''),
+			    new_maturity_date = $10::date,
+			    new_quantity = $11,
+			    new_price = $12,
+			    new_amount = $13,
+			    comments = NULLIF($14,''),
+			    updated_by = $15,
+			    updated_at = NOW()
+			WHERE settlement_id = $16::uuid
+			  AND COALESCE(is_deleted, false) = false
+		`, method, strings.TrimSpace(req.Entity), strings.TrimSpace(req.Currency), nullDate(req.SettlementDate),
+			req.TotalOpenAmount, settled, req.Submit, status,
+			strings.TrimSpace(req.NewExposureType), nullDate(req.NewMaturityDate), req.NewQuantity, req.NewPrice, req.NewAmount,
+			strings.TrimSpace(req.Comments), actor, settlementID)
+		if err != nil || tag.RowsAffected() == 0 {
+			respondWithError(w, http.StatusNotFound, "settlement not found")
+			return
+		}
+
+		if err := replaceSettlementLines(ctx, pool, settlementID, req.Lines); err != nil {
+			respondWithError(w, http.StatusInternalServerError, "failed to save settlement lines: "+err.Error())
+			return
+		}
+
+		finalStatus := status
+		if !req.Submit {
+			_ = pool.QueryRow(ctx, `SELECT processing_status FROM public.exposure_settlement_document WHERE settlement_id = $1::uuid`, settlementID).Scan(&finalStatus)
+		}
+		recordSettlementAudit(ctx, pool, settlementAuditParams{
+			SettlementID: settlementID, ActionType: actionType, Status: finalStatus, Reason: strings.TrimSpace(req.Comments),
+			Actor: actor, OldSnap: oldSnap, MethodHint: method,
+		})
+
+		if req.Submit {
+			makerEmail := ""
+			for _, s := range auth.GetActiveSessions() {
+				if s.UserID == req.UserID {
+					makerEmail = s.Email
+					break
+				}
+			}
+			txnType := "FX_SETTLEMENT_EDIT"
+			if method == "ROLLOVER" {
+				txnType = "FX_SETTLEMENT_ROLLOVER"
+			} else if method == "CANCELLATION" {
+				txnType = "FX_SETTLEMENT_CANCELLATION"
+			}
+			go func(id, email, tType, tID string) {
+				bgCtx := context.Background()
+				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
+				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+					ModuleCode:          "FX",
+					TransactionType:     tType,
+					RecordID:            id,
+					MatrixID:            tID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: false,
+					SubmittedByEmail:    email,
+				})
+			}(settlementID, makerEmail, txnType, triggerMatrixID)
+		}
+
+		msg := "Settlement updated"
 		if req.Submit {
 			msg = "Settlement submitted for approval"
 		}
@@ -1537,7 +1699,7 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 					MatrixID:            matrices[id],
 					SubmittedByEmail:    email,
 					RequirePinnedMatrix: true,
-					AutoApplyIfUnpinned: true,
+					AutoApplyIfUnpinned: false,
 				})
 			}
 		}(req.SettlementIDs, makerEmail, triggerMatrices)

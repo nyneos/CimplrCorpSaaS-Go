@@ -193,6 +193,7 @@ func RegisterFXRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool.P
 	mux.Handle("/fx/exposures/settlements/list", midFX(exposures.ListExposureSettlementDocuments(pgxPool)))
 	mux.Handle("/fx/exposures/settlements/get", midFX(exposures.GetExposureSettlementDocument(pgxPool)))
 	mux.Handle("/fx/exposures/settlements/save", midFX(exposures.SaveExposureSettlementDocument(pgxPool)))
+	mux.Handle("/fx/exposures/settlements/edit", midFX(exposures.EditExposureSettlementDocument(pgxPool)))
 	mux.Handle("/fx/exposures/settlements/approve", midFX(exposures.ApproveExposureSettlementDocuments(pgxPool)))
 	mux.Handle("/fx/exposures/settlements/reject", midFX(exposures.RejectExposureSettlementDocuments(pgxPool)))
 	mux.Handle("/fx/exposures/settlements/delete", midFX(exposures.DeleteExposureSettlementDocuments(pgxPool)))
