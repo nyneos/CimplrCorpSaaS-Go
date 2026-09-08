@@ -407,8 +407,8 @@ func invalidateStalePendingSettlements(ctx context.Context, pool *pgxpool.Pool, 
 		WHERE esl.exposure_header_id = $1
 		  AND esd.settlement_id <> $2::uuid
 		  AND COALESCE(esd.is_deleted, false) = false
-		  AND UPPER(TRIM(COALESCE(esd.processing_status, ''))) = $3
-	`, exposureHeaderID, approvedSettlementID, constants.StatusPendingApproval)
+		  AND UPPER(TRIM(COALESCE(esd.processing_status, ''))) IN ($3, $4)
+	`, exposureHeaderID, approvedSettlementID, constants.StatusPendingApproval, constants.StatusPendingEditApproval)
 	if err != nil {
 		return
 	}
@@ -439,8 +439,8 @@ func invalidateStalePendingSettlements(ctx context.Context, pool *pgxpool.Pool, 
 			    updated_by = $3,
 			    updated_at = NOW()
 			WHERE settlement_id = $4::uuid
-			  AND UPPER(TRIM(COALESCE(processing_status, ''))) = $5
-		`, constants.StatusRejected, approvedSettlementID, actor, c.ID, constants.StatusPendingApproval)
+			  AND UPPER(TRIM(COALESCE(processing_status, ''))) IN ($5, $6)
+		`, constants.StatusRejected, approvedSettlementID, actor, c.ID, constants.StatusPendingApproval, constants.StatusPendingEditApproval)
 		_ = approvalengine.CancelPendingInstances(ctx, pool, "FX", c.ID, "")
 	}
 }
@@ -1170,10 +1170,7 @@ func EditExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 		actor := auditutil.Actor(req.UserID)
 		status := "DRAFT"
 		if req.Submit {
-			status = constants.StatusPendingApproval
-			if status == "" {
-				status = "PENDING_APPROVAL"
-			}
+			status = constants.StatusPendingEditApproval
 		}
 
 		settled := req.TotalSettledAmount
@@ -1518,7 +1515,8 @@ func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p
 			if err != nil || tag.RowsAffected() == 0 {
 				continue
 			}
-			if actionType == "CONFIRM" && strings.EqualFold(prevStatus, constants.StatusPendingApproval) {
+			if actionType == "CONFIRM" &&
+				(strings.EqualFold(prevStatus, constants.StatusPendingApproval) || strings.EqualFold(prevStatus, constants.StatusPendingEditApproval)) {
 				if applyErr := applySettlementOnApprove(ctx, pool, id, actor); applyErr != nil {
 					// keep approved status but report via audit new values
 					_ = applyErr
