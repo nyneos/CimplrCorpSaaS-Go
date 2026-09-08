@@ -90,7 +90,14 @@ func DeleteScope(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			if err := applyScopeRemoveImmediate(ctx, tx, scopeID, cycleID, selectionStatus, actorEmail, actorIP, req.Reason); err != nil {
+			if err := applyScopeRemoveImmediate(ctx, tx, scopeRemoveParams{
+				scopeID:         scopeID,
+				cycleID:         cycleID,
+				selectionStatus: selectionStatus,
+				actorEmail:      actorEmail,
+				actorIP:         actorIP,
+				reason:          req.Reason,
+			}); err != nil {
 				tx.Rollback(ctx) //nolint:errcheck
 				api.LogErrorForResponse(w, "[FDClosingScope] DeleteScope apply for %s: %v", scopeID, err)
 				errs = append(errs, scopeID+": "+err.Error())
@@ -127,20 +134,27 @@ func DeleteScope(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// scopeRemoveParams bundles applyScopeRemoveImmediate's arguments so the
+// function itself stays under the parameter-count limit.
+type scopeRemoveParams struct {
+	scopeID         string
+	cycleID         string
+	selectionStatus string
+	actorEmail      string
+	actorIP         string
+	reason          string
+}
+
 // applyScopeRemoveImmediate soft-deletes the scope row, deletes its checklist
 // items (and their audits/files), writes an APPROVED DELETE scope audit, and
 // refreshes cycle fd_count / readiness. Fails if any checklist step for this
 // scope has progressed past NOT_STARTED.
-func applyScopeRemoveImmediate(
-	ctx context.Context,
-	tx pgx.Tx,
-	scopeID, cycleID, selectionStatus, actorEmail, actorIP, reason string,
-) error {
+func applyScopeRemoveImmediate(ctx context.Context, tx pgx.Tx, p scopeRemoveParams) error {
 	var inProgressCount int
 	if err := tx.QueryRow(ctx, `
 		SELECT COUNT(*) FROM investment.fd_closing_checklist_item
 		WHERE scope_id = $1 AND status NOT IN ('NOT_STARTED')`,
-		scopeID,
+		p.scopeID,
 	).Scan(&inProgressCount); err != nil {
 		return fmt.Errorf("eligibility check failed")
 	}
@@ -154,12 +168,12 @@ func applyScopeRemoveImmediate(
 		SET processing_status = 'REJECTED', checker_by = $2, checker_at = now(),
 		    checker_comment = 'Superseded by immediate remove'
 		WHERE scope_id = $1 AND processing_status IN ('PENDING_APPROVAL','PENDING_DELETE_APPROVAL')`,
-		scopeID, actorEmail,
+		p.scopeID, p.actorEmail,
 	); err != nil {
 		return fmt.Errorf("failed to supersede prior pending request")
 	}
 
-	if err := purgeChecklistForScope(ctx, tx, scopeID, actorEmail, reason); err != nil {
+	if err := purgeChecklistForScope(ctx, tx, p.scopeID); err != nil {
 		return err
 	}
 
@@ -170,7 +184,7 @@ func applyScopeRemoveImmediate(
 		    removed_by = $2,
 		    removed_at = now()
 		WHERE scope_id = $1`,
-		scopeID, actorEmail,
+		p.scopeID, p.actorEmail,
 	); err != nil {
 		return fmt.Errorf("scope soft-delete failed: %w", err)
 	}
@@ -183,15 +197,15 @@ func applyScopeRemoveImmediate(
 			$1,'DELETE','APPROVED',$2,$3,now(),$4,
 			$3,now(),'Applied immediately with checklist purge',$5
 		)`,
-		scopeID, nullIfEmpty(reason), actorEmail, actorIP, selectionStatus,
+		p.scopeID, nullIfEmpty(p.reason), p.actorEmail, p.actorIP, p.selectionStatus,
 	); err != nil {
 		return fmt.Errorf("audit insert failed: %w", err)
 	}
 
-	if err := fdclosingcommon.RefreshCycleFdCount(ctx, tx, cycleID); err != nil {
+	if err := fdclosingcommon.RefreshCycleFdCount(ctx, tx, p.cycleID); err != nil {
 		return fmt.Errorf("fd_count refresh failed: %w", err)
 	}
-	if err := fdclosingcommon.RefreshCycleReadiness(ctx, tx, cycleID); err != nil {
+	if err := fdclosingcommon.RefreshCycleReadiness(ctx, tx, p.cycleID); err != nil {
 		return fmt.Errorf("readiness refresh failed: %w", err)
 	}
 	return nil
@@ -200,7 +214,7 @@ func applyScopeRemoveImmediate(
 // purgeChecklistForScope removes checklist items for a scope (audit rows
 // first — FK has no ON DELETE CASCADE — then items; files cascade from items).
 // Scope DELETE audit remains the durable trail for the remove.
-func purgeChecklistForScope(ctx context.Context, tx pgx.Tx, scopeID, _actorEmail, _reason string) error {
+func purgeChecklistForScope(ctx context.Context, tx pgx.Tx, scopeID string) error {
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM investment.fd_closing_checklist_item_audit
 		WHERE item_id IN (
@@ -246,7 +260,7 @@ func applyScopeRemoveOnApprove(ctx context.Context, tx pgx.Tx, scopeID, actorEma
 		return fmt.Errorf("cannot remove — checklist progress already recorded for this FD")
 	}
 
-	if err := purgeChecklistForScope(ctx, tx, scopeID, actorEmail, comment); err != nil {
+	if err := purgeChecklistForScope(ctx, tx, scopeID); err != nil {
 		return err
 	}
 

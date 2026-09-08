@@ -20,6 +20,9 @@ const (
 	rateNegAuditTable  = "investment.fd_audit_rate_negotiation"
 	rateNegPK          = "rate_request_id"
 	rateNegModule      = "FIXED_DEPOSIT"
+
+	errSuffixMasterApplyFailed = ": master apply failed: "
+	errSuffixCommitFailed      = ": commit failed"
 )
 
 type bulkRateIDs struct {
@@ -505,11 +508,11 @@ func bulkDecide(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, appr
 			}
 			if applyErr != nil {
 				_ = tx.Rollback(ctx)
-				errors = append(errors, id+": master apply failed: "+applyErr.Error())
+				errors = append(errors, id+errSuffixMasterApplyFailed+applyErr.Error())
 				continue
 			}
 			if err := tx.Commit(ctx); err != nil {
-				errors = append(errors, id+": commit failed")
+				errors = append(errors, id+errSuffixCommitFailed)
 				continue
 			}
 			engineActed++
@@ -575,11 +578,11 @@ func bulkDecide(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, appr
 				}
 				if applyErr := applyApproveMaster(ctx, tx, id, actionType); applyErr != nil {
 					_ = tx.Rollback(ctx)
-					errors = append(errors, id+": master apply failed: "+applyErr.Error())
+					errors = append(errors, id+errSuffixMasterApplyFailed+applyErr.Error())
 					continue
 				}
 				if err := tx.Commit(ctx); err != nil {
-					errors = append(errors, id+": commit failed")
+					errors = append(errors, id+errSuffixCommitFailed)
 					continue
 				}
 				directActed++
@@ -608,11 +611,11 @@ func bulkDecide(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, appr
 		}
 		if applyErr != nil {
 			_ = tx.Rollback(ctx)
-			errors = append(errors, id+": master apply failed: "+applyErr.Error())
+			errors = append(errors, id+errSuffixMasterApplyFailed+applyErr.Error())
 			continue
 		}
 		if err := tx.Commit(ctx); err != nil {
-			errors = append(errors, id+": commit failed")
+			errors = append(errors, id+errSuffixCommitFailed)
 			continue
 		}
 		directActed++

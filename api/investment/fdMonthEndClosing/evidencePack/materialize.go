@@ -16,6 +16,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// errorLinePrefix tags a section-report error line inside the generated evidence pack text.
+const errorLinePrefix = "ERROR: "
+
 // MaterializeEvidencePack builds a ZIP of closing evidence section reports from
 // live cycle/checklist/lock/audit data, uploads it to S3, and stamps
 // s3_key/file_size/checksum/document_count on the pack row.
@@ -173,7 +176,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 			WHERE cycle_id = $1 AND step_code IN ('RECEIPTS_CAPTURED','RECEIPTS_RECONCILED')
 			ORDER BY fd_id, sequence`, cycleID)
 		if qErr != nil {
-			body += "ERROR: " + qErr.Error() + "\n"
+			body += errorLinePrefix + qErr.Error() + "\n"
 		} else {
 			for rows.Next() {
 				var fd, step, st, ref string
@@ -194,7 +197,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 			WHERE cycle_id = $1 AND (COALESCE(exception_count,0) > 0 OR status = 'BLOCKED')
 			ORDER BY fd_id, sequence`, cycleID)
 		if qErr != nil {
-			body += "ERROR: " + qErr.Error() + "\n"
+			body += errorLinePrefix + qErr.Error() + "\n"
 		} else {
 			n := 0
 			for rows.Next() {
@@ -248,7 +251,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 			WHERE cycle_id = $1
 			ORDER BY requested_at`, cycleID)
 		if qErr != nil {
-			body += "ERROR: " + qErr.Error() + "\n"
+			body += errorLinePrefix + qErr.Error() + "\n"
 		} else {
 			for rows.Next() {
 				var action, ps, reqBy, reqAt, chkBy, chkAt, reason, comment string
@@ -277,7 +280,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 			WHERE cycle_id = $1 AND COALESCE(is_deleted,false)=false
 			ORDER BY requested_at`, cycleID)
 		if qErr != nil {
-			body += "ERROR: " + qErr.Error() + "\n"
+			body += errorLinePrefix + qErr.Error() + "\n"
 		} else {
 			n := 0
 			for rows.Next() {
@@ -305,7 +308,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 			WHERE cycle_id = $1
 			ORDER BY performed_at`, cycleID)
 		if qErr != nil {
-			body += "ERROR: " + qErr.Error() + "\n"
+			body += errorLinePrefix + qErr.Error() + "\n"
 		} else {
 			n := 0
 			for rows.Next() {
@@ -331,7 +334,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 			WHERE cycle_id = $1 AND COALESCE(evidence_ref,'') <> ''
 			ORDER BY fd_id, sequence`, cycleID)
 		if qErr != nil {
-			body += "ERROR: " + qErr.Error() + "\n"
+			body += errorLinePrefix + qErr.Error() + "\n"
 		} else {
 			n := 0
 			for rows.Next() {

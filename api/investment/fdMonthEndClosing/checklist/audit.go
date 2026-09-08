@@ -45,6 +45,28 @@ const checklistAuditSelect = `
 	FROM investment.fd_closing_checklist_item_audit a
 	JOIN investment.fd_closing_checklist_item i ON i.item_id = a.item_id`
 
+const (
+	checklistAuditEntityFilter    = " AND c.entity_id = ANY($"
+	checklistAuditTextArraySuffix = "::text[])"
+	checklistAuditOrderBy         = " ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC"
+	checklistAuditLimit           = " LIMIT $"
+)
+
+// appendChecklistAuditScopeAndPaging appends the entity-scope filter (if the
+// caller isn't admin-override and has a restricted entity list), the shared
+// ORDER BY, and the LIMIT clause — the tail shared by all three AuditChecklistItem
+// branches (item_id / cycle_id / unfiltered) so they can't drift out of sync.
+func appendChecklistAuditScopeAndPaging(q string, args []interface{}, scope ctxutil.RequestScope, limit int) (string, []interface{}) {
+	if !scope.IsAdminOverride && len(scope.EntityIDs) > 0 {
+		args = append(args, scope.EntityIDs)
+		q += checklistAuditEntityFilter + strconv.Itoa(len(args)) + checklistAuditTextArraySuffix
+	}
+	q += checklistAuditOrderBy
+	args = append(args, limit)
+	q += checklistAuditLimit + strconv.Itoa(len(args))
+	return q, args
+}
+
 // AuditChecklistItem handles POST /investment/fd-closing/checklist/audit — a
 // standalone paginated audit-trail endpoint pairing with the shared frontend
 // AuditTrailSection component's `endpoint` prop. item_id is optional:
@@ -73,36 +95,18 @@ func AuditChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 				JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 				WHERE a.item_id = $1`
 			args = append(args, itemID)
-			if !scope.IsAdminOverride && len(scope.EntityIDs) > 0 {
-				args = append(args, scope.EntityIDs)
-				q += " AND c.entity_id = ANY($" + strconv.Itoa(len(args)) + "::text[])"
-			}
-			q += " ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC"
-			args = append(args, limit)
-			q += " LIMIT $" + strconv.Itoa(len(args))
+			q, args = appendChecklistAuditScopeAndPaging(q, args, scope, limit)
 		} else if cycleID := strings.TrimSpace(req.CycleID); cycleID != "" {
 			q = checklistAuditSelect + `
 				JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 				WHERE i.cycle_id = $1`
 			args = append(args, cycleID)
-			if !scope.IsAdminOverride && len(scope.EntityIDs) > 0 {
-				args = append(args, scope.EntityIDs)
-				q += " AND c.entity_id = ANY($" + strconv.Itoa(len(args)) + "::text[])"
-			}
-			q += " ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC"
-			args = append(args, limit)
-			q += " LIMIT $" + strconv.Itoa(len(args))
+			q, args = appendChecklistAuditScopeAndPaging(q, args, scope, limit)
 		} else {
 			q = checklistAuditSelect + `
 				JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 				WHERE 1=1`
-			if !scope.IsAdminOverride && len(scope.EntityIDs) > 0 {
-				args = append(args, scope.EntityIDs)
-				q += " AND c.entity_id = ANY($" + strconv.Itoa(len(args)) + "::text[])"
-			}
-			q += " ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC"
-			args = append(args, limit)
-			q += " LIMIT $" + strconv.Itoa(len(args))
+			q, args = appendChecklistAuditScopeAndPaging(q, args, scope, limit)
 		}
 
 		rows, err := pool.Query(ctx, q, args...)

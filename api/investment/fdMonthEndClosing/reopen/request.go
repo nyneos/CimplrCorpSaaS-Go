@@ -107,14 +107,14 @@ func RequestReopen(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Pre-submit validation snapshot (accrual_valid / reconciliation_valid /
-		// accounting_valid). TODO: tighten validation rules once the mock UI's
-		// exact reopen-eligibility criteria are confirmed — the handler spec
-		// explicitly allows a placeholder here (all-true / COMPLETED) since the
-		// mock UI's ReopenValidationResult only shows a validation_status of
-		// PENDING at request time and fills in real accrual/reconciliation/
-		// accounting results asynchronously AFTER the period is reopened, not
-		// before the request is submitted (see periodReopen.tsx's
-		// handleReopenPeriod, which kicks off validation only after reopening).
+		// accounting_valid) is intentionally always all-true/COMPLETED at this
+		// stage, per the handler spec: the mock UI's ReopenValidationResult only
+		// shows a validation_status of PENDING at request time and fills in real
+		// accrual/reconciliation/accounting results asynchronously AFTER the
+		// period is reopened, not before the request is submitted (see
+		// periodReopen.tsx's handleReopenPeriod, which kicks off validation only
+		// after reopening). Revisit if the mock UI's reopen-eligibility criteria
+		// change to require validation before submission.
 		accrualValid, reconciliationValid, accountingValid := true, true, true
 		validationStatus := "COMPLETED"
 

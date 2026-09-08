@@ -39,6 +39,7 @@ const (
 	auditMFConfirmation       = "investment.auditactioninvestmentconfirmation"
 	auditMFRedemption         = "investment.auditactionredemption"
 	auditMFRedemptionConfirm  = "investment.auditactionredemptionconfirmation"
+	auditFDClosingCycle       = "investment.fd_closing_cycle_audit"
 )
 
 // txTypeRegistry maps transaction_type strings (as passed to CreateInstance)
@@ -98,9 +99,9 @@ var txTypeRegistry = map[string]txTableConfig{
 	// ── FD Month/Quarter End Closing (fd_closing_cycle) ───────────────────
 	// CREATE has no transaction type — cycle creation is never gated by the
 	// approval engine (see api/investment/fdMonthEndClosing/cycle/create.go).
-	"FD_CLOSING_CYCLE_CREATE": {AuditTable: "investment.fd_closing_cycle_audit", AuditIDColumn: "cycle_id"},
-	"FD_CLOSING_CYCLE_EDIT":   {AuditTable: "investment.fd_closing_cycle_audit", AuditIDColumn: "cycle_id"},
-	"FD_CLOSING_CYCLE_DELETE": {AuditTable: "investment.fd_closing_cycle_audit", AuditIDColumn: "cycle_id"},
+	"FD_CLOSING_CYCLE_CREATE": {AuditTable: auditFDClosingCycle, AuditIDColumn: "cycle_id"},
+	"FD_CLOSING_CYCLE_EDIT":   {AuditTable: auditFDClosingCycle, AuditIDColumn: "cycle_id"},
+	"FD_CLOSING_CYCLE_DELETE": {AuditTable: auditFDClosingCycle, AuditIDColumn: "cycle_id"},
 	"FD_CLOSING_SCOPE_ADD":    {AuditTable: "investment.fd_closing_cycle_fd_scope_audit", AuditIDColumn: "scope_id"},
 	"FD_CLOSING_SCOPE_REMOVE": {AuditTable: "investment.fd_closing_cycle_fd_scope_audit", AuditIDColumn: "scope_id"},
 	// Request row IS its own audit trail — no separate *_audit sibling table.
