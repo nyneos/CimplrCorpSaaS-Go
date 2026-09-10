@@ -1340,6 +1340,7 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				comments,
 				new_exposure_header_id,
 				COALESCE(exl.ids, '')                AS exposure_header_ids,
+				COALESCE(expd.items, '[]')          AS exposure_details,
 				COALESCE(ai.instance_id,'')         AS approval_instance_id,
 				COALESCE(ai.status,'')              AS approval_engine_status,
 				COALESCE(aie.instance_eye_id,'')    AS current_eye_id,
@@ -1355,6 +1356,23 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE esl.settlement_id = esd.settlement_id
 				  AND COALESCE(esl.exposure_header_id, '') <> ''
 			) exl ON true
+			LEFT JOIN LATERAL (
+				-- Exposure type + original/open amount per linked exposure header,
+				-- for the "Exposure Details" block in the settlement's row-expand.
+				SELECT json_agg(json_build_object(
+					'exposure_header_id', eh.exposure_header_id,
+					'exposure_type', eh.exposure_type,
+					'total_original_amount', eh.total_original_amount,
+					'total_open_amount', eh.total_open_amount
+				) ORDER BY eh.exposure_header_id) AS items
+				FROM (
+					SELECT DISTINCT esl.exposure_header_id
+					FROM public.exposure_settlement_line esl
+					WHERE esl.settlement_id = esd.settlement_id
+					  AND COALESCE(esl.exposure_header_id, '') <> ''
+				) ids
+				JOIN public.exposure_headers eh ON eh.exposure_header_id::text = ids.exposure_header_id
+			) expd ON true
 			LEFT JOIN LATERAL (
 				SELECT ai.* FROM uam.approval_instance ai
 				WHERE ai.record_id = esd.settlement_id::text
@@ -1391,14 +1409,19 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				updatedAt                                                                  *time.Time
 				openAmt, settledAmt                                                        float64
 				exposureHeaderIDs                                                          string
+				exposureDetailsRaw                                                         []byte
 				approvalInstanceID, approvalEngineStatus, currentEyeID, currentEyePosition string
 				approvalsRequired, approvalsReceived                                       int
 				slaDeadline                                                                *time.Time
 				isEscalated                                                                bool
 			)
-			if err := rows.Scan(&id, &method, &entity, &currency, &settlementDate, &openAmt, &settledAmt, &status, &createdBy, &createdAt, &updatedBy, &updatedAt, &comments, &newExpID, &exposureHeaderIDs,
+			if err := rows.Scan(&id, &method, &entity, &currency, &settlementDate, &openAmt, &settledAmt, &status, &createdBy, &createdAt, &updatedBy, &updatedAt, &comments, &newExpID, &exposureHeaderIDs, &exposureDetailsRaw,
 				&approvalInstanceID, &approvalEngineStatus, &currentEyeID, &currentEyePosition, &approvalsRequired, &approvalsReceived, &slaDeadline, &isEscalated); err != nil {
 				continue
+			}
+			var exposureDetails []map[string]any
+			if len(exposureDetailsRaw) > 0 {
+				_ = json.Unmarshal(exposureDetailsRaw, &exposureDetails)
 			}
 			row := map[string]any{
 				"settlement_id":          id,
@@ -1411,6 +1434,7 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				"created_by":             createdBy,
 				"created_at":             createdAt,
 				"exposure_header_id":     exposureHeaderIDs,
+				"exposures":              exposureDetails,
 				"approval_instance_id":   approvalInstanceID,
 				"approval_engine_status": approvalEngineStatus,
 				"current_eye_id":         currentEyeID,

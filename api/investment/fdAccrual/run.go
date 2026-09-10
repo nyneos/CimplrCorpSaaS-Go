@@ -1,6 +1,7 @@
 package fdAccrual
 
 import (
+	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	"context"
 	"encoding/json"
 	"errors"
@@ -3834,7 +3835,7 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 				total_debit, total_credit,
 				status, created_by,
 				fd_id, accrual_run_id, accrual_ledger_id
-			) VALUES ($1,$2,$3,$4,$5,'FD_INTEREST_ACCRUAL',$6,$7,$8,'POSTED',$9,$10,$11,$12)
+			) VALUES ($1,$2,$3,$4,$5,'FD_INTEREST_ACCRUAL',$6,$7,$8,'PENDING_APPROVAL',$9,$10,$11,$12)
 			RETURNING entry_id`,
 			activityID, nullIfEmpty(lr.EntityID), nullIfEmpty(lr.EntityName),
 			lr.PeriodEnd, buildAccrualPeriod(lr.PeriodEnd),
@@ -3843,6 +3844,11 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 		).Scan(&entryID); err != nil {
 			_ = tx.Rollback(ctx)
 			api.LogError("[FDAccrual] Insert journal entry failed fd %s: %v", lr.FDID, err)
+			continue
+		}
+		if err := fdAccounting.StageJournalForApproval(ctx, tx, entryID, userEmail, "Interest accrual journal run "+runID); err != nil {
+			_ = tx.Rollback(ctx)
+			api.LogError("[FDAccrual] Stage journal for approval failed fd %s: %v", lr.FDID, err)
 			continue
 		}
 
@@ -3899,13 +3905,16 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 							total_debit, total_credit,
 							status, created_by,
 							fd_id, accrual_run_id, accrual_ledger_id
-						) VALUES ($1,$2,$3,$4,$5,'FD_TDS_ACCRUAL',$6,$7,$8,'POSTED',$9,$10,$11,$12)
+						) VALUES ($1,$2,$3,$4,$5,'FD_TDS_ACCRUAL',$6,$7,$8,'PENDING_APPROVAL',$9,$10,$11,$12)
 						RETURNING entry_id`,
 						tdsActivityID, nullIfEmpty(lr.EntityID), nullIfEmpty(lr.EntityName),
 						lr.PeriodEnd, buildAccrualPeriod(lr.PeriodEnd),
 						tdsDesc, tdsAmt, tdsAmt, userEmail,
 						nullIfEmpty(lr.FDID), nullIfEmpty(runID), nullIfEmpty(lr.LedgerID),
 					).Scan(&tdsEntryID)
+					if tdsErr == nil {
+						tdsErr = fdAccounting.StageJournalForApproval(ctx, tdsTx, tdsEntryID, userEmail, "TDS accrual journal run "+runID)
+					}
 					if tdsErr == nil {
 						tdsNarration := fmt.Sprintf("FD TDS %s | accrual_run_id=%s | accrual_ledger_id=%s", lr.FDID, runID, lr.LedgerID)
 						_, tdsErr1 := tdsTx.Exec(ctx, `
