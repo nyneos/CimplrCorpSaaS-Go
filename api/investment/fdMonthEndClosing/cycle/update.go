@@ -197,8 +197,7 @@ func UpdateCycle(pool *pgxpool.Pool) http.HandlerFunc {
 				// legacy audit row's processing_status — it has no idea about our
 				// new_bank_id/new_currency_code/new_include_matured columns, so it
 				// would silently mark the request APPROVED without ever copying the
-				// staged values onto the master. When no matrix applies (instID==""
-				// below) we apply the edit ourselves instead.
+				// staged values onto the master.
 				AutoApplyIfUnpinned: false,
 			})
 			if err != nil {
@@ -209,24 +208,7 @@ func UpdateCycle(pool *pgxpool.Pool) http.HandlerFunc {
 				api.LogInfo("[FDClosingCycle] CreateInstance(EDIT) %s → cycle %s PENDING_EDIT_APPROVAL", instID, cycleID)
 				return
 			}
-			// No approval matrix — apply staged new_* onto the master now
-			// (comment above AutoApplyIfUnpinned=false requires this path).
-			tx, txErr := pool.Begin(bgCtx)
-			if txErr != nil {
-				api.LogError("[FDClosingCycle] no-matrix EDIT begin tx failed for cycle=%s: %v", cycleID, txErr)
-				return
-			}
-			defer tx.Rollback(bgCtx) //nolint:errcheck
-			if applyErr := ApplyEditToMaster(bgCtx, tx, cycleID, api.SystemIfBlank(actorEmail),
-				"Applied automatically — no approval matrix configured", "PENDING_EDIT_APPROVAL", true); applyErr != nil {
-				api.LogError("[FDClosingCycle] no-matrix EDIT apply failed for cycle=%s: %v", cycleID, applyErr)
-				return
-			}
-			if commitErr := tx.Commit(bgCtx); commitErr != nil {
-				api.LogError("[FDClosingCycle] no-matrix EDIT commit failed for cycle=%s: %v", cycleID, commitErr)
-				return
-			}
-			api.LogInfo("[FDClosingCycle] no-matrix EDIT applied for cycle=%s", cycleID)
+			api.LogInfo("[FDClosingCycle] no approval matrix for cycle=%s — left PENDING_EDIT_APPROVAL for maker-checker", cycleID)
 		})
 	}
 }
