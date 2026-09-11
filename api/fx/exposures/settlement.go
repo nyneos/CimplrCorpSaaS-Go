@@ -3,6 +3,7 @@ package exposures
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -32,34 +33,47 @@ func FilterForwardBookingsForSettlement(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
+		// Same source rules as dash/hedgingProposal/fwdDashHedge.go: approved
+		// forwards, outstanding = latest ledger running_open_amount (fallback
+		// booking_amount). Status/currency compared case-insensitively and the
+		// exposure currency may sit on either leg of the forward.
 		query := `
-			SELECT 
+			SELECT DISTINCT
 				fb.internal_reference_id AS "Forward Ref",
-				COALESCE((SELECT running_open_amount FROM forward_booking_ledger fbl WHERE fbl.booking_id = fb.system_transaction_id ORDER BY ledger_sequence DESC LIMIT 1), fb.booking_amount) AS "Outstanding Amount",
+				COALESCE(fbl.running_open_amount, fb.booking_amount) AS "Outstanding Amount",
 				fb.spot_rate AS "Spot",
 				fb.total_rate AS "Fwd",
 				fb.bank_margin AS "Margin",
-				fb.counterparty_dealer AS "Bank Name",
-				fb.maturity_date AS "Maturity"
+				COALESCE(NULLIF(fb.counterparty_dealer,''), fb.counterparty) AS "Bank Name",
+				fb.maturity_date AS "Maturity",
+				fb.system_transaction_id AS "Booking ID",
+				fb.base_currency AS "Base Currency",
+				fb.quote_currency AS "Quote Currency",
+				fb.order_type AS "Order Type",
+				COALESCE(ehl.hedged_amount, 0) AS "Hedged Amount"
 			FROM exposure_hedge_links ehl
 			JOIN forward_bookings fb ON ehl.booking_id = fb.system_transaction_id
+			LEFT JOIN LATERAL (
+				SELECT l.running_open_amount
+				FROM forward_booking_ledger l
+				WHERE l.booking_id = fb.system_transaction_id
+				ORDER BY l.ledger_sequence DESC
+				LIMIT 1
+			) fbl ON TRUE
 			WHERE ehl.exposure_header_id = ANY($1)
-				AND fb.quote_currency = $2
+				AND COALESCE(fb.is_deleted, false) = false
+				AND LOWER(COALESCE(fb.processing_status,'')) = 'approved'
+				AND UPPER(COALESCE(fb.status,'')) NOT IN ('CANCELLED','CANCELED','MATURED','CLOSED')
+				AND (UPPER(fb.base_currency) = UPPER($2) OR UPPER(fb.quote_currency) = UPPER($2))
 				AND (
-					fb.entity_level_0 = $3
-					OR fb.entity_level_1 = $3
-					OR fb.entity_level_2 = $3
-					OR fb.entity_level_3 = $3
+					fb.entity_level_0 = ANY($3)
+					OR fb.entity_level_1 = ANY($3)
+					OR fb.entity_level_2 = ANY($3)
+					OR fb.entity_level_3 = ANY($3)
 				)
-				AND fb.status = 'Confirmed'
-				AND (
-					fb.entity_level_0 = ANY($4)
-					OR fb.entity_level_1 = ANY($4)
-					OR fb.entity_level_2 = ANY($4)
-					OR fb.entity_level_3 = ANY($4)
-				)
+			ORDER BY fb.maturity_date, fb.internal_reference_id
 		`
-		rows, err := pool.Query(ctx, query, req.ExposureHeaderIDs, req.Currency, req.Entity, buNames)
+		rows, err := pool.Query(ctx, query, req.ExposureHeaderIDs, strings.TrimSpace(req.Currency), buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch forward bookings for settlement")
 			return
@@ -193,9 +207,10 @@ func GetForwardBookingsByEntityAndCurrency(pool *pgxpool.Pool) http.HandlerFunc 
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
-			UserID   string `json:"user_id"`
-			Entity   string `json:"entity"`
-			Currency string `json:"currency"`
+			UserID            string   `json:"user_id"`
+			Entity            string   `json:"entity"`
+			Currency          string   `json:"currency"`
+			ExposureHeaderIDs []string `json:"exposure_header_ids"` // optional: forwards already linked to these are excluded
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Entity == "" || req.Currency == "" || req.UserID == "" {
 			respondWithError(w, http.StatusBadRequest, "user_id, entity, and currency are required")
@@ -207,33 +222,59 @@ func GetForwardBookingsByEntityAndCurrency(pool *pgxpool.Pool) http.HandlerFunc 
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
+		// Additional (unlinked) forwards: same forward_bookings rules as the
+		// hedging-proposal dashboard, restricted to the exposure's entity (any
+		// level) and currency (either leg), with a non-zero open amount, and
+		// excluding forwards already linked to the selected exposures.
 		query := `
-			SELECT 
+			SELECT
 				fb.internal_reference_id AS "Forward Ref",
-				COALESCE((SELECT running_open_amount FROM forward_booking_ledger fbl WHERE fbl.booking_id = fb.system_transaction_id ORDER BY ledger_sequence DESC LIMIT 1), fb.booking_amount) AS "Outstanding Amount",
+				COALESCE(fbl.running_open_amount, fb.booking_amount) AS "Outstanding Amount",
 				fb.spot_rate AS "Spot",
 				fb.total_rate AS "Fwd",
 				fb.bank_margin AS "Margin",
-				fb.counterparty_dealer AS "Bank Name",
-				fb.maturity_date AS "Maturity"
+				COALESCE(NULLIF(fb.counterparty_dealer,''), fb.counterparty) AS "Bank Name",
+				fb.maturity_date AS "Maturity",
+				fb.system_transaction_id AS "Booking ID",
+				fb.base_currency AS "Base Currency",
+				fb.quote_currency AS "Quote Currency",
+				fb.order_type AS "Order Type"
 			FROM forward_bookings fb
-			WHERE fb.quote_currency = $1
-				AND COALESCE(fb.is_deleted, false) = false
+			LEFT JOIN LATERAL (
+				SELECT l.running_open_amount
+				FROM forward_booking_ledger l
+				WHERE l.booking_id = fb.system_transaction_id
+				ORDER BY l.ledger_sequence DESC
+				LIMIT 1
+			) fbl ON TRUE
+			WHERE COALESCE(fb.is_deleted, false) = false
+				AND LOWER(COALESCE(fb.processing_status,'')) = 'approved'
+				AND UPPER(COALESCE(fb.status,'')) NOT IN ('CANCELLED','CANCELED','MATURED','CLOSED')
+				AND (UPPER(fb.base_currency) = UPPER($1) OR UPPER(fb.quote_currency) = UPPER($1))
 				AND (
-					fb.entity_level_0 = $2
-					OR fb.entity_level_1 = $2
-					OR fb.entity_level_2 = $2
-					OR fb.entity_level_3 = $2
+					UPPER(TRIM(COALESCE(fb.entity_level_0,''))) = UPPER($2)
+					OR UPPER(TRIM(COALESCE(fb.entity_level_1,''))) = UPPER($2)
+					OR UPPER(TRIM(COALESCE(fb.entity_level_2,''))) = UPPER($2)
+					OR UPPER(TRIM(COALESCE(fb.entity_level_3,''))) = UPPER($2)
 				)
-				AND fb.status = 'Confirmed'
 				AND (
 					fb.entity_level_0 = ANY($3)
 					OR fb.entity_level_1 = ANY($3)
 					OR fb.entity_level_2 = ANY($3)
 					OR fb.entity_level_3 = ANY($3)
 				)
+				AND ABS(COALESCE(fbl.running_open_amount, fb.booking_amount, 0)) > 0
+				AND NOT EXISTS (
+					SELECT 1 FROM exposure_hedge_links x
+					WHERE x.booking_id = fb.system_transaction_id
+					  AND x.exposure_header_id = ANY($4)
+				)
+			ORDER BY fb.maturity_date, fb.internal_reference_id
 		`
-		rows, err := pool.Query(ctx, query, req.Currency, req.Entity, buNames)
+		if req.ExposureHeaderIDs == nil {
+			req.ExposureHeaderIDs = []string{}
+		}
+		rows, err := pool.Query(ctx, query, strings.TrimSpace(req.Currency), strings.TrimSpace(req.Entity), buNames, req.ExposureHeaderIDs)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch forward bookings")
 			return

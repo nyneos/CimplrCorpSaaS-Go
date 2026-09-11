@@ -38,6 +38,53 @@ type settlementLineInput struct {
 	PartialAmount    *float64 `json:"partial_amount"`
 	Status           string   `json:"status"`
 	Comments         *string  `json:"comments"`
+	// Cancellation (TC-73): booked vs cancellation rate → gain/loss.
+	BookedRate       *float64 `json:"booked_rate"`
+	CancellationRate *float64 `json:"cancellation_rate"`
+	GainLoss         *float64 `json:"gain_loss"`
+}
+
+// resolveForwardBooking maps a forward_ref (internal_reference_id) to the
+// booking's system_transaction_id + order_type + total_rate. The settlement
+// forms only know the reference, but hedge links and the booking ledger are
+// keyed by system_transaction_id.
+func resolveForwardBooking(ctx context.Context, pool *pgxpool.Pool, bookingID, forwardRef string) (id, orderType string, bookedRate float64) {
+	bookingID = strings.TrimSpace(bookingID)
+	forwardRef = strings.TrimSpace(forwardRef)
+	if bookingID == "" && forwardRef == "" {
+		return "", "", 0
+	}
+	var ot string
+	var rate *float64
+	if bookingID != "" {
+		_ = pool.QueryRow(ctx, `
+			SELECT COALESCE(order_type,''), total_rate
+			FROM public.forward_bookings
+			WHERE system_transaction_id::text = $1 AND COALESCE(is_deleted,false) = false
+			LIMIT 1`, bookingID).Scan(&ot, &rate)
+	} else {
+		_ = pool.QueryRow(ctx, `
+			SELECT system_transaction_id::text, COALESCE(order_type,''), total_rate
+			FROM public.forward_bookings
+			WHERE internal_reference_id = $1 AND COALESCE(is_deleted,false) = false
+			ORDER BY add_date DESC NULLS LAST
+			LIMIT 1`, forwardRef).Scan(&bookingID, &ot, &rate)
+	}
+	if rate != nil {
+		bookedRate = *rate
+	}
+	return bookingID, ot, bookedRate
+}
+
+// cancellationGainLoss applies the configured booked-vs-cancelled logic:
+// Buy forward  → gain when cancellation rate > booked rate.
+// Sell forward → gain when cancellation rate < booked rate.
+func cancellationGainLoss(orderType string, bookedRate, cancellationRate, amount float64) float64 {
+	dir := 1.0
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(orderType)), "S") {
+		dir = -1.0
+	}
+	return math.Round((cancellationRate-bookedRate)*math.Abs(amount)*dir*100) / 100
 }
 
 func normalizeSettlementMethod(m string) string {
@@ -329,19 +376,41 @@ func replaceSettlementLines(ctx context.Context, pool *pgxpool.Pool, settlementI
 		if line.PartialAmount != nil && *line.PartialAmount > 0 && amount == 0 {
 			amount = *line.PartialAmount
 		}
+		bookingID, orderType, bookedFromFwd := resolveForwardBooking(ctx, pool, line.BookingID, line.ForwardRef)
+		var bookedRate, cancelRate, gainLoss *float64
+		if line.BookedRate != nil {
+			bookedRate = line.BookedRate
+		} else if bookedFromFwd != 0 {
+			br := bookedFromFwd
+			bookedRate = &br
+		} else if line.FwdRate != nil {
+			bookedRate = line.FwdRate
+		}
+		if line.CancellationRate != nil && *line.CancellationRate > 0 {
+			cancelRate = line.CancellationRate
+			if bookedRate != nil {
+				gl := cancellationGainLoss(orderType, *bookedRate, *cancelRate, amount)
+				gainLoss = &gl
+			}
+		}
+		if gainLoss == nil && line.GainLoss != nil {
+			gainLoss = line.GainLoss
+		}
 		_, err := pool.Exec(ctx, `
 			INSERT INTO public.exposure_settlement_line (
 				settlement_id, exposure_header_id, booking_id, forward_ref, leg_type,
 				settlement_amount, spot_rate, fwd_rate, margin, bank_name, maturity_date,
-				partial_amount, line_status, comments, created_at
+				partial_amount, line_status, comments, created_at,
+				booked_rate, cancellation_rate, gain_loss
 			) VALUES (
 				$1::uuid, $2, NULLIF($3,''), NULLIF($4,''), $5,
 				$6, $7, $8, $9, NULLIF($10,''), $11::date,
-				$12, $13, $14, NOW()
+				$12, $13, $14, NOW(),
+				$15, $16, $17
 			)
 		`, settlementID,
 			strings.TrimSpace(line.ExposureHeaderID),
-			strings.TrimSpace(line.BookingID),
+			bookingID,
 			strings.TrimSpace(line.ForwardRef),
 			leg,
 			amount,
@@ -353,12 +422,18 @@ func replaceSettlementLines(ctx context.Context, pool *pgxpool.Pool, settlementI
 			line.PartialAmount,
 			status,
 			line.Comments,
+			bookedRate, cancelRate, gainLoss,
 		)
 		if err != nil {
 			return err
 		}
 	}
-	return nil
+	// Roll the per-line gain/loss up to the document (TC-73).
+	_, err := pool.Exec(ctx, `
+		UPDATE public.exposure_settlement_document d
+		SET total_gain_loss = (SELECT COALESCE(SUM(gain_loss), 0) FROM public.exposure_settlement_line l WHERE l.settlement_id = d.settlement_id)
+		WHERE d.settlement_id = $1::uuid`, settlementID)
+	return err
 }
 
 func reduceExposureOpenAmount(ctx context.Context, pool *pgxpool.Pool, exposureHeaderID string, amount float64) error {
@@ -463,9 +538,11 @@ func syncExposureLifecycleStatus(ctx context.Context, pool *pgxpool.Pool, exposu
 	`, exposureHeaderID).Scan(&open); err != nil {
 		return
 	}
-	if math.Abs(open) > 0.0001 {
-		return
-	}
+	// The settlement method is stamped as soon as it is approved, even for a
+	// partial amount: from this point the exposure can no longer be linked to a
+	// forward (ExpFwdLinking / LinkExposureHedge / ApproveHedgeLinks all refuse
+	// PAYMENT / ROLLOVER / CANCELLED / CLOSED). is_active only drops once the
+	// open amount is fully consumed.
 	next := "Closed"
 	switch strings.ToUpper(method) {
 	case "CANCELLATION":
@@ -475,14 +552,25 @@ func syncExposureLifecycleStatus(ctx context.Context, pool *pgxpool.Pool, exposu
 	case "PAYMENT":
 		next = "Payment"
 	}
-	_, _ = pool.Exec(ctx, `
+	fullySettled := math.Abs(open) <= 0.0001
+	if _, err := pool.Exec(ctx, `
 		UPDATE public.exposure_headers
 		SET status = $1,
-		    is_active = false,
+		    is_active = CASE WHEN $3 THEN false ELSE is_active END,
 		    updated_at = NOW()
 		WHERE exposure_header_id::text = $2
 		  AND COALESCE(is_deleted, false) = false
-	`, next, exposureHeaderID)
+	`, next, exposureHeaderID, fullySettled); err != nil {
+		logger.LogError("[Settlement] exposure lifecycle status %s → %s: %v", exposureHeaderID, next, err)
+	}
+	// Any hedge link still waiting for approval on this exposure is void now.
+	if _, err := pool.Exec(ctx, `
+		UPDATE public.exposure_hedge_links
+		SET is_active = false
+		WHERE exposure_header_id::text = $1 AND COALESCE(is_active, false) = false
+	`, exposureHeaderID); err != nil {
+		logger.LogError("[Settlement] void pending hedge links %s: %v", exposureHeaderID, err)
+	}
 }
 
 func parseSettlementDate(s string) (time.Time, error) {
@@ -738,45 +826,50 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 					touched[strings.TrimSpace(lr.ExposureID)] = struct{}{}
 				}
 			}
-			// Release / consume hedge link when booking present
-			if strings.TrimSpace(lr.BookingID) != "" && strings.TrimSpace(lr.ExposureID) != "" {
-				_, _ = pool.Exec(ctx, `
-					UPDATE public.exposure_hedge_links
-					SET hedged_amount = GREATEST(0, COALESCE(hedged_amount, 0) - $1),
-					    is_active = CASE WHEN GREATEST(0, COALESCE(hedged_amount, 0) - $1) <= 0 THEN false ELSE is_active END
-					WHERE exposure_header_id::text = $2
-					  AND booking_id::text = $3
-				`, math.Abs(amt), lr.ExposureID, lr.BookingID)
-				if method == "PAYMENT" {
-					var openAmt float64
-					var seq int
-					_ = pool.QueryRow(ctx, `
-						SELECT COALESCE(running_open_amount, 0), COALESCE(ledger_sequence, 0)
-						FROM public.forward_booking_ledger
-						WHERE booking_id::text = $1
-						ORDER BY ledger_sequence DESC LIMIT 1
-					`, lr.BookingID).Scan(&openAmt, &seq)
-					newOpen := math.Max(0, openAmt-math.Abs(amt))
-					_, _ = pool.Exec(ctx, `
-						INSERT INTO public.forward_booking_ledger
-							(booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount, user_id)
-						VALUES ($1, $2, 'UTILIZATION', $3, CURRENT_DATE, $4, $5, $6)
-					`, lr.BookingID, seq+1, settlementID, math.Abs(amt), newOpen, actor)
-				} else if method == "CANCELLATION" {
-					var openAmt float64
-					var seq int
-					_ = pool.QueryRow(ctx, `
-						SELECT COALESCE(running_open_amount, 0), COALESCE(ledger_sequence, 0)
-						FROM public.forward_booking_ledger
-						WHERE booking_id::text = $1
-						ORDER BY ledger_sequence DESC LIMIT 1
-					`, lr.BookingID).Scan(&openAmt, &seq)
-					newOpen := openAmt + math.Abs(amt)
-					_, _ = pool.Exec(ctx, `
-						INSERT INTO public.forward_booking_ledger
-							(booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount, user_id)
-						VALUES ($1, $2, 'CANCELLATION', $3, CURRENT_DATE, $4, $5, $6)
-					`, lr.BookingID, seq+1, settlementID, -math.Abs(amt), newOpen, actor)
+			// Forward legs (LINKED_HEDGE / ADDITIONAL_FWD / CASH with a ref): consume
+			// the hedge link and write the booking ledger. Lines saved before the
+			// booking_id backfill only carry forward_ref, so resolve it here too.
+			if lr.BookingID == "" && lr.ForwardRef != "" {
+				lr.BookingID, _, _ = resolveForwardBooking(ctx, pool, "", lr.ForwardRef)
+			}
+			if strings.TrimSpace(lr.BookingID) != "" && lr.LegType != "EXPOSURE" && lr.LegType != "CANCELLATION" && amt != 0 {
+				if strings.TrimSpace(lr.ExposureID) != "" {
+					if _, lerr := pool.Exec(ctx, `
+						UPDATE public.exposure_hedge_links
+						SET hedged_amount = GREATEST(0, COALESCE(hedged_amount, 0) - $1),
+						    is_active = CASE WHEN GREATEST(0, COALESCE(hedged_amount, 0) - $1) <= 0 THEN false ELSE is_active END
+						WHERE exposure_header_id::text = $2
+						  AND booking_id::text = $3
+					`, math.Abs(amt), lr.ExposureID, lr.BookingID); lerr != nil {
+						logger.LogError("[Settlement] hedge link update %s/%s: %v", lr.ExposureID, lr.BookingID, lerr)
+					}
+				}
+				// Both PAYMENT (utilisation) and CANCELLATION consume the forward's
+				// open amount; the ledger keeps the sign of the movement.
+				var openAmt float64
+				var seq int
+				lerr := pool.QueryRow(ctx, `
+					SELECT COALESCE(running_open_amount, 0), COALESCE(ledger_sequence, 0)
+					FROM public.forward_booking_ledger
+					WHERE booking_id::text = $1
+					ORDER BY ledger_sequence DESC LIMIT 1
+				`, lr.BookingID).Scan(&openAmt, &seq)
+				if lerr != nil {
+					// no ledger yet → start from the booking amount
+					_ = pool.QueryRow(ctx, `SELECT COALESCE(booking_amount,0) FROM public.forward_bookings WHERE system_transaction_id::text = $1`, lr.BookingID).Scan(&openAmt)
+					seq = 0
+				}
+				actionType := "UTILIZATION"
+				if method == "CANCELLATION" {
+					actionType = "CANCELLATION"
+				}
+				newOpen := math.Max(0, math.Abs(openAmt)-math.Abs(amt))
+				if _, lerr := pool.Exec(ctx, `
+					INSERT INTO public.forward_booking_ledger
+						(booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount)
+					VALUES ($1::uuid, $2, $3, $4, CURRENT_DATE, $5, $6)
+				`, lr.BookingID, seq+1, actionType, settlementID, -math.Abs(amt), newOpen); lerr != nil {
+					logger.LogError("[Settlement] forward ledger insert %s: %v", lr.BookingID, lerr)
 				}
 			}
 		}
