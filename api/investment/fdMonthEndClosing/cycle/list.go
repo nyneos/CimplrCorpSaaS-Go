@@ -38,7 +38,7 @@ const listWithAuditQuery = `
 		m.financial_period,
 		TO_CHAR(m.period_start,'YYYY-MM-DD') AS period_start,
 		TO_CHAR(m.period_end,'YYYY-MM-DD') AS period_end,
-		m.include_matured, m.source, m.status,
+		m.include_matured, m.source, COALESCE(m.status,'DRAFT') AS status,
 		COALESCE((
 			SELECT COUNT(*)::int
 			FROM investment.fd_closing_cycle_fd_scope s
