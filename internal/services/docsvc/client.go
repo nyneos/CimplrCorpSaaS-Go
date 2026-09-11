@@ -13,8 +13,6 @@ import (
 	"time"
 )
 
-// Client talks to CIMPLR-Document-Service for hard-stop, quota counts, and format rendering.
-// Job queue / client payloads stay in Main (dms_svc).
 type Client struct {
 	base  string
 	token string
@@ -37,8 +35,6 @@ func healthHTTPClient() *http.Client {
 	return &http.Client{Timeout: 4 * time.Second}
 }
 
-// Health pings /v1/health — used by the DMS status light so the UI can tell
-// whether Document-Service is reachable without waiting on a full quota check.
 func (c *Client) Health(ctx context.Context) error {
 	var wrap struct {
 		Success bool   `json:"success"`
@@ -206,13 +202,6 @@ func (c *Client) RenderFormat(ctx context.Context, req RenderFormatRequest) (Ren
 	return wrap.Data, nil
 }
 
-// mainS3Fields resolves Main's own S3 identity to pass per-request to
-// Document-Service for storage calls — same env vars and same MAIN_S3
-// resolution as internal/jobs/dino/outboxWorker.go's owS3CredsForBackend,
-// same "fishy" field names Document-Service expects (see its api/caller.go
-// StorageCreds). Document-Service is one shared instance; Main is
-// tenant-based (each deployment has its own bucket), so credentials travel
-// with the request rather than living in Document-Service's own env.
 func mainS3Fields() map[string]any {
 	region := strings.TrimSpace(os.Getenv("BANK_STMT_S3_REGION"))
 	if region == "" {
@@ -240,8 +229,6 @@ func mergeS3Fields(body map[string]any) map[string]any {
 	return body
 }
 
-// RenderAndStoreData is /v1/render/store's response — same as RenderFormatData
-// plus the S3 key Document-Service stored the result under in its own bucket.
 type RenderAndStoreData struct {
 	BytesBase64 string `json:"bytes_base64"`
 	Key         string `json:"key"`
@@ -251,11 +238,6 @@ type RenderAndStoreData struct {
 	Size        int64  `json:"size"`
 }
 
-// RenderAndStore renders like RenderFormat, but Document-Service also uploads
-// the result to its own S3 bucket and returns the key — Main records the key
-// on dms_svc.generated_document (storage_backend='DOCSVC_S3') instead of
-// calling its own S3 credentials. Bytes are still returned for the LOCAL
-// destination case and checksum verification.
 func (c *Client) RenderAndStore(ctx context.Context, req RenderFormatRequest) (RenderAndStoreData, error) {
 	var wrap struct {
 		Success bool               `json:"success"`
@@ -293,9 +275,6 @@ func (c *Client) RenderAndStore(ctx context.Context, req RenderFormatRequest) (R
 	return wrap.Data, nil
 }
 
-// DownloadDocument fetches raw bytes for a key Document-Service stored (i.e.
-// dms_svc.generated_document.storage_backend='DOCSVC_S3'). Used where Main
-// needs actual bytes (email attachment MIME embedding), not just a link.
 func (c *Client) DownloadDocument(ctx context.Context, key string) ([]byte, error) {
 	var wrap struct {
 		Success bool `json:"success"`
@@ -325,8 +304,6 @@ func (c *Client) DownloadDocument(ctx context.Context, key string) ([]byte, erro
 	return raw, nil
 }
 
-// UploadDocument stores bytes Main already has (no render step) — e.g. a ZIP
-// package built from several already-generated documents.
 func (c *Client) UploadDocument(ctx context.Context, prefix string, data []byte, contentType, ext string) (string, error) {
 	var wrap struct {
 		Success bool `json:"success"`
@@ -355,9 +332,6 @@ func (c *Client) UploadDocument(ctx context.Context, prefix string, data []byte,
 	return wrap.Data.Key, nil
 }
 
-// DownloadDocumentURL returns a short-lived presigned link for a key
-// Document-Service stored — for browser-facing downloads (Sent Box) that
-// shouldn't proxy the whole file through Main as a JSON payload.
 func (c *Client) DownloadDocumentURL(ctx context.Context, key, contentType string, inline bool) (string, error) {
 	var wrap struct {
 		Success bool `json:"success"`

@@ -1,6 +1,7 @@
 package scope
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -78,7 +79,19 @@ func ListEligibleFDs(pool *pgxpool.Pool) http.HandlerFunc {
 			statuses = filtered
 		}
 
-		q := `
+		currencyExpr := resolveFDCurrencyExpr(ctx, pool)
+		currencySelect := `'' AS currency_code`
+		if currencyExpr != "" {
+			currencySelect = fmt.Sprintf(`COALESCE((
+					SELECT %s
+					FROM investment.fd_confirmation c
+					LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+					WHERE c.confirmation_id = m.confirmation_id
+					LIMIT 1
+				),'') AS currency_code`, currencyExpr)
+		}
+
+		q := fmt.Sprintf(`
 			SELECT
 				m.fd_id,
 				COALESCE(NULLIF(BTRIM(m.bank_fd_ref_no), ''), m.fd_id) AS bank_fd_ref_no,
@@ -89,9 +102,10 @@ func ListEligibleFDs(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.principal_amount,0) AS principal_amount,
 				COALESCE(m.fd_status,'') AS fd_status,
 				COALESCE(TO_CHAR(m.start_date,'YYYY-MM-DD'),'') AS start_date,
-				COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'') AS maturity_date
+				COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'') AS maturity_date,
+				%s
 			FROM investment.fd_master m
-			WHERE COALESCE(m.is_deleted,false) = false
+			WHERE COALESCE(m.is_deleted,false) = false`, currencySelect) + `
 			  AND m.entity_id = $1
 			  AND UPPER(COALESCE(m.fd_status,'')) = ANY($2::text[])
 			  AND m.start_date IS NOT NULL
@@ -107,6 +121,20 @@ func ListEligibleFDs(pool *pgxpool.Pool) http.HandlerFunc {
 			q += fmt.Sprintf(` AND COALESCE(m.bank_id,'') = $%d`, argIdx)
 			args = append(args, req.BankID)
 			argIdx++
+		}
+
+		currencyFilterApplied := false
+		if req.CurrencyCode != "" && currencyExpr != "" {
+			q += fmt.Sprintf(`
+			  AND EXISTS (
+				SELECT 1 FROM investment.fd_confirmation c
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+				WHERE c.confirmation_id = m.confirmation_id
+				  AND UPPER(%s) = UPPER($%d)
+			  )`, currencyExpr, argIdx)
+			args = append(args, req.CurrencyCode)
+			argIdx++
+			currencyFilterApplied = true
 		}
 
 		if req.CycleID != "" {
@@ -141,13 +169,56 @@ func ListEligibleFDs(pool *pgxpool.Pool) http.HandlerFunc {
 			"include_matured":   includeMatured,
 			"bank_id":           req.BankID,
 			"currency_code":     req.CurrencyCode,
-			// investment.fd_master has no currency column — currency_code is
-			// stored on the cycle header only and cannot filter eligible FDs yet.
-			"currency_filter_applied": false,
+			"currency_filter_applied": currencyFilterApplied,
 			"bank_filter_applied":     req.BankID != "",
 			"eligible_statuses":       statuses,
 		})
 	}
+}
+
+func resolveFDCurrencyExpr(ctx context.Context, pool *pgxpool.Pool) string {
+	confCols, err := loadClosingTableColumns(ctx, pool, "investment", "fd_confirmation")
+	if err != nil {
+		return ""
+	}
+	bookingCols, err := loadClosingTableColumns(ctx, pool, "investment", "fd_booking_request")
+	if err != nil {
+		return ""
+	}
+	switch {
+	case confCols["currency"]:
+		return "COALESCE(c.currency,'')"
+	case confCols["currency_code"]:
+		return "COALESCE(c.currency_code,'')"
+	case bookingCols["currency"]:
+		return "COALESCE(b.currency,'')"
+	case bookingCols["currency_code"]:
+		return "COALESCE(b.currency_code,'')"
+	}
+	return ""
+}
+
+func loadClosingTableColumns(ctx context.Context, pool *pgxpool.Pool, schemaName, tableName string) (map[string]bool, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2`,
+		schemaName, tableName,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var columnName string
+		if err := rows.Scan(&columnName); err != nil {
+			return nil, err
+		}
+		columns[columnName] = true
+	}
+	return columns, rows.Err()
 }
 
 // validateEligibleStatus rejects FDs that are not in the closing-eligible set

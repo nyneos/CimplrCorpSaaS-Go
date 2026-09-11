@@ -613,7 +613,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SubmittedByEmail:    uEmail,
 				MatrixID:            matrixID,
 				RequirePinnedMatrix: true,
-				AutoApplyIfUnpinned: true,
+				AutoApplyIfUnpinned: false,
 			})
 			if err != nil {
 				api.LogError("[FDBooking] CaptureConfirmation CreateInstance failed for %s: %v", cID, err)

@@ -56,7 +56,9 @@ func DetailCycle(pool *pgxpool.Pool) http.HandlerFunc {
 						  AND s.is_deleted = false
 						  AND s.selection_status = 'APPROVED'
 					), 0) AS fd_count,
-					readiness_score, blocker_count, eligibility,
+					COALESCE(readiness_score,0) AS readiness_score,
+					COALESCE(blocker_count,0) AS blocker_count,
+					COALESCE(eligibility,'NOT_READY') AS eligibility,
 					initiated_by, TO_CHAR(initiated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS initiated_at,
 					is_deleted, created_by, TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
 				FROM investment.fd_closing_cycle

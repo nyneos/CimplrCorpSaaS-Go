@@ -150,6 +150,15 @@ func matrixTxnTypePrefixes(subModule string) []string {
 	if code == "EXPOSURE_BUCKETING" {
 		return []string{"FX_BUCKETING"}
 	}
+	if code == "EXPOSURE_CREATION" {
+		return []string{"FX_EXPOSURE", "EXPOSURE_CREATION"}
+	}
+	if code == "EXPOSURE_UPLOAD" {
+		return []string{"FX_EXPOSURE", "EXPOSURE_UPLOAD"}
+	}
+	if code == "EXPOSURE_SETTLEMENT" {
+		return []string{"FX_SETTLEMENT", "EXPOSURE_SETTLEMENT"}
+	}
 	if code == "FORWARD_CANCELLATION" {
 		return []string{"FX_FORWARD_CANCELLATION"}
 	}
