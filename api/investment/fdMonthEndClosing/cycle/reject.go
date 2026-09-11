@@ -100,10 +100,9 @@ func RejectCycle(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // directRejectCycle is the no-approval-matrix-configured fallback: flip the
-// single pending audit row to REJECTED. For EDIT/DELETE there is no
-// master-level revert (see the package doc comment on RejectCycle); for
-// CREATE the master row was never actually live, so reject also soft-deletes
-// it — a rejected creation must not remain usable.
+// single pending audit row to REJECTED. No master-level change is made for any
+// action_type — is_deleted is reserved for an approved DELETE, so a rejected
+// record stays visible in the list carrying its REJECTED processing_status.
 func directRejectCycle(ctx context.Context, pool *pgxpool.Pool, cycleID, checkerEmail, comment string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -123,15 +122,6 @@ func directRejectCycle(ctx context.Context, pool *pgxpool.Pool, cycleID, checker
 		pending.AuditID, api.SystemIfBlank(checkerEmail), comment,
 	); err != nil {
 		return fmt.Errorf("audit flip failed: %w", err)
-	}
-
-	if pending.ActionType == "CREATE" {
-		if _, err := tx.Exec(ctx, `
-			UPDATE investment.fd_closing_cycle SET is_deleted = true WHERE cycle_id = $1`,
-			cycleID,
-		); err != nil {
-			return fmt.Errorf("is_deleted flip failed: %w", err)
-		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {

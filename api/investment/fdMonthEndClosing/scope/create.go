@@ -413,30 +413,6 @@ func applyScopeAddApproval(ctx context.Context, tx pgx.Tx, scopeID, checkerEmail
 		return fmt.Errorf("applyScopeAddApproval checklist seed: %w", err)
 	}
 
-	// Heal orphan PENDING CREATE (no live approval instance) before promote —
-	// same as CreateScope's immediate-add path.
-	if _, err := tx.Exec(ctx, `
-		UPDATE investment.fd_closing_cycle_audit ca
-		SET processing_status = 'APPROVED',
-		    checker_by = $2,
-		    checker_at = now(),
-		    checker_comment = COALESCE(NULLIF(ca.checker_comment,''),
-		      'Auto-approved on scope add — no pending approval instance')
-		WHERE ca.cycle_id = $1
-		  AND ca.action_type = 'CREATE'
-		  AND ca.processing_status = 'PENDING_APPROVAL'
-		  AND NOT EXISTS (
-			SELECT 1 FROM uam.approval_instance ai
-			WHERE ai.record_id = $1
-			  AND ai.module_code = $3
-			  AND ai.status = 'PENDING'
-			  AND ai.is_deleted = false
-		  )`,
-		cycleID, checkerEmail, moduleCode,
-	); err != nil {
-		return fmt.Errorf("applyScopeAddApproval orphan CREATE heal: %w", err)
-	}
-
 	// Move DRAFT → IN_PROGRESS only after CREATE is approved AND first FD is
 	// in scope. Do not promote a still-pending CREATE cycle into work screens.
 	if _, err := tx.Exec(ctx, `
