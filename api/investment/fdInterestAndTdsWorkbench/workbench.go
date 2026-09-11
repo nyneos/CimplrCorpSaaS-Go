@@ -508,17 +508,19 @@ func GetInterestVsAccrualAnalysis(pool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, req.FdID)
 			idx++
 		}
+		// Scope by interest period overlap with [from_date, to_date], not cash
+		// receipt_date — same rule as /investment/fd/receipt/all and reconcile load.
 		if req.FromDate != "" {
-			analysisSQL += fmt.Sprintf(" AND r.receipt_date>=$%d", idx)
+			analysisSQL += fmt.Sprintf(" AND r.period_end>=$%d::date", idx)
 			args = append(args, req.FromDate)
 			idx++
 		}
 		if req.ToDate != "" {
-			analysisSQL += fmt.Sprintf(" AND r.receipt_date<=$%d", idx)
+			analysisSQL += fmt.Sprintf(" AND r.period_start<=$%d::date", idx)
 			args = append(args, req.ToDate)
 			idx++
 		}
-		analysisSQL += " ORDER BY r.receipt_date DESC"
+		analysisSQL += " ORDER BY r.period_end DESC, r.receipt_date DESC"
 
 		rows, err := pool.Query(ctx, analysisSQL, args...)
 		if err != nil {

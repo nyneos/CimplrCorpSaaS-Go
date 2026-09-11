@@ -34,11 +34,30 @@ const checklistItemSelect = `
 		COALESCE(i.last_updated_by,'') AS last_updated_by,
 		COALESCE(TO_CHAR((i.last_updated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS last_updated_at,
 		TO_CHAR((i.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS') AS created_at,
-		c.entity_id AS entity_id
+		c.entity_id AS entity_id,
+		COALESCE(la.processing_status,'') AS processing_status,
+		COALESCE(la.action_type,'') AS pending_action_type,
+		COALESCE(la.proposed_status,'') AS proposed_status,
+		COALESCE(la.audit_id::text,'') AS pending_audit_id,
+		COALESCE(la.requested_by,'') AS requested_by,
+		COALESCE(la.checker_by,'') AS checker_by
 	FROM investment.fd_closing_checklist_item i
 	JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 	JOIN investment.fd_closing_cycle_fd_scope s
-	  ON s.scope_id = i.scope_id AND s.is_deleted = false`
+	  ON s.scope_id = i.scope_id AND s.is_deleted = false
+	LEFT JOIN LATERAL (
+		SELECT a.audit_id, a.processing_status, a.action_type,
+		       COALESCE(a.new_status,'') AS proposed_status,
+		       COALESCE(a.requested_by,'') AS requested_by,
+		       COALESCE(a.checker_by,'') AS checker_by
+		FROM investment.fd_closing_checklist_item_audit a
+		WHERE a.item_id = i.item_id
+		ORDER BY GREATEST(
+		  COALESCE(a.requested_at, '1970-01-01'::timestamptz),
+		  COALESCE(a.checker_at, '1970-01-01'::timestamptz)
+		) DESC
+		LIMIT 1
+	) la ON true`
 
 // ListChecklistItems handles POST /investment/fd-closing/checklist/list —
 // this is what the per-cycle "5 steps x N FDs" grid renders from. fd_id is an
@@ -61,7 +80,7 @@ func ListChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		q := checklistItemSelect + " WHERE i.cycle_id = $1"
+		q := checklistItemSelect + " WHERE i.cycle_id = $1 AND i.is_deleted = false"
 		args := []interface{}{req.CycleID}
 
 		if fdID := strings.TrimSpace(req.FDID); fdID != "" {

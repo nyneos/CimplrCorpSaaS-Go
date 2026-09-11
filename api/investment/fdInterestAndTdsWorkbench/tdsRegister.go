@@ -448,13 +448,13 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.DateFrom != "" {
-			sql += fmt.Sprintf(" AND tds.period_start >= $%d", argIdx)
+			sql += fmt.Sprintf(" AND tds.period_end >= $%d::date", argIdx)
 			args = append(args, req.DateFrom)
 			argIdx++
 		}
 
 		if req.DateTo != "" {
-			sql += fmt.Sprintf(" AND tds.period_end <= $%d", argIdx)
+			sql += fmt.Sprintf(" AND tds.period_start <= $%d::date", argIdx)
 			args = append(args, req.DateTo)
 			argIdx++
 		}

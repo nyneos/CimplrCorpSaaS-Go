@@ -23,6 +23,16 @@ type Middleware func(http.Handler) http.Handler
 func RegisterChecklistRoutes(mux *http.ServeMux, pool *pgxpool.Pool, mid Middleware) {
 	mux.Handle("/investment/fd-closing/checklist/update",
 		mid(http.HandlerFunc(UpdateChecklistItem(pool))))
+	mux.Handle("/investment/fd-closing/checklist/delete",
+		mid(http.HandlerFunc(DeleteChecklistItem(pool))))
+	mux.Handle("/investment/fd-closing/checklist/approve",
+		mid(http.HandlerFunc(ApproveChecklistItem(pool))))
+	mux.Handle("/investment/fd-closing/checklist/bulk-approve",
+		mid(http.HandlerFunc(ApproveChecklistItem(pool))))
+	mux.Handle("/investment/fd-closing/checklist/reject",
+		mid(http.HandlerFunc(RejectChecklistItem(pool))))
+	mux.Handle("/investment/fd-closing/checklist/bulk-reject",
+		mid(http.HandlerFunc(RejectChecklistItem(pool))))
 	mux.Handle("/investment/fd-closing/checklist/list",
 		mid(http.HandlerFunc(ListChecklistItems(pool))))
 	mux.Handle("/investment/fd-closing/checklist/detail",
