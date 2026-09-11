@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	"CimplrCorpSaas/api/investment/fdMaster"
 	"CimplrCorpSaas/api/investment/fdNotifications"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
@@ -2953,11 +2954,14 @@ func postCimplrClosureJournalsTx(ctx context.Context, tx pgx.Tx, closureConfirmI
 			activity_id, entity_id, entity_name, entry_date, accounting_period, entry_type,
 			description, total_debit, total_credit, status, fd_id, closure_request_id,
 			is_reversal, created_by
-		) VALUES ($1,$2,$3,CURRENT_DATE,$4,'CLOSURE',$5,$6,$7,'POSTED',$8,$9,false,$10)
+		) VALUES ($1,$2,$3,CURRENT_DATE,$4,'CLOSURE',$5,$6,$7,'PENDING_APPROVAL',$8,$9,false,$10)
 		RETURNING entry_id`,
 		activityID, nullStrOrNil(entityID), nullStrOrNil(entityName), accountingPeriod,
 		fmt.Sprintf("FD %s closure - %s", closureType, fdID), totalDebit, totalCredit, fdID, closureConfirmID, actorEmail,
 	).Scan(&entryID); err != nil {
+		return err
+	}
+	if err := fdAccounting.StageJournalForApproval(ctx, tx, entryID, actorEmail, "FD closure journal"); err != nil {
 		return err
 	}
 
@@ -3123,11 +3127,14 @@ func createCimplrRolloverBookingTx(ctx context.Context, tx pgx.Tx, closureConfir
 			activity_id, entity_id, entity_name, entry_date, accounting_period, entry_type,
 			description, total_debit, total_credit, status, fd_id, closure_request_id,
 			is_reversal, created_by
-		) VALUES ($1,$2,$3,CURRENT_DATE,$4,'CLOSURE',$5,$6,$7,'POSTED',$8,$9,false,$10)
+		) VALUES ($1,$2,$3,CURRENT_DATE,$4,'CLOSURE',$5,$6,$7,'PENDING_APPROVAL',$8,$9,false,$10)
 		RETURNING entry_id`,
 		activityID, nullStrOrNil(entityID), nullStrOrNil(entityName), accountingPeriod,
 		fmt.Sprintf("FD ROLLOVER closure - %s", fdID), totalDebit, totalCredit, fdID, closureConfirmID, actorEmail,
 	).Scan(&entryID); err != nil {
+		return err
+	}
+	if err := fdAccounting.StageJournalForApproval(ctx, tx, entryID, actorEmail, "FD closure journal"); err != nil {
 		return err
 	}
 	lineNum := 1

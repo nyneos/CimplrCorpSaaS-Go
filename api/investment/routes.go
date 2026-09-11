@@ -12,6 +12,7 @@ import (
 	fdInterestWorkbench "CimplrCorpSaas/api/investment/fdInterestAndTdsWorkbench"
 	fdMaster "CimplrCorpSaas/api/investment/fdMaster"
 	fdMaturityAndRollover "CimplrCorpSaas/api/investment/fdMaturityAndRollover"
+	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	fdMonthEndClosing "CimplrCorpSaas/api/investment/fdMonthEndClosing"
 	fdRateNegotiation "CimplrCorpSaas/api/investment/fdRateNegotiation"
 	fdReceipt "CimplrCorpSaas/api/investment/fdReceipt"
@@ -434,6 +435,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	// FD Month/Quarter End Closing (cycle — Sections 0+1 of the handler spec;
 	// scope/checklist/lock/reopen/evidencePack land here as sibling agents build them)
 	fdMonthEndClosing.RegisterFDMonthEndClosingRoutes(mux, pool)
+	fdAccounting.RegisterFDAccountingRoutes(mux, pool)
 	fdRateNegotiation.RegisterFDRateNegotiationRoutes(mux, pool)
 	fdMaster.RegisterFDMasterRoutes(mux, pool)
 	fdAccrual.RegisterFDAccrualRoutes(mux, pool)

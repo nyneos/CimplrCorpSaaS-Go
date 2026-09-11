@@ -383,7 +383,7 @@ func ExpFwdLinking(pool *pgxpool.Pool) http.HandlerFunc {
 			  AND COALESCE(is_deleted, false) = false
 			  -- Once a settlement (payment/rollover/cancellation) has been approved on this
 			  -- exposure it is terminal — no further hedges can be linked to it.
-			  AND UPPER(TRIM(COALESCE(status, ''))) NOT IN ('CLOSED', 'CANCELLED', 'PAYMENT', 'ROLLOVER')
+			  AND UPPER(TRIM(COALESCE(status, ''))) NOT IN ('CLOSED', 'CANCELLED', 'CANCELED', 'PAYMENT', 'ROLLOVER', 'SETTLED', 'PAID')
 			  AND ABS(COALESCE(total_open_amount, 0)) > 0
 		`)
 		if err != nil {
@@ -544,6 +544,11 @@ func ExpFwdLinking(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // Handler: LinkExposureHedge - upsert exposure_hedge_links and log to forward_booking_ledger
+// settledExposureStatuses are the exposure_headers.status values stamped by an
+// approved settlement (see syncExposureLifecycleStatus). Such an exposure can
+// never be linked to a forward again.
+var settledExposureStatuses = map[string]bool{"CLOSED": true, "CANCELLED": true, "CANCELED": true, "PAYMENT": true, "ROLLOVER": true, "SETTLED": true, "PAID": true}
+
 func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -569,7 +574,7 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "Exposure not found")
 			return
 		}
-		if map[string]bool{"CLOSED": true, "CANCELLED": true, "PAYMENT": true, "ROLLOVER": true}[exposureStatus] ||
+		if settledExposureStatuses[exposureStatus] ||
 			math.Abs(exposureOpenAmount) <= 0 {
 			respondWithError(w, http.StatusUnprocessableEntity, "This exposure has already been settled and can no longer be hedged")
 			return
@@ -719,11 +724,27 @@ func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		approved := 0
+		skipped := []string{}
 		approvedExposureIDs := make([]string, 0, len(req.Links))
 		for _, link := range req.Links {
 			expID := strings.TrimSpace(link.ExposureHeaderID)
 			bookID := strings.TrimSpace(link.BookingID)
 			if expID == "" || bookID == "" {
+				continue
+			}
+			// The exposure may have been settled (payment / rollover / cancellation
+			// approved) while this link sat in the queue — it is terminal now.
+			var exposureStatus string
+			var exposureOpen float64
+			_ = pool.QueryRow(ctx, `
+				SELECT UPPER(TRIM(COALESCE(status, ''))), COALESCE(total_open_amount, 0)
+				FROM exposure_headers
+				WHERE exposure_header_id::text = $1 AND COALESCE(is_deleted, false) = false
+			`, expID).Scan(&exposureStatus, &exposureOpen)
+			if settledExposureStatuses[exposureStatus] || math.Abs(exposureOpen) <= 0 {
+				_, _ = pool.Exec(ctx, `UPDATE exposure_hedge_links SET is_active = false WHERE exposure_header_id = $1 AND booking_id = $2`, expID, bookID)
+				skipped = append(skipped, expID+" ("+strings.Title(strings.ToLower(exposureStatus))+")")
+				logger.LogError("approve hedge link refused: exposure %s already settled (%s)", expID, exposureStatus)
 				continue
 			}
 			var hedged float64
@@ -743,7 +764,11 @@ func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 			var totalUtilized float64
 			_ = pool.QueryRow(ctx, `SELECT COALESCE(SUM(amount_changed), 0) FROM forward_booking_ledger WHERE booking_id = $1 AND action_type IN ('UTILIZATION', 'CANCELLATION', 'ROLLOVER')`, bookID).Scan(&totalUtilized)
 			newOpenAmount := math.Abs(math.Abs(bookingAmount) - math.Abs(totalUtilized) - math.Abs(hedged))
-			_, _ = pool.Exec(ctx, `INSERT INTO forward_booking_ledger (booking_id, action_type, action_id, action_date, amount_changed, running_open_amount, user_id) VALUES ($1, 'UTILIZATION', $2, CURRENT_DATE, $3, $4, $5)`, bookID, expID, hedged, newOpenAmount, req.UserID)
+			var nextSeq int
+			_ = pool.QueryRow(ctx, `SELECT COALESCE(MAX(ledger_sequence), 0) + 1 FROM forward_booking_ledger WHERE booking_id = $1`, bookID).Scan(&nextSeq)
+			if _, lerr := pool.Exec(ctx, `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, 'UTILIZATION', $3, CURRENT_DATE, $4, $5)`, bookID, nextSeq, expID, hedged, newOpenAmount); lerr != nil {
+				logger.LogError("approve hedge link ledger insert failed booking=%s: %v", bookID, lerr)
+			}
 
 			linkMap := map[string]interface{}{
 				"exposure_header_id": expID,
@@ -767,8 +792,13 @@ func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 			dmsjobs.FireDmsEvent(pool, "FX", "HEDGE_LINK", "POST_APPROVE", approvedExposureIDs, auditutil.Actor(req.UserID))
 		}
 
-		respondWithSuccess(w, http.StatusOK, "Hedge links approved successfully", map[string]interface{}{
+		msg := "Hedge links approved successfully"
+		if len(skipped) > 0 {
+			msg = fmt.Sprintf("%d approved; %d refused because the exposure is already settled: %s", approved, len(skipped), strings.Join(skipped, ", "))
+		}
+		respondWithSuccess(w, http.StatusOK, msg, map[string]interface{}{
 			"approved": approved,
+			"skipped":  skipped,
 		})
 	}
 }

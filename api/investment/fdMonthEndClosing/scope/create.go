@@ -61,13 +61,14 @@ type checklistStep struct {
 
 func strPtr(s string) *string { return &s }
 
-// checklistSteps is the fixed 5-row template. Order matches the spec exactly.
+// checklistSteps is the fixed 6-row template (incl. ACCOUNTING_CONSOLIDATED).
 var checklistSteps = []checklistStep{
 	{StepCode: "ACCRUAL_RUN_COMPLETED", StepName: "Accrual Run Completed", OwnerRole: "TREASURY", Sequence: 1, IsCritical: true, DependsOnStep: nil},
 	{StepCode: "ACCRUAL_RUN_APPROVED", StepName: "Accrual Run Approved", OwnerRole: "FINANCE", Sequence: 2, IsCritical: true, DependsOnStep: strPtr("ACCRUAL_RUN_COMPLETED")},
 	{StepCode: "RECEIPTS_CAPTURED", StepName: "Interest Receipts Captured", OwnerRole: "BACK_OFFICE", Sequence: 3, IsCritical: true, DependsOnStep: strPtr("ACCRUAL_RUN_APPROVED")},
 	{StepCode: "RECEIPTS_RECONCILED", StepName: "Receipts Reconciled", OwnerRole: "FINANCE", Sequence: 4, IsCritical: true, DependsOnStep: strPtr("RECEIPTS_CAPTURED")},
 	{StepCode: "TDS_VALIDATED", StepName: "TDS Validated", OwnerRole: "FINANCE", Sequence: 5, IsCritical: false, DependsOnStep: strPtr("RECEIPTS_CAPTURED")},
+	{StepCode: "ACCOUNTING_CONSOLIDATED", StepName: "Accounting Consolidated", OwnerRole: "FINANCE", Sequence: 6, IsCritical: true, DependsOnStep: strPtr("TDS_VALIDATED")},
 }
 
 // CreateScope handles both POST /investment/fd-closing/scope/create (single

@@ -865,7 +865,8 @@ func loadInterestReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, per
 			FROM investment.fd_interest_receipt r
 			LEFT JOIN investment.fd_master m ON m.fd_id = r.fd_id AND m.is_deleted = false
 			WHERE r.entity_id = $1
-			  AND r.receipt_date BETWEEN $2::date AND $3::date
+			  AND r.period_end >= $2::date
+			  AND r.period_start <= $3::date
 			  AND r.receipt_status IN ('APPROVED','POSTED','PARTIAL')
 			  AND r.is_deleted = false`, entityID, periodStart, periodEnd)
 	}
@@ -923,8 +924,8 @@ func loadTDSReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, periodSt
 			LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND m.is_deleted = false
 			LEFT JOIN investment.fd_interest_receipt r ON r.receipt_id = t.receipt_id AND r.is_deleted = false
 			WHERE t.entity_id = $1
-			  AND COALESCE(r.period_end, t.period_end) > $2::date
-			  AND COALESCE(r.period_end, t.period_end) <= $3::date
+			  AND COALESCE(r.period_end, t.period_end) >= $2::date
+			  AND COALESCE(r.period_start, t.period_start) <= $3::date
 			  AND t.tds_status IN ('APPROVED','POSTED','PARTIAL')
 			  AND t.is_deleted = false`, entityID, periodStart, periodEnd)
 	}

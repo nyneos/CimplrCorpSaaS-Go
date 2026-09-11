@@ -104,6 +104,8 @@ var txTypeRegistry = map[string]txTableConfig{
 	"FD_CLOSING_CYCLE_DELETE": {AuditTable: auditFDClosingCycle, AuditIDColumn: "cycle_id"},
 	"FD_CLOSING_SCOPE_ADD":    {AuditTable: "investment.fd_closing_cycle_fd_scope_audit", AuditIDColumn: "scope_id"},
 	"FD_CLOSING_SCOPE_REMOVE": {AuditTable: "investment.fd_closing_cycle_fd_scope_audit", AuditIDColumn: "scope_id"},
+	"FD_CLOSING_CHECKLIST_EDIT":   {AuditTable: "investment.fd_closing_checklist_item_audit", AuditIDColumn: "item_id"},
+	"FD_CLOSING_CHECKLIST_DELETE": {AuditTable: "investment.fd_closing_checklist_item_audit", AuditIDColumn: "item_id"},
 	// Request row IS its own audit trail — no separate *_audit sibling table.
 	"FD_CLOSING_LOCK":   {AuditTable: "investment.fd_closing_lock_request", AuditIDColumn: "request_id"},
 	"FD_CLOSING_REOPEN": {AuditTable: "investment.fd_closing_reopen_request", AuditIDColumn: "request_id"},

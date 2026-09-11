@@ -1,9 +1,10 @@
 // Package checklist implements the fd_closing_checklist_item handlers —
 // Section 3 of database/2026-08-27/HANDLER_SPEC_fd_month_quarter_end_closing.md.
-// Rows already exist by the time any handler here runs (created by the
-// scope-approval post-finalize hook in the sibling scope package) — this
-// package only ever does status UPDATE, LIST, DETAIL, AUDIT and the file
-// sub-handlers, never CREATE/DELETE.
+//
+// Status EDIT is STAGE-THEN-APPLY (CLAUDE.md preferred): master untouched while
+// PENDING_EDIT_APPROVAL; approve copies new_* onto the master; reject flips
+// audit only. DELETE is the same with PENDING_DELETE_APPROVAL → soft-delete +
+// reseed NOT_STARTED on approve.
 package checklist
 
 import (
@@ -13,6 +14,7 @@ import (
 	"strings"
 
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	fdclosingcommon "CimplrCorpSaas/api/investment/fdMonthEndClosing/common"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -30,18 +32,8 @@ var checklistEvidenceTypes = map[string]bool{
 }
 
 // UpdateChecklistItem handles POST /investment/fd-closing/checklist/update.
-//
-// Apply-immediately, self-approved — there is no checker step for a checklist
-// status flip (matches the mock UI's handleStatusChange, and the migration's
-// own design comment). old_status/old_blocked_comment/old_exception_count are
-// captured from the row read via SELECT ... FOR UPDATE, the update is applied
-// directly, and the audit row is written already APPROVED (requested_by ==
-// checker_by == the acting user) in the same transaction — no
-// approvalengine.CreateInstance call at all, unlike every
-// fd_closing_cycle/*_scope handler in the sibling packages. After the status
-// update commits its own values, recomputeCycleReadiness refreshes the parent
-// fd_closing_cycle's readiness_score/blocker_count/eligibility so the "N steps
-// x N FDs" grid and the Lock Request eligibility gate both stay in sync.
+// Stages an EDIT on the audit row (PENDING_EDIT_APPROVAL). Does not mutate the
+// master checklist item until approve (or no-matrix auto-apply).
 func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -99,18 +91,23 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 		var cycleID, entityID, cycleStatus, oldStatus string
 		var oldBlockedComment, oldEvidenceRef, oldEvidenceType *string
 		var oldExceptionCount int
+		var isDeleted bool
 		err = tx.QueryRow(ctx, `
 			SELECT i.cycle_id, c.entity_id, c.status, i.status, i.blocked_comment, i.exception_count,
-			       i.evidence_ref, i.evidence_type
+			       i.evidence_ref, i.evidence_type, i.is_deleted
 			FROM investment.fd_closing_checklist_item i
 			JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 			WHERE i.item_id = $1
 			FOR UPDATE OF i`,
 			req.ItemID,
 		).Scan(&cycleID, &entityID, &cycleStatus, &oldStatus, &oldBlockedComment, &oldExceptionCount,
-			&oldEvidenceRef, &oldEvidenceType)
+			&oldEvidenceRef, &oldEvidenceType, &isDeleted)
 		if err != nil {
 			fdclosingcommon.RespondError(w, http.StatusNotFound, "Checklist item not found")
+			return
+		}
+		if isDeleted {
+			fdclosingcommon.RespondError(w, http.StatusBadRequest, "Checklist item is deleted; use the recreated step")
 			return
 		}
 
@@ -121,25 +118,11 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Immutability guard: once the cycle is LOCKED or CLOSED there is
-		// nothing left to check off (mirrors cycle/update.go's own defensive
-		// guard and the handler spec's Section 7 points 3/4 — REOPENED
-		// explicitly re-enables this handler again since it is not in the
-		// blocked set below).
 		if cycleStatus == "LOCKED" || cycleStatus == "CLOSED" {
 			fdclosingcommon.RespondError(w, http.StatusBadRequest, "Cannot update a checklist item on a "+strings.ToLower(cycleStatus)+" cycle")
 			return
 		}
 
-		// Partial update: a field omitted from the request (nil pointer) keeps
-		// its current value rather than being wiped to NULL/0. This matters
-		// because multiple independent screens (closingChecklistDashboard,
-		// accrualCompletionApproval, receiptReconciliationSummary,
-		// closingAccountingConsolidation) all call this same endpoint, each
-		// typically only caring about its own subset of fields — a full
-		// overwrite would let one screen's call silently erase another
-		// screen's previously-set evidence_ref/exception_count/blocked_comment
-		// on the same item.
 		exceptionCount := oldExceptionCount
 		if req.ExceptionCount != nil {
 			exceptionCount = *req.ExceptionCount
@@ -148,9 +131,6 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.EvidenceRef != nil {
 			evidenceRef = nullableTrimPtr(req.EvidenceRef)
 		}
-		// evidenceType was already validated/normalized above from
-		// req.EvidenceType when that field was sent; only fall back to the
-		// existing value when the caller omitted it entirely.
 		if req.EvidenceType == nil {
 			evidenceType = oldEvidenceType
 		}
@@ -159,49 +139,44 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 			blockedComment = nullableTrimPtr(req.BlockedComment)
 		}
 
+		// Supersede any earlier pending EDIT/DELETE for this item.
 		if _, err = tx.Exec(ctx, `
-			UPDATE investment.fd_closing_checklist_item
-			SET status = $1, evidence_ref = $2, evidence_type = $3, exception_count = $4,
-			    blocked_comment = $5, last_updated_by = $6, last_updated_at = now()
-			WHERE item_id = $7`,
-			req.Status, evidenceRef, evidenceType, exceptionCount,
-			blockedComment, actor.Email, req.ItemID,
+			UPDATE investment.fd_closing_checklist_item_audit
+			SET processing_status = 'REJECTED', checker_by = $2, checker_at = now(),
+			    checker_comment = 'Superseded by new request'
+			WHERE item_id = $1 AND processing_status IN ('PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL')`,
+			req.ItemID, api.SystemIfBlank(actor.Email),
 		); err != nil {
-			api.LogErrorForResponse(w, "[FDClosingChecklist] UpdateChecklistItem update: %v", err)
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to update checklist item")
+			api.LogErrorForResponse(w, "[FDClosingChecklist] UpdateChecklistItem supersede: %v", err)
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to supersede prior pending request")
 			return
 		}
 
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_closing_checklist_item_audit (
 				item_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip,
-				checker_by, checker_at, checker_comment,
 				old_status, old_blocked_comment, old_exception_count,
+				old_evidence_ref, old_evidence_type,
 				new_status, new_blocked_comment, new_exception_count,
 				new_evidence_ref, new_evidence_type
 			) VALUES (
-				$1,'EDIT','APPROVED',$2,$3,now(),$4,$3,now(),$5,
-				$6,$7,$8,
-				$9,$10,$11,
-				$12,$13
+				$1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,
+				$5,$6,$7,
+				$8,$9,
+				$10,$11,$12,
+				$13,$14
 			)`,
 			req.ItemID,
 			nullIfEmpty(req.Reason),
 			api.SystemIfBlank(actor.Email),
 			api.SystemIfBlank(api.ClientIPFromContext(ctx)),
-			"Checklist status applied immediately (no maker-checker; same as design — not FD Booking)",
 			oldStatus, oldBlockedComment, oldExceptionCount,
+			oldEvidenceRef, oldEvidenceType,
 			req.Status, blockedComment, exceptionCount,
 			evidenceRef, evidenceType,
 		); err != nil {
 			api.LogErrorForResponse(w, "[FDClosingChecklist] UpdateChecklistItem audit insert: %v", err)
 			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed)
-			return
-		}
-
-		if err = recomputeCycleReadiness(ctx, tx, cycleID); err != nil {
-			api.LogErrorForResponse(w, "[FDClosingChecklist] UpdateChecklistItem recompute readiness: %v", err)
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to recompute cycle readiness")
 			return
 		}
 
@@ -211,30 +186,62 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		fdclosingcommon.RespondSuccess(w, "Checklist item updated", map[string]interface{}{
-			"item_id": req.ItemID,
-			"status":  req.Status,
+		fdclosingcommon.RespondSuccess(w, "Checklist change submitted for approval", map[string]interface{}{
+			"item_id":            req.ItemID,
+			"processing_status":  "PENDING_EDIT_APPROVAL",
+			"proposed_status":    req.Status,
+			"status":             oldStatus, // live master unchanged
 		})
-		api.LogInfo("[FDClosingChecklist] UpdateChecklistItem: item=%s cycle=%s status=%s by=%s",
+		api.LogInfo("[FDClosingChecklist] UpdateChecklistItem staged: item=%s cycle=%s proposed=%s by=%s",
 			req.ItemID, cycleID, req.Status, actor.Email)
+
+		itemID, entity, actorEmail, actorUserID := req.ItemID, entityID, actor.Email, actor.UserID
+		runEngineInBackground(func(bgCtx context.Context) {
+			if err := approvalengine.CancelPendingInstances(bgCtx, pool, moduleCode, itemID, actorEmail); err != nil {
+				api.LogError("[FDClosingChecklist] CancelPendingInstances(EDIT) failed for item %s: %v", itemID, err)
+				return
+			}
+			instID, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+				ModuleCode:          moduleCode,
+				EntityCode:          entity,
+				TransactionType:     TxEditChecklist,
+				RecordID:            itemID,
+				RecordTable:         checklistTable,
+				AuditTable:          checklistAuditTable,
+				AuditIDColumn:       "item_id",
+				ActionType:          "EDIT",
+				SubmittedBy:         actorUserID,
+				SubmittedByEmail:    actorEmail,
+				RequirePinnedMatrix: true,
+				AutoApplyIfUnpinned: false,
+			})
+			if err != nil {
+				api.LogError("[FDClosingChecklist] CreateInstance(EDIT) failed for item %s: %v", itemID, err)
+				return
+			}
+			if instID != "" {
+				return
+			}
+			// No matrix — apply staged edit directly.
+			tx2, err := pool.Begin(bgCtx)
+			if err != nil {
+				api.LogError("[FDClosingChecklist] no-matrix EDIT begin tx failed for item %s: %v", itemID, err)
+				return
+			}
+			defer tx2.Rollback(bgCtx) //nolint:errcheck
+			if err := ApplyEditToMaster(bgCtx, tx2, itemID, api.SystemIfBlank(actorEmail), "Auto-applied (no approval matrix)", "PENDING_EDIT_APPROVAL", true); err != nil {
+				api.LogError("[FDClosingChecklist] no-matrix EDIT apply failed for item %s: %v", itemID, err)
+				return
+			}
+			if err := tx2.Commit(bgCtx); err != nil {
+				api.LogError("[FDClosingChecklist] no-matrix EDIT commit failed for item %s: %v", itemID, err)
+			}
+		})
 	}
 }
 
-// recomputeCycleReadiness recomputes fd_closing_cycle.readiness_score/
-// blocker_count/eligibility from every checklist item currently attached to
-// cycleID, and stamps readiness_checked_at. Pulled out as a standalone,
-// reusable package-level helper (rather than being inlined into
-// UpdateChecklistItem) per the handler spec's explicit instruction, so any
-// future caller — e.g. a bulk re-check job — can call it the same way instead
-// of duplicating the aggregate SQL. Must run inside the same transaction as
-// the status update it follows.
-//
-// eligibility rule (handler spec Section 3):
-//   - READY_TO_CLOSE        — every item for the cycle is COMPLETED
-//   - CONDITIONALLY_READY   — not all items are COMPLETED, but every
-//     is_critical=true item is (some non-critical items may still be
-//     incomplete)
-//   - NOT_READY             — otherwise (including zero items, defensively)
+// recomputeCycleReadiness recomputes fd_closing_cycle readiness from active
+// (non-deleted) checklist items.
 func recomputeCycleReadiness(ctx context.Context, tx pgx.Tx, cycleID string) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE investment.fd_closing_cycle c
@@ -260,7 +267,7 @@ func recomputeCycleReadiness(ctx context.Context, tx pgx.Tx, cycleID string) err
 			FROM investment.fd_closing_checklist_item i
 			JOIN investment.fd_closing_cycle_fd_scope s
 			  ON s.scope_id = i.scope_id AND s.is_deleted = false
-			WHERE i.cycle_id = $1
+			WHERE i.cycle_id = $1 AND i.is_deleted = false
 			GROUP BY i.cycle_id
 		) agg
 		WHERE c.cycle_id = $1 AND c.cycle_id = agg.cycle_id`,
@@ -269,10 +276,6 @@ func recomputeCycleReadiness(ctx context.Context, tx pgx.Tx, cycleID string) err
 	return err
 }
 
-// nullIfEmpty returns nil for a blank string so optional text columns are
-// stored as SQL NULL rather than "" (mirrors cycle/create.go's helper of the
-// same name — package-local by design, not shared, matching that package's
-// own precedent).
 func nullIfEmpty(s string) interface{} {
 	if strings.TrimSpace(s) == "" {
 		return nil
@@ -280,8 +283,6 @@ func nullIfEmpty(s string) interface{} {
 	return s
 }
 
-// nullableTrim trims s and returns nil for an empty result (mirrors
-// cycle/update.go's nullableTrim).
 func nullableTrim(s string) *string {
 	t := strings.TrimSpace(s)
 	if t == "" {
@@ -290,8 +291,6 @@ func nullableTrim(s string) *string {
 	return &t
 }
 
-// nullableTrimPtr applies nullableTrim through an optional *string request
-// field, so an omitted field stays nil and an explicit "" clears the column.
 func nullableTrimPtr(s *string) *string {
 	if s == nil {
 		return nil

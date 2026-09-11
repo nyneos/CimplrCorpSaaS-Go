@@ -17,6 +17,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	"CimplrCorpSaas/api/investment/uploadutil"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -2866,13 +2867,16 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		INSERT INTO investment.accounting_journal_entry (
 		  activity_id,entity_id,entity_name,entry_date,accounting_period,entry_type,description,
 		  total_debit,total_credit,status,fd_id,closure_request_id,is_reversal,created_by
-		) VALUES ($1,$2,$3,CURRENT_DATE,$4,'CLOSURE',$5,$6,$7,'POSTED',$8,$9,false,$10)
+		) VALUES ($1,$2,$3,CURRENT_DATE,$4,'CLOSURE',$5,$6,$7,'PENDING_APPROVAL',$8,$9,false,$10)
 		RETURNING entry_id`,
 		activityID, nullStrOrNil(entityID), nullStrOrNil(entityName),
 		accountingPeriod, description, totalDebitAmt, totalCreditAmt, fdID, closureRequestID, approvedByEmail,
 	).Scan(&entryID)
 	if err != nil {
 		return fmt.Errorf("postClosureJournals insert journal entry: %w", err)
+	}
+	if err := fdAccounting.StageJournalForApproval(ctx, tx, entryID, approvedByEmail, "FD closure journal"); err != nil {
+		return err
 	}
 
 	// Balanced journal lines:

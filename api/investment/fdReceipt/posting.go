@@ -2,6 +2,7 @@ package fdReceipt
 
 import (
 	"CimplrCorpSaas/api/constants"
+	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	"context"
 	"fmt"
 	"math/rand"
@@ -84,14 +85,17 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 			entry_id, activity_id, entry_type, entry_date, accounting_period,
 			entity_id, entity_name, fd_id, receipt_id,
 			description, total_debit, total_credit,
-			created_by, created_at, is_deleted
-		) VALUES ($1,$2,'FD_INTEREST_RECEIPT',$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,now(),false)`,
+			created_by, created_at, is_deleted, status
+		) VALUES ($1,$2,'FD_INTEREST_RECEIPT',$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,now(),false,'PENDING_APPROVAL')`,
 		interestEntryID, activityID, entryDate, period,
 		rec.EntityID, entityName, rec.FDID, rec.ReceiptID,
 		fmt.Sprintf("Interest receipt for FD %s period %s", rec.FdRefNo, period),
 		rec.GrossInterestReceived, userEmail)
 	if err != nil {
 		return "", "", fmt.Errorf("interest journal insert: %w", err)
+	}
+	if err := fdAccounting.StageJournalForApproval(ctx, tx, interestEntryID, userEmail, "Interest receipt journal"); err != nil {
+		return "", "", err
 	}
 
 	_, err = tx.Exec(ctx, `
@@ -113,14 +117,17 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 				entry_id, activity_id, entry_type, entry_date, accounting_period,
 				entity_id, entity_name, fd_id, receipt_id,
 				description, total_debit, total_credit,
-				created_by, created_at, is_deleted
-			) VALUES ($1,$2,'FD_TDS_DEDUCTED',$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,now(),false)`,
+				created_by, created_at, is_deleted, status
+			) VALUES ($1,$2,'FD_TDS_DEDUCTED',$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,now(),false,'PENDING_APPROVAL')`,
 			tdsEntryID, activityID, entryDate, period,
 			rec.EntityID, entityName, rec.FDID, rec.ReceiptID,
 			fmt.Sprintf("TDS deducted for FD %s period %s", rec.FdRefNo, period),
 			rec.TDSAmountDeducted, userEmail)
 		if err != nil {
 			return "", "", fmt.Errorf("tds journal insert: %w", err)
+		}
+		if err := fdAccounting.StageJournalForApproval(ctx, tx, tdsEntryID, userEmail, "TDS deducted journal"); err != nil {
+			return "", "", err
 		}
 
 		_, err = tx.Exec(ctx, `

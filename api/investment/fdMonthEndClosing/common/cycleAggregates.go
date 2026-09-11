@@ -56,7 +56,7 @@ func RefreshCycleReadiness(ctx context.Context, tx pgx.Tx, cycleID string) error
 			JOIN investment.fd_closing_cycle_fd_scope s
 			  ON s.scope_id = i.scope_id
 			 AND s.is_deleted = false
-			WHERE i.cycle_id = $1
+			WHERE i.cycle_id = $1 AND i.is_deleted = false
 		) agg
 		WHERE c.cycle_id = $1`,
 		cycleID,

@@ -1734,13 +1734,17 @@ WHERE r.is_deleted = false`
 			args = append(args, req.ReceiptStatus)
 			argIdx++
 		}
+		// from_date/to_date scope by interest period (period_start/period_end),
+		// not cash receipt_date — month-end closing and period workbenches need
+		// receipts whose covered period overlaps the window even when cash
+		// lands after period_end (e.g. receipt_date in Oct for a Sep period).
 		if req.FromDate != "" {
-			baseSQL += fmt.Sprintf(" AND r.receipt_date>=$%d", argIdx)
+			baseSQL += fmt.Sprintf(" AND r.period_end>=$%d::date", argIdx)
 			args = append(args, req.FromDate)
 			argIdx++
 		}
 		if req.ToDate != "" {
-			baseSQL += fmt.Sprintf(" AND r.receipt_date<=$%d", argIdx)
+			baseSQL += fmt.Sprintf(" AND r.period_start<=$%d::date", argIdx)
 			args = append(args, req.ToDate)
 			argIdx++
 		}
@@ -2119,17 +2123,19 @@ WHERE t.is_deleted = false`
 			args = append(args, req.TDSStatus)
 			argIdx++
 		}
+		// Scope TDS by interest/TDS period overlap with [from_date, to_date],
+		// not deduction_date (cash) — same rule as interest receipt list.
 		if req.FromDate != "" {
-			baseSQL += fmt.Sprintf(" AND t.deduction_date>=$%d::date", argIdx)
+			baseSQL += fmt.Sprintf(" AND t.period_end>=$%d::date", argIdx)
 			args = append(args, req.FromDate)
 			argIdx++
 		}
 		if req.ToDate != "" {
-			baseSQL += fmt.Sprintf(" AND t.deduction_date<=$%d::date", argIdx)
+			baseSQL += fmt.Sprintf(" AND t.period_start<=$%d::date", argIdx)
 			args = append(args, req.ToDate)
 			argIdx++
 		}
-		baseSQL += " ORDER BY t.deduction_date  DESC"
+		baseSQL += " ORDER BY t.period_end DESC, t.deduction_date DESC"
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
@@ -2417,20 +2423,20 @@ func GetTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			argIdx++
 		}
 		if req.FromDate != "" {
-			cond := fmt.Sprintf(" AND period_start>=$%d", argIdx)
+			cond := fmt.Sprintf(" AND period_end>=$%d::date", argIdx)
 			baseSQL += cond
 			summarySQL += cond
 			args = append(args, req.FromDate)
 			argIdx++
 		}
 		if req.ToDate != "" {
-			cond := fmt.Sprintf(" AND period_end<=$%d", argIdx)
+			cond := fmt.Sprintf(" AND period_start<=$%d::date", argIdx)
 			baseSQL += cond
 			summarySQL += cond
 			args = append(args, req.ToDate)
 			argIdx++
 		}
-		baseSQL += " ORDER BY deduction_date DESC, fd_id"
+		baseSQL += " ORDER BY period_end DESC, deduction_date DESC, fd_id"
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
@@ -3618,12 +3624,12 @@ WHERE r.is_deleted = false
 			return
 		}
 		if req.PeriodStart != "" {
-			interestSQL += fmt.Sprintf(" AND r.period_start>=$%d::date", iIdx)
+			interestSQL += fmt.Sprintf(" AND r.period_end>=$%d::date", iIdx)
 			iArgs = append(iArgs, req.PeriodStart)
 			iIdx++
 		}
 		if req.PeriodEnd != "" {
-			interestSQL += fmt.Sprintf(" AND r.period_end<=$%d::date", iIdx)
+			interestSQL += fmt.Sprintf(" AND r.period_start<=$%d::date", iIdx)
 			iArgs = append(iArgs, req.PeriodEnd)
 			iIdx++
 		}
@@ -3709,12 +3715,12 @@ WHERE t.is_deleted = false
 			return
 		}
 		if req.PeriodStart != "" {
-			tdsSQL += fmt.Sprintf(" AND t.period_start>=$%d::date", tIdx)
+			tdsSQL += fmt.Sprintf(" AND t.period_end>=$%d::date", tIdx)
 			tArgs = append(tArgs, req.PeriodStart)
 			tIdx++
 		}
 		if req.PeriodEnd != "" {
-			tdsSQL += fmt.Sprintf(" AND t.period_end<=$%d::date", tIdx)
+			tdsSQL += fmt.Sprintf(" AND t.period_start<=$%d::date", tIdx)
 			tArgs = append(tArgs, req.PeriodEnd)
 			tIdx++
 		}

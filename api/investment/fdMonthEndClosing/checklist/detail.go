@@ -36,7 +36,7 @@ func DetailChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 		var item map[string]interface{}
 		var entityID string
 		{
-			rows, err := pool.Query(ctx, checklistItemSelect+" WHERE i.item_id = $1", req.ItemID)
+			rows, err := pool.Query(ctx, checklistItemSelect+" WHERE i.item_id = $1 AND i.is_deleted = false", req.ItemID)
 			if err != nil {
 				api.LogErrorForResponse(w, "[FDClosingChecklist] DetailChecklistItem query: %v", err)
 				fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrQueryFailed)
