@@ -263,33 +263,6 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 			created = append(created, createdScope{scopeID: scopeID, fdID: e.fdID})
 		}
 
-		// Heal orphan PENDING CREATE (no live approval instance): stamp it
-		// APPROVED so DRAFT→IN_PROGRESS can run. Covers cycles created before
-		// the no-matrix CREATE auto-approve fix, and any CreateInstance miss.
-		if _, err = tx.Exec(ctx, `
-			UPDATE investment.fd_closing_cycle_audit ca
-			SET processing_status = 'APPROVED',
-			    checker_by = $2,
-			    checker_at = now(),
-			    checker_comment = COALESCE(NULLIF(ca.checker_comment,''),
-			      'Auto-approved on scope add — no pending approval instance')
-			WHERE ca.cycle_id = $1
-			  AND ca.action_type = 'CREATE'
-			  AND ca.processing_status = 'PENDING_APPROVAL'
-			  AND NOT EXISTS (
-				SELECT 1 FROM uam.approval_instance ai
-				WHERE ai.record_id = $1
-				  AND ai.module_code = $3
-				  AND ai.status = 'PENDING'
-				  AND ai.is_deleted = false
-			  )`,
-			req.CycleID, actorEmail, moduleCode,
-		); err != nil {
-			api.LogErrorForResponse(w, "[FDClosingScope] CreateScope orphan CREATE heal: %v", err)
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to heal pending create approval")
-			return
-		}
-
 		if _, err = tx.Exec(ctx, `
 			UPDATE investment.fd_closing_cycle
 			SET status = 'IN_PROGRESS'
@@ -438,30 +411,6 @@ func applyScopeAddApproval(ctx context.Context, tx pgx.Tx, scopeID, checkerEmail
 
 	if err := seedChecklistItemsWithCreateAudit(ctx, tx, cycleID, fdID, scopeID, checkerEmail, api.SystemIfBlank("")); err != nil {
 		return fmt.Errorf("applyScopeAddApproval checklist seed: %w", err)
-	}
-
-	// Heal orphan PENDING CREATE (no live approval instance) before promote —
-	// same as CreateScope's immediate-add path.
-	if _, err := tx.Exec(ctx, `
-		UPDATE investment.fd_closing_cycle_audit ca
-		SET processing_status = 'APPROVED',
-		    checker_by = $2,
-		    checker_at = now(),
-		    checker_comment = COALESCE(NULLIF(ca.checker_comment,''),
-		      'Auto-approved on scope add — no pending approval instance')
-		WHERE ca.cycle_id = $1
-		  AND ca.action_type = 'CREATE'
-		  AND ca.processing_status = 'PENDING_APPROVAL'
-		  AND NOT EXISTS (
-			SELECT 1 FROM uam.approval_instance ai
-			WHERE ai.record_id = $1
-			  AND ai.module_code = $3
-			  AND ai.status = 'PENDING'
-			  AND ai.is_deleted = false
-		  )`,
-		cycleID, checkerEmail, moduleCode,
-	); err != nil {
-		return fmt.Errorf("applyScopeAddApproval orphan CREATE heal: %w", err)
 	}
 
 	// Move DRAFT → IN_PROGRESS only after CREATE is approved AND first FD is

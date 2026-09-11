@@ -220,15 +220,7 @@ func CreateCycle(pool *pgxpool.Pool) http.HandlerFunc {
 				api.LogInfo("[FDClosingCycle] CreateInstance(CREATE) %s → cycle %s PENDING_APPROVAL", instID, newCycleID)
 				return
 			}
-			// No approval matrix — stamp CREATE approved so scope-add can
-			// promote DRAFT→IN_PROGRESS (otherwise cycles stay stuck in DRAFT
-			// forever with processing_status still PENDING_APPROVAL).
-			if approveErr := directApproveCycle(bgCtx, pool, newCycleID, actorEmail,
-				"Applied automatically — no approval matrix configured"); approveErr != nil {
-				api.LogError("[FDClosingCycle] no-matrix CREATE approve failed for cycle=%s: %v", newCycleID, approveErr)
-				return
-			}
-			api.LogInfo("[FDClosingCycle] no-matrix CREATE approved for cycle=%s", newCycleID)
+			api.LogInfo("[FDClosingCycle] no approval matrix for cycle=%s — left PENDING_APPROVAL for maker-checker", newCycleID)
 		})
 	}
 }
