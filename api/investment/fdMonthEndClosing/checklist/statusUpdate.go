@@ -31,6 +31,10 @@ var checklistEvidenceTypes = map[string]bool{
 	"REPORT": true, "RUN_ID": true, "RECONCILIATION_BATCH": true,
 }
 
+var accrualFinalRunSteps = map[string]bool{
+	"ACCRUAL_RUN_COMPLETED": true, "ACCRUAL_RUN_APPROVED": true,
+}
+
 // UpdateChecklistItem handles POST /investment/fd-closing/checklist/update.
 // Stages an EDIT on the audit row (PENDING_EDIT_APPROVAL). Does not mutate the
 // master checklist item until approve (or no-matrix auto-apply).
@@ -88,20 +92,20 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
 
-		var cycleID, entityID, cycleStatus, oldStatus string
+		var cycleID, entityID, cycleStatus, oldStatus, stepCode string
 		var oldBlockedComment, oldEvidenceRef, oldEvidenceType *string
 		var oldExceptionCount int
 		var isDeleted bool
 		err = tx.QueryRow(ctx, `
 			SELECT i.cycle_id, c.entity_id, c.status, i.status, i.blocked_comment, i.exception_count,
-			       i.evidence_ref, i.evidence_type, i.is_deleted
+			       i.evidence_ref, i.evidence_type, i.is_deleted, i.step_code
 			FROM investment.fd_closing_checklist_item i
 			JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 			WHERE i.item_id = $1
 			FOR UPDATE OF i`,
 			req.ItemID,
 		).Scan(&cycleID, &entityID, &cycleStatus, &oldStatus, &oldBlockedComment, &oldExceptionCount,
-			&oldEvidenceRef, &oldEvidenceType, &isDeleted)
+			&oldEvidenceRef, &oldEvidenceType, &isDeleted, &stepCode)
 		if err != nil {
 			fdclosingcommon.RespondError(w, http.StatusNotFound, "Checklist item not found")
 			return
@@ -137,6 +141,30 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 		blockedComment := oldBlockedComment
 		if req.BlockedComment != nil {
 			blockedComment = nullableTrimPtr(req.BlockedComment)
+		}
+
+		if req.Status == "COMPLETED" && accrualFinalRunSteps[stepCode] {
+			if evidenceRef == nil {
+				fdclosingcommon.RespondError(w, http.StatusBadRequest,
+					"Step "+stepCode+" requires a FINAL accrual run reference before it can be completed")
+				return
+			}
+			var runMode string
+			if err = tx.QueryRow(ctx, `
+				SELECT COALESCE(run_mode,'')
+				FROM investment.fd_accrual_run
+				WHERE run_id = $1 AND COALESCE(is_deleted,false) = false`,
+				*evidenceRef,
+			).Scan(&runMode); err != nil {
+				fdclosingcommon.RespondError(w, http.StatusBadRequest,
+					"Accrual run '"+*evidenceRef+"' not found; step "+stepCode+" requires a FINAL accrual run reference")
+				return
+			}
+			if strings.ToUpper(runMode) != "FINAL" {
+				fdclosingcommon.RespondError(w, http.StatusBadRequest,
+					"Cannot complete "+stepCode+" — accrual run "+*evidenceRef+" has run mode "+runMode+"; closing requires FINAL")
+				return
+			}
 		}
 
 		// Supersede any earlier pending EDIT/DELETE for this item.
