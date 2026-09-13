@@ -173,7 +173,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 		rows, qErr := pool.Query(ctx, `
 			SELECT fd_id, step_code, status, COALESCE(evidence_ref,''), COALESCE(exception_count,0)
 			FROM investment.fd_closing_checklist_item
-			WHERE cycle_id = $1 AND step_code IN ('RECEIPTS_CAPTURED','RECEIPTS_RECONCILED')
+			WHERE cycle_id = $1 AND step_code IN ('RECEIPTS_CAPTURED','RECEIPTS_RECONCILED','VARIANCES_CLOSED')
 			ORDER BY fd_id, sequence`, cycleID)
 		if qErr != nil {
 			body += errorLinePrefix + qErr.Error() + "\n"

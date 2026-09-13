@@ -86,6 +86,7 @@ func GetExceptionDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		audit, _ := loadVarianceAuditTrail(ctx, pool, req.ExceptionID, hdr.ResultID)
+		cfReason, cfPeriod := loadExceptionCarryForwardFields(ctx, pool, req.ExceptionID)
 
 		receiptID, tdsID := resolveExceptionReceiptLinks(ctx, pool, hdr.ReceiptID, hdr.TDSID)
 		var receipt map[string]interface{}
@@ -129,6 +130,8 @@ func GetExceptionDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			"exception":         hdr,
 			"audit_trail":       audit,
 			"audit":             audit,
+			"carry_forward_reason":     cfReason,
+			"target_resolution_period": cfPeriod,
 			"reconcile_result":  result,
 			"receipt":           receipt,
 			"reconcile_run":     run,
@@ -151,6 +154,15 @@ func GetExceptionDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			},
 		})
 	}
+}
+
+func loadExceptionCarryForwardFields(ctx context.Context, pool *pgxpool.Pool, exceptionID string) (string, string) {
+	var reason, period string
+	_ = pool.QueryRow(ctx, `
+		SELECT COALESCE(carry_forward_reason,''), COALESCE(target_resolution_period,'')
+		FROM investment.fd_receipt_exception
+		WHERE exception_id=$1`, exceptionID).Scan(&reason, &period)
+	return reason, period
 }
 
 func loadReconcileResultDetail(ctx context.Context, pool *pgxpool.Pool, resultID string) (*reconcileResultDetail, error) {

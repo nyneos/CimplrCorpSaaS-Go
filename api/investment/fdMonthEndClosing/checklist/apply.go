@@ -89,11 +89,91 @@ func ApplyEditToMaster(ctx context.Context, tx pgx.Tx, itemID, checkerEmail, che
 		}
 	}
 
-	var cycleID string
-	if err = tx.QueryRow(ctx, `SELECT cycle_id FROM investment.fd_closing_checklist_item WHERE item_id = $1`, itemID).Scan(&cycleID); err != nil {
+	var cycleID, fdID, stepCode string
+	if err = tx.QueryRow(ctx, `
+		SELECT cycle_id, fd_id, step_code
+		FROM investment.fd_closing_checklist_item
+		WHERE item_id = $1`, itemID,
+	).Scan(&cycleID, &fdID, &stepCode); err != nil {
 		return err
 	}
+
+	if newStatus == "COMPLETED" && stepCode == "TDS_VALIDATED" {
+		if err = autoPassVarianceClosure(ctx, tx, cycleID, fdID, checkerEmail); err != nil {
+			return err
+		}
+	}
+
 	return recomputeCycleReadiness(ctx, tx, cycleID)
+}
+
+// autoPassVarianceClosure completes VARIANCES_CLOSED for an FD that carries no
+// unaccepted variance, once its TDS_VALIDATED step lands. An FD with open
+// variances is left for the Variance & Exception Closure screen to complete.
+func autoPassVarianceClosure(ctx context.Context, tx pgx.Tx, cycleID, fdID, actorEmail string) error {
+	var openVariances int
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM investment.fd_receipt_exception
+		WHERE fd_id = $1
+		  AND COALESCE(is_deleted, false) = false
+		  AND COALESCE(variance_outcome, '') <> 'ACCEPTED'`,
+		fdID,
+	).Scan(&openVariances); err != nil {
+		return err
+	}
+	if openVariances > 0 {
+		return nil
+	}
+
+	var itemID string
+	err := tx.QueryRow(ctx, `
+		SELECT i.item_id
+		FROM investment.fd_closing_checklist_item i
+		WHERE i.cycle_id = $1
+		  AND i.fd_id = $2
+		  AND i.step_code = 'VARIANCES_CLOSED'
+		  AND i.is_deleted = false
+		  AND i.status <> 'COMPLETED'
+		  AND NOT EXISTS (
+			SELECT 1 FROM investment.fd_closing_checklist_item_audit a
+			WHERE a.item_id = i.item_id AND a.processing_status LIKE 'PENDING%'
+		  )
+		LIMIT 1
+		FOR UPDATE OF i`,
+		cycleID, fdID,
+	).Scan(&itemID)
+	if err == pgx.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if _, err = tx.Exec(ctx, `
+		UPDATE investment.fd_closing_checklist_item
+		SET status = 'COMPLETED',
+		    exception_count = 0,
+		    last_updated_by = $2,
+		    last_updated_at = now()
+		WHERE item_id = $1`,
+		itemID, api.SystemIfBlank(actorEmail),
+	); err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO investment.fd_closing_checklist_item_audit (
+			item_id, action_type, processing_status, reason,
+			requested_by, requested_at, requested_ip,
+			checker_by, checker_at, checker_comment, new_status
+		) VALUES ($1,'EDIT','APPROVED',$2,$3,now(),$4,$3,now(),$2,'COMPLETED')`,
+		itemID,
+		"Auto-completed — no open variances for this FD",
+		api.SystemIfBlank(actorEmail),
+		api.SystemIfBlank(""),
+	)
+	return err
 }
 
 // ApplyDeleteToMaster soft-deletes the item and reseeds a fresh NOT_STARTED

@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"CimplrCorpSaas/api"
@@ -92,20 +93,20 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
 
-		var cycleID, entityID, cycleStatus, oldStatus, stepCode string
+		var cycleID, entityID, cycleStatus, oldStatus, stepCode, fdID string
 		var oldBlockedComment, oldEvidenceRef, oldEvidenceType *string
 		var oldExceptionCount int
 		var isDeleted bool
 		err = tx.QueryRow(ctx, `
 			SELECT i.cycle_id, c.entity_id, c.status, i.status, i.blocked_comment, i.exception_count,
-			       i.evidence_ref, i.evidence_type, i.is_deleted, i.step_code
+			       i.evidence_ref, i.evidence_type, i.is_deleted, i.step_code, COALESCE(i.fd_id,'')
 			FROM investment.fd_closing_checklist_item i
 			JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 			WHERE i.item_id = $1
 			FOR UPDATE OF i`,
 			req.ItemID,
 		).Scan(&cycleID, &entityID, &cycleStatus, &oldStatus, &oldBlockedComment, &oldExceptionCount,
-			&oldEvidenceRef, &oldEvidenceType, &isDeleted, &stepCode)
+			&oldEvidenceRef, &oldEvidenceType, &isDeleted, &stepCode, &fdID)
 		if err != nil {
 			fdclosingcommon.RespondError(w, http.StatusNotFound, "Checklist item not found")
 			return
@@ -163,6 +164,33 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 			if strings.ToUpper(runMode) != "FINAL" {
 				fdclosingcommon.RespondError(w, http.StatusBadRequest,
 					"Cannot complete "+stepCode+" — accrual run "+*evidenceRef+" has run mode "+runMode+"; closing requires FINAL")
+				return
+			}
+		}
+
+		if req.Status == "COMPLETED" && stepCode == "VARIANCES_CLOSED" && fdID != "" {
+			var openExceptions int
+			if err = tx.QueryRow(ctx, `
+				SELECT COUNT(*)
+				FROM investment.fd_receipt_exception e
+				WHERE e.fd_id = $1
+				  AND COALESCE(e.is_deleted,false) = false
+				  AND COALESCE(e.exception_status,'OPEN') IN ('OPEN','IN_REVIEW')
+				  AND COALESCE((
+					SELECT a.processing_status
+					FROM investment.fd_receipt_exception_audit a
+					WHERE a.exception_id = e.exception_id
+					ORDER BY a.requested_at DESC, a.audit_id DESC
+					LIMIT 1), '') <> 'APPROVED'`,
+				fdID,
+			).Scan(&openExceptions); err != nil {
+				api.LogErrorForResponse(w, "[FDClosingChecklist] UpdateChecklistItem open exception check: %v", err)
+				fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to check open exceptions")
+				return
+			}
+			if openExceptions > 0 {
+				fdclosingcommon.RespondError(w, http.StatusBadRequest,
+					"Cannot complete "+stepCode+" — FD "+fdID+" has "+strconv.Itoa(openExceptions)+" open exception(s); open exceptions must be 0 or checker-approved carry-forward before period close")
 				return
 			}
 		}

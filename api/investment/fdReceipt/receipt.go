@@ -3805,6 +3805,8 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 			ReasonCode         string `json:"reason_code"`
 			ResolutionRemarks  string `json:"resolution_remarks"`
 			Attachment         string `json:"attachment"`
+			CarryForwardReason     string `json:"carry_forward_reason"`
+			TargetResolutionPeriod string `json:"target_resolution_period"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -3813,6 +3815,20 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.ExceptionID == "" || req.ProposedResolution == "" || req.ReasonCode == "" || req.ResolutionRemarks == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "exception_id, proposed_resolution, reason_code, resolution_remarks are required")
 			return
+		}
+		isCarryForward := strings.EqualFold(strings.TrimSpace(req.ProposedResolution), "CARRY_FORWARD")
+		if isCarryForward {
+			if strings.TrimSpace(req.CarryForwardReason) == "" {
+				api.RespondWithError(w, http.StatusBadRequest, "carry_forward_reason is required when proposed_resolution is CARRY_FORWARD")
+				return
+			}
+			if strings.TrimSpace(req.TargetResolutionPeriod) == "" {
+				api.RespondWithError(w, http.StatusBadRequest, "target_resolution_period is required when proposed_resolution is CARRY_FORWARD")
+				return
+			}
+		} else {
+			req.CarryForwardReason = ""
+			req.TargetResolutionPeriod = ""
 		}
 		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
@@ -3853,6 +3869,9 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 		if rowErr != nil {
 			resolveRow = fdExceptionRow{ExceptionID: req.ExceptionID, EntityID: entityID}
 		}
+		resolveRow.ProposedResolution = req.ProposedResolution
+		resolveRow.ReasonCode = req.ReasonCode
+		resolveRow.ResolutionRemarks = req.ResolutionRemarks
 		if !fdEnforce(ctx, w, r, pool, enforceCtx{
 			EventCode:   common.TriggerPreEdit,
 			HandlerName: "ResolveException",
@@ -3887,6 +3906,14 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if cols["updated_at"] {
 			sets = append(sets, "updated_at=now()")
+		}
+		if cols["carry_forward_reason"] {
+			args = append(args, nullStr(strings.TrimSpace(req.CarryForwardReason)))
+			sets = append(sets, fmt.Sprintf("carry_forward_reason=$%d", len(args)))
+		}
+		if cols["target_resolution_period"] {
+			args = append(args, nullStr(strings.TrimSpace(req.TargetResolutionPeriod)))
+			sets = append(sets, fmt.Sprintf("target_resolution_period=$%d", len(args)))
 		}
 		args = append(args, req.ExceptionID)
 		updateSQL := fmt.Sprintf(`

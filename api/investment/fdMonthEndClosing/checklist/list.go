@@ -40,16 +40,27 @@ const checklistItemSelect = `
 		COALESCE(la.proposed_status,'') AS proposed_status,
 		COALESCE(la.audit_id::text,'') AS pending_audit_id,
 		COALESCE(la.requested_by,'') AS requested_by,
-		COALESCE(la.checker_by,'') AS checker_by
+		COALESCE(la.checker_by,'') AS checker_by,
+		COALESCE(la.pending_evidence_ref,'') AS pending_evidence_ref,
+		COALESCE(la.pending_evidence_type,'') AS pending_evidence_type,
+		COALESCE(la.pending_blocked_comment,'') AS pending_blocked_comment,
+		COALESCE(la.pending_exception_count, -1) AS pending_exception_count,
+		COALESCE(m.bank_fd_ref_no,'') AS fd_ref_no
 	FROM investment.fd_closing_checklist_item i
 	JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 	JOIN investment.fd_closing_cycle_fd_scope s
 	  ON s.scope_id = i.scope_id AND s.is_deleted = false
+	LEFT JOIN investment.fd_master m
+	  ON m.fd_id = i.fd_id AND COALESCE(m.is_deleted,false) = false
 	LEFT JOIN LATERAL (
 		SELECT a.audit_id, a.processing_status, a.action_type,
 		       COALESCE(a.new_status,'') AS proposed_status,
 		       COALESCE(a.requested_by,'') AS requested_by,
-		       COALESCE(a.checker_by,'') AS checker_by
+		       COALESCE(a.checker_by,'') AS checker_by,
+		       COALESCE(a.new_evidence_ref,'') AS pending_evidence_ref,
+		       COALESCE(a.new_evidence_type,'') AS pending_evidence_type,
+		       COALESCE(a.new_blocked_comment,'') AS pending_blocked_comment,
+		       a.new_exception_count AS pending_exception_count
 		FROM investment.fd_closing_checklist_item_audit a
 		WHERE a.item_id = i.item_id
 		ORDER BY GREATEST(

@@ -398,7 +398,7 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			if err = insertVarianceAudit(ctx, tx, eid, varianceAuditInsert{
 				ActionType: "EDIT", ProcessingStatus: constants.StatusApproved, Reason: req.Comment,
 				RequestedBy: userEmail, CheckerBy: userEmail, CheckerComment: req.Comment,
-				Old: varianceAuditOld{ExceptionStatus: strPtr("IN_REVIEW")},
+				Old: auditOldFromHeader(hdr),
 			}); err != nil {
 				tx.Rollback(ctx) //nolint:errcheck
 				res["error"] = err.Error()
@@ -737,6 +737,10 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			applyExceptionReject(ctx, pool, eid)
+			_, _ = pool.Exec(ctx, `
+				UPDATE investment.fd_receipt_exception
+				SET carry_forward_reason=NULL, target_resolution_period=NULL
+				WHERE exception_id=$1`, eid)
 			rejected++
 			res["success"] = true
 			res["exception_status"] = "OPEN"

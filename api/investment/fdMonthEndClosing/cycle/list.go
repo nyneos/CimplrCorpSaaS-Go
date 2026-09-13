@@ -46,9 +46,14 @@ const listWithAuditQuery = `
 			  AND s.is_deleted = false
 			  AND s.selection_status = 'APPROVED'
 		), 0) AS fd_count,
-		COALESCE(m.readiness_score,0) AS readiness_score,
-		COALESCE(m.blocker_count,0) AS blocker_count,
-		COALESCE(m.eligibility,'NOT_READY') AS eligibility,
+		COALESCE(agg.readiness_score,0) AS readiness_score,
+		COALESCE(agg.blocker_count,0) AS blocker_count,
+		CASE
+			WHEN COALESCE(agg.total_count,0) = 0 THEN 'NOT_READY'
+			WHEN agg.completed_count = agg.total_count THEN 'READY_TO_CLOSE'
+			WHEN agg.critical_incomplete = 0 THEN 'CONDITIONALLY_READY'
+			ELSE 'NOT_READY'
+		END AS eligibility,
 		m.initiated_by, TO_CHAR(m.initiated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS initiated_at,
 		m.is_deleted, m.created_by, TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
 
@@ -77,6 +82,20 @@ const listWithAuditQuery = `
 		aie.sla_deadline AS sla_deadline,
 		COALESCE(aie.is_escalated,false) AS is_escalated
 	FROM investment.fd_closing_cycle m
+	LEFT JOIN LATERAL (
+		SELECT
+			COUNT(*) AS total_count,
+			COUNT(*) FILTER (WHERE i.status = 'COMPLETED') AS completed_count,
+			COUNT(*) FILTER (WHERE i.status = 'BLOCKED') AS blocker_count,
+			CASE WHEN COUNT(*) = 0 THEN 0
+			     ELSE ROUND(COUNT(*) FILTER (WHERE i.status = 'COMPLETED') * 100.0 / COUNT(*), 2)
+			END AS readiness_score,
+			COUNT(*) FILTER (WHERE i.is_critical = true AND i.status <> 'COMPLETED') AS critical_incomplete
+		FROM investment.fd_closing_checklist_item i
+		JOIN investment.fd_closing_cycle_fd_scope s
+		  ON s.scope_id = i.scope_id AND s.is_deleted = false
+		WHERE i.cycle_id = m.cycle_id AND i.is_deleted = false
+	) agg ON true
 	LEFT JOIN latest_audit l ON l.cycle_id = m.cycle_id
 	LEFT JOIN LATERAL (
 		SELECT ai.* FROM uam.approval_instance ai
