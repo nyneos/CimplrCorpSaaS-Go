@@ -8,7 +8,6 @@ import (
 
 	"CimplrCorpSaas/api"
 	fundavailibilty "CimplrCorpSaas/api/cash/fundavailibilty"
-	cashlimit "CimplrCorpSaas/api/cash/limit"
 	payablerecievable "CimplrCorpSaas/api/cash/payablerecievable"
 	cashprojection "CimplrCorpSaas/api/cash/projection"
 	"CimplrCorpSaas/api/constants"
@@ -784,102 +783,73 @@ func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 	return runSourceQuery(ctx, pool, q, args)
 }
 
-// Dashboard builder exposes only these utilization columns (see CI_DSAHBOARD dataSourceFields cashUtilizations).
-var cashUtilizationDashboardFields = []string{
-	"utilization_id",
-	"currency_code",
-	"entry_mode",
-	"limit_action_type",
-	"limit_available",
-	"limit_bank_name",
-	"limit_core_limit_type",
-	"limit_currency_code",
-	"limit_effective_date",
-	"limit_entity_name",
-	"limit_fungibility_pct",
-	"limit_fungibility_type",
-	"limit_initial_utilization",
-	"limit_limit_sub_type",
-	"limit_limit_type",
-	"limit_processing_status",
-	"limit_remarks",
-	"limit_requested_at",
-	"limit_requested_by",
-	"limit_sanction_date",
-	"limit_sanctioned_amount",
-	"limit_security_type",
-	"limit_utilization_pct",
-	"processing_status",
-	"reference_doc",
-	"remarks",
-	"utilization_date",
-	"utilized_amount",
-}
+func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "l", "entity_name")
+	bf, bfArgs := bankNameFilter(ctx, "l", len(args)+1)
+	args = append(args, bfArgs...)
 
-func projectUtilizationRow(row map[string]interface{}) map[string]any {
-	out := make(map[string]any, len(cashUtilizationDashboardFields))
-	for _, key := range cashUtilizationDashboardFields {
-		if v, ok := row[key]; ok {
-			out[key] = v
-		}
-	}
-	return out
-}
+	q := fmt.Sprintf(`
+		WITH latest_audit AS (
+			SELECT DISTINCT ON (utilization_id)
+				utilization_id,
+				action_type,
+				processing_status,
+				requested_at,
+				checker_at
+			FROM cimplrcorpsaas.auditactionbanklimitutilization
+			WHERE action_type IN ('CREATE','EDIT','DELETE')
+			ORDER BY utilization_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC
+		),
+		latest_limit_audit AS (
+			SELECT DISTINCT ON (limit_id)
+				limit_id,
+				action_type,
+				processing_status,
+				requested_by,
+				requested_at
+			FROM cimplrcorpsaas.auditactionbanklimit
+			WHERE action_type IN ('CREATE','EDIT','DELETE')
+			ORDER BY limit_id, requested_at DESC
+		)
+		SELECT
+			COALESCE(u.utilization_id::text, '') AS utilization_id,
+			COALESCE(u.currency_code, '') AS currency_code,
+			COALESCE(u.entry_mode, '') AS entry_mode,
+			COALESCE(la.action_type, '') AS limit_action_type,
+			GREATEST(COALESCE(l.sanctioned_amount, 0) - (COALESCE(l.initial_utilization, 0) + COALESCE(u.utilized_amount, 0)), 0) AS limit_available,
+			COALESCE(l.bank_name, '') AS limit_bank_name,
+			COALESCE(l.core_limit_type, '') AS limit_core_limit_type,
+			COALESCE(l.currency_code, '') AS limit_currency_code,
+			l.effective_date AS limit_effective_date,
+			COALESCE(l.entity_name, '') AS limit_entity_name,
+			COALESCE(l.fungibility_pct, 0) AS limit_fungibility_pct,
+			COALESCE(l.fungibility_type, '') AS limit_fungibility_type,
+			COALESCE(l.initial_utilization, 0) AS limit_initial_utilization,
+			COALESCE(l.limit_sub_type, '') AS limit_limit_sub_type,
+			COALESCE(l.limit_type, '') AS limit_limit_type,
+			COALESCE(la.processing_status, '') AS limit_processing_status,
+			COALESCE(l.remarks, '') AS limit_remarks,
+			la.requested_at AS limit_requested_at,
+			COALESCE(la.requested_by, '') AS limit_requested_by,
+			l.sanction_date AS limit_sanction_date,
+			COALESCE(l.sanctioned_amount, 0) AS limit_sanctioned_amount,
+			COALESCE(l.security_type, '') AS limit_security_type,
+			CASE WHEN COALESCE(l.sanctioned_amount, 0) > 0
+				THEN (COALESCE(l.initial_utilization, 0) + COALESCE(u.utilized_amount, 0)) / l.sanctioned_amount
+				ELSE 0 END AS limit_utilization_pct,
+			COALESCE(a.processing_status, '') AS processing_status,
+			COALESCE(u.reference_doc, '') AS reference_doc,
+			COALESCE(u.remarks, '') AS remarks,
+			u.utilization_date,
+			COALESCE(u.utilized_amount, 0) AS utilized_amount
+		FROM cimplrcorpsaas.bank_limit_utilization u
+		LEFT JOIN latest_audit a ON a.utilization_id = u.utilization_id
+		LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
+		LEFT JOIN latest_limit_audit la ON la.limit_id = l.limit_id
+		WHERE COALESCE(u.is_deleted, false) = false %s %s
+		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC NULLS LAST
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef, bf)
 
-func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, rowLimit int, offset int) ([]map[string]any, error) {
-	// Reuse the cash module query for scope validation and KPI columns; project to dashboard schema.
-	fetchLimit := 0
-	if rowLimit > 0 {
-		fetchLimit = rowLimit + offset
-	}
-	rows, err := cashlimit.QueryAllUtilizations(ctx, pool, fetchLimit)
-	if err != nil {
-		return nil, err
-	}
-
-	if names, _ := ctx.Value("reqEntityNames").([]string); len(names) > 0 {
-		rows = filterUtilizationRowsByEntityNames(rows, names)
-		if fetchLimit > 0 && len(rows) > fetchLimit {
-			rows = rows[:fetchLimit]
-		}
-	}
-
-	if offset > 0 {
-		if offset >= len(rows) {
-			rows = nil
-		} else {
-			rows = rows[offset:]
-		}
-	}
-	if rowLimit > 0 && len(rows) > rowLimit {
-		rows = rows[:rowLimit]
-	}
-
-	out := make([]map[string]any, len(rows))
-	for i, row := range rows {
-		out[i] = projectUtilizationRow(row)
-	}
-	return out, nil
-}
-
-func filterUtilizationRowsByEntityNames(rows []map[string]interface{}, names []string) []map[string]interface{} {
-	allowed := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		n := strings.ToLower(strings.TrimSpace(name))
-		if n != "" {
-			allowed[n] = struct{}{}
-		}
-	}
-	if len(allowed) == 0 {
-		return rows
-	}
-
-	filtered := make([]map[string]interface{}, 0, len(rows))
-	for _, row := range rows {
-		entityName, _ := row["limit_entity_name"].(string)
-		if _, ok := allowed[strings.ToLower(strings.TrimSpace(entityName))]; ok {
-			filtered = append(filtered, row)
-		}
-	}
-	return filtered
+	return runSourceQuery(ctx, pool, q, args)
 }
