@@ -42,6 +42,7 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 				s.account_number,
 				s.statement_period_start,
 				s.statement_period_end,
+				s.statement_request_date,
 				s.opening_balance,
 				s.closing_balance,
 				s.uploaded_at,
@@ -101,6 +102,7 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 			COALESCE(ss.account_nickname, '')        AS account_nickname,
 			ss.statement_period_start,
 			ss.statement_period_end,
+			ss.statement_request_date,
 			ss.uploaded_at,
 			COALESCE(ss.opening_balance, 0)          AS opening_balance,
 			COALESCE(ss.closing_balance, 0)          AS closing_balance,
@@ -207,7 +209,8 @@ func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 			p.invoice_date,
 			p.due_date,
 			COALESCE(p.amount, 0)                     AS amount,
-			COALESCE(p.currency_code, '')             AS currency_code
+			COALESCE(p.currency_code, '')             AS currency_code,
+			COALESCE(a.processing_status, '')         AS processing_status
 		FROM public.tr_payables p
 		LEFT JOIN public.masterentitycash e
 			ON LOWER(TRIM(e.entity_name)) = LOWER(TRIM(p.entity_name))
@@ -215,6 +218,13 @@ func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 		LEFT JOIN public.mastercounterparty c
 			ON LOWER(TRIM(c.counterparty_name)) = LOWER(TRIM(p.counterparty_name))
 			AND COALESCE(c.is_deleted, false) = false
+		LEFT JOIN LATERAL (
+			SELECT processing_status
+			FROM public.auditactionpayable
+			WHERE payable_id = p.payable_id
+			ORDER BY requested_at DESC, action_id DESC
+			LIMIT 1
+		) a ON true
 		WHERE COALESCE(p.is_deleted, false) = false %s
 		ORDER BY p.due_date ASC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
@@ -242,7 +252,8 @@ func queryCashReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			r.invoice_date,
 			r.due_date,
 			COALESCE(r.invoice_amount, 0)             AS invoice_amount,
-			COALESCE(r.currency_code, '')             AS currency_code
+			COALESCE(r.currency_code, '')             AS currency_code,
+			COALESCE(a.processing_status, '')         AS processing_status
 		FROM public.tr_receivables r
 		LEFT JOIN public.masterentitycash e
 			ON LOWER(TRIM(e.entity_name)) = LOWER(TRIM(r.entity_name))
@@ -250,6 +261,13 @@ func queryCashReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 		LEFT JOIN public.mastercounterparty c
 			ON LOWER(TRIM(c.counterparty_name)) = LOWER(TRIM(r.counterparty_name))
 			AND COALESCE(c.is_deleted, false) = false
+		LEFT JOIN LATERAL (
+			SELECT processing_status
+			FROM public.auditactionreceivable
+			WHERE receivable_id = r.receivable_id
+			ORDER BY requested_at DESC, action_id DESC
+			LIMIT 1
+		) a ON true
 		WHERE COALESCE(r.is_deleted, false) = false %s
 		ORDER BY r.due_date ASC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
@@ -330,6 +348,7 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 			"counterparty_id":   row["counterparty_id"],
 			"counterparty_name": row["counterparty_name"],
 			"currency_code":     row["currency_code"],
+			"processing_status": row["processing_status"],
 		})
 	}
 	for _, row := range receivables {
@@ -346,6 +365,7 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 			"counterparty_id":   row["counterparty_id"],
 			"counterparty_name": row["counterparty_name"],
 			"currency_code":     row["currency_code"],
+			"processing_status": row["processing_status"],
 		})
 	}
 	if offset > 0 {
@@ -382,6 +402,8 @@ func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs
 			COALESCE(fpg.horizon::text, '') AS horizon,
 			COALESCE(fpg.primary_key, '') AS primary_types,
 			COALESCE(fpg.primary_value, '') AS primary_values,
+			COALESCE(fpg.primary_key, '') AS primary_key,
+			COALESCE(fpg.primary_value, '') AS primary_value,
 			COALESCE(fpg.total_amount, 0) AS total_amount,
 			COALESCE(aa.actiontype, '') AS action_type,
 			COALESCE(aa.processing_status, '') AS processing_status,
@@ -459,7 +481,9 @@ func queryCashSweepConfig(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 			COALESCE(c.target_bank_account, '') AS target_bank_account,
 			COALESCE(c.sweep_type, '') AS sweep_type,
 			COALESCE(c.frequency, '') AS frequency,
+			c.effective_date,
 			COALESCE(c.execution_time::text, '') AS execution_time,
+			COALESCE(c.requires_initiation, true) AS requires_initiation,
 			COALESCE(c.buffer_amount, 0) AS buffer_amount,
 			COALESCE(c.sweep_amount, 0) AS sweep_amount,
 			c.updated_at,
@@ -491,6 +515,10 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		SELECT
 			COALESCE(i.initiation_id::text, '') AS initiation_id,
 			COALESCE(i.sweep_id::text,      '') AS config_id,
+			COALESCE(i.sweep_id::text,      '') AS sweep_id,
+			COALESCE(i.overridden_execution_time::text, '') AS overridden_execution_time,
+			COALESCE(i.overridden_source_bank_account, '') AS overridden_source_bank_account,
+			COALESCE(i.overridden_target_bank_account, '') AS overridden_target_bank_account,
 			COALESCE(c.entity_name,         '') AS entity_name,
 			COALESCE(c.source_bank_name,    '') AS source_bank_name,
 			COALESCE(c.source_bank_account, '') AS source_bank_account,
@@ -693,8 +721,14 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 			COALESCE(b.balance_id::text, '') AS balance_id,
 			COALESCE(b.bank_name, '') AS bank_name,
 			COALESCE(b.account_no, '') AS account_no,
+			COALESCE(b.currency_code, '') AS currency_code,
 			b.as_of_date,
+			COALESCE(b.as_of_time::text, '') AS as_of_time,
+			COALESCE(b.balance_type, '') AS balance_type,
 			COALESCE(b.balance_amount, 0) AS balance_amount,
+			COALESCE(b.opening_balance, 0) AS opening_balance,
+			COALESCE(b.total_credits, 0) AS total_credits,
+			COALESCE(b.total_debits, 0) AS total_debits,
 			COALESCE(b.closing_balance, 0) AS closing_balance,
 			COALESCE(a.processing_status, '') AS processing_status
 		FROM public.bank_balances_manual b
@@ -813,6 +847,9 @@ func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 		)
 		SELECT
 			COALESCE(u.utilization_id::text, '') AS utilization_id,
+			COALESCE(u.limit_id, '') AS limit_id,
+			COALESCE(l.entity_name, '') AS entity_name,
+			COALESCE(l.bank_name, '') AS bank_name,
 			COALESCE(u.currency_code, '') AS currency_code,
 			COALESCE(u.entry_mode, '') AS entry_mode,
 			COALESCE(la.action_type, '') AS limit_action_type,
