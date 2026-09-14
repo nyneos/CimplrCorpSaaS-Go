@@ -159,7 +159,17 @@ func GetApprovedExposuresForSettlement(pool *pgxpool.Pool) http.HandlerFunc {
 				l.plant_code,
 				l.delivery_date,
 				l.payment_terms,
-				l.inco_terms
+				l.inco_terms,
+				-- A rollover moves the old exposure's hedge links onto the new
+				-- exposure at full amount (it does not unhedge them — the forward
+				-- stays live until its own maturity), so this stays visible here
+				-- on the rolled-over exposure exactly like it was on the original.
+				COALESCE((
+					SELECT SUM(ehl.hedged_amount)
+					FROM exposure_hedge_links ehl
+					WHERE ehl.exposure_header_id = h.exposure_header_id
+					  AND COALESCE(ehl.is_active, true) = true
+				), 0) AS hedged_amount
 			FROM exposure_headers h
 			LEFT JOIN exposure_line_items l ON l.exposure_header_id = h.exposure_header_id
 			WHERE (

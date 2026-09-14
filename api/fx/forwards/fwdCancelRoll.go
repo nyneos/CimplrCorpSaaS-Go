@@ -1394,7 +1394,8 @@ func GetExposuresByBookingIds(pool *pgxpool.Pool) http.HandlerFunc {
 				eh.total_original_amount,
 				eh.value_date,
 				COALESCE(eh.status, '') AS status,
-				COALESCE(eh.is_active, true) AS is_active
+				COALESCE(eh.is_active, true) AS is_active,
+				COALESCE(ehl.hedged_amount, 0) AS hedged_amount
 			FROM exposure_hedge_links ehl
 			JOIN exposure_headers eh ON ehl.exposure_header_id = eh.exposure_header_id
 			WHERE ehl.booking_id = ANY($1)
