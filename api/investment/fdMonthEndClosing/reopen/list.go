@@ -63,7 +63,7 @@ const listQuery = `
 		ORDER BY aie.position ASC, aie.instance_eye_id ASC
 		LIMIT 1
 	) aie ON true
-	WHERE rr.is_deleted = false`
+	WHERE COALESCE(rr.is_deleted, false) = false`
 
 // ListReopenRequests handles POST /investment/fd-closing/reopen/list.
 func ListReopenRequests(pool *pgxpool.Pool) http.HandlerFunc {

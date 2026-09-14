@@ -53,7 +53,7 @@ func ApplyReopen(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT cycle_id, processing_status, reason,
 			       TO_CHAR(reopened_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"')
 			FROM investment.fd_closing_reopen_request
-			WHERE request_id = $1 AND is_deleted = false
+			WHERE request_id = $1 AND COALESCE(is_deleted, false) = false
 			FOR UPDATE`,
 			req.RequestID,
 		).Scan(&cycleID, &processingStatus, &reason, &reopenedAt)

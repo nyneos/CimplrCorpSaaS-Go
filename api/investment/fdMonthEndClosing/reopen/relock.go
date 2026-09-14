@@ -66,7 +66,7 @@ func RelockCycle(pool *pgxpool.Pool) http.HandlerFunc {
 			       TO_CHAR(reopened_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 			       TO_CHAR(relocked_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"')
 			FROM investment.fd_closing_reopen_request
-			WHERE request_id = $1 AND is_deleted = false
+			WHERE request_id = $1 AND COALESCE(is_deleted, false) = false
 			FOR UPDATE`,
 			req.RequestID,
 		).Scan(&cycleID, &reopenedAt, &relockedAt)
