@@ -98,13 +98,13 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 				fmt.Sprintf("Entity:            %s (%s)", entityName, entityID),
 				fmt.Sprintf("Close Type:        %s", closeType),
 				fmt.Sprintf("Financial Period:  %s", financialPeriod),
-				fmt.Sprintf("Period Window:     %s → %s", periodStart.Format("2006-01-02"), periodEnd.Format("2006-01-02")),
+				fmt.Sprintf("Period Window:     %s → %s", periodStart.Format("02-01-2006"), periodEnd.Format("02-01-2006")),
 				fmt.Sprintf("Cycle Status:      %s", status),
 				fmt.Sprintf("Eligibility:       %s", eligibility),
 				fmt.Sprintf("FDs in Scope:      %d", fdCount),
 				fmt.Sprintf("Readiness Score:   %.2f%%", readiness),
 				fmt.Sprintf("Initiated By:      %s", initiatedBy),
-				fmt.Sprintf("Generated At:      %s IST", time.Now().In(time.FixedZone("IST", 5*3600+30*60)).Format("2006-01-02 15:04:05")),
+				fmt.Sprintf("Generated At:      %s IST", time.Now().In(time.FixedZone("IST", 5*3600+30*60)).Format("02-01-2006 15:04:05")),
 				"",
 				"This pack was materialised by the closing module (DMS-independent",
 				"fallback) so demo / local environments can download evidence without",
@@ -123,8 +123,8 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 		rows, qErr := pool.Query(ctx, `
 			SELECT COALESCE(run_id,''), COALESCE(run_mode,''), COALESCE(run_status,''),
 			       COALESCE(financial_period,''),
-			       COALESCE(TO_CHAR(accrual_period_start,'YYYY-MM-DD'),''),
-			       COALESCE(TO_CHAR(accrual_period_end,'YYYY-MM-DD'),'')
+			       COALESCE(TO_CHAR(accrual_period_start,'DD-MM-YYYY'),''),
+			       COALESCE(TO_CHAR(accrual_period_end,'DD-MM-YYYY'),'')
 			FROM investment.fd_accrual_run
 			WHERE entity_id = $1
 			  AND COALESCE(is_deleted,false) = false
@@ -243,9 +243,9 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 		body := "APPROVAL LOGS\n=============\n\n"
 		rows, qErr := pool.Query(ctx, `
 			SELECT action_type, processing_status, COALESCE(requested_by,''),
-			       COALESCE(TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),''),
+			       COALESCE(TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
 			       COALESCE(checker_by,''),
-			       COALESCE(TO_CHAR((checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),''),
+			       COALESCE(TO_CHAR((checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
 			       COALESCE(reason,''), COALESCE(checker_comment,'')
 			FROM investment.fd_closing_cycle_audit
 			WHERE cycle_id = $1
@@ -268,12 +268,12 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 		body := "PERIOD LOCK CERTIFICATE\n=======================\n\n"
 		rows, qErr := pool.Query(ctx, `
 			SELECT request_id, lock_type, processing_status,
-			       COALESCE(TO_CHAR(lock_effective_date,'YYYY-MM-DD'),''),
+			       COALESCE(TO_CHAR(lock_effective_date,'DD-MM-YYYY'),''),
 			       COALESCE(requested_by,''),
-			       COALESCE(TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),''),
+			       COALESCE(TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
 			       COALESCE(checker_by,''),
-			       COALESCE(TO_CHAR((checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),''),
-			       COALESCE(TO_CHAR((applied_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),''),
+			       COALESCE(TO_CHAR((checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
+			       COALESCE(TO_CHAR((applied_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
 			       COALESCE(applied_by,''),
 			       COALESCE(remarks,'')
 			FROM investment.fd_closing_lock_request
@@ -295,6 +295,37 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 				body += "(No lock requests on this cycle.)\n"
 			}
 		}
+		evRows, evErr := pool.Query(ctx, `
+			SELECT event_type, COALESCE(lock_type,''), COALESCE(performed_by,''),
+			       COALESCE(TO_CHAR((performed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),'')
+			FROM investment.fd_closing_cycle_event_log
+			WHERE cycle_id = $1 AND event_type IN ('LOCK','RELOCK','REOPEN','CLOSE')
+			ORDER BY performed_at`, cycleID)
+		if evErr != nil {
+			body += errorLinePrefix + evErr.Error() + "\n"
+		} else {
+			body += "\nPERIOD CLOSE CERTIFICATE\n========================\n\n"
+			closed := false
+			for evRows.Next() {
+				var et, lt, by, at string
+				_ = evRows.Scan(&et, &lt, &by, &at)
+				if et == "CLOSE" {
+					closed = true
+				}
+				if lt != "" {
+					body += fmt.Sprintf("%s (%s) by %s @ %s\n", et, lt, by, at)
+				} else {
+					body += fmt.Sprintf("%s by %s @ %s\n", et, by, at)
+				}
+			}
+			evRows.Close()
+			if closed {
+				body += fmt.Sprintf("\nThis certifies that closing period %s (%s to %s) for %s has been locked and closed.\n",
+					financialPeriod, periodStart.Format("02-01-2006"), periodEnd.Format("02-01-2006"), entityName)
+			} else {
+				body += "\n(Period not yet closed at pack time.)\n"
+			}
+		}
 		body += fmt.Sprintf("\nCertified cycle status at pack time: %s\n", status)
 		add(true, "06_period_lock_certificate.txt", body)
 	}
@@ -303,7 +334,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 		body := "AUDIT TRAIL\n===========\n\n"
 		rows, qErr := pool.Query(ctx, `
 			SELECT event_type, COALESCE(lock_type,''), COALESCE(reason,''), COALESCE(performed_by,''),
-			       COALESCE(TO_CHAR((performed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'')
+			       COALESCE(TO_CHAR((performed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),'')
 			FROM investment.fd_closing_cycle_event_log
 			WHERE cycle_id = $1
 			ORDER BY performed_at`, cycleID)

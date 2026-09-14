@@ -2356,6 +2356,22 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		req.RunID = outRunID
 		req.FDID = outFDID
 
+		var lockEntityID string
+		var lockPeriodStart, lockPeriodEnd time.Time
+		if err := pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(entity_id,''), accrual_period_start, accrual_period_end
+			FROM investment.fd_accrual_run WHERE run_id=$1`, outRunID,
+		).Scan(&lockEntityID, &lockPeriodStart, &lockPeriodEnd); err == nil {
+			if blocked, reason, lockErr := closingCycleBlocksAccrual(ctx, pgxPool, lockEntityID, lockPeriodStart, lockPeriodEnd); lockErr != nil {
+				api.LogError("[FDAccrual] ProposeOverride closing-lock check: %v", lockErr)
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+				return
+			} else if blocked {
+				api.RespondWithError(w, http.StatusConflict, reason)
+				return
+			}
+		}
+
 		proposeRow, pfErr := loadFDAccrualLedgerRow(ctx, pgxPool, ledgerID)
 		if pfErr != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())

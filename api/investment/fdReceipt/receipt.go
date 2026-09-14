@@ -261,6 +261,66 @@ func checkFDPeriodDates(fdStart, fdMaturity time.Time, periodStart, periodEnd st
 
 // ─── HANDLER 1: CreateReceipt ─────────────────────────────────────────────────
 
+func receiptLockWindow(fields map[string]interface{}, dateKey string, date, periodStart, periodEnd *time.Time) (time.Time, time.Time) {
+	pick := func(key string, current *time.Time) time.Time {
+		if s, ok := fields[key].(string); ok {
+			if t, err := time.Parse(constants.DateFormat, strings.TrimSpace(s)); err == nil {
+				return t
+			}
+		}
+		if current != nil {
+			return *current
+		}
+		return time.Time{}
+	}
+	from, to := pick("period_start", periodStart), pick("period_end", periodEnd)
+	if from.IsZero() || to.IsZero() {
+		d := pick(dateKey, date)
+		if from.IsZero() {
+			from = d
+		}
+		if to.IsZero() {
+			to = d
+		}
+	}
+	return from, to
+}
+
+func receiptPeriodLocked(ctx context.Context, pool *pgxpool.Pool, entityID string, from, to time.Time) (bool, string, error) {
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" || from.IsZero() || to.IsZero() {
+		return false, "", nil
+	}
+	if to.Before(from) {
+		from, to = to, from
+	}
+	var cycleID, status, financialPeriod, lockType string
+	err := pool.QueryRow(ctx, `
+		SELECT c.cycle_id, c.status, COALESCE(c.financial_period,''),
+		       COALESCE((SELECT e.lock_type FROM investment.fd_closing_cycle_event_log e
+		                 WHERE e.cycle_id = c.cycle_id AND e.event_type IN ('LOCK','RELOCK')
+		                 ORDER BY e.performed_at DESC LIMIT 1), 'HARD_LOCK')
+		FROM investment.fd_closing_cycle c
+		WHERE c.entity_id = $1
+		  AND COALESCE(c.is_deleted,false) = false
+		  AND c.status IN ('LOCKED','CLOSED')
+		  AND c.period_start <= $3::date
+		  AND c.period_end >= $2::date
+		ORDER BY CASE c.status WHEN 'CLOSED' THEN 0 ELSE 1 END, c.period_end DESC
+		LIMIT 1`, entityID, from, to).Scan(&cycleID, &status, &financialPeriod, &lockType)
+	if err == pgx.ErrNoRows {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+	state := status
+	if status == "LOCKED" {
+		state = strings.ReplaceAll(lockType, "_", " ")
+	}
+	return true, fmt.Sprintf("Period %s is under %s by closing cycle %s. Receipts, TDS and accounting for this entity/period cannot be modified until the cycle is reopened.", financialPeriod, state, cycleID), nil
+}
+
 func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -398,6 +458,14 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if errMsg := checkFDPeriodDates(fdStart, fdMaturity, req.PeriodStart, req.PeriodEnd); errMsg != "" {
 			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+		lockFrom, lockTo := receiptLockWindow(map[string]interface{}{"receipt_date": req.ReceiptDate, "period_start": req.PeriodStart, "period_end": req.PeriodEnd}, "receipt_date", nil, nil, nil)
+		if locked, why, lockErr := receiptPeriodLocked(ctx, pool, entityID, lockFrom, lockTo); lockErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+			return
+		} else if locked {
+			api.RespondWithError(w, http.StatusConflict, why)
 			return
 		}
 
@@ -837,6 +905,16 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
+		for _, fields := range []map[string]interface{}{nil, req.Fields} {
+			lockFrom, lockTo := receiptLockWindow(fields, "receipt_date", currentReceiptDate, currentPeriodStart, currentPeriodEnd)
+			if locked, why, lockErr := receiptPeriodLocked(ctx, pool, entityID, lockFrom, lockTo); lockErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+				return
+			} else if locked {
+				api.RespondWithError(w, http.StatusConflict, why)
+				return
+			}
+		}
 
 		existingReceiptRow, rowErr := loadFDReceiptRow(ctx, pool, req.ReceiptID)
 		if rowErr != nil {
@@ -1025,16 +1103,26 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		deleteMatrixByID := map[string]string{}
 
 		for _, rid := range req.ReceiptIDs {
-			var status string
+			var status, delEntityID string
+			var delReceiptDate, delPeriodStart, delPeriodEnd *time.Time
 			err := pool.QueryRow(ctx, `
-				SELECT receipt_status FROM investment.fd_interest_receipt
-				WHERE receipt_id=$1 AND is_deleted=false`, rid).Scan(&status)
+				SELECT receipt_status, COALESCE(entity_id,''), receipt_date, period_start, period_end
+				FROM investment.fd_interest_receipt
+				WHERE receipt_id=$1 AND is_deleted=false`, rid).Scan(&status, &delEntityID, &delReceiptDate, &delPeriodStart, &delPeriodEnd)
 			if err != nil {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": errFDReceiptNotFound})
 				continue
 			}
 			if status != "CAPTURED" && status != constants.StatusRejected {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "Cannot delete receipt in status " + status})
+				continue
+			}
+			lockFrom, lockTo := receiptLockWindow(nil, "receipt_date", delReceiptDate, delPeriodStart, delPeriodEnd)
+			if locked, why, lockErr := receiptPeriodLocked(ctx, pool, delEntityID, lockFrom, lockTo); lockErr != nil {
+				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "Failed to check closing period lock"})
+				continue
+			} else if locked {
+				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": why})
 				continue
 			}
 			delRow, delRowErr := loadFDReceiptRow(ctx, pool, rid)
@@ -4012,6 +4100,16 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "receipt_status is not APPROVED"})
 				continue
 			}
+			lockFrom, lockTo := receiptLockWindow(nil, "receipt_date", receiptDateRaw, periodStartRaw, periodEndRaw)
+			if locked, why, lockErr := receiptPeriodLocked(ctx, pool, rec.EntityID, lockFrom, lockTo); lockErr != nil {
+				skipped++
+				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "Failed to check closing period lock"})
+				continue
+			} else if locked {
+				skipped++
+				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": why})
+				continue
+			}
 			if blockMsg := checkReceiptPostingEligibility(ctx, pool, rid); blockMsg != "" {
 				skipped++
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": blockMsg})
@@ -4199,6 +4297,16 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 				[]string{"deduction_date"},
 				[]string{deductionDateForValidation}); errMsg != "" {
 				api.RespondWithError(w, http.StatusBadRequest, errMsg)
+				return
+			}
+		}
+		for _, fields := range []map[string]interface{}{nil, req.Fields} {
+			lockFrom, lockTo := receiptLockWindow(fields, "deduction_date", currentDeductionDate, currentPeriodStart, currentPeriodEnd)
+			if locked, why, lockErr := receiptPeriodLocked(ctx, pool, entityID, lockFrom, lockTo); lockErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+				return
+			} else if locked {
+				api.RespondWithError(w, http.StatusConflict, why)
 				return
 			}
 		}

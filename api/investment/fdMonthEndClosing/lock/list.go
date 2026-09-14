@@ -22,7 +22,7 @@ import (
 // the same approval-engine LATERAL join shape as GetBookingsWithAudit.
 const listQuery = `
 	SELECT
-		lr.request_id, lr.cycle_id, lr.lock_type,
+		lr.request_id::text AS request_id, lr.cycle_id, lr.lock_type,
 		TO_CHAR(lr.lock_effective_date,'YYYY-MM-DD') AS lock_effective_date,
 		COALESCE(lr.remarks,'') AS remarks,
 		lr.approver_id, lr.approver_name, COALESCE(lr.approver_role,'') AS approver_role,
@@ -48,7 +48,7 @@ const listQuery = `
 	JOIN investment.fd_closing_cycle c ON c.cycle_id = lr.cycle_id
 	LEFT JOIN LATERAL (
 		SELECT ai.* FROM uam.approval_instance ai
-		WHERE ai.record_id = lr.request_id AND ai.module_code = $1
+		WHERE ai.record_id = lr.request_id::text AND ai.module_code = $1
 		  AND ai.status = 'PENDING' AND ai.is_deleted = false
 		ORDER BY ai.submitted_at DESC, ai.instance_id DESC
 		LIMIT 1
