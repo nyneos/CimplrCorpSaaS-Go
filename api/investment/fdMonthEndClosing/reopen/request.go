@@ -66,7 +66,11 @@ func RequestReopen(pool *pgxpool.Pool) http.HandlerFunc {
 		req.Reason = strings.TrimSpace(req.Reason)
 		req.ApproverID = strings.TrimSpace(req.ApproverID)
 		req.ApproverName = strings.TrimSpace(req.ApproverName)
-		if req.CycleID == "" || req.Reason == "" || req.ApproverID == "" || req.ApproverName == "" {
+		if req.Reason == "" {
+			fdclosingcommon.RespondError(w, http.StatusBadRequest, "Reason for Reopen is mandatory")
+			return
+		}
+		if req.CycleID == "" || req.ApproverID == "" || req.ApproverName == "" {
 			fdclosingcommon.RespondError(w, http.StatusBadRequest,
 				"cycle_id, reason, approver_id and approver_name are required")
 			return
