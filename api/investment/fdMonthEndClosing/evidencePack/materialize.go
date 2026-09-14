@@ -243,9 +243,9 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 		body := "APPROVAL LOGS\n=============\n\n"
 		rows, qErr := pool.Query(ctx, `
 			SELECT action_type, processing_status, COALESCE(requested_by,''),
-			       COALESCE(TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
+			       COALESCE(TO_CHAR((requested_at AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
 			       COALESCE(checker_by,''),
-			       COALESCE(TO_CHAR((checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
+			       COALESCE(TO_CHAR((checker_at AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
 			       COALESCE(reason,''), COALESCE(checker_comment,'')
 			FROM investment.fd_closing_cycle_audit
 			WHERE cycle_id = $1
@@ -270,10 +270,10 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 			SELECT request_id, lock_type, processing_status,
 			       COALESCE(TO_CHAR(lock_effective_date,'DD-MM-YYYY'),''),
 			       COALESCE(requested_by,''),
-			       COALESCE(TO_CHAR((requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
+			       COALESCE(TO_CHAR((requested_at AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
 			       COALESCE(checker_by,''),
-			       COALESCE(TO_CHAR((checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
-			       COALESCE(TO_CHAR((applied_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
+			       COALESCE(TO_CHAR((checker_at AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
+			       COALESCE(TO_CHAR((applied_at AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),''),
 			       COALESCE(applied_by,''),
 			       COALESCE(remarks,'')
 			FROM investment.fd_closing_lock_request
@@ -297,7 +297,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 		}
 		evRows, evErr := pool.Query(ctx, `
 			SELECT event_type, COALESCE(lock_type,''), COALESCE(performed_by,''),
-			       COALESCE(TO_CHAR((performed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),'')
+			       COALESCE(TO_CHAR((performed_at AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),'')
 			FROM investment.fd_closing_cycle_event_log
 			WHERE cycle_id = $1 AND event_type IN ('LOCK','RELOCK','REOPEN','CLOSE')
 			ORDER BY performed_at`, cycleID)
@@ -334,7 +334,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 		body := "AUDIT TRAIL\n===========\n\n"
 		rows, qErr := pool.Query(ctx, `
 			SELECT event_type, COALESCE(lock_type,''), COALESCE(reason,''), COALESCE(performed_by,''),
-			       COALESCE(TO_CHAR((performed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),'')
+			       COALESCE(TO_CHAR((performed_at AT TIME ZONE 'Asia/Kolkata'),'DD-MM-YYYY HH24:MI:SS'),'')
 			FROM investment.fd_closing_cycle_event_log
 			WHERE cycle_id = $1
 			ORDER BY performed_at`, cycleID)

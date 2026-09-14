@@ -36,7 +36,7 @@ const packWithDmsJoinQuery = `
 		COALESCE(p.checksum, gd.checksum, '') AS checksum,
 		p.download_count,
 		p.generated_by,
-		TO_CHAR((p.generated_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS') AS generated_at,
+		TO_CHAR((p.generated_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS') AS generated_at,
 		COALESCE(gd.status, '') AS dms_status,
 		COALESCE(gd.file_format, '') AS dms_file_format,
 		p.is_deleted

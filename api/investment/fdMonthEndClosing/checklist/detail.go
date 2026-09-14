@@ -85,7 +85,7 @@ func DetailChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 		fileRows, err := pool.Query(ctx, `
 			SELECT file_id, stored_file_name, COALESCE(content_type,'') AS content_type,
 			       COALESCE(file_size,0) AS file_size, upload_s3_key, COALESCE(uploaded_by,'') AS uploaded_by,
-			       TO_CHAR((uploaded_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS') AS uploaded_at
+			       TO_CHAR((uploaded_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS') AS uploaded_at
 			FROM investment.fd_closing_checklist_item_files
 			WHERE item_id = $1 AND is_deleted = false
 			ORDER BY uploaded_at DESC`,

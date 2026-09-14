@@ -21,9 +21,9 @@ const auditHistorySelect = `
 	SELECT
 		a.audit_id::text, a.cycle_id, a.action_type, a.processing_status,
 		COALESCE(a.requested_by,'') AS requested_by,
-		COALESCE(TO_CHAR((a.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+		COALESCE(TO_CHAR((a.requested_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
 		COALESCE(a.checker_by,'') AS checker_by,
-		COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+		COALESCE(TO_CHAR((a.checker_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
 		COALESCE(a.checker_comment,'') AS checker_comment,
 		COALESCE(a.reason,'') AS reason,
 		COALESCE(a.old_status,'') AS old_status,
