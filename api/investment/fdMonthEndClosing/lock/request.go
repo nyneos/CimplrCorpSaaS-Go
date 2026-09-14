@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -85,12 +86,13 @@ func RequestLock(pool *pgxpool.Pool) http.HandlerFunc {
 
 		var entityID, cycleStatus, eligibility string
 		var isDeleted bool
+		var blockerCount int
 		err := pool.QueryRow(ctx, `
-			SELECT entity_id, status, eligibility, is_deleted
+			SELECT entity_id, status, eligibility, is_deleted, COALESCE(blocker_count,0)
 			FROM investment.fd_closing_cycle
 			WHERE cycle_id = $1`,
 			req.CycleID,
-		).Scan(&entityID, &cycleStatus, &eligibility, &isDeleted)
+		).Scan(&entityID, &cycleStatus, &eligibility, &isDeleted, &blockerCount)
 		if err != nil || isDeleted {
 			fdclosingcommon.RespondError(w, http.StatusNotFound, "Cycle not found")
 			return
@@ -112,6 +114,40 @@ func RequestLock(pool *pgxpool.Pool) http.HandlerFunc {
 		if eligibility != "READY_TO_CLOSE" {
 			fdclosingcommon.RespondError(w, http.StatusBadRequest,
 				"Cycle is not ready to close (eligibility="+eligibility+"); complete the closing checklist first")
+			return
+		}
+		if blockerCount > 0 {
+			fdclosingcommon.RespondError(w, http.StatusBadRequest,
+				fmt.Sprintf("Cycle has %d blocked checklist item(s); resolve them before requesting a lock", blockerCount))
+			return
+		}
+		var openExceptions int
+		if err := pool.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM investment.fd_receipt_exception e
+			JOIN investment.fd_closing_cycle_fd_scope s
+			  ON s.fd_id = e.fd_id
+			 AND s.cycle_id = $1
+			 AND s.is_deleted = false
+			 AND s.selection_status = 'APPROVED'
+			LEFT JOIN LATERAL (
+				SELECT a.processing_status
+				FROM investment.fd_receipt_exception_audit a
+				WHERE a.exception_id = e.exception_id
+				ORDER BY a.requested_at DESC, a.audit_id DESC
+				LIMIT 1
+			) la ON true
+			WHERE COALESCE(e.is_deleted,false) = false
+			  AND UPPER(COALESCE(e.exception_status,'OPEN')) IN ('OPEN','IN_REVIEW')
+			  AND NOT (UPPER(COALESCE(e.exception_status,'')) = 'IN_REVIEW' AND COALESCE(la.processing_status,'') = 'APPROVED')`,
+			req.CycleID,
+		).Scan(&openExceptions); err != nil {
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrQueryFailed)
+			return
+		}
+		if openExceptions > 0 {
+			fdclosingcommon.RespondError(w, http.StatusBadRequest,
+				fmt.Sprintf("%d open exception(s) remain on FDs in this cycle; resolve, close or approve carry-forward before requesting a lock", openExceptions))
 			return
 		}
 		// Only an in-progress cycle may have a lock requested — once a lock has

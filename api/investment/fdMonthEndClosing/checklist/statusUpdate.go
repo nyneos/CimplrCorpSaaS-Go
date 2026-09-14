@@ -123,9 +123,21 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if cycleStatus == "LOCKED" || cycleStatus == "CLOSED" {
-			fdclosingcommon.RespondError(w, http.StatusBadRequest, "Cannot update a checklist item on a "+strings.ToLower(cycleStatus)+" cycle")
+		if cycleStatus == "CLOSED" {
+			fdclosingcommon.RespondError(w, http.StatusBadRequest, "Cannot update a checklist item on a closed cycle")
 			return
+		}
+		if cycleStatus == "LOCKED" {
+			if fdclosingcommon.AppliedLockType(ctx, tx, cycleID) != "SOFT_LOCK" {
+				fdclosingcommon.RespondError(w, http.StatusBadRequest,
+					"Cannot update a checklist item on a hard-locked cycle — reopen the period to make changes")
+				return
+			}
+			if strings.TrimSpace(req.Reason) == "" {
+				fdclosingcommon.RespondError(w, http.StatusBadRequest,
+					"Cycle is soft-locked — a reason is required for a controlled checklist adjustment")
+				return
+			}
 		}
 
 		exceptionCount := oldExceptionCount

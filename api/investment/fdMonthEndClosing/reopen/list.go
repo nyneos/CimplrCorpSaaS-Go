@@ -30,13 +30,13 @@ const listQuery = `
 		rr.validation_status, COALESCE(rr.validation_errors,'') AS validation_errors,
 		rr.processing_status,
 		COALESCE(rr.requested_by,'') AS requested_by,
-		COALESCE(TO_CHAR((rr.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+		COALESCE(TO_CHAR((rr.requested_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
 		COALESCE(rr.checker_by,'') AS checker_by,
-		COALESCE(TO_CHAR((rr.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+		COALESCE(TO_CHAR((rr.checker_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
 		COALESCE(rr.checker_comment,'') AS checker_comment,
-		COALESCE(TO_CHAR((rr.reopened_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS reopened_at,
+		COALESCE(TO_CHAR((rr.reopened_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS reopened_at,
 		COALESCE(rr.reopened_by,'') AS reopened_by,
-		COALESCE(TO_CHAR((rr.relocked_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS relocked_at,
+		COALESCE(TO_CHAR((rr.relocked_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS relocked_at,
 		COALESCE(rr.relocked_by,'') AS relocked_by,
 		c.entity_id, c.entity_name, c.financial_period,
 
@@ -63,7 +63,7 @@ const listQuery = `
 		ORDER BY aie.position ASC, aie.instance_eye_id ASC
 		LIMIT 1
 	) aie ON true
-	WHERE rr.is_deleted = false`
+	WHERE COALESCE(rr.is_deleted, false) = false`
 
 // ListReopenRequests handles POST /investment/fd-closing/reopen/list.
 func ListReopenRequests(pool *pgxpool.Pool) http.HandlerFunc {

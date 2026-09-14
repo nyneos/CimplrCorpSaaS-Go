@@ -25,19 +25,34 @@ var approvedActiveStatuses = []string{"IN_PROGRESS", "AWAITING_APPROVAL", "REOPE
 func ListApprovedActiveCycles(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			EntityID string `json:"entity_id"`
+			EntityID string   `json:"entity_id"`
+			Statuses []string `json:"statuses"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		ctx := r.Context()
 		scope := ctxutil.FromContext(ctx)
 
+		statuses := approvedActiveStatuses
+		if len(req.Statuses) > 0 {
+			statuses = nil
+			for _, s := range req.Statuses {
+				s = strings.ToUpper(strings.TrimSpace(s))
+				if s != "" && s != "DRAFT" {
+					statuses = append(statuses, s)
+				}
+			}
+			if len(statuses) == 0 {
+				statuses = approvedActiveStatuses
+			}
+		}
+
 		q := strings.Replace(listWithAuditQuery, "$moduleCode$", "$1", 1)
 		args := []interface{}{moduleCode}
 		argIdx := 2
 
 		q += " AND m.status = ANY($" + strconv.Itoa(argIdx) + "::text[])"
-		args = append(args, approvedActiveStatuses)
+		args = append(args, statuses)
 		argIdx++
 
 		// Gate: cycle CREATE must already be checker-approved. Pending CREATE

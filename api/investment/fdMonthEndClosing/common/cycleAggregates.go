@@ -27,6 +27,21 @@ func RefreshCycleFdCount(ctx context.Context, tx pgx.Tx, cycleID string) error {
 	return err
 }
 
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}
+
+func AppliedLockType(ctx context.Context, q rowQuerier, cycleID string) string {
+	var lockType string
+	_ = q.QueryRow(ctx, `
+		SELECT COALESCE(e.lock_type, 'HARD_LOCK')
+		FROM investment.fd_closing_cycle_event_log e
+		WHERE e.cycle_id = $1 AND e.event_type IN ('LOCK','RELOCK')
+		ORDER BY e.performed_at DESC
+		LIMIT 1`, cycleID).Scan(&lockType)
+	return lockType
+}
+
 // RefreshCycleReadiness recomputes readiness_score / blocker_count / eligibility
 // from checklist items for cycleID (same rule as checklist.recomputeCycleReadiness).
 func RefreshCycleReadiness(ctx context.Context, tx pgx.Tx, cycleID string) error {

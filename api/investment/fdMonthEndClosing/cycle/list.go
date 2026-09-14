@@ -54,6 +54,13 @@ const listWithAuditQuery = `
 			WHEN agg.critical_incomplete = 0 THEN 'CONDITIONALLY_READY'
 			ELSE 'NOT_READY'
 		END AS eligibility,
+		CASE WHEN COALESCE(m.status,'') = 'LOCKED' THEN COALESCE((
+			SELECT COALESCE(e.lock_type,'HARD_LOCK')
+			FROM investment.fd_closing_cycle_event_log e
+			WHERE e.cycle_id = m.cycle_id
+			  AND e.event_type IN ('LOCK','RELOCK')
+			ORDER BY e.performed_at DESC
+			LIMIT 1), '') ELSE '' END AS lock_type,
 		m.initiated_by, TO_CHAR(m.initiated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS initiated_at,
 		m.is_deleted, m.created_by, TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
 
@@ -61,9 +68,9 @@ const listWithAuditQuery = `
 		COALESCE(l.action_type,'') AS action_type,
 		COALESCE(l.processing_status,'') AS processing_status,
 		COALESCE(l.requested_by,'') AS requested_by,
-		COALESCE(TO_CHAR((l.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+		COALESCE(TO_CHAR((l.requested_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
 		COALESCE(l.checker_by,'') AS checker_by,
-		COALESCE(TO_CHAR((l.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+		COALESCE(TO_CHAR((l.checker_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
 		COALESCE(l.checker_comment,'') AS checker_comment,
 		COALESCE(l.reason,'') AS reason,
 		COALESCE(l.old_bank_id,'') AS old_bank_id,

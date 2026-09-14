@@ -64,6 +64,13 @@ func DetailCycle(pool *pgxpool.Pool) http.HandlerFunc {
 						WHEN agg.critical_incomplete = 0 THEN 'CONDITIONALLY_READY'
 						ELSE 'NOT_READY'
 					END AS eligibility,
+					CASE WHEN status = 'LOCKED' THEN COALESCE((
+						SELECT COALESCE(e.lock_type,'HARD_LOCK')
+						FROM investment.fd_closing_cycle_event_log e
+						WHERE e.cycle_id = investment.fd_closing_cycle.cycle_id
+						  AND e.event_type IN ('LOCK','RELOCK')
+						ORDER BY e.performed_at DESC
+						LIMIT 1), '') ELSE '' END AS lock_type,
 					initiated_by, TO_CHAR(initiated_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS initiated_at,
 					is_deleted, created_by, TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
 				FROM investment.fd_closing_cycle

@@ -66,7 +66,11 @@ func RequestReopen(pool *pgxpool.Pool) http.HandlerFunc {
 		req.Reason = strings.TrimSpace(req.Reason)
 		req.ApproverID = strings.TrimSpace(req.ApproverID)
 		req.ApproverName = strings.TrimSpace(req.ApproverName)
-		if req.CycleID == "" || req.Reason == "" || req.ApproverID == "" || req.ApproverName == "" {
+		if req.Reason == "" {
+			fdclosingcommon.RespondError(w, http.StatusBadRequest, "Reason for Reopen is mandatory")
+			return
+		}
+		if req.CycleID == "" || req.ApproverID == "" || req.ApproverName == "" {
 			fdclosingcommon.RespondError(w, http.StatusBadRequest,
 				"cycle_id, reason, approver_id and approver_name are required")
 			return
@@ -125,8 +129,8 @@ func RequestReopen(pool *pgxpool.Pool) http.HandlerFunc {
 				approver_id, approver_name, approver_role,
 				accrual_valid, reconciliation_valid, accounting_valid,
 				validation_status, validated_at, validated_by,
-				processing_status, requested_by, requested_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$11,'PENDING_APPROVAL',$11,now())
+				processing_status, requested_by, requested_at, is_deleted
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$11,'PENDING_APPROVAL',$11,now(),false)
 			RETURNING request_id`,
 			req.CycleID, req.Reason, nullIfEmpty(req.ImpactSummary),
 			req.ApproverID, req.ApproverName, nullIfEmpty(req.ApproverRole),

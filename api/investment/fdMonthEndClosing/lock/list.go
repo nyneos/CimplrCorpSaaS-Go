@@ -22,17 +22,17 @@ import (
 // the same approval-engine LATERAL join shape as GetBookingsWithAudit.
 const listQuery = `
 	SELECT
-		lr.request_id, lr.cycle_id, lr.lock_type,
+		lr.request_id::text AS request_id, lr.cycle_id, lr.lock_type,
 		TO_CHAR(lr.lock_effective_date,'YYYY-MM-DD') AS lock_effective_date,
 		COALESCE(lr.remarks,'') AS remarks,
 		lr.approver_id, lr.approver_name, COALESCE(lr.approver_role,'') AS approver_role,
 		lr.processing_status,
 		COALESCE(lr.requested_by,'') AS requested_by,
-		COALESCE(TO_CHAR((lr.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+		COALESCE(TO_CHAR((lr.requested_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
 		COALESCE(lr.checker_by,'') AS checker_by,
-		COALESCE(TO_CHAR((lr.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+		COALESCE(TO_CHAR((lr.checker_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
 		COALESCE(lr.checker_comment,'') AS checker_comment,
-		COALESCE(TO_CHAR((lr.applied_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS applied_at,
+		COALESCE(TO_CHAR((lr.applied_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS applied_at,
 		COALESCE(lr.applied_by,'') AS applied_by,
 		c.entity_id, c.entity_name, c.financial_period,
 
@@ -48,7 +48,7 @@ const listQuery = `
 	JOIN investment.fd_closing_cycle c ON c.cycle_id = lr.cycle_id
 	LEFT JOIN LATERAL (
 		SELECT ai.* FROM uam.approval_instance ai
-		WHERE ai.record_id = lr.request_id AND ai.module_code = $1
+		WHERE ai.record_id = lr.request_id::text AND ai.module_code = $1
 		  AND ai.status = 'PENDING' AND ai.is_deleted = false
 		ORDER BY ai.submitted_at DESC, ai.instance_id DESC
 		LIMIT 1

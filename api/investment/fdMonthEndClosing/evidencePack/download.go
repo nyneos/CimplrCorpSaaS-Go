@@ -45,7 +45,7 @@ func DownloadEvidencePack(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		rows, err := pool.Query(ctx, packWithDmsJoinQuery+`
-			WHERE p.pack_id = $1 AND p.is_deleted = false`,
+			WHERE p.pack_id = $1 AND COALESCE(p.is_deleted, false) = false`,
 			req.PackID,
 		)
 		if err != nil {

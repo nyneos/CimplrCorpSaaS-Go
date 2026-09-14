@@ -53,7 +53,7 @@ func ApplyReopen(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT cycle_id, processing_status, reason,
 			       TO_CHAR(reopened_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"')
 			FROM investment.fd_closing_reopen_request
-			WHERE request_id = $1 AND is_deleted = false
+			WHERE request_id = $1 AND COALESCE(is_deleted, false) = false
 			FOR UPDATE`,
 			req.RequestID,
 		).Scan(&cycleID, &processingStatus, &reason, &reopenedAt)
@@ -126,11 +126,31 @@ func ApplyReopen(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		validation := runPostReopenChecks(ctx, pool, cycleID)
+		if _, err = pool.Exec(ctx, `
+			UPDATE investment.fd_closing_reopen_request
+			SET accrual_valid = $2, reconciliation_valid = $3, accounting_valid = $4,
+			    validation_status = $5, validation_errors = $6,
+			    validated_at = now(), validated_by = 'SYSTEM'
+			WHERE request_id = $1`,
+			req.RequestID, validation.AccrualValid, validation.ReconciliationValid, validation.AccountingValid,
+			validation.Status, nullIfEmpty(validation.Errors),
+		); err != nil {
+			api.LogError("[FDClosingReopen] ApplyReopen validation stamp failed for request %s: %v", req.RequestID, err)
+		}
+
 		fdclosingcommon.RespondSuccess(w, "Cycle reopened", map[string]interface{}{
 			"request_id":   req.RequestID,
 			"cycle_id":     cycleID,
 			"cycle_status": "REOPENED",
+			"validation": map[string]interface{}{
+				"accrual_valid":        validation.AccrualValid,
+				"reconciliation_valid": validation.ReconciliationValid,
+				"accounting_valid":     validation.AccountingValid,
+				"validation_status":    validation.Status,
+				"validation_errors":    validation.Errors,
+			},
 		})
-		api.LogInfo("[FDClosingReopen] ApplyReopen: request=%s cycle=%s by=%s", req.RequestID, cycleID, actor.Email)
+		api.LogInfo("[FDClosingReopen] ApplyReopen: request=%s cycle=%s by=%s validation=%s", req.RequestID, cycleID, actor.Email, validation.Status)
 	}
 }
