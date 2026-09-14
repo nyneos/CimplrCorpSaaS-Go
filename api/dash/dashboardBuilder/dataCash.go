@@ -8,7 +8,6 @@ import (
 
 	"CimplrCorpSaas/api"
 	fundavailibilty "CimplrCorpSaas/api/cash/fundavailibilty"
-	cashlimit "CimplrCorpSaas/api/cash/limit"
 	payablerecievable "CimplrCorpSaas/api/cash/payablerecievable"
 	cashprojection "CimplrCorpSaas/api/cash/projection"
 	"CimplrCorpSaas/api/constants"
@@ -43,6 +42,7 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 				s.account_number,
 				s.statement_period_start,
 				s.statement_period_end,
+				s.statement_request_date,
 				s.opening_balance,
 				s.closing_balance,
 				s.uploaded_at,
@@ -102,6 +102,7 @@ func queryCashBankStatements(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 			COALESCE(ss.account_nickname, '')        AS account_nickname,
 			ss.statement_period_start,
 			ss.statement_period_end,
+			ss.statement_request_date,
 			ss.uploaded_at,
 			COALESCE(ss.opening_balance, 0)          AS opening_balance,
 			COALESCE(ss.closing_balance, 0)          AS closing_balance,
@@ -208,7 +209,8 @@ func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 			p.invoice_date,
 			p.due_date,
 			COALESCE(p.amount, 0)                     AS amount,
-			COALESCE(p.currency_code, '')             AS currency_code
+			COALESCE(p.currency_code, '')             AS currency_code,
+			COALESCE(a.processing_status, '')         AS processing_status
 		FROM public.tr_payables p
 		LEFT JOIN public.masterentitycash e
 			ON LOWER(TRIM(e.entity_name)) = LOWER(TRIM(p.entity_name))
@@ -216,6 +218,13 @@ func queryCashPayable(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 		LEFT JOIN public.mastercounterparty c
 			ON LOWER(TRIM(c.counterparty_name)) = LOWER(TRIM(p.counterparty_name))
 			AND COALESCE(c.is_deleted, false) = false
+		LEFT JOIN LATERAL (
+			SELECT processing_status
+			FROM public.auditactionpayable
+			WHERE payable_id = p.payable_id
+			ORDER BY requested_at DESC, action_id DESC
+			LIMIT 1
+		) a ON true
 		WHERE COALESCE(p.is_deleted, false) = false %s
 		ORDER BY p.due_date ASC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
@@ -243,7 +252,8 @@ func queryCashReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			r.invoice_date,
 			r.due_date,
 			COALESCE(r.invoice_amount, 0)             AS invoice_amount,
-			COALESCE(r.currency_code, '')             AS currency_code
+			COALESCE(r.currency_code, '')             AS currency_code,
+			COALESCE(a.processing_status, '')         AS processing_status
 		FROM public.tr_receivables r
 		LEFT JOIN public.masterentitycash e
 			ON LOWER(TRIM(e.entity_name)) = LOWER(TRIM(r.entity_name))
@@ -251,6 +261,13 @@ func queryCashReceivable(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 		LEFT JOIN public.mastercounterparty c
 			ON LOWER(TRIM(c.counterparty_name)) = LOWER(TRIM(r.counterparty_name))
 			AND COALESCE(c.is_deleted, false) = false
+		LEFT JOIN LATERAL (
+			SELECT processing_status
+			FROM public.auditactionreceivable
+			WHERE receivable_id = r.receivable_id
+			ORDER BY requested_at DESC, action_id DESC
+			LIMIT 1
+		) a ON true
 		WHERE COALESCE(r.is_deleted, false) = false %s
 		ORDER BY r.due_date ASC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
@@ -331,6 +348,7 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 			"counterparty_id":   row["counterparty_id"],
 			"counterparty_name": row["counterparty_name"],
 			"currency_code":     row["currency_code"],
+			"processing_status": row["processing_status"],
 		})
 	}
 	for _, row := range receivables {
@@ -347,6 +365,7 @@ func queryCashPayableReceivable(ctx context.Context, pool *pgxpool.Pool, entityI
 			"counterparty_id":   row["counterparty_id"],
 			"counterparty_name": row["counterparty_name"],
 			"currency_code":     row["currency_code"],
+			"processing_status": row["processing_status"],
 		})
 	}
 	if offset > 0 {
@@ -383,6 +402,8 @@ func queryCashFundPlanSummary(ctx context.Context, pool *pgxpool.Pool, entityIDs
 			COALESCE(fpg.horizon::text, '') AS horizon,
 			COALESCE(fpg.primary_key, '') AS primary_types,
 			COALESCE(fpg.primary_value, '') AS primary_values,
+			COALESCE(fpg.primary_key, '') AS primary_key,
+			COALESCE(fpg.primary_value, '') AS primary_value,
 			COALESCE(fpg.total_amount, 0) AS total_amount,
 			COALESCE(aa.actiontype, '') AS action_type,
 			COALESCE(aa.processing_status, '') AS processing_status,
@@ -460,7 +481,9 @@ func queryCashSweepConfig(ctx context.Context, pool *pgxpool.Pool, entityIDs []s
 			COALESCE(c.target_bank_account, '') AS target_bank_account,
 			COALESCE(c.sweep_type, '') AS sweep_type,
 			COALESCE(c.frequency, '') AS frequency,
+			c.effective_date,
 			COALESCE(c.execution_time::text, '') AS execution_time,
+			COALESCE(c.requires_initiation, true) AS requires_initiation,
 			COALESCE(c.buffer_amount, 0) AS buffer_amount,
 			COALESCE(c.sweep_amount, 0) AS sweep_amount,
 			c.updated_at,
@@ -492,6 +515,10 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		SELECT
 			COALESCE(i.initiation_id::text, '') AS initiation_id,
 			COALESCE(i.sweep_id::text,      '') AS config_id,
+			COALESCE(i.sweep_id::text,      '') AS sweep_id,
+			COALESCE(i.overridden_execution_time::text, '') AS overridden_execution_time,
+			COALESCE(i.overridden_source_bank_account, '') AS overridden_source_bank_account,
+			COALESCE(i.overridden_target_bank_account, '') AS overridden_target_bank_account,
 			COALESCE(c.entity_name,         '') AS entity_name,
 			COALESCE(c.source_bank_name,    '') AS source_bank_name,
 			COALESCE(c.source_bank_account, '') AS source_bank_account,
@@ -694,8 +721,14 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 			COALESCE(b.balance_id::text, '') AS balance_id,
 			COALESCE(b.bank_name, '') AS bank_name,
 			COALESCE(b.account_no, '') AS account_no,
+			COALESCE(b.currency_code, '') AS currency_code,
 			b.as_of_date,
+			COALESCE(b.as_of_time::text, '') AS as_of_time,
+			COALESCE(b.balance_type, '') AS balance_type,
 			COALESCE(b.balance_amount, 0) AS balance_amount,
+			COALESCE(b.opening_balance, 0) AS opening_balance,
+			COALESCE(b.total_credits, 0) AS total_credits,
+			COALESCE(b.total_debits, 0) AS total_debits,
 			COALESCE(b.closing_balance, 0) AS closing_balance,
 			COALESCE(a.processing_status, '') AS processing_status
 		FROM public.bank_balances_manual b
@@ -784,102 +817,76 @@ func queryCashBankLimits(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 	return runSourceQuery(ctx, pool, q, args)
 }
 
-// Dashboard builder exposes only these utilization columns (see CI_DSAHBOARD dataSourceFields cashUtilizations).
-var cashUtilizationDashboardFields = []string{
-	"utilization_id",
-	"currency_code",
-	"entry_mode",
-	"limit_action_type",
-	"limit_available",
-	"limit_bank_name",
-	"limit_core_limit_type",
-	"limit_currency_code",
-	"limit_effective_date",
-	"limit_entity_name",
-	"limit_fungibility_pct",
-	"limit_fungibility_type",
-	"limit_initial_utilization",
-	"limit_limit_sub_type",
-	"limit_limit_type",
-	"limit_processing_status",
-	"limit_remarks",
-	"limit_requested_at",
-	"limit_requested_by",
-	"limit_sanction_date",
-	"limit_sanctioned_amount",
-	"limit_security_type",
-	"limit_utilization_pct",
-	"processing_status",
-	"reference_doc",
-	"remarks",
-	"utilization_date",
-	"utilized_amount",
-}
+func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "l", "entity_name")
+	bf, bfArgs := bankNameFilter(ctx, "l", len(args)+1)
+	args = append(args, bfArgs...)
 
-func projectUtilizationRow(row map[string]interface{}) map[string]any {
-	out := make(map[string]any, len(cashUtilizationDashboardFields))
-	for _, key := range cashUtilizationDashboardFields {
-		if v, ok := row[key]; ok {
-			out[key] = v
-		}
-	}
-	return out
-}
+	q := fmt.Sprintf(`
+		WITH latest_audit AS (
+			SELECT DISTINCT ON (utilization_id)
+				utilization_id,
+				action_type,
+				processing_status,
+				requested_at,
+				checker_at
+			FROM cimplrcorpsaas.auditactionbanklimitutilization
+			WHERE action_type IN ('CREATE','EDIT','DELETE')
+			ORDER BY utilization_id, GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST, action_id DESC
+		),
+		latest_limit_audit AS (
+			SELECT DISTINCT ON (limit_id)
+				limit_id,
+				action_type,
+				processing_status,
+				requested_by,
+				requested_at
+			FROM cimplrcorpsaas.auditactionbanklimit
+			WHERE action_type IN ('CREATE','EDIT','DELETE')
+			ORDER BY limit_id, requested_at DESC
+		)
+		SELECT
+			COALESCE(u.utilization_id::text, '') AS utilization_id,
+			COALESCE(u.limit_id, '') AS limit_id,
+			COALESCE(l.entity_name, '') AS entity_name,
+			COALESCE(l.bank_name, '') AS bank_name,
+			COALESCE(u.currency_code, '') AS currency_code,
+			COALESCE(u.entry_mode, '') AS entry_mode,
+			COALESCE(la.action_type, '') AS limit_action_type,
+			GREATEST(COALESCE(l.sanctioned_amount, 0) - (COALESCE(l.initial_utilization, 0) + COALESCE(u.utilized_amount, 0)), 0) AS limit_available,
+			COALESCE(l.bank_name, '') AS limit_bank_name,
+			COALESCE(l.core_limit_type, '') AS limit_core_limit_type,
+			COALESCE(l.currency_code, '') AS limit_currency_code,
+			l.effective_date AS limit_effective_date,
+			COALESCE(l.entity_name, '') AS limit_entity_name,
+			COALESCE(l.fungibility_pct, 0) AS limit_fungibility_pct,
+			COALESCE(l.fungibility_type, '') AS limit_fungibility_type,
+			COALESCE(l.initial_utilization, 0) AS limit_initial_utilization,
+			COALESCE(l.limit_sub_type, '') AS limit_limit_sub_type,
+			COALESCE(l.limit_type, '') AS limit_limit_type,
+			COALESCE(la.processing_status, '') AS limit_processing_status,
+			COALESCE(l.remarks, '') AS limit_remarks,
+			la.requested_at AS limit_requested_at,
+			COALESCE(la.requested_by, '') AS limit_requested_by,
+			l.sanction_date AS limit_sanction_date,
+			COALESCE(l.sanctioned_amount, 0) AS limit_sanctioned_amount,
+			COALESCE(l.security_type, '') AS limit_security_type,
+			CASE WHEN COALESCE(l.sanctioned_amount, 0) > 0
+				THEN (COALESCE(l.initial_utilization, 0) + COALESCE(u.utilized_amount, 0)) / l.sanctioned_amount
+				ELSE 0 END AS limit_utilization_pct,
+			COALESCE(a.processing_status, '') AS processing_status,
+			COALESCE(u.reference_doc, '') AS reference_doc,
+			COALESCE(u.remarks, '') AS remarks,
+			u.utilization_date,
+			COALESCE(u.utilized_amount, 0) AS utilized_amount
+		FROM cimplrcorpsaas.bank_limit_utilization u
+		LEFT JOIN latest_audit a ON a.utilization_id = u.utilization_id
+		LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
+		LEFT JOIN latest_limit_audit la ON la.limit_id = l.limit_id
+		WHERE COALESCE(u.is_deleted, false) = false %s %s
+		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC NULLS LAST
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef, bf)
 
-func queryCashUtilizations(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, rowLimit int, offset int) ([]map[string]any, error) {
-	// Reuse the cash module query for scope validation and KPI columns; project to dashboard schema.
-	fetchLimit := 0
-	if rowLimit > 0 {
-		fetchLimit = rowLimit + offset
-	}
-	rows, err := cashlimit.QueryAllUtilizations(ctx, pool, fetchLimit)
-	if err != nil {
-		return nil, err
-	}
-
-	if names, _ := ctx.Value("reqEntityNames").([]string); len(names) > 0 {
-		rows = filterUtilizationRowsByEntityNames(rows, names)
-		if fetchLimit > 0 && len(rows) > fetchLimit {
-			rows = rows[:fetchLimit]
-		}
-	}
-
-	if offset > 0 {
-		if offset >= len(rows) {
-			rows = nil
-		} else {
-			rows = rows[offset:]
-		}
-	}
-	if rowLimit > 0 && len(rows) > rowLimit {
-		rows = rows[:rowLimit]
-	}
-
-	out := make([]map[string]any, len(rows))
-	for i, row := range rows {
-		out[i] = projectUtilizationRow(row)
-	}
-	return out, nil
-}
-
-func filterUtilizationRowsByEntityNames(rows []map[string]interface{}, names []string) []map[string]interface{} {
-	allowed := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		n := strings.ToLower(strings.TrimSpace(name))
-		if n != "" {
-			allowed[n] = struct{}{}
-		}
-	}
-	if len(allowed) == 0 {
-		return rows
-	}
-
-	filtered := make([]map[string]interface{}, 0, len(rows))
-	for _, row := range rows {
-		entityName, _ := row["limit_entity_name"].(string)
-		if _, ok := allowed[strings.ToLower(strings.TrimSpace(entityName))]; ok {
-			filtered = append(filtered, row)
-		}
-	}
-	return filtered
+	return runSourceQuery(ctx, pool, q, args)
 }
