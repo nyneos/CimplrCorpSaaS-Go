@@ -66,7 +66,7 @@ func ListEvidencePacks(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		scope := ctxutil.FromContext(ctx)
 
-		q := packWithDmsJoinQuery + ` WHERE p.is_deleted = false`
+		q := packWithDmsJoinQuery + ` WHERE COALESCE(p.is_deleted, false) = false`
 		args := []interface{}{}
 		argIdx := 1
 

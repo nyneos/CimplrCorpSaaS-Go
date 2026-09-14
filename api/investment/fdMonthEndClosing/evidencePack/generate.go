@@ -134,9 +134,9 @@ func GenerateEvidencePack(pool *pgxpool.Pool) http.HandlerFunc {
 				include_accrual_ledger, include_reconciliation_report, include_exceptions_register,
 				include_posting_summary, include_approval_logs, include_period_lock_certificate,
 				include_audit_trail, include_supporting_documents,
-				generated_by
+				generated_by, is_deleted
 			) VALUES (
-				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,false
 			) RETURNING pack_id`,
 			req.CycleID, req.Format,
 			include(req.IncludeAccrualLedger), include(req.IncludeReconciliationReport), include(req.IncludeExceptionsRegister),

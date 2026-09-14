@@ -46,7 +46,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 		       include_audit_trail, include_supporting_documents,
 		       COALESCE(s3_key,'')
 		FROM investment.fd_closing_evidence_pack
-		WHERE pack_id = $1 AND is_deleted = false`,
+		WHERE pack_id = $1 AND COALESCE(is_deleted, false) = false`,
 		packID,
 	).Scan(
 		&cycleID, &format,
