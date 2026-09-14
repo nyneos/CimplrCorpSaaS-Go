@@ -75,6 +75,14 @@ func RequestLock(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
+		if rtx, rErr := pool.Begin(ctx); rErr == nil {
+			if rErr = fdclosingcommon.RefreshCycleReadiness(ctx, rtx, req.CycleID); rErr == nil {
+				_ = rtx.Commit(ctx)
+			} else {
+				_ = rtx.Rollback(ctx)
+			}
+		}
+
 		var entityID, cycleStatus, eligibility string
 		var isDeleted bool
 		err := pool.QueryRow(ctx, `

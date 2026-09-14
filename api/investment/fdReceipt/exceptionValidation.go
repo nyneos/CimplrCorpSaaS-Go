@@ -17,6 +17,7 @@ var allowedProposedResolutions = map[string]bool{
 	"ADJUST_ACCRUAL":   true,
 	"RAISE_BANK_CLAIM": true,
 	"RECLASSIFY":       true,
+	"CARRY_FORWARD":    true,
 }
 
 // Legacy / UI aliases mapped to DB values before write.
@@ -26,7 +27,7 @@ var proposedResolutionAliases = map[string]string{
 	"RAISE_BANK":      "RAISE_BANK_CLAIM",
 }
 
-const proposedResolutionAllowedMsg = "proposed_resolution must be one of: ACCEPT, ADJUST_ACCRUAL, RAISE_BANK_CLAIM, RECLASSIFY"
+const proposedResolutionAllowedMsg = "proposed_resolution must be one of: ACCEPT, ADJUST_ACCRUAL, RAISE_BANK_CLAIM, RECLASSIFY, CARRY_FORWARD"
 
 func normalizeProposedResolution(raw string) (string, bool) {
 	s := strings.ToUpper(strings.TrimSpace(raw))
@@ -45,6 +46,7 @@ func proposedResolutionFormOptions() []map[string]string {
 		{"value": "ADJUST_ACCRUAL", "label": "Adjust accrual / schedule"},
 		{"value": "RAISE_BANK_CLAIM", "label": "Raise bank claim"},
 		{"value": "RECLASSIFY", "label": "Reclassify"},
+		{"value": "CARRY_FORWARD", "label": "Carry forward to next period (requires checker approval)"},
 	}
 }
 

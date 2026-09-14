@@ -493,7 +493,8 @@ func GetInterestVsAccrualAnalysis(pool *pgxpool.Pool) http.HandlerFunc {
 			           SUM(tds_deducted_in_period)  AS total_tds,
 			           SUM(net_interest_in_period)  AS total_net
 			    FROM investment.fd_accrual_ledger
-			    WHERE ledger_row_status='CALCULATED' AND COALESCE(is_deleted,false)=false
+			    WHERE ledger_row_status IN ('CALCULATED','OVERRIDDEN','POSTED')
+			      AND COALESCE(is_deleted,false)=false$ledgerPeriod$
 			    GROUP BY fd_id
 			) al ON al.fd_id = r.fd_id
 			WHERE COALESCE(r.is_deleted,false)=false`
@@ -510,16 +511,20 @@ func GetInterestVsAccrualAnalysis(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Scope by interest period overlap with [from_date, to_date], not cash
 		// receipt_date — same rule as /investment/fd/receipt/all and reconcile load.
+		ledgerPeriod := ""
 		if req.FromDate != "" {
 			analysisSQL += fmt.Sprintf(" AND r.period_end>=$%d::date", idx)
+			ledgerPeriod += fmt.Sprintf(" AND accrual_period_end>=$%d::date", idx)
 			args = append(args, req.FromDate)
 			idx++
 		}
 		if req.ToDate != "" {
 			analysisSQL += fmt.Sprintf(" AND r.period_start<=$%d::date", idx)
+			ledgerPeriod += fmt.Sprintf(" AND accrual_period_start<=$%d::date", idx)
 			args = append(args, req.ToDate)
 			idx++
 		}
+		analysisSQL = strings.Replace(analysisSQL, "$ledgerPeriod$", ledgerPeriod, 1)
 		analysisSQL += " ORDER BY r.period_end DESC, r.receipt_date DESC"
 
 		rows, err := pool.Query(ctx, analysisSQL, args...)
