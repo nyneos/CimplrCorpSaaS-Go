@@ -892,6 +892,7 @@ func queryFDRateNegotiation(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 			COALESCE(m.interest_payout_mode, '') AS interest_payout_mode,
 			COALESCE(array_to_string(m.target_bank_ids, ','), '') AS target_bank_ids,
 			COALESCE(array_to_string(m.target_bank_names, ','), '') AS target_bank_names,
+			COALESCE(array_to_string(m.target_bank_names, ','), '') AS target_banks,
 			COALESCE(m.internal_notes, '') AS internal_notes,
 			COALESCE(m.selected_offer_id::text, '') AS selected_offer_id,
 			COALESCE(m.selected_bank_id, '') AS selected_bank_id,
