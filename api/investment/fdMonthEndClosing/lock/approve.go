@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
@@ -113,6 +114,9 @@ func ApproveLock(pool *pgxpool.Pool) http.HandlerFunc {
 // flip the request row's processing_status straight to APPROVED. There is no
 // separate audit table to update (the request row IS the audit trail).
 func directApproveLockRequest(ctx context.Context, pool *pgxpool.Pool, requestID, checkerEmail, comment string) error {
+	if err := ensureLockMakerChecker(ctx, pool, requestID, checkerEmail); err != nil {
+		return err
+	}
 	tag, err := pool.Exec(ctx, `
 		UPDATE investment.fd_closing_lock_request
 		SET processing_status = 'APPROVED', checker_by = $2, checker_at = now(), checker_comment = $3
@@ -124,6 +128,22 @@ func directApproveLockRequest(ctx context.Context, pool *pgxpool.Pool, requestID
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("no pending lock request found (already actioned or not found)")
+	}
+	return nil
+}
+
+func ensureLockMakerChecker(ctx context.Context, pool *pgxpool.Pool, requestID, checkerEmail string) error {
+	var requestedBy string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(requested_by,'')
+		FROM investment.fd_closing_lock_request
+		WHERE request_id = $1 AND is_deleted = false`,
+		requestID,
+	).Scan(&requestedBy); err != nil {
+		return fmt.Errorf("no pending lock request found (already actioned or not found)")
+	}
+	if strings.EqualFold(strings.TrimSpace(requestedBy), strings.TrimSpace(checkerEmail)) {
+		return fmt.Errorf("maker-checker violation: the user who requested the lock cannot approve or reject it")
 	}
 	return nil
 }
