@@ -556,6 +556,42 @@ func queryCashSweepInitiation(ctx context.Context, pool *pgxpool.Pool, entityIDs
 	return runSourceQuery(ctx, pool, q, args)
 }
 
+func queryCashSweepExecution(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "c", "entity_name")
+
+	q := fmt.Sprintf(`
+		SELECT
+			COALESCE(l.execution_id::text, '') AS execution_id,
+			COALESCE(l.initiation_id::text, '') AS initiation_id,
+			COALESCE(l.sweep_id::text, '') AS sweep_id,
+			COALESCE(c.entity_name, '') AS entity_name,
+			COALESCE(c.source_bank_name, '') AS source_bank_name,
+			COALESCE(c.target_bank_name, '') AS target_bank_name,
+			COALESCE(c.sweep_type, '') AS sweep_type,
+			COALESCE(c.frequency, '') AS frequency,
+			COALESCE(c.frequency, '') AS sweep_frequency,
+			c.effective_date,
+			COALESCE(c.execution_time::text, '') AS execution_time,
+			COALESCE(c.requires_initiation, true) AS requires_initiation,
+			CASE WHEN l.initiation_id IS NULL THEN 'CRON' ELSE 'MANUAL' END AS execution_mode,
+			l.execution_date,
+			COALESCE(l.amount_swept, 0) AS amount_swept,
+			COALESCE(l.from_account, '') AS from_account,
+			COALESCE(l.to_account, '') AS to_account,
+			COALESCE(l.status, '') AS status,
+			COALESCE(l.error_message, '') AS error_message,
+			COALESCE(l.balance_before, 0) AS balance_before,
+			COALESCE(l.balance_after, 0) AS balance_after
+		FROM cimplrcorpsaas.sweep_execution_log l
+		JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = l.sweep_id
+		WHERE COALESCE(c.is_deleted, false) = false %s
+		ORDER BY l.execution_date DESC NULLS LAST
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef)
+
+	return runSourceQuery(ctx, pool, q, args)
+}
+
 func queryCashSweepStatistics(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "c", "entity_name")
 

@@ -17,8 +17,10 @@ func queryInvestmentOnboardBatch(ctx context.Context, pool *pgxpool.Pool, entity
 			COALESCE(b.source, '') AS source,
 			COALESCE(b.total_records, 0) AS total_records,
 			COALESCE(b.status, '') AS status,
+			COALESCE(b.status, '') AS batch_status,
 			COALESCE(b.approval_status, '') AS approval_status,
 			COALESCE(b.remarks, '') AS remarks,
+			COALESCE(b.remarks, '') AS batch_remarks,
 			b.created_at,
 			b.completed_at
 		FROM investment.onboard_batch b
@@ -72,7 +74,7 @@ func queryInvestmentInitiationAll(ctx context.Context, pool *pgxpool.Pool, entit
 			COALESCE(s.amc_name, '') AS amc_name,
 			COALESCE(f.folio_id::text, '') AS folio_id,
 			COALESCE(f.folio_number, '') AS folio_number,
-			COALESCE(d.demat_id::text, '') AS demat_id,
+			COALESCE(d.demat_id::text, i.demat_id, '') AS demat_id,
 			COALESCE(d.demat_account_number, d.default_settlement_account, '') AS demat_number,
 			COALESCE(i.amount, 0) AS amount,
 			COALESCE(i.source, '') AS source,
@@ -133,6 +135,7 @@ func queryInvestmentConfirmationAll(ctx context.Context, pool *pgxpool.Pool, ent
 			COALESCE(c.confirmed_by, '') AS confirmed_by,
 			COALESCE(c.resolution_comment, '') AS resolution_comment,
 			COALESCE(c.resolution_variance, '') AS resolution_variance,
+			COALESCE(c.demat_id, '') AS demat_id,
 			COALESCE(c.is_deleted, false) AS is_deleted,
 			c.nav_date,
 			c.confirmed_at,
@@ -301,6 +304,7 @@ func queryInvestmentRedemptionConfirmAll(ctx context.Context, pool *pgxpool.Pool
 			COALESCE(a.processing_status, '') AS processing_status,
 			COALESCE(c.confirmed_by, '') AS confirmed_by,
 			COALESCE(c.resolution_variance, '') AS resolution_variance,
+			COALESCE(c.resolution_comment, '') AS resolution_comment,
 			TO_CHAR(i.requested_date, 'YYYY-MM-DD') AS initiation_requested_date,
 			c.confirmed_at,
 
