@@ -233,7 +233,7 @@ var dataSources = map[string]dataSourceFn{
 	},
 	// DMS E2E: unique DASHBOARD alias for SWEEP_EXECUTION (same underlying rows).
 	"cashSweepExecution": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
-		return queryCashSweepInitiation(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+		return queryCashSweepExecution(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 	"cashProjectionList": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryCashProjectionList(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
