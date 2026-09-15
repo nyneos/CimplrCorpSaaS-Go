@@ -96,6 +96,9 @@ func RejectReopen(pool *pgxpool.Pool) http.HandlerFunc {
 // directRejectReopenRequest is the no-approval-matrix-configured fallback:
 // flip the request row's processing_status straight to REJECTED.
 func directRejectReopenRequest(ctx context.Context, pool *pgxpool.Pool, requestID, checkerEmail, comment string) error {
+	if err := ensureReopenMakerChecker(ctx, pool, requestID, checkerEmail); err != nil {
+		return err
+	}
 	tag, err := pool.Exec(ctx, `
 		UPDATE investment.fd_closing_reopen_request
 		SET processing_status = 'REJECTED', checker_by = $2, checker_at = now(), checker_comment = $3

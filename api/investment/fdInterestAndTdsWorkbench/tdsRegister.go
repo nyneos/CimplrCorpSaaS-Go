@@ -15,6 +15,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -33,6 +34,58 @@ func nullIfEmpty(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+func tdsPeriodLocked(ctx context.Context, pool *pgxpool.Pool, entityID, periodStart, periodEnd, deductionDate string) (bool, string, error) {
+	parse := func(s string) time.Time {
+		t, err := time.Parse(constants.DateFormat, strings.TrimSpace(s))
+		if err != nil {
+			return time.Time{}
+		}
+		return t
+	}
+	from, to := parse(periodStart), parse(periodEnd)
+	if from.IsZero() || to.IsZero() {
+		d := parse(deductionDate)
+		if from.IsZero() {
+			from = d
+		}
+		if to.IsZero() {
+			to = d
+		}
+	}
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" || from.IsZero() || to.IsZero() {
+		return false, "", nil
+	}
+	if to.Before(from) {
+		from, to = to, from
+	}
+	var cycleID, status, financialPeriod, lockType string
+	err := pool.QueryRow(ctx, `
+		SELECT c.cycle_id, c.status, COALESCE(c.financial_period,''),
+		       COALESCE((SELECT e.lock_type FROM investment.fd_closing_cycle_event_log e
+		                 WHERE e.cycle_id = c.cycle_id AND e.event_type IN ('LOCK','RELOCK')
+		                 ORDER BY e.performed_at DESC LIMIT 1), 'HARD_LOCK')
+		FROM investment.fd_closing_cycle c
+		WHERE c.entity_id = $1
+		  AND COALESCE(c.is_deleted,false) = false
+		  AND c.status IN ('LOCKED','CLOSED')
+		  AND c.period_start <= $3::date
+		  AND c.period_end >= $2::date
+		ORDER BY CASE c.status WHEN 'CLOSED' THEN 0 ELSE 1 END, c.period_end DESC
+		LIMIT 1`, entityID, from, to).Scan(&cycleID, &status, &financialPeriod, &lockType)
+	if err == pgx.ErrNoRows {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+	state := status
+	if status == "LOCKED" {
+		state = strings.ReplaceAll(lockType, "_", " ")
+	}
+	return true, fmt.Sprintf("Period %s is under %s by closing cycle %s. Receipts, TDS and accounting for this entity/period cannot be modified until the cycle is reopened.", financialPeriod, state, cycleID), nil
 }
 
 func toFloat64(v interface{}) float64 {
@@ -183,6 +236,13 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			[]string{"tds_deduction_date"},
 			[]string{deductionDate}); errMsg != "" {
 			api.RespondWithError(w, http.StatusBadRequest, errMsg)
+			return
+		}
+		if locked, why, lockErr := tdsPeriodLocked(ctx, pool, req.EntityID, req.PeriodStart, req.PeriodEnd, deductionDate); lockErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+			return
+		} else if locked {
+			api.RespondWithError(w, http.StatusConflict, why)
 			return
 		}
 
@@ -713,6 +773,13 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, tdsEntryNotFoundMsg)
 			return
 		}
+		if locked, why, lockErr := tdsPeriodLocked(ctx, pool, approveRow.EntityID, approveRow.PeriodStart, approveRow.PeriodEnd, approveRow.DeductionDate); lockErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+			return
+		} else if locked {
+			api.RespondWithError(w, http.StatusConflict, why)
+			return
+		}
 		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreApprove, HandlerName: "ApproveTDSRegister", APIPath: "/investment/fd/tds-register/approve",
 			EntityCode: approveRow.EntityID, Actor: userEmail}, buildFDTDSRegisterPolicyFields(approveRow)) {
 			return
@@ -901,6 +968,15 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"tds_section":         req.TDSSection,
 			"has_pan":             req.HasPAN,
 		})
+		for _, lockRow := range []fdTDSRegisterRow{editBaseRow, editedRow} {
+			if locked, why, lockErr := tdsPeriodLocked(ctx, pool, lockRow.EntityID, lockRow.PeriodStart, lockRow.PeriodEnd, lockRow.DeductionDate); lockErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+				return
+			} else if locked {
+				api.RespondWithError(w, http.StatusConflict, why)
+				return
+			}
+		}
 		tdsEditOK, tdsEditMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreEdit, HandlerName: "UpdateTDSRegister", APIPath: "/investment/fd/tds-register/update",
 			EntityCode: editedRow.EntityID, Actor: userEmail}, buildFDTDSRegisterPolicyFields(editedRow))
 		if !tdsEditOK {
@@ -1052,6 +1128,13 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: tdsEntryNotFoundMsg})
 				continue
 			}
+			if locked, why, lockErr := tdsPeriodLocked(ctx, pool, bulkApproveRow.EntityID, bulkApproveRow.PeriodStart, bulkApproveRow.PeriodEnd, bulkApproveRow.DeductionDate); lockErr != nil {
+				results = append(results, result{TDSID: tdsID, OK: false, Message: "Failed to check closing period lock"})
+				continue
+			} else if locked {
+				results = append(results, result{TDSID: tdsID, OK: false, Message: why})
+				continue
+			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{EventCode: common.TriggerPreApprove, HandlerName: "BulkApproveTDSRegister",
 				APIPath: "/investment/fd/tds-register/approve-bulk", EntityCode: bulkApproveRow.EntityID, Actor: userEmail},
 				buildFDTDSRegisterPolicyFields(bulkApproveRow)); !ok {
@@ -1196,6 +1279,9 @@ func BulkRejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			if rowErr != nil {
 				continue
 			}
+			if locked, _, lockErr := tdsPeriodLocked(ctx, pool, bulkRejectRow.EntityID, bulkRejectRow.PeriodStart, bulkRejectRow.PeriodEnd, bulkRejectRow.DeductionDate); lockErr != nil || locked {
+				continue
+			}
 			if ok, _ := fdEnforceInline(ctx, r, pool, enforceCtx{EventCode: common.TriggerPreReject, HandlerName: "BulkRejectTDSRegister",
 				APIPath: "/investment/fd/tds-register/reject-bulk", EntityCode: bulkRejectRow.EntityID, Actor: userEmail},
 				buildFDTDSRegisterPolicyFields(bulkRejectRow)); !ok {
@@ -1310,6 +1396,13 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			api.LogError("[TDSReject] load row for policy failed for %s: %v", req.TDSID, err)
 			api.RespondWithError(w, http.StatusNotFound, tdsEntryNotFoundMsg)
+			return
+		}
+		if locked, why, lockErr := tdsPeriodLocked(ctx, pool, rejectRow.EntityID, rejectRow.PeriodStart, rejectRow.PeriodEnd, rejectRow.DeductionDate); lockErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+			return
+		} else if locked {
+			api.RespondWithError(w, http.StatusConflict, why)
 			return
 		}
 		if !fdEnforce(ctx, w, r, pool, enforceCtx{EventCode: common.TriggerPreReject, HandlerName: "RejectTDSRegister", APIPath: "/investment/fd/tds-register/reject",
@@ -1555,6 +1648,10 @@ func BulkDeleteTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			deleteRow, rowErr := loadFDTDSRegisterRow(ctx, pool, tdsID)
 			if rowErr != nil {
+				failed++
+				continue
+			}
+			if locked, _, lockErr := tdsPeriodLocked(ctx, pool, deleteRow.EntityID, deleteRow.PeriodStart, deleteRow.PeriodEnd, deleteRow.DeductionDate); lockErr != nil || locked {
 				failed++
 				continue
 			}

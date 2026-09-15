@@ -64,10 +64,15 @@ func RequestReopen(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		req.CycleID = strings.TrimSpace(req.CycleID)
 		req.Reason = strings.TrimSpace(req.Reason)
+		req.ImpactSummary = strings.TrimSpace(req.ImpactSummary)
 		req.ApproverID = strings.TrimSpace(req.ApproverID)
 		req.ApproverName = strings.TrimSpace(req.ApproverName)
 		if req.Reason == "" {
 			fdclosingcommon.RespondError(w, http.StatusBadRequest, "Reason for Reopen is mandatory")
+			return
+		}
+		if req.ImpactSummary == "" {
+			fdclosingcommon.RespondError(w, http.StatusBadRequest, "Impact Summary is mandatory")
 			return
 		}
 		if req.CycleID == "" || req.ApproverID == "" || req.ApproverName == "" {
@@ -132,7 +137,7 @@ func RequestReopen(pool *pgxpool.Pool) http.HandlerFunc {
 				processing_status, requested_by, requested_at, is_deleted
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$11,'PENDING_APPROVAL',$11,now(),false)
 			RETURNING request_id`,
-			req.CycleID, req.Reason, nullIfEmpty(req.ImpactSummary),
+			req.CycleID, req.Reason, req.ImpactSummary,
 			req.ApproverID, req.ApproverName, nullIfEmpty(req.ApproverRole),
 			accrualValid, reconciliationValid, accountingValid,
 			validationStatus, api.SystemIfBlank(actor.Email),

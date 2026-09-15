@@ -77,6 +77,13 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 		auditOld := auditOldFromHeader(hdr)
 
 		excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
+		if locked, why, lockErr := exceptionPeriodLocked(ctx, pool, hdr, excEntityID); lockErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+			return
+		} else if locked {
+			api.RespondWithError(w, http.StatusConflict, why)
+			return
+		}
 		editVarOK, editVarMatrixID := fdEnforceMatrix(ctx, w, r, pool, enforceCtx{
 			EventCode:   common.TriggerPreEdit,
 			HandlerName: "EditVariance",
@@ -353,6 +360,15 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
+			if locked, why, lockErr := exceptionPeriodLocked(ctx, pool, hdr, excEntityID); lockErr != nil {
+				res["error"] = "Failed to check closing period lock"
+				results = append(results, res)
+				continue
+			} else if locked {
+				res["error"] = why
+				results = append(results, res)
+				continue
+			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{
 				EventCode:   common.TriggerPreApprove,
 				HandlerName: "ApproveVariance",
@@ -462,6 +478,13 @@ func closeOneVariance(ctx context.Context, r *http.Request, pool *pgxpool.Pool, 
 	// Policy check — CloseException was live and routed with zero
 	// enforcement anywhere in its call chain. Added 2026-07-27.
 	excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
+	if locked, why, lockErr := exceptionPeriodLocked(ctx, pool, hdr, excEntityID); lockErr != nil {
+		res["error"] = "Failed to check closing period lock"
+		return res
+	} else if locked {
+		res["error"] = why
+		return res
+	}
 	if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{
 		EventCode:   common.TriggerPreApprove,
 		HandlerName: "CloseException",
@@ -669,6 +692,15 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
+			if locked, why, lockErr := exceptionPeriodLocked(ctx, pool, hdr, excEntityID); lockErr != nil {
+				res["error"] = "Failed to check closing period lock"
+				results = append(results, res)
+				continue
+			} else if locked {
+				res["error"] = why
+				results = append(results, res)
+				continue
+			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{
 				EventCode:   common.TriggerPreReject,
 				HandlerName: "RejectVariance",

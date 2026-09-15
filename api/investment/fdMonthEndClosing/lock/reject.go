@@ -97,6 +97,9 @@ func RejectLock(pool *pgxpool.Pool) http.HandlerFunc {
 // directRejectLockRequest is the no-approval-matrix-configured fallback: flip
 // the request row's processing_status straight to REJECTED.
 func directRejectLockRequest(ctx context.Context, pool *pgxpool.Pool, requestID, checkerEmail, comment string) error {
+	if err := ensureLockMakerChecker(ctx, pool, requestID, checkerEmail); err != nil {
+		return err
+	}
 	tag, err := pool.Exec(ctx, `
 		UPDATE investment.fd_closing_lock_request
 		SET processing_status = 'REJECTED', checker_by = $2, checker_at = now(), checker_comment = $3

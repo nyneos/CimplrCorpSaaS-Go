@@ -321,6 +321,44 @@ func receiptPeriodLocked(ctx context.Context, pool *pgxpool.Pool, entityID strin
 	return true, fmt.Sprintf("Period %s is under %s by closing cycle %s. Receipts, TDS and accounting for this entity/period cannot be modified until the cycle is reopened.", financialPeriod, state, cycleID), nil
 }
 
+func parseLockDate(s string) *time.Time {
+	t, err := time.Parse(constants.DateFormat, strings.TrimSpace(s))
+	if err != nil {
+		return nil
+	}
+	return &t
+}
+
+func receiptRowPeriodLocked(ctx context.Context, pool *pgxpool.Pool, row fdReceiptRow) (bool, string, error) {
+	lockFrom, lockTo := receiptLockWindow(nil, "receipt_date", parseLockDate(row.ReceiptDate), parseLockDate(row.PeriodStart), parseLockDate(row.PeriodEnd))
+	return receiptPeriodLocked(ctx, pool, row.EntityID, lockFrom, lockTo)
+}
+
+func exceptionPeriodLocked(ctx context.Context, pool *pgxpool.Pool, hdr *varianceCaseHeader, entityID string) (bool, string, error) {
+	if hdr == nil {
+		return false, "", nil
+	}
+	var anchor, periodStart, periodEnd *time.Time
+	switch {
+	case strings.TrimSpace(hdr.ReceiptID) != "":
+		if err := pool.QueryRow(ctx, `
+			SELECT receipt_date, period_start, period_end
+			FROM investment.fd_interest_receipt
+			WHERE receipt_id=$1`, hdr.ReceiptID).Scan(&anchor, &periodStart, &periodEnd); err != nil && err != pgx.ErrNoRows {
+			return false, "", err
+		}
+	case strings.TrimSpace(hdr.TDSID) != "":
+		if err := pool.QueryRow(ctx, `
+			SELECT deduction_date, period_start, period_end
+			FROM investment.fd_tds_receipt
+			WHERE tds_id=$1`, hdr.TDSID).Scan(&anchor, &periodStart, &periodEnd); err != nil && err != pgx.ErrNoRows {
+			return false, "", err
+		}
+	}
+	lockFrom, lockTo := receiptLockWindow(nil, "receipt_date", anchor, periodStart, periodEnd)
+	return receiptPeriodLocked(ctx, pool, entityID, lockFrom, lockTo)
+}
+
 func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1287,6 +1325,13 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				approvalErrors = append(approvalErrors, receiptID+": not found")
 				continue
 			}
+			if locked, why, lockErr := receiptRowPeriodLocked(ctx, pool, approveRow); lockErr != nil {
+				approvalErrors = append(approvalErrors, receiptID+": failed to check closing period lock")
+				continue
+			} else if locked {
+				approvalErrors = append(approvalErrors, receiptID+": "+why)
+				continue
+			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{
 				EventCode:   common.TriggerPreApprove,
 				HandlerName: "BulkApproveReceipt",
@@ -1538,6 +1583,13 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			rejectRow, rejectRowErr := loadFDReceiptRow(ctx, pool, receiptID)
 			if rejectRowErr != nil {
 				approvalErrors = append(approvalErrors, receiptID+": not found")
+				continue
+			}
+			if locked, why, lockErr := receiptRowPeriodLocked(ctx, pool, rejectRow); lockErr != nil {
+				approvalErrors = append(approvalErrors, receiptID+": failed to check closing period lock")
+				continue
+			} else if locked {
+				approvalErrors = append(approvalErrors, receiptID+": "+why)
 				continue
 			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{
@@ -3947,6 +3999,15 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 		if exStatus != "OPEN" && exStatus != "IN_REVIEW" {
 			api.RespondWithError(w, http.StatusBadRequest, "Exception must be OPEN or IN_REVIEW")
 			return
+		}
+		if hdr, hdrErr := loadVarianceCase(ctx, pool, req.ExceptionID); hdrErr == nil {
+			if locked, why, lockErr := exceptionPeriodLocked(ctx, pool, hdr, entityID); lockErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+				return
+			} else if locked {
+				api.RespondWithError(w, http.StatusConflict, why)
+				return
+			}
 		}
 
 		// Policy check — this was the live, routed handler for
