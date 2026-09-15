@@ -99,6 +99,9 @@ var dataSources = map[string]dataSourceFn{
 	"fdBooking": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDBooking(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
+	"fdRateNegotiation": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDRateNegotiation(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
 	"fdConfirmation": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDConfirmation(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
@@ -864,6 +867,61 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 		) DESC
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
+
+	return runSourceQuery(ctx, pool, q, args)
+}
+
+func queryFDRateNegotiation(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "m")
+
+	q := fmt.Sprintf(`
+		SELECT
+			COALESCE(m.rate_request_id::text, '') AS rate_request_id,
+			COALESCE(m.rate_request_ref, '') AS rate_request_ref,
+			m.request_date,
+			COALESCE(m.request_status, '') AS request_status,
+			COALESCE(m.entity_id, '') AS entity_id,
+			COALESCE(m.entity_name, '') AS entity_name,
+			COALESCE(m.proposed_fd_amount, 0) AS proposed_fd_amount,
+			COALESCE(m.currency_code, '') AS currency_code,
+			COALESCE(m.tenure_type, '') AS tenure_type,
+			COALESCE(m.tenure_value, 0) AS tenure_value,
+			m.expected_start_date,
+			m.expected_maturity_date,
+			COALESCE(m.interest_type, '') AS interest_type,
+			COALESCE(m.interest_payout_mode, '') AS interest_payout_mode,
+			COALESCE(array_to_string(m.target_bank_ids, ','), '') AS target_bank_ids,
+			COALESCE(array_to_string(m.target_bank_names, ','), '') AS target_bank_names,
+			COALESCE(m.internal_notes, '') AS internal_notes,
+			COALESCE(m.selected_offer_id::text, '') AS selected_offer_id,
+			COALESCE(m.selected_bank_id, '') AS selected_bank_id,
+			COALESCE(m.selected_bank_name, '') AS selected_bank_name,
+			COALESCE(m.selection_remarks, '') AS selection_remarks,
+			COALESCE(m.approval_decision, '') AS approval_decision,
+			COALESCE(m.approval_remarks, '') AS approval_remarks,
+			m.approval_date,
+			COALESCE(m.approved_by, '') AS approved_by,
+			COALESCE(m.booking_id, '') AS booking_id,
+			COALESCE(m.created_by, '') AS created_by,
+			m.created_at,
+			CASE
+				WHEN UPPER(COALESCE(m.processing_status,'')) LIKE 'PENDING%%'
+				 AND UPPER(COALESCE(la.processing_status,'')) IN ('APPROVED','REJECTED')
+				THEN la.processing_status
+				ELSE COALESCE(NULLIF(m.processing_status,''), la.processing_status, '')
+			END AS processing_status
+		FROM investment.fd_rate_negotiation m
+		LEFT JOIN LATERAL (
+			SELECT a.processing_status
+			FROM investment.fd_audit_rate_negotiation a
+			WHERE a.rate_request_id = m.rate_request_id
+			ORDER BY a.requested_at DESC, a.audit_id DESC
+			LIMIT 1
+		) la ON true
+		WHERE COALESCE(m.is_deleted, false) = false %s
+		ORDER BY m.created_at DESC NULLS LAST
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef)
 
 	return runSourceQuery(ctx, pool, q, args)
 }
