@@ -560,16 +560,17 @@ func generateAdhocAttachment(ctx context.Context, pool *pgxpool.Pool, p adhocAtt
 // Lookup table rather than a long switch — same shape as businessAuditBySub.
 var adhocSourceIDFieldBySub = map[string]string{
 	// CASH
-	"BANK_STATEMENT":      "bank_statement_id",
-	"BANK_BALANCE":        "balance_id",
-	"BANK_LIMIT":          "limit_id",
-	"CASHFLOW_PROJECTION": "proposal_id",
-	"FUND_PLANNING":       "plan_id",
-	"LIMIT_UTILIZATION":   "utilization_id",
-	"PAYABLE_RECEIVABLE":  "transaction_id",
-	"SWEEP_CONFIG":        "sweep_id",
-	"SWEEP_INITIATION":    "initiation_id",
-	"SWEEP_EXECUTION":     "initiation_id",
+	"BANK_STATEMENT":       "bank_statement_id",
+	"SMART_CATEGORIZATION": "bank_statement_id",
+	"BANK_BALANCE":         "balance_id",
+	"BANK_LIMIT":           "limit_id",
+	"CASHFLOW_PROJECTION":  "proposal_id",
+	"FUND_PLANNING":        "plan_id",
+	"LIMIT_UTILIZATION":    "utilization_id",
+	"PAYABLE_RECEIVABLE":   "transaction_id",
+	"SWEEP_CONFIG":         "sweep_id",
+	"SWEEP_INITIATION":     "initiation_id",
+	"SWEEP_EXECUTION":      "initiation_id",
 	// FD
 	"FD_BOOKING":       "booking_id",
 	"FD_CONFIRMATION":  "confirmation_id",

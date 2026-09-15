@@ -196,6 +196,13 @@ var dataSources = map[string]dataSourceFn{
 		}
 		return queryCashBankStatements(ctx, pool, req.EntityIDs, req.Limit, req.Offset, pairs)
 	},
+	"cashSmartCategorization": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		pairs := resolveBankStatementScopePairs(req)
+		if len(pairs) == 0 && !req.AllowUnscopedBankAccount {
+			return []map[string]any{}, nil
+		}
+		return queryCashBankStatements(ctx, pool, req.EntityIDs, req.Limit, req.Offset, pairs)
+	},
 	"cashBankStatementTransactions": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		pairs := resolveBankStatementScopePairs(req)
 		if len(pairs) == 0 && !req.AllowUnscopedBankAccount {
@@ -837,11 +844,14 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 			COALESCE(br.interest_rate,              0) AS interest_rate,
 			COALESCE(br.tenure_days,                0) AS tenure_days,
 			COALESCE(br.tenure_months,              0) AS tenure_months,
+			COALESCE(br.tenure_days,                0) AS tenor_days,
+			COALESCE(br.tenure_months,              0) AS tenor_months,
 			COALESCE(br.tenure_years,               0) AS tenure_years,
 			br.value_date,
 			br.expected_maturity_date,
 			br.expected_start_date,
 			br.offer_valid_till,
+			br.created_at,
 			COALESCE(l.processing_status,         '')  AS processing_status
 		FROM investment.fd_booking_request br
 		LEFT JOIN latest_audit l ON l.booking_id = br.booking_id
@@ -920,6 +930,14 @@ func queryFDConfirmation(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			fc.confirmation_received_date,
 			fc.first_payout_date,
 			fc.first_capitalization_date,
+			COALESCE(fc.bank_fd_ref_no,                    '')  AS bank_fd_reference,
+			COALESCE(fc.confirmed_interest_type_code,      '')  AS confirmed_interest_type,
+			fc.actual_maturity_date                             AS confirmed_maturity_date,
+			fc.actual_start_date                                AS confirmed_value_date,
+			COALESCE(fc.tenor_days,                         0)  AS confirmed_tenor_days,
+			COALESCE(fc.tenor_months,                       0)  AS confirmed_tenor_months,
+			COALESCE(fc.tenor_years,                        0)  AS confirmed_tenor_years,
+			COALESCE(fc.variance_remarks,                  '')  AS variance_remarks,
 			COALESCE(l.processing_status,                  '')  AS processing_status
 		FROM investment.fd_confirmation fc
 		LEFT JOIN investment.fd_booking_request br ON br.booking_id = fc.booking_id
@@ -996,6 +1014,13 @@ func queryFDActivation(ctx context.Context, pool *pgxpool.Pool, entityIDs []stri
 			COALESCE(m.bank_config_id::text,  '')  AS bank_config_id,
 			COALESCE(m.created_by,            '')  AS created_by,
 			COALESCE(m.auto_renewal,       FALSE)  AS auto_renewal,
+			COALESCE(m.product_code,          '')  AS product_code,
+			COALESCE(m.interest_payout_frequency, '') AS interest_payout_frequency,
+			COALESCE(m.maturity_instructions, '')  AS maturity_instructions,
+			COALESCE(m.penalty_id,            '')  AS penalty_id,
+			COALESCE(m.premature_closure_terms, '') AS premature_closure_terms,
+			COALESCE(m.confirmation_captured, FALSE) AS confirmation_captured,
+			COALESCE(m.variance_resolved,  FALSE)  AS variance_resolved,
 			COALESCE(m.principal_amount,        0) AS principal_amount,
 			COALESCE(m.interest_rate,           0) AS interest_rate,
 			COALESCE(m.tenure_days,             0) AS tenure_days,
@@ -1115,6 +1140,28 @@ func queryFDCashflows(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 			COALESCE(cf.net_cash_flow,                0)  AS net_cash_flow,
 			COALESCE(cf.posting_status,              '')  AS posting_status,
 			COALESCE(cf.is_active,                FALSE)  AS is_active,
+			COALESCE(m.entity_id,                    '')  AS entity_id,
+			COALESCE(cf.period_days,                  0)  AS period_days,
+			COALESCE(cf.capitalized_amount,           0)  AS capitalized_amount,
+			COALESCE(cf.net_amount,                   0)  AS net_amount,
+			COALESCE(cf.interest_rate,                0)  AS interest_rate,
+			COALESCE(cf.tds_rate,                     0)  AS tds_rate,
+			COALESCE(cf.day_count_code,              '')  AS day_count_code,
+			COALESCE(cf.accrual_frequency,           '')  AS accrual_frequency,
+			COALESCE(cf.financial_year,              '')  AS financial_year,
+			cf.value_date,
+			COALESCE(cf.remarks,                     '')  AS remarks,
+			COALESCE(cf.bank_confirmed,           FALSE)  AS bank_confirmed,
+			cf.bank_confirmed_date,
+			COALESCE(cf.bank_reference,              '')  AS bank_reference,
+			COALESCE(cf.receipt_id,                  '')  AS receipt_id,
+			COALESCE(cf.receipt_cleared,          FALSE)  AS receipt_cleared,
+			COALESCE(cf.voucher_generated,        FALSE)  AS voucher_generated,
+			COALESCE(cf.voucher_number,              '')  AS voucher_number,
+			COALESCE(cf.dr_account_code,             '')  AS dr_account_code,
+			COALESCE(cf.dr_account_name,             '')  AS dr_account_name,
+			COALESCE(cf.cr_account_code,             '')  AS cr_account_code,
+			COALESCE(cf.cr_account_name,             '')  AS cr_account_name,
 			COALESCE(l.processing_status,            '')  AS processing_status
 		FROM investment.fd_cashflow_schedule cf
 		LEFT JOIN investment.fd_master m ON m.fd_id::text = cf.fd_id::text
@@ -1160,6 +1207,40 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(ci.net_expected_amount,        0) AS net_expected_amount,
 			ci.requested_closure_date,
 			COALESCE(ci.has_variance,            FALSE) AS has_variance,
+			COALESCE(ci.booking_id,                '') AS booking_id,
+			COALESCE(ci.confirmation_id,           '') AS confirmation_id,
+			COALESCE(ci.fd_ref_no,                 '') AS fd_ref_no,
+			COALESCE(ci.bank_fd_ref_no,            '') AS bank_fd_ref_no,
+			COALESCE(ci.action_at_maturity,        '') AS action_at_maturity,
+			ci.maturity_date,
+			COALESCE(ci.interest_type_code,        '') AS interest_type_code,
+			COALESCE(ci.interest_rate,              0) AS interest_rate,
+			COALESCE(ci.expected_maturity_value,    0) AS expected_maturity_value,
+			COALESCE(ci.maturity_status,           '') AS maturity_status,
+			COALESCE(ci.action_required,        FALSE) AS action_required,
+			COALESCE(ci.rollover_type,             '') AS rollover_type,
+			COALESCE(ci.rollover_bank_type,        '') AS rollover_bank_type,
+			COALESCE(ci.tentative_new_tenor_days,   0) AS tentative_new_tenor_days,
+			COALESCE(ci.remarks,                   '') AS remarks,
+			COALESCE(ci.has_unresolved_variance, FALSE) AS has_unresolved_variance,
+			COALESCE(ci.rollover_new_bank_id,      '') AS rollover_new_bank_id,
+			COALESCE(ci.rollover_new_bank_name,    '') AS rollover_new_bank_name,
+			COALESCE(prem_cc.posting_status,       '') AS posting_status,
+			COALESCE(prem_cc.confirmation_mode,    '') AS confirmation_mode,
+			COALESCE(prem_cc.bank_reference_no,    '') AS bank_reference_no,
+			prem_cc.actual_payout_date,
+			COALESCE(prem_cc.premature_reason,     '') AS premature_reason,
+			COALESCE(prem_cc.principal_expected,    0) AS principal_expected,
+			COALESCE(prem_cc.interest_expected,     0) AS interest_expected,
+			COALESCE(prem_cc.net_expected,          0) AS net_expected,
+			COALESCE(prem_cc.principal_received,    0) AS principal_received,
+			COALESCE(prem_cc.interest_received,     0) AS interest_received,
+			COALESCE(prem_cc.tds_deducted,          0) AS tds_deducted,
+			COALESCE(prem_cc.net_amount_received,   0) AS net_amount_received,
+			COALESCE(prem_cc.variance_type,        '') AS variance_type,
+			COALESCE(prem_cc.resolution_action,    '') AS resolution_action,
+			COALESCE(prem_cc.journal_entry_id,     '') AS journal_entry_id,
+			COALESCE(prem_cc.new_booking_id,       '') AS new_booking_id,
 			COALESCE(
 				NULLIF(ia.processing_status, ''),
 				CASE WHEN UPPER(COALESCE(ci.closure_type, '')) = 'PREMATURE' THEN
@@ -1180,7 +1261,11 @@ func queryFDClosureInitiateAll(ctx context.Context, pool *pgxpool.Pool, entityID
 			LIMIT 1
 		) ia ON true
 		LEFT JOIN LATERAL (
-			SELECT cc.closure_confirm_id, cc.closure_status
+			SELECT cc.closure_confirm_id, cc.closure_status,
+			       cc.posting_status, cc.confirmation_mode, cc.bank_reference_no, cc.actual_payout_date,
+			       cc.premature_reason, cc.principal_expected, cc.interest_expected, cc.net_expected,
+			       cc.principal_received, cc.interest_received, cc.tds_deducted, cc.net_amount_received,
+			       cc.variance_type, cc.resolution_action, cc.journal_entry_id, cc.new_booking_id
 			FROM cimplr.fd_closure_confirm cc
 			WHERE cc.closure_initiate_id = ci.closure_initiate_id
 			  AND COALESCE(cc.is_deleted, false) = false
