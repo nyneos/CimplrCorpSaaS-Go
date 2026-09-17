@@ -17,6 +17,7 @@ import (
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
+	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/logger"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -1194,6 +1195,12 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 					SubmittedByEmail:    email,
 				})
 			}(settlementID, makerEmail, txnType, triggerMatrixID)
+
+			dmsTrigger := "POST_EDIT"
+			if len(oldSnap) == 0 {
+				dmsTrigger = "POST_CREATE"
+			}
+			dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_SETTLEMENT", dmsTrigger, []string{settlementID}, actor)
 		}
 
 		msg := "Settlement saved"
@@ -1388,6 +1395,8 @@ func EditExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 					SubmittedByEmail:    email,
 				})
 			}(settlementID, makerEmail, txnType, triggerMatrixID)
+
+			dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_SETTLEMENT", "POST_EDIT", []string{settlementID}, actor)
 		}
 
 		msg := "Settlement updated"
@@ -1597,6 +1606,8 @@ func GetExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p updateStatusesParams) (int, error) {
 	ids, status, actor, userID, comments, actionType := p.IDs, p.Status, p.Actor, p.UserID, p.Comments, p.ActionType
 	count := 0
+	updatedIDs := make([]string, 0, len(ids))
+	deletedIDs := make([]string, 0, len(ids))
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -1619,6 +1630,7 @@ func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p
 			if err != nil {
 				continue
 			}
+			deletedIDs = append(deletedIDs, id)
 		} else {
 			tag, err := pool.Exec(ctx, `
 				UPDATE public.exposure_settlement_document
@@ -1684,8 +1696,40 @@ func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p
 			}
 		}
 		count++
+		updatedIDs = append(updatedIDs, id)
+	}
+	if len(deletedIDs) > 0 {
+		dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_SETTLEMENT", "POST_DELETE", deletedIDs, actor)
+	}
+	if pending := excludeSettlementIDs(updatedIDs, deletedIDs); len(pending) > 0 {
+		switch actionType {
+		case "CONFIRM":
+			dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_SETTLEMENT", "POST_APPROVE", pending, actor)
+		case "REJECT":
+			dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_SETTLEMENT", "POST_REJECT", pending, actor)
+		case "DELETE":
+			dmsjobs.FireDmsEvent(pool, "FX", "EXPOSURE_SETTLEMENT", "POST_DELETE", pending, actor)
+		}
 	}
 	return count, nil
+}
+
+func excludeSettlementIDs(ids []string, exclude []string) []string {
+	if len(exclude) == 0 {
+		return ids
+	}
+	skip := make(map[string]struct{}, len(exclude))
+	for _, id := range exclude {
+		skip[id] = struct{}{}
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := skip[id]; ok {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 func ApproveExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -368,6 +369,9 @@ func BuildChangeSummary(oldValues, newValues interface{}) []map[string]interface
 			"new_value": newValue,
 		})
 	}
+	sort.SliceStable(changes, func(i, j int) bool {
+		return fmt.Sprint(changes[i]["field"]) < fmt.Sprint(changes[j]["field"])
+	})
 	return changes
 }
 

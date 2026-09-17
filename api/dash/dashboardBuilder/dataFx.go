@@ -506,3 +506,93 @@ func queryFXCancellationRollover(ctx context.Context, pool *pgxpool.Pool, entity
 
 	return runSourceQuery(ctx, pool, q, args)
 }
+
+// ── Settlement ─────────────────────────────────────────────────────────────
+// Header rows from public.exposure_settlement_document (All Settlements list).
+func queryFXSettlement(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "esd", "entity")
+	df, dfArgs := dateRangeFilter(ctx, "esd", "created_at", len(args)+1)
+	args = append(args, dfArgs...)
+
+	q := fmt.Sprintf(`
+		SELECT
+			COALESCE(esd.settlement_id::text, '') AS settlement_id,
+			COALESCE(esd.settlement_method, '') AS settlement_method,
+			COALESCE(esd.entity, '') AS entity,
+			COALESCE(esd.currency, '') AS currency,
+			esd.settlement_date,
+			COALESCE(esd.processing_status, '') AS processing_status,
+			COALESCE(esd.new_exposure_header_id::text, '') AS new_exposure_header_id,
+			COALESCE(esd.comments, '') AS comments,
+			COALESCE(esd.created_by, '') AS created_by,
+			esd.created_at,
+			COALESCE(esd.updated_by, '') AS updated_by,
+			esd.updated_at,
+			COALESCE(esd.total_open_amount, 0) AS total_open_amount,
+			COALESCE(esd.total_settled_amount, 0) AS total_settled_amount,
+			COALESCE(esd.total_gain_loss, 0) AS total_gain_loss,
+			COALESCE(exl.ids, '') AS exposure_header_id,
+			COALESCE(exl.line_count, 0) AS line_count
+		FROM public.exposure_settlement_document esd
+		LEFT JOIN LATERAL (
+			SELECT STRING_AGG(DISTINCT esl.exposure_header_id, ', ' ORDER BY esl.exposure_header_id) AS ids,
+			       COUNT(*)::int AS line_count
+			FROM public.exposure_settlement_line esl
+			WHERE esl.settlement_id = esd.settlement_id
+		) exl ON true
+		WHERE COALESCE(esd.is_deleted, false) = false %s
+		  %s
+		ORDER BY esd.created_at DESC NULLS LAST
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef, df)
+
+	return runSourceQuery(ctx, pool, q, args)
+}
+
+// Line items from public.exposure_settlement_line.
+// settlementIDs filters to selected documents; empty = no rows (require scope,
+// same rule as hedging proposal lines).
+func queryFXSettlementLineItems(ctx context.Context, pool *pgxpool.Pool, limit int, offset int, settlementIDs []string) ([]map[string]any, error) {
+	settlementIDs = normalizeProposalIDs(settlementIDs)
+	if len(settlementIDs) == 0 {
+		return []map[string]any{}, nil
+	}
+
+	args := []any{limit, offset, settlementIDs}
+	ef, efArgs := entityNameFilter(ctx, "esd", "entity", len(args)+1)
+	args = append(args, efArgs...)
+
+	q := fmt.Sprintf(`
+		SELECT
+			COALESCE(esl.line_id::text, '') AS line_id,
+			COALESCE(esl.settlement_id::text, '') AS settlement_id,
+			COALESCE(esd.settlement_method, '') AS settlement_method,
+			COALESCE(esd.entity, '') AS entity,
+			COALESCE(esd.currency, '') AS currency,
+			COALESCE(esl.exposure_header_id, '') AS exposure_header_id,
+			COALESCE(esl.booking_id::text, '') AS booking_id,
+			COALESCE(esl.forward_ref, '') AS forward_ref,
+			COALESCE(esl.leg_type, '') AS leg_type,
+			COALESCE(esl.bank_name, '') AS bank_name,
+			COALESCE(esl.line_status, '') AS line_status,
+			COALESCE(esl.comments, '') AS comments,
+			esl.maturity_date,
+			esl.created_at,
+			COALESCE(esl.settlement_amount, 0) AS settlement_amount,
+			COALESCE(esl.partial_amount, 0) AS partial_amount,
+			COALESCE(esl.spot_rate, 0) AS spot_rate,
+			COALESCE(esl.fwd_rate, 0) AS fwd_rate,
+			COALESCE(esl.booked_rate, 0) AS booked_rate,
+			COALESCE(esl.cancellation_rate, 0) AS cancellation_rate,
+			COALESCE(esl.margin, 0) AS margin,
+			COALESCE(esl.gain_loss, 0) AS gain_loss
+		FROM public.exposure_settlement_line esl
+		JOIN public.exposure_settlement_document esd ON esd.settlement_id = esl.settlement_id
+		WHERE COALESCE(esd.is_deleted, false) = false
+		  AND esl.settlement_id::text = ANY($3) %s
+		ORDER BY esl.settlement_id, esl.line_id
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef)
+
+	return runSourceQuery(ctx, pool, q, args)
+}

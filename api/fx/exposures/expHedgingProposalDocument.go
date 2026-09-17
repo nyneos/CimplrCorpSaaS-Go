@@ -94,9 +94,39 @@ func stringifyAny(v interface{}) string {
 	}
 }
 
+var auditSkippedDocumentColumns = map[string]bool{
+	"proposal_id":   true,
+	"line_id":       true,
+	"created_at":    true,
+	"updated_at":    true,
+	"is_deleted":    true,
+	"business_unit": true,
+	"currency":      true,
+	"exposure_type": true,
+}
+
+func documentLineLabel(line map[string]any) string {
+	parts := make([]string, 0, 3)
+	for _, key := range []string{"business_unit", "currency", "exposure_type"} {
+		value, _ := line[key].(string)
+		if value = strings.TrimSpace(value); value != "" {
+			parts = append(parts, value)
+		}
+	}
+	if len(parts) == 0 {
+		return "line"
+	}
+	return strings.Join(parts, " / ")
+}
+
 func documentSnapshot(ctx context.Context, pool *pgxpool.Pool, proposalID string) map[string]any {
-	header := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.hedging_proposal_document", "proposal_id", proposalID)
-	lines := make([]map[string]any, 0)
+	snapshot := map[string]any{}
+	for key, value := range auditutil.FetchRowSnapshotPGX(ctx, pool, "public.hedging_proposal_document", "proposal_id", proposalID) {
+		if auditSkippedDocumentColumns[key] {
+			continue
+		}
+		snapshot[key] = value
+	}
 	rows, err := pool.Query(ctx, `
 		SELECT row_to_json(t)
 		FROM (
@@ -113,15 +143,19 @@ func documentSnapshot(ctx context.Context, pool *pgxpool.Pool, proposalID string
 				continue
 			}
 			var m map[string]any
-			if json.Unmarshal(raw, &m) == nil {
-				lines = append(lines, m)
+			if json.Unmarshal(raw, &m) != nil {
+				continue
+			}
+			label := documentLineLabel(m)
+			for key, value := range m {
+				if auditSkippedDocumentColumns[key] {
+					continue
+				}
+				snapshot[label+" - "+key] = value
 			}
 		}
 	}
-	return map[string]any{
-		"header": header,
-		"lines":  lines,
-	}
+	return snapshot
 }
 
 func replaceDocumentLines(ctx context.Context, pool *pgxpool.Pool, proposalID string, lines []hedgingProposalLineInput) error {
@@ -250,7 +284,7 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			oldSnap = documentSnapshot(ctx, pool, proposalID)
 			actionType = "EDIT"
 			if req.Submit {
-				actionType = "SUBMIT"
+				status = constants.StatusPendingEditApproval
 			}
 			tag, err := pool.Exec(ctx, `
 				UPDATE public.hedging_proposal_document

@@ -61,6 +61,7 @@ func HedgeLinksDetails(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := pool.Query(ctx, `
 			SELECT
+				l.link_id::text AS link_id,
 				l.exposure_header_id::text AS exposure_header_id,
 				l.booking_id::text AS booking_id,
 				COALESCE(l.hedged_amount, 0) AS hedged_amount,

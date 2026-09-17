@@ -43,11 +43,14 @@ var dmsEventSourceIDFields = map[string]string{
 	"FX|EXPOSURE_CREATION":    "exposure_header_id",
 	"FX|EXPOSURE_UPLOAD":      "exposure_header_id",
 	"FX|EXPOSURE_BUCKETING":   "exposure_header_id",
+	"FX|EXPOSURE_SETTLEMENT":  "settlement_id",
 	"FX|HEDGE_LINK":           "exposure_header_id",
 	"FX|FORWARD_MTM":          "mtm_id",
 	"FX|FORWARD_CANCELLATION": "booking_id",
 	"FX|FORWARD_ROLLOVER":     "booking_id",
 	"FX|FORWARD_CANCEL_ROLL":  "booking_id",
+
+	"INVESTMENT_FD|FD_CLOSING_EVIDENCE_PACK": "pack_id",
 }
 
 // CanonicalEventSourceIDField returns the dashboard column that carries the IDs

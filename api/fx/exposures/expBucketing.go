@@ -401,10 +401,10 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 		}
 		if len(req.HedgingFields) > 0 {
 			newValues := any(req.HedgingFields)
-			if hedgingRows, ok := updated["hedging"]; ok {
-				newValues = hedgingRows
+			if hedgingRows, ok := updated["hedging"].([]map[string]interface{}); ok && len(hedgingRows) > 0 {
+				newValues = hedgingRows[0]
 			}
-			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableHedgeProposal, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: actor, OldValues: oldHedging, NewValues: newValues})
+			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableHedgeProposal, ParentColumn: "exposure_header_id", ParentID: req.ExposureHeaderID, ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: reason, RequestedBy: actor, OldValues: oldHedging, NewValues: newValues})
 		}
 		respondWithSuccess(w, http.StatusOK, "Exposure bucketing updated successfully", map[string]interface{}{
 			"updated": updated,
