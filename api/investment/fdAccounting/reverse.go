@@ -150,6 +150,11 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 		// original is always reachable through reversal_of_entry_id.
 		_ = accrualLedgerID
 		_ = closureReqID
+		// requested_by (text) and created_by (varchar) are different column types,
+		// so they need their own placeholders — reusing one parameter across two
+		// differently-typed columns makes Postgres unable to deduce a single type
+		// for it (SQLSTATE 42P08).
+		actorEmail := api.SystemIfBlank(actor.Email)
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO `+journalTable+` (
 				activity_id, entity_id, entity_name, fd_id, receipt_id, accrual_run_id,
@@ -158,11 +163,11 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES (
 				$1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), NULLIF($5,''), NULLIF($6,''),
 				$7, $8, $9, $10, $11, $12, $13,
-				true, $14, $15, $16, $17, $17
+				true, $14, $15, $16, $17, $18
 			) RETURNING entry_id`,
 			newActivityID, entityID, entityName, fdID, receiptID, accrualRunID,
 			reversalDate, reversalDate.Format(constants.DateFormatYearMonth), entryTypeReversal, newDesc, totalCredit, totalDebit, statusPendingApproval,
-			req.EntryID, strings.TrimSpace(req.ReasonCode), strings.TrimSpace(req.Remarks), api.SystemIfBlank(actor.Email),
+			req.EntryID, strings.TrimSpace(req.ReasonCode), strings.TrimSpace(req.Remarks), actorEmail, actorEmail,
 		).Scan(&newEntryID); err != nil {
 			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "insert reversal entry: "+err.Error())
 			return
