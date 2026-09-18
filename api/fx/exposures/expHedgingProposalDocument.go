@@ -345,7 +345,7 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 					RecordID:            id,
 					MatrixID:            tID,
 					RequirePinnedMatrix: true,
-					AutoApplyIfUnpinned: true,
+					AutoApplyIfUnpinned: false,
 					SubmittedByEmail:    email,
 				})
 			}(proposalID, makerEmail, txnType, triggerMatrixID)
@@ -704,6 +704,22 @@ func ApproveHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
+		for _, id := range req.ProposalIDs {
+			snap := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.hedging_proposal_document", "proposal_id", id)
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreApprove,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "FX_HEDGING_PROPOSAL",
+				ActorUserID:         req.UserID,
+				HandlerName:         "ApproveHedgingProposalDocuments",
+				APIPath:             "/fx/exposures/hedging-proposals/approve",
+				DefaultBlockMessage: "Hedging proposal approval blocked by policy",
+				Fields:              snap,
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
+		}
 		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, updateStatusesParams{
 			IDs: req.ProposalIDs, Status: constants.StatusApproved, Actor: actor, UserID: req.UserID,
 			Comments: strings.TrimSpace(req.Comments), ActionType: "CONFIRM",
@@ -734,6 +750,22 @@ func RejectHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := auditutil.Actor(req.UserID)
+		for _, id := range req.ProposalIDs {
+			snap := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.hedging_proposal_document", "proposal_id", id)
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "FX_HEDGING_PROPOSAL",
+				ActorUserID:         req.UserID,
+				HandlerName:         "RejectHedgingProposalDocuments",
+				APIPath:             "/fx/exposures/hedging-proposals/reject",
+				DefaultBlockMessage: "Hedging proposal rejection blocked by policy",
+				Fields:              snap,
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
+		}
 		n, err := updateHedgingProposalDocumentStatuses(ctx, pool, updateStatusesParams{
 			IDs: req.ProposalIDs, Status: constants.StatusRejected, Actor: actor, UserID: req.UserID,
 			Comments: strings.TrimSpace(req.Comments), ActionType: "REJECT",
@@ -810,7 +842,7 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 					MatrixID:            matrices[id],
 					SubmittedByEmail:    email,
 					RequirePinnedMatrix: true,
-					AutoApplyIfUnpinned: true,
+					AutoApplyIfUnpinned: false,
 				})
 			}
 		}(req.ProposalIDs, makerEmail, triggerMatrices)
