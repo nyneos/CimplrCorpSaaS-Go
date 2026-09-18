@@ -24,6 +24,8 @@ const (
 	SourceRouteBucketingDelete  = "/fx/exposures/bucketing/delete-multiple-headers"
 
 	SourceRouteLinkExposureHedge = "/fx/exposures/link-exposure-hedge"
+	SourceRouteApproveHedgeLinks = "/fx/exposures/approve-hedge-links"
+	SourceRouteRejectHedgeLinks  = "/fx/exposures/reject-hedge-links"
 )
 
 // Event action labels used in notification payloads.

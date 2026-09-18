@@ -698,7 +698,7 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 				RecordID:            req.ExposureHeaderID,
 				MatrixID:            tID,
 				RequirePinnedMatrix: true,
-				AutoApplyIfUnpinned: true,
+				AutoApplyIfUnpinned: false,
 				SubmittedByEmail:    makerEmail,
 			})
 		}(triggerMatrixID)
@@ -732,6 +732,25 @@ func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 			bookID := strings.TrimSpace(link.BookingID)
 			if expID == "" || bookID == "" {
 				continue
+			}
+			linkRow, loadErr := loadHedgeLinkRow(ctx, pool, expID, bookID)
+			if loadErr != nil {
+				logger.LogError("approve hedge link policy load failed exposure=%s booking=%s: %v", expID, bookID, loadErr)
+				continue
+			}
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreApprove,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "HEDGE_LINK",
+				EntityCode:          exposureEntityForHeader(ctx, pool, expID),
+				ActorUserID:         req.UserID,
+				HandlerName:         "ApproveHedgeLinks",
+				APIPath:             "/fx/exposures/approve-hedge-links",
+				DefaultBlockMessage: "Hedge link approval blocked by policy",
+				Fields:              buildHedgeLinkPolicyFields(linkRow),
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
 			}
 			// The exposure may have been settled (payment / rollover / cancellation
 			// approved) while this link sat in the queue — it is terminal now.
@@ -791,6 +810,18 @@ func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(approvedExposureIDs) > 0 {
 			dmsjobs.FireDmsEvent(pool, "FX", "HEDGE_LINK", "POST_APPROVE", approvedExposureIDs, auditutil.Actor(req.UserID))
+
+			payload := fxnotif.BuildExposureBulkActionPayload(ctx, pool, fxnotif.ExposureBulkActionInput{
+				ExposureIDs:    approvedExposureIDs,
+				ApprovedIDs:    approvedExposureIDs,
+				Action:         fxnotif.ActionApprove,
+				RequestedBy:    req.UserID,
+				CheckerComment: strings.TrimSpace(req.ApprovalComment),
+			})
+			payloadMap := payload.ToMap()
+			payloadMap["UserID"] = req.UserID
+			fxnotif.TriggerFX(context.WithoutCancel(ctx), pool, fxnotif.SourceRouteApproveHedgeLinks,
+				fxnotif.CorrelationID("FXLINK-APPROVE", approvedExposureIDs[0]), payloadMap)
 		}
 
 		msg := "Hedge links approved successfully"
@@ -826,6 +857,25 @@ func RejectHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 			if expID == "" || bookID == "" {
 				continue
 			}
+			linkRow, loadErr := loadHedgeLinkRow(ctx, pool, expID, bookID)
+			if loadErr != nil {
+				logger.LogError("reject hedge link policy load failed exposure=%s booking=%s: %v", expID, bookID, loadErr)
+				continue
+			}
+			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+				EventCode:           common.TriggerPreReject,
+				ModuleCode:          common.ModuleFX,
+				SubModule:           "HEDGE_LINK",
+				EntityCode:          exposureEntityForHeader(ctx, pool, expID),
+				ActorUserID:         req.UserID,
+				HandlerName:         "RejectHedgeLinks",
+				APIPath:             "/fx/exposures/reject-hedge-links",
+				DefaultBlockMessage: "Hedge link rejection blocked by policy",
+				Fields:              buildHedgeLinkPolicyFields(linkRow),
+			}); !ok {
+				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
 			var hedged float64
 			err := pool.QueryRow(ctx, `
 				UPDATE exposure_hedge_links
@@ -857,6 +907,18 @@ func RejectHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(rejectedExposureIDs) > 0 {
 			dmsjobs.FireDmsEvent(pool, "FX", "HEDGE_LINK", "POST_REJECT", rejectedExposureIDs, auditutil.Actor(req.UserID))
+
+			payload := fxnotif.BuildExposureBulkActionPayload(ctx, pool, fxnotif.ExposureBulkActionInput{
+				ExposureIDs:    rejectedExposureIDs,
+				RejectedIDs:    rejectedExposureIDs,
+				Action:         fxnotif.ActionReject,
+				RequestedBy:    req.UserID,
+				CheckerComment: strings.TrimSpace(req.RejectionComment),
+			})
+			payloadMap := payload.ToMap()
+			payloadMap["UserID"] = req.UserID
+			fxnotif.TriggerFX(context.WithoutCancel(ctx), pool, fxnotif.SourceRouteRejectHedgeLinks,
+				fxnotif.CorrelationID("FXLINK-REJECT", rejectedExposureIDs[0]), payloadMap)
 		}
 
 		respondWithSuccess(w, http.StatusOK, "Hedge links rejected successfully", map[string]interface{}{
