@@ -162,6 +162,9 @@ var dataSources = map[string]dataSourceFn{
 	"fdAccrualScheduleExecutionLog": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDAccrualScheduleExecutionLog(ctx, pool, req.EntityIDs, req.Limit, req.Offset, req.ParentID)
 	},
+	"fdClosingEvidencePack": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingEvidencePack(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
 	// ── Portfolio & Proposal ───────────────────────────────────────────────────
 	"investmentOnboardBatch": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryInvestmentOnboardBatch(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
@@ -366,6 +369,13 @@ var dataSources = map[string]dataSourceFn{
 	},
 	"fxCancellationRollover": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFXCancellationRollover(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fxSettlement": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFXSettlement(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fxSettlementLineItem": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		// Empty settlement_ids → no rows (scope required, like hedging proposal lines).
+		return queryFXSettlementLineItems(ctx, pool, req.Limit, req.Offset, resolveProjectionProposalIDs(req))
 	},
 }
 
