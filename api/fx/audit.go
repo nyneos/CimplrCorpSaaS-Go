@@ -13,6 +13,7 @@ import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/auditutil"
+	"CimplrCorpSaas/api/fx/exposures"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -135,7 +136,10 @@ func queryExposureSettlementAudit(r *http.Request, pool *pgxpool.Pool, parentWhe
 				old_new_price,
 				old_new_amount,
 				old_new_exposure_header_id,
-				old_partial_amount
+				old_partial_amount,
+				old_values,
+				new_values,
+				change_summary
 			FROM public.auditactionexposuresettlement
 			WHERE %s%s
 			ORDER BY requested_at ASC, action_id ASC
@@ -199,6 +203,9 @@ func queryExposureSettlementAudit(r *http.Request, pool *pgxpool.Pool, parentWhe
 			"old_new_amount",
 			"old_new_exposure_header_id",
 			"old_partial_amount",
+			"old_values",
+			"new_values",
+			"change_summary",
 		} {
 			if v, ok := row[key]; ok && v != nil {
 				entry[key] = v
@@ -206,7 +213,85 @@ func queryExposureSettlementAudit(r *http.Request, pool *pgxpool.Pool, parentWhe
 		}
 		payload = append(payload, entry)
 	}
-	return payload, rows.Err()
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, rowsErr
+	}
+	rows.Close()
+	attachSettlementNewValues(r, pool, payload)
+	return payload, nil
+}
+
+var settlementAuditOldKeys = []string{
+	"old_settlement_method",
+	"old_entity",
+	"old_currency",
+	"old_settlement_date",
+	"old_total_open_amount",
+	"old_total_settled_amount",
+	"old_processing_status",
+	"old_comments",
+	"old_exposure_header_ids",
+	"old_line_count",
+	"old_linked_hedge_amount",
+	"old_additional_fwd_amount",
+	"old_cash_amount",
+	"old_new_exposure_type",
+	"old_new_maturity_date",
+	"old_new_quantity",
+	"old_new_price",
+	"old_new_amount",
+	"old_new_exposure_header_id",
+	"old_partial_amount",
+}
+
+var settlementNonMutationActions = map[string]struct{}{
+	"DMS_TRIGGER": {},
+	"DMS_EVENT":   {},
+	"DOWNLOAD":    {},
+	"UPLOAD_FILE": {},
+	"DELETE_FILE": {},
+}
+
+func isSettlementMutationAudit(entry map[string]interface{}) bool {
+	action := strings.ToUpper(strings.TrimSpace(fmt.Sprint(entry["action_type"])))
+	_, skip := settlementNonMutationActions[action]
+	return !skip
+}
+
+func attachSettlementNewValues(r *http.Request, pool *pgxpool.Pool, payload []map[string]interface{}) {
+	if len(payload) == 0 {
+		return
+	}
+	settlementID := strings.TrimSpace(fmt.Sprint(payload[0]["settlement_id"]))
+	if settlementID == "" || settlementID == "<nil>" {
+		return
+	}
+	mutations := make([]int, 0, len(payload))
+	for i := range payload {
+		if isSettlementMutationAudit(payload[i]) {
+			mutations = append(mutations, i)
+		}
+	}
+	if len(mutations) == 0 {
+		return
+	}
+	current := exposures.CurrentSettlementAuditValues(r.Context(), pool, settlementID)
+	for pos, index := range mutations {
+		next := current
+		if pos+1 < len(mutations) {
+			next = payload[mutations[pos+1]]
+		}
+		if next == nil {
+			continue
+		}
+		for _, key := range settlementAuditOldKeys {
+			value, ok := next[key]
+			if !ok || value == nil {
+				continue
+			}
+			payload[index]["new_"+strings.TrimPrefix(key, "old_")] = value
+		}
+	}
 }
 
 func queryFXActionAudit(r *http.Request, pool *pgxpool.Pool, cfg fxAuditConfig, parentWhere string, args []interface{}, extraWhere string) ([]map[string]interface{}, error) {

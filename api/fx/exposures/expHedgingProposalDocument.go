@@ -355,6 +355,16 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 				dmsTrigger = "POST_CREATE"
 			}
 			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", dmsTrigger, []string{proposalID}, actor)
+
+			notifAction := "EDIT"
+			if oldSnap == nil {
+				notifAction = "CREATE"
+			}
+			triggerHedgingProposalNotif(ctx, pool, hedgingProposalNotifInput{
+				Route: routeHedgingProposalSave, Action: notifAction, UserID: req.UserID, RequestedBy: actor,
+				ProcessingStatus: finalStatus, CheckerComment: strings.TrimSpace(req.Comments),
+				ProposalIDs: []string{proposalID},
+			})
 		}
 
 		respondWithSuccess(w, http.StatusOK, "Hedging proposal saved", map[string]any{
@@ -655,10 +665,22 @@ func updateHedgingProposalDocumentStatuses(ctx context.Context, pool *pgxpool.Po
 		switch actionType {
 		case "CONFIRM":
 			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", "POST_APPROVE", updatedIDs, actor)
+			triggerHedgingProposalNotif(ctx, pool, hedgingProposalNotifInput{
+				Route: routeHedgingProposalApprove, Action: "APPROVE", UserID: userID, RequestedBy: actor,
+				ProcessingStatus: status, CheckerComment: comments, ProposalIDs: updatedIDs,
+			})
 		case "REJECT":
 			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", "POST_REJECT", updatedIDs, actor)
+			triggerHedgingProposalNotif(ctx, pool, hedgingProposalNotifInput{
+				Route: routeHedgingProposalReject, Action: "REJECT", UserID: userID, RequestedBy: actor,
+				ProcessingStatus: status, CheckerComment: comments, ProposalIDs: updatedIDs,
+			})
 		case "DELETE":
 			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", "POST_DELETE", updatedIDs, actor)
+			triggerHedgingProposalNotif(ctx, pool, hedgingProposalNotifInput{
+				Route: routeHedgingProposalDelete, Action: "DELETE", UserID: userID, RequestedBy: actor,
+				ProcessingStatus: status, CheckerComment: comments, ProposalIDs: updatedIDs,
+			})
 		}
 	}
 	return count, nil
