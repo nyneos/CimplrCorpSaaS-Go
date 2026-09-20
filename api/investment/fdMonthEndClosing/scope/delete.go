@@ -125,7 +125,7 @@ func DeleteScope(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, e := range errs {
 			results = append(results, map[string]interface{}{"success": false, "error": e})
 		}
-		msg := "FD(s) removed from scope; checklist cleared"
+		msg := "Fd's removed from scope; checklist cleared"
 		if len(okIDs) == 0 {
 			msg = "No scope rows were removed"
 		}

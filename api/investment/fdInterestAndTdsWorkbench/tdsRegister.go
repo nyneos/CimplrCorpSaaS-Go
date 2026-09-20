@@ -122,7 +122,7 @@ func checkFDDates(fdStart, fdMaturity time.Time, labels, values []string) string
 		}
 		if t.Before(fdStart) || t.After(fdMaturity) {
 			return fmt.Sprintf(
-				"%s (%s) must be within this FD's window (%s to %s)",
+				"%s (%s) must be within this Fd's window (%s to %s)",
 				labels[i], v, fdStart.Format(constants.DateFormat), fdMaturity.Format(constants.DateFormat))
 		}
 	}

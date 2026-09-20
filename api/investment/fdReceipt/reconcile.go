@@ -588,7 +588,7 @@ func expandLinkedReconcileIDs(ctx context.Context, pool *pgxpool.Pool, receiptID
 		}
 
 		// Step 2: fallback — for TDS entries that had no receipt_id link, restrict the
-		// interest pass to receipts from the same FD(s) and overlapping periods.
+		// interest pass to receipts from the same Fd's and overlapping periods.
 		// Without this guard, loadInterestReceipts falls back to entity+period-wide and pulls in unrelated FDs' receipts.
 		irRows, irErr := pool.Query(ctx, `
 			SELECT r.receipt_id

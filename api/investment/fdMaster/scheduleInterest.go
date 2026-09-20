@@ -23,7 +23,7 @@ func PeriodInterestFromSchedule(
 }
 
 // PeriodInterestFromScheduleWithEnd is the accrual-engine variant. Adjacent
-// sub-periods should be half-open [start,end), except when end is the FD's
+// sub-periods should be half-open [start,end), except when end is the Fd's
 // terminal maturity/closure date.
 func PeriodInterestFromScheduleWithEnd(
 	ctx context.Context,

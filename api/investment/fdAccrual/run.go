@@ -3722,7 +3722,7 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 
 	if newStatus == "FAILED" {
 		return 0, failed, fmt.Errorf(
-			"accrual run FAILED: 0 of %d FD(s) calculated successfully for entity %s. "+
+			"accrual run FAILED: 0 of %d Fd's calculated successfully for entity %s. "+
 				"Check execution log: SELECT log_level, event_type, fd_id, message "+
 				"FROM investment.fd_accrual_run_execution_log WHERE run_id='%s' "+
 				"AND log_level='ERROR' ORDER BY logged_at",
