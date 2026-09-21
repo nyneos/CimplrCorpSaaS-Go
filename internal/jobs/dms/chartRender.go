@@ -301,6 +301,30 @@ func chartSeriesAllZero(series []chartSeriesPoint) bool {
 	return len(series) > 0
 }
 
+// wholeAxisRange gives whole-number ticks for a small counting series. Left to
+// itself go-chart splits a column of ones into 0.13, 0.26 … 1.15, which reads as
+// fractions of a row that cannot exist.
+func wholeAxisRange(series []chartSeriesPoint) (chart.Range, []chart.Tick) {
+	maxV := 0.0
+	for _, p := range series {
+		if p.Value < 0 || p.Value != math.Trunc(p.Value) {
+			return nil, nil
+		}
+		if p.Value > maxV {
+			maxV = p.Value
+		}
+	}
+	if maxV < 1 || maxV > 10 {
+		return nil, nil
+	}
+	top := int(maxV) + 1
+	ticks := make([]chart.Tick, 0, top+1)
+	for i := 0; i <= top; i++ {
+		ticks = append(ticks, chart.Tick{Value: float64(i), Label: strconv.Itoa(i)})
+	}
+	return &chart.ContinuousRange{Min: 0, Max: float64(top)}, ticks
+}
+
 func chartYRange(series []chartSeriesPoint) *chart.ContinuousRange {
 	maxV := 0.0
 	for _, p := range series {
@@ -384,6 +408,11 @@ func renderBarChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	}
 	width, height := categoryChartSize(len(series))
 	barW, barSpacing := barChartBarMetrics(len(series), width)
+	var barYRange chart.Range = chartYRange(series)
+	var barYTicks []chart.Tick
+	if r, t := wholeAxisRange(series); r != nil {
+		barYRange, barYTicks = r, t
+	}
 	graph := chart.BarChart{
 		Title: " ",
 		Background: chart.Style{
@@ -399,7 +428,8 @@ func renderBarChartPNG(series []chartSeriesPoint) ([]byte, error) {
 		},
 		YAxis: chart.YAxis{
 			AxisType: chart.YAxisSecondary,
-			Range:    chartYRange(series),
+			Range:    barYRange,
+			Ticks:    barYTicks,
 			ValueFormatter: func(v interface{}) string {
 				if f, ok := v.(float64); ok {
 					return formatAxisValue(f)
@@ -755,7 +785,9 @@ func renderLineChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	}
 	// go-chart ContinuousSeries needs a non-zero X span (≥2 points); single-point
 	// series used to fail with "zero x-range delta" and kill BANK_BALANCE renders.
-	if len(series) == 1 {
+	// The padding point is a duplicate, so only one label belongs on the axis.
+	soleCategory := len(series) == 1
+	if soleCategory {
 		series = []chartSeriesPoint{series[0], {Label: series[0].Label, Value: series[0].Value}}
 	}
 	xs := make([]float64, len(series))
@@ -784,6 +816,15 @@ func renderLineChartPNG(series []chartSeriesPoint) ([]byte, error) {
 		}
 	}
 	pad := (maxY - minY) * 0.1
+	lo := minY - pad
+	if minY >= 0 && lo < 0 {
+		lo = 0
+	}
+	var yRange chart.Range = &chart.ContinuousRange{Min: lo, Max: maxY + pad}
+	var yTicks []chart.Tick
+	if r, t := wholeAxisRange(series); r != nil {
+		yRange, yTicks = r, t
+	}
 	width, height := categoryChartSize(len(series))
 	graph := chart.Chart{
 		Width:  width,
@@ -798,7 +839,8 @@ func renderLineChartPNG(series []chartSeriesPoint) ([]byte, error) {
 		},
 		YAxis: chart.YAxis{
 			AxisType: chart.YAxisSecondary,
-			Range:    &chart.ContinuousRange{Min: minY - pad, Max: maxY + pad},
+			Range:    yRange,
+			Ticks:    yTicks,
 			ValueFormatter: func(v interface{}) string {
 				if f, ok := v.(float64); ok {
 					return formatAxisValue(f)
@@ -826,7 +868,7 @@ func renderLineChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	if err := graph.Render(chart.PNG, &buf); err != nil {
 		return nil, err
 	}
-	return drawLineCategoryLabels(buf.Bytes(), graph, series)
+	return drawLineCategoryLabels(buf.Bytes(), graph, series, soleCategory)
 }
 
 // lineDotColor is unique to the plotted points — the legend sample and the line
@@ -873,7 +915,7 @@ func detectDotColumns(img *image.RGBA, dot drawing.Color) []int {
 // drawLineCategoryLabels paints each point's dimension label turned 90° under
 // the plot. go-chart can only draw x-axis ticks horizontally, which runs long
 // ids into each other, so the axis is hidden and the labels painted here.
-func drawLineCategoryLabels(pngBytes []byte, graph chart.Chart, series []chartSeriesPoint) ([]byte, error) {
+func drawLineCategoryLabels(pngBytes []byte, graph chart.Chart, series []chartSeriesPoint, soleCategory bool) ([]byte, error) {
 	src, err := png.Decode(bytes.NewReader(pngBytes))
 	if err != nil {
 		return pngBytes, nil
@@ -903,13 +945,23 @@ func drawLineCategoryLabels(pngBytes []byte, graph chart.Chart, series []chartSe
 	}
 	fontPx := rotatedLabelFontPx(int(step))
 	col := color.RGBA{R: 0x33, G: 0x41, B: 0x55, A: 0xff}
-	for i, p := range series {
-		strip, sw, sh := renderTextStrip(ttf, fontPx, fitLabelToPx(p.Label, fontPx, avail), col)
-		if strip == nil {
-			continue
+	// The second point of a sole category is padding for go-chart, not data, so
+	// the one real label is centred under the flat line instead of repeated.
+	if soleCategory {
+		fontPx = 9
+		if strip, sw, sh := renderTextStrip(ttf, fontPx, fitLabelToPx(series[0].Label, fontPx, avail), col); strip != nil {
+			mid := first + int(math.Round(step/2))
+			blitRotated90(canvas, strip, mid-sh/2, bottom+6, sw, sh)
 		}
-		dx := first + int(math.Round(float64(i)*step)) - sh/2
-		blitRotated90(canvas, strip, dx, bottom+6, sw, sh)
+	} else {
+		for i, p := range series {
+			strip, sw, sh := renderTextStrip(ttf, fontPx, fitLabelToPx(p.Label, fontPx, avail), col)
+			if strip == nil {
+				continue
+			}
+			dx := first + int(math.Round(float64(i)*step)) - sh/2
+			blitRotated90(canvas, strip, dx, bottom+6, sw, sh)
+		}
 	}
 
 	var out bytes.Buffer
