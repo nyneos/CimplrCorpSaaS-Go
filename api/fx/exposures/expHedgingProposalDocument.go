@@ -243,6 +243,21 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			if len(req.Proposals) > 0 {
 				entity = strings.TrimSpace(req.Proposals[0].BusinessUnit)
 			}
+			policyRow := HedgingProposalPolicyRow{
+				ProposalID:       proposalID,
+				ProposalName:     name,
+				ProcessingStatus: status,
+				Comments:         strings.TrimSpace(req.Comments),
+				CreatedBy:        actor,
+				LineCount:        len(req.Proposals),
+			}
+			if proposalID != "" {
+				if existing, loadErr := LoadHedgingProposalPolicyRow(ctx, pool, proposalID); loadErr == nil {
+					policyRow.CreatedBy = existing.CreatedBy
+					policyRow.CreatedAt = existing.CreatedAt
+					policyRow.UpdatedBy = actor
+				}
+			}
 			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           eventCode,
 				ModuleCode:          common.ModuleFX,
@@ -252,12 +267,7 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "SaveHedgingProposalDocument",
 				APIPath:             "/fx/exposures/hedging-proposals/save",
 				DefaultBlockMessage: "Hedging proposal submit blocked by policy",
-				Fields: map[string]interface{}{
-					"proposal_id":   proposalID,
-					"proposal_name": name,
-					"comments":      strings.TrimSpace(req.Comments),
-					"entity":        entity,
-				},
+				Fields:              BuildHedgingProposalPolicyFields(policyRow),
 			}); !ok {
 				respondWithError(w, http.StatusForbidden, msg)
 				return
@@ -357,11 +367,13 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", dmsTrigger, []string{proposalID}, actor)
 
 			notifAction := "EDIT"
+			notifRoute := routeHedgingProposalEdit
 			if oldSnap == nil {
 				notifAction = "CREATE"
+				notifRoute = routeHedgingProposalSave
 			}
 			triggerHedgingProposalNotif(ctx, pool, hedgingProposalNotifInput{
-				Route: routeHedgingProposalSave, Action: notifAction, UserID: req.UserID, RequestedBy: actor,
+				Route: notifRoute, Action: notifAction, UserID: req.UserID, RequestedBy: actor,
 				ProcessingStatus: finalStatus, CheckerComment: strings.TrimSpace(req.Comments),
 				ProposalIDs: []string{proposalID},
 			})
@@ -705,7 +717,11 @@ func ApproveHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		actor := auditutil.Actor(req.UserID)
 		for _, id := range req.ProposalIDs {
-			snap := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.hedging_proposal_document", "proposal_id", id)
+			policyRow, loadErr := LoadHedgingProposalPolicyRow(ctx, pool, id)
+			if loadErr != nil {
+				respondWithError(w, http.StatusInternalServerError, loadErr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreApprove,
 				ModuleCode:          common.ModuleFX,
@@ -714,7 +730,8 @@ func ApproveHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "ApproveHedgingProposalDocuments",
 				APIPath:             "/fx/exposures/hedging-proposals/approve",
 				DefaultBlockMessage: "Hedging proposal approval blocked by policy",
-				Fields:              snap,
+				EntityCode:          "",
+				Fields:              BuildHedgingProposalPolicyFields(policyRow),
 			}); !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
@@ -751,7 +768,11 @@ func RejectHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		actor := auditutil.Actor(req.UserID)
 		for _, id := range req.ProposalIDs {
-			snap := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.hedging_proposal_document", "proposal_id", id)
+			policyRow, loadErr := LoadHedgingProposalPolicyRow(ctx, pool, id)
+			if loadErr != nil {
+				respondWithError(w, http.StatusInternalServerError, loadErr.Error())
+				return
+			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreReject,
 				ModuleCode:          common.ModuleFX,
@@ -760,7 +781,8 @@ func RejectHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "RejectHedgingProposalDocuments",
 				APIPath:             "/fx/exposures/hedging-proposals/reject",
 				DefaultBlockMessage: "Hedging proposal rejection blocked by policy",
-				Fields:              snap,
+				EntityCode:          "",
+				Fields:              BuildHedgingProposalPolicyFields(policyRow),
 			}); !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
@@ -798,7 +820,11 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		actor := auditutil.Actor(req.UserID)
 		triggerMatrices := make(map[string]string, len(req.ProposalIDs))
 		for _, id := range req.ProposalIDs {
-			snap := auditutil.FetchRowSnapshotPGX(ctx, pool, "public.hedging_proposal_document", "proposal_id", id)
+			policyRow, loadErr := LoadHedgingProposalPolicyRow(ctx, pool, id)
+			if loadErr != nil {
+				respondWithError(w, http.StatusInternalServerError, loadErr.Error())
+				return
+			}
 			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreDelete,
 				ModuleCode:          common.ModuleFX,
@@ -807,7 +833,7 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				HandlerName:         "DeleteHedgingProposalDocuments",
 				APIPath:             "/fx/exposures/hedging-proposals/delete",
 				DefaultBlockMessage: "Hedging proposal delete blocked by policy",
-				Fields:              snap,
+				Fields:              BuildHedgingProposalPolicyFields(policyRow),
 			}); !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
