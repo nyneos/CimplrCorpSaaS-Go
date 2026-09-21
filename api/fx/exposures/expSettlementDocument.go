@@ -25,6 +25,8 @@ import (
 
 const errSettlementIDsRequired = "settlement_ids is required"
 
+const settlementRecordTable = "public.exposure_settlement_document"
+
 type settlementLineInput struct {
 	ExposureHeaderID string   `json:"exposure_header_id"`
 	BookingID        string   `json:"booking_id"`
@@ -1274,6 +1276,7 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 					ModuleCode:          "FX",
 					TransactionType:     tType,
 					RecordID:            id,
+					RecordTable:         settlementRecordTable,
 					MatrixID:            tID,
 					RequirePinnedMatrix: true,
 					AutoApplyIfUnpinned: false,
@@ -1488,6 +1491,7 @@ func EditExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 					ModuleCode:          "FX",
 					TransactionType:     tType,
 					RecordID:            id,
+					RecordTable:         settlementRecordTable,
 					MatrixID:            tID,
 					RequirePinnedMatrix: true,
 					AutoApplyIfUnpinned: false,
@@ -1584,7 +1588,7 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				SELECT ai.* FROM uam.approval_instance ai
 				WHERE ai.record_id = esd.settlement_id::text
 				  AND ai.module_code = 'FX'
-				  AND ai.transaction_type = CASE WHEN esd.settlement_method = 'ROLLOVER' OR esd.settlement_method = 'CANCELLATION' THEN 'FX_SETTLEMENT_' || esd.settlement_method ELSE 'FX_SETTLEMENT_CREATE' END
+				  AND ai.transaction_type LIKE 'FX_SETTLEMENT_%'
 				  AND ai.status = 'PENDING'
 				  AND ai.is_deleted = false
 				ORDER BY ai.submitted_at DESC, ai.instance_id DESC
@@ -2018,6 +2022,7 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 					ModuleCode:          "FX",
 					TransactionType:     "FX_SETTLEMENT_DELETE",
 					RecordID:            id,
+					RecordTable:         settlementRecordTable,
 					MatrixID:            matrices[id],
 					SubmittedByEmail:    email,
 					RequirePinnedMatrix: true,
