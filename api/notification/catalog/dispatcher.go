@@ -237,6 +237,7 @@ type actorResolution struct {
 	Email     string // public.users.email
 	Name      string // public.users.employee_name
 	Entity    string // first entity_name from user_entity_mappings (empty = no restriction)
+	Entities  []string // every entity_name mapped to the user (empty = no restriction)
 	MatchedBy string // which identifier tier resolved this actor: "id","email","username","mobile","name"
 	Ambiguous bool   // true when name matched >1 row (entity still returned but flagged)
 }
@@ -264,10 +265,11 @@ func resolveActorEntity(ctx context.Context, pool *pgxpool.Pool, actorValue stri
 	}
 
 	type row struct {
-		userID string
-		email  string
-		name   string
-		entity string
+		userID   string
+		email    string
+		name     string
+		entity   string
+		entities []string
 	}
 
 	scan := func(q string, args ...interface{}) ([]row, error) {
@@ -279,34 +281,42 @@ func resolveActorEntity(ctx context.Context, pool *pgxpool.Pool, actorValue stri
 		var out []row
 		for rows.Next() {
 			var r row
-			if err := rows.Scan(&r.userID, &r.email, &r.name, &r.entity); err == nil {
+			if err := rows.Scan(&r.userID, &r.email, &r.name, &r.entities); err == nil {
+				if len(r.entities) > 0 {
+					r.entity = r.entities[0]
+				}
 				out = append(out, r)
+			} else {
+				api.LogError("[NOTIF] resolveActorEntity: scan failed — actor will resolve to no entity: %v", err)
 			}
 		}
 		return out, rows.Err()
 	}
 
-	// sel returns first entity name from user_entity_mappings (or empty if none mapped)
+	// sel returns EVERY entity name mapped to the user (empty array if none mapped);
+	// a user scoped to several entities must match events scoped to any of them.
 	const sel = `SELECT u.id::text, COALESCE(u.email,''), COALESCE(u.employee_name,''),
-		COALESCE((SELECT uem.entity_name FROM user_entity_mappings uem WHERE uem.user_id = u.id ORDER BY uem.entity_id LIMIT 1), '')
+		COALESCE((SELECT array_agg(TRIM(uem.entity_name::text) ORDER BY uem.entity_id)
+		          FROM user_entity_mappings uem
+		          WHERE uem.user_id = u.id AND COALESCE(TRIM(uem.entity_name::text),'') <> ''), '{}'::text[])
 	FROM public.users u`
 
 	// ── Tier 1: CIMPLR ID prefix or exact PK match ─────────────────────────
 	if rows, err := scan(sel+` WHERE u.id::text = $1`, actorValue); err == nil && len(rows) == 1 {
 		api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by user_id → entity=%q", actorValue, rows[0].entity)
-		return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "id"}
+		return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, Entities: rows[0].entities, MatchedBy: "id"}
 	}
 
 	// ── Tier 2: email (case-insensitive, DB-unique) ─────────────────────────
 	if rows, err := scan(sel+` WHERE lower(u.email) = lower($1)`, actorValue); err == nil && len(rows) == 1 {
 		api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by email → entity=%q", actorValue, rows[0].entity)
-		return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "email"}
+		return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, Entities: rows[0].entities, MatchedBy: "email"}
 	}
 
 	// ── Tier 3: username_or_employee_id (case-insensitive, DB-unique) ───────
 	if rows, err := scan(sel+` WHERE lower(u.username_or_employee_id) = lower($1)`, actorValue); err == nil && len(rows) == 1 {
 		api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by username_or_employee_id → entity=%q", actorValue, rows[0].entity)
-		return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "username"}
+		return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, Entities: rows[0].entities, MatchedBy: "username"}
 	}
 
 	// ── Tier 4: mobile (NOT unique — reject if multiple rows match) ─────────
@@ -314,7 +324,7 @@ func resolveActorEntity(ctx context.Context, pool *pgxpool.Pool, actorValue stri
 		switch len(rows) {
 		case 1:
 			api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by mobile → entity=%q", actorValue, rows[0].entity)
-			return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "mobile"}
+			return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, Entities: rows[0].entities, MatchedBy: "mobile"}
 		case 0:
 			// no match, continue to next tier
 		default:
@@ -327,7 +337,7 @@ func resolveActorEntity(ctx context.Context, pool *pgxpool.Pool, actorValue stri
 		switch len(rows) {
 		case 1:
 			api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by employee_name → entity=%q", actorValue, rows[0].entity)
-			return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "name"}
+			return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, Entities: rows[0].entities, MatchedBy: "name"}
 		case 0:
 			// no match
 		default:
@@ -383,14 +393,15 @@ func dispatchNotification(
 	// priority-ordered, unambiguous lookup.  See resolveActorEntity doc-comment
 	// for the full tier chain and ambiguity rules.
 	resolution := resolveActorEntity(ctx, pool, actorValue)
-	actorEntity := resolution.Entity
+	actorEntities := resolution.Entities
 
 	// Step 1b-fallback — if actor resolution didn't yield an entity, try reading
 	// entity_name or entity_id directly from the payload. Booking/FD callers pass
 	// these keys so we can match the entity-scoped event without a user DB round-trip.
-	if actorEntity == "" {
+	if len(actorEntities) == 0 {
+		fallback := ""
 		if en := payloadString(payload, "EntityName", "entity_name"); en != "" {
-			actorEntity = en
+			fallback = en
 		} else if eid := payloadString(payload, "EntityID", "entity_id"); eid != "" {
 			// Resolve entity_id → entity_name via masterentitycash
 			var ename string
@@ -398,13 +409,15 @@ func dispatchNotification(
 				`SELECT COALESCE(entity_name,'') FROM masterentitycash WHERE entity_id = $1 AND (is_deleted=false OR is_deleted IS NULL) LIMIT 1`,
 				eid,
 			).Scan(&ename); err == nil && ename != "" {
-				actorEntity = ename
+				fallback = ename
 			}
 		}
-		if actorEntity != "" {
-			api.LogInfo("[NOTIF] entity resolved from payload key for correlation=%s: entity=%q", correlationID, actorEntity)
+		if fallback != "" {
+			actorEntities = []string{fallback}
+			api.LogInfo("[NOTIF] entity resolved from payload key for correlation=%s: entity=%q", correlationID, fallback)
 		}
 	}
+	actorEntityLabel := strings.Join(actorEntities, ", ")
 
 	// If we got an actorValue but could not resolve it at all, warn the user in-app.
 	if actorValue != "" && resolution.UserID == "" {
@@ -434,7 +447,7 @@ func dispatchNotification(
 		// When the payload carries the domain entity, narrow admin to that org pool instead.
 		if en := payloadString(payload, "EntityName", "entity_name"); en != "" {
 			api.LogInfo("[NOTIF] admin actor — narrowing event lookup to payload EntityName=%q for route=%s", en, sourceRoute)
-			events, err = lookupEventsForActor(ctx, pool, sourceRoute, en)
+			events, err = lookupEventsForActor(ctx, pool, sourceRoute, []string{en})
 		} else if eid := payloadString(payload, "EntityID", "entity_id"); eid != "" {
 			var ename string
 			if qerr := pool.QueryRow(ctx,
@@ -442,7 +455,7 @@ func dispatchNotification(
 				eid,
 			).Scan(&ename); qerr == nil && ename != "" {
 				api.LogInfo("[NOTIF] admin actor — narrowing event lookup via EntityID to entity=%q for route=%s", ename, sourceRoute)
-				events, err = lookupEventsForActor(ctx, pool, sourceRoute, ename)
+				events, err = lookupEventsForActor(ctx, pool, sourceRoute, []string{ename})
 			} else {
 				api.LogInfo("[NOTIF] admin actor %q — EntityID not resolved to entity_name; using unrestricted event lookup for route=%s", resolution.UserID, sourceRoute)
 				events, err = lookupEvents(ctx, pool, sourceRoute)
@@ -452,7 +465,7 @@ func dispatchNotification(
 			events, err = lookupEvents(ctx, pool, sourceRoute)
 		}
 	} else {
-		events, err = lookupEventsForActor(ctx, pool, sourceRoute, actorEntity)
+		events, err = lookupEventsForActor(ctx, pool, sourceRoute, actorEntities)
 	}
 	if err != nil {
 		PushSystemNotification(resolution, SystemNotifParams{
@@ -466,11 +479,15 @@ func dispatchNotification(
 		return fmt.Errorf("lookupEventsForActor: %w", err)
 	}
 	if len(events) == 0 {
-		api.LogInfo("[NOTIF] no active approved event for route=%s entity=%q — skipping", sourceRoute, actorEntity)
+		api.LogInfo("[NOTIF] no active approved event for route=%s entity=%q — skipping", sourceRoute, actorEntityLabel)
+		if others, oerr := lookupEvents(ctx, pool, sourceRoute); oerr == nil && len(others) > 0 {
+			api.LogInfo("[NOTIF] route=%s has %d active approved event(s) scoped to other entities — no alert for entity=%q", sourceRoute, len(others), actorEntityLabel)
+			return nil
+		}
 		PushSystemNotification(resolution, SystemNotifParams{
 			Level:         LevelWarn,
 			Subject:       "Notification not configured",
-			Body:          fmt.Sprintf("No active approved notification event found for '%s' (entity: %q). Ask your admin to configure and approve a notification event for this action.", sourceRoute, actorEntity),
+			Body:          fmt.Sprintf("No active approved notification event found for '%s' (entity: %q). Ask your admin to configure and approve a notification event for this action.", sourceRoute, actorEntityLabel),
 			Source:        "notification_pipeline",
 			Route:         sourceRoute,
 			CorrelationID: correlationID,
@@ -478,7 +495,7 @@ func dispatchNotification(
 		return nil
 	}
 	events = dedupeResolvedEventsByEventID(events)
-	api.LogInfo("[NOTIF] resolved %d event(s) for route=%s entity=%q", len(events), sourceRoute, actorEntity)
+	api.LogInfo("[NOTIF] resolved %d event(s) for route=%s entity=%q", len(events), sourceRoute, actorEntityLabel)
 
 	var firstErr error
 	for _, ev := range events {
@@ -962,7 +979,7 @@ func lookupEvents(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) (
 //	org pool = {"BU-North", "APAC", "Global", <all siblings/cousins reachable via APAC/Global>}
 //	→ any event scoped to any entity in the pool (or global) fires.
 //	→ self-entity match (depth=0) is ranked first, then nearest relatives, then global.
-func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, actorEntity string) ([]resolvedEvent, error) {
+func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute string, actorEntities []string) ([]resolvedEvent, error) {
 	// Two separate unidirectional recursive CTEs replace the previous single bidirectional CTE.
 	//
 	// The old bidirectional approach (UNION ALL of parent→child and child→parent in one CTE)
@@ -977,7 +994,7 @@ func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, 
 		WITH RECURSIVE
 		-- Walk UP the hierarchy: actor entity → its parents → grandparents …
 		ancestors AS (
-			SELECT $2::text AS entity_name
+			SELECT unnest($2::text[]) AS entity_name
 			UNION
 			SELECT r.parent_entity_name::text
 			FROM ancestors a
@@ -985,7 +1002,7 @@ func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, 
 		),
 		-- Walk DOWN the hierarchy: actor entity → its children → grandchildren …
 		descendants AS (
-			SELECT $2::text AS entity_name
+			SELECT unnest($2::text[]) AS entity_name
 			UNION
 			SELECT r.child_entity_name::text
 			FROM descendants d
@@ -1008,8 +1025,8 @@ func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, 
 		  )
 		  AND (
 			CASE
-			  -- Actor has a known entity: match any event in the full org pool OR global
-			  WHEN $2 <> ''
+			  -- Actor has known entities: match any event in the full org pool OR global
+			  WHEN COALESCE(array_length($2::text[], 1), 0) > 0
 			  THEN COALESCE(e.entity_name,'') IN (SELECT entity_name FROM org_pool)
 			    OR COALESCE(e.entity_name,'') = ''
 			  -- Actor has no entity: only global events
@@ -1018,7 +1035,7 @@ func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, 
 		  )
 		ORDER BY
 			-- Self-entity exact match first, then other pool members, then global
-			(COALESCE(e.entity_name,'') = $2) DESC,
+			(COALESCE(e.entity_name,'') = ANY($2::text[])) DESC,
 			(COALESCE(e.entity_name,'') <> '') DESC,
 			-- prefer events with an enabled notification_config
 			(EXISTS (SELECT 1 FROM notification_svc.notification_config nc WHERE nc.event_id = e.event_id AND nc.is_enabled = true)) DESC,
@@ -1032,7 +1049,7 @@ func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, 
 			(SELECT MAX(ae2.checker_at) FROM notification_svc.audit_event ae2
 			 WHERE ae2.event_id = e.event_id AND ae2.processing_status = 'APPROVED') DESC NULLS LAST
 	`
-	rows, err := pool.Query(ctx, q, sourceRoute, actorEntity)
+	rows, err := pool.Query(ctx, q, sourceRoute, actorEntities)
 	if err != nil {
 		return nil, err
 	}
@@ -1186,7 +1203,7 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 					u.id::text = NULLIF(TRIM(COALESCE(tr.recipient_user_id,'')), '')
 					OR
 					(POSITION('@' IN COALESCE(tr.recipient_user_id,'')) > 0
-					 AND u.email = NULLIF(TRIM(COALESCE(tr.recipient_user_id,'')), ''))
+					 AND lower(u.email) = lower(NULLIF(TRIM(COALESCE(tr.recipient_user_id,'')), '')))
 				 )
 				)
 				OR

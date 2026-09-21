@@ -11,6 +11,7 @@ import (
 
 const (
 	routeHedgingProposalSave    = "/fx/exposures/hedging-proposals/save"
+	routeHedgingProposalEdit    = "/fx/exposures/hedging-proposals/edit"
 	routeHedgingProposalApprove = "/fx/exposures/hedging-proposals/approve"
 	routeHedgingProposalReject  = "/fx/exposures/hedging-proposals/reject"
 	routeHedgingProposalDelete  = "/fx/exposures/hedging-proposals/delete"

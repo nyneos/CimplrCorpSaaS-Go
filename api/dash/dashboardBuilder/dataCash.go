@@ -584,7 +584,8 @@ func queryCashSweepExecution(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 			COALESCE(l.balance_after, 0) AS balance_after
 		FROM cimplrcorpsaas.sweep_execution_log l
 		JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = l.sweep_id
-		WHERE COALESCE(c.is_deleted, false) = false %s
+		WHERE COALESCE(c.is_deleted, false) = false
+		  AND l.initiation_id IS NOT NULL %s
 		ORDER BY l.execution_date DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef)

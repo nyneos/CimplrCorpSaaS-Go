@@ -2471,7 +2471,7 @@ func populateRecipientsForTemplate(ctx context.Context, pgxPool *pgxpool.Pool, t
 				if strings.Contains(s, "@") {
 					var resolvedUID string
 					lookupErr := pgxPool.QueryRow(ctx,
-						`SELECT id::text FROM users WHERE email = $1 LIMIT 1`, s,
+						`SELECT id::text FROM users WHERE lower(email) = lower($1) LIMIT 1`, s,
 					).Scan(&resolvedUID)
 					if lookupErr == nil && resolvedUID != "" {
 						// Found the internal user — store their UUID
