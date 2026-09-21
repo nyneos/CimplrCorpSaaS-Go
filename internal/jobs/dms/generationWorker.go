@@ -311,8 +311,14 @@ func runGeneration(
 		}
 	} else {
 		for ri, mergeRow := range rowsToMerge {
+			rowCtx := genCtx
+			if expandMode == "PER_ROW" && mergeRow != nil {
+				rowCtx.PoolRows = []map[string]any{mergeRow}
+			}
 			for _, a := range attachments {
-				if err := generateOneAttachment(ctx, pool, newAttachmentJob(a), mergeRow); err != nil {
+				job := newAttachmentJob(a)
+				job.GenCtx = rowCtx
+				if err := generateOneAttachment(ctx, pool, job, mergeRow); err != nil {
 					failed++
 					errDetails = append(errDetails, fmt.Sprintf("%s[row%d]: %v", a.DocumentTemplateID, ri, err))
 					continue

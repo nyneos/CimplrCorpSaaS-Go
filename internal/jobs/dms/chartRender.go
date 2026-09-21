@@ -32,7 +32,8 @@ type chartSeriesPoint struct {
 }
 
 // aggregateChartSeries groups pool rows by dimension and sums measure.
-// For pie/donut-style charts, collapses a long tail into "Other".
+// maxBars <= 0 keeps every category; a positive cap collapses the tail into
+// "Other".
 func aggregateChartSeries(rows []map[string]any, dimension, measure string, maxBars int) []chartSeriesPoint {
 	dimension = strings.TrimSpace(dimension)
 	measure = strings.TrimSpace(measure)
@@ -40,7 +41,9 @@ func aggregateChartSeries(rows []map[string]any, dimension, measure string, maxB
 		return nil
 	}
 	sums := map[string]float64{}
+	counts := map[string]float64{}
 	order := make([]string, 0)
+	measureNumeric := false
 	for _, row := range rows {
 		if row == nil {
 			continue
@@ -51,16 +54,28 @@ func aggregateChartSeries(rows []map[string]any, dimension, measure string, maxB
 		}
 		val := 1.0
 		if measure != "" {
-			val = parseFloatLoose(lookupRowField(row, measure))
+			f, ok := numericValue(lookupRowField(row, measure))
+			if ok {
+				measureNumeric = true
+			}
+			val = f
 		}
 		if _, ok := sums[label]; !ok {
 			order = append(order, label)
 		}
 		sums[label] += val
+		counts[label]++
+	}
+	// A measure that never resolves to a number (a text column, or one absent
+	// from the source) would otherwise plot as a flat zero series and render as
+	// "No data"; fall back to how many rows each category holds.
+	picked := sums
+	if measure != "" && !measureNumeric {
+		picked = counts
 	}
 	out := make([]chartSeriesPoint, 0, len(order))
 	for _, label := range order {
-		out = append(out, chartSeriesPoint{Label: label, Value: sums[label]})
+		out = append(out, chartSeriesPoint{Label: label, Value: picked[label]})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].Value > out[j].Value
@@ -76,6 +91,34 @@ func aggregateChartSeries(rows []map[string]any, dimension, measure string, maxB
 		}
 	}
 	return out
+}
+
+// numericValue is parseFloatLoose plus whether the value was a number at all,
+// which separates a real zero from a field that carries no measurable value.
+func numericValue(v any) (float64, bool) {
+	if v == nil {
+		return 0, false
+	}
+	switch t := v.(type) {
+	case float64, float32, int, int32, int64, uint32, uint64:
+		return parseFloatLoose(v), true
+	case json.Number:
+		f, err := t.Float64()
+		return f, err == nil
+	case pgtype.Numeric:
+		return numericToFloat(t), t.Valid
+	case *pgtype.Numeric:
+		if t == nil {
+			return 0, false
+		}
+		return numericToFloat(*t), t.Valid
+	}
+	s := strings.ReplaceAll(strings.TrimSpace(formatFieldValue(v)), ",", "")
+	if s == "" || s == "-" || strings.EqualFold(s, "null") {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	return f, err == nil
 }
 
 func parseFloatLoose(v any) float64 {
@@ -275,6 +318,54 @@ func chartYRange(series []chartSeriesPoint) *chart.ContinuousRange {
 	return &chart.ContinuousRange{Min: 0, Max: maxV * 1.15}
 }
 
+const (
+	catChartBaseWidth  = 760
+	catChartBaseHeight = 470
+	catChartMaxWidth   = 2400
+	catChartGutter     = 170
+	catChartMinPitch   = 13
+)
+
+// categoryChartSize widens the canvas so every category keeps a usable slice of
+// the x-axis. go-chart silently clips whatever does not fit the image, so a
+// fixed width would drop the tail categories instead of drawing them.
+func categoryChartSize(n int) (width, height int) {
+	width = catChartGutter + n*catChartMinPitch
+	if width < catChartBaseWidth {
+		width = catChartBaseWidth
+	}
+	if width > catChartMaxWidth {
+		width = catChartMaxWidth
+	}
+	grow := math.Min(1.8, float64(width)/float64(catChartBaseWidth))
+	return width, int(math.Round(float64(catChartBaseHeight) * grow))
+}
+
+// barChartBarMetrics picks an explicit bar width and spacing that fit the plot
+// exactly. go-chart's own fit rounds every bar up, so the accumulated overflow
+// pushes the last bars past the right edge of the image.
+func barChartBarMetrics(n, width int) (barW, spacing int) {
+	if n <= 0 {
+		return 36, 16
+	}
+	pitch := (width - catChartGutter) / n
+	if pitch < 3 {
+		pitch = 3
+	}
+	gap := pitch / 5
+	if gap < 1 {
+		gap = 1
+	}
+	barW = pitch - gap
+	if barW > 36 {
+		barW = 36
+	}
+	if barW < 2 {
+		barW = 2
+	}
+	return barW, pitch - barW
+}
+
 func renderBarChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	if chartSeriesAllZero(series) {
 		return renderEmptyChartPNG(msgNoData)
@@ -291,15 +382,18 @@ func renderBarChartPNG(series []chartSeriesPoint) ([]byte, error) {
 			Style: chart.Style{FillColor: palette[i%len(palette)], StrokeColor: palette[i%len(palette)]},
 		})
 	}
+	width, height := categoryChartSize(len(series))
+	barW, barSpacing := barChartBarMetrics(len(series), width)
 	graph := chart.BarChart{
 		Title: " ",
 		Background: chart.Style{
 			Padding:   chart.Box{Top: 28, Left: 68, Right: 20, Bottom: 96},
 			FillColor: drawing.ColorWhite,
 		},
-		Width:    760,
-		Height:   470,
-		BarWidth: 36,
+		Width:      width,
+		Height:     height,
+		BarWidth:   barW,
+		BarSpacing: barSpacing,
 		XAxis: chart.Style{
 			Hidden: true,
 		},
@@ -369,7 +463,7 @@ func barChartGeometry(graph chart.BarChart) (left, bottom, barW, spacing int) {
 // label placement follows what go-chart actually drew rather than a re-derived
 // copy of its internal axis-fitting maths. Returns the first bar's left edge,
 // the plot floor, and the bar pitch.
-func detectBarBand(img *image.RGBA, palette []drawing.Color, n int) (firstLeft, floor, slot, barW int, ok bool) {
+func detectBarBand(img *image.RGBA, palette []drawing.Color, n, minBarPx int) (firstLeft, floor, slot, barW int, ok bool) {
 	if n <= 0 {
 		return 0, 0, 0, 0, false
 	}
@@ -378,28 +472,40 @@ func detectBarBand(img *image.RGBA, palette []drawing.Color, n int) (firstLeft, 
 		want[uint32(c.R)<<16|uint32(c.G)<<8|uint32(c.B)] = true
 	}
 	b := img.Bounds()
-	isBar := func(x, y int) bool {
+	barKey := func(x, y int) (uint32, bool) {
 		r, g, bb, a := img.At(x, y).RGBA()
 		if a == 0 {
-			return false
+			return 0, false
 		}
-		return want[uint32(r>>8)<<16|uint32(g>>8)<<8|uint32(bb>>8)]
+		k := uint32(r>>8)<<16 | uint32(g>>8)<<8 | uint32(bb>>8)
+		return k, want[k]
 	}
 	// Runs on a row, keeping only those wide enough to be a bar rather than an
-	// antialiased glyph edge from the y-axis tick labels.
-	const minBarPx = 6
+	// antialiased glyph edge from the y-axis tick labels. A run also ends where
+	// the fill colour changes, so bars that touch once the pitch is tight still
+	// count as one run each instead of merging into a single band.
 	runs := func(y int) (starts, widths []int) {
-		runStart := -1
+		runStart, runKey := -1, uint32(0)
+		flush := func(end int) {
+			if runStart >= 0 && end-runStart >= minBarPx {
+				starts = append(starts, runStart)
+				widths = append(widths, end-runStart)
+			}
+			runStart = -1
+		}
 		for x := b.Min.X; x <= b.Max.X; x++ {
-			cur := x < b.Max.X && isBar(x, y)
-			if cur && runStart < 0 {
-				runStart = x
-			} else if !cur && runStart >= 0 {
-				if x-runStart >= minBarPx {
-					starts = append(starts, runStart)
-					widths = append(widths, x-runStart)
-				}
-				runStart = -1
+			k, isBar := uint32(0), false
+			if x < b.Max.X {
+				k, isBar = barKey(x, y)
+			}
+			switch {
+			case !isBar:
+				flush(x)
+			case runStart < 0:
+				runStart, runKey = x, k
+			case k != runKey:
+				flush(x)
+				runStart, runKey = x, k
 			}
 		}
 		return starts, widths
@@ -460,7 +566,11 @@ func drawBarCategoryLabels(pngBytes []byte, graph chart.BarChart, series []chart
 	// go-chart grows the canvas to fit the y-axis, so the drawn bars sit well
 	// right of the raw padding. Read their true positions off the rendered
 	// image rather than re-deriving that adjustment.
-	if fl, fy, sl, bw, ok := detectBarBand(canvas, chartBrandPalette(), len(series)); ok {
+	minBarPx := barW / 2
+	if minBarPx < 4 {
+		minBarPx = 4
+	}
+	if fl, fy, sl, bw, ok := detectBarBand(canvas, chartBrandPalette(), len(series), minBarPx); ok {
 		left, bottom = fl, fy
 		if sl > 0 {
 			slot = sl
@@ -489,13 +599,11 @@ func drawBarCategoryLabels(pngBytes []byte, graph chart.BarChart, series []chart
 			fc.DrawString(p.Label, fixed.P(tx, bottom+14))
 		}
 	} else {
+		rpx := rotatedLabelFontPx(slot)
 		for i, p := range series {
-			strip, sw, sh := renderTextStrip(ttf, fontPx, p.Label,
+			strip, sw, sh := renderTextStrip(ttf, rpx, fitLabelToPx(p.Label, rpx, avail),
 				color.RGBA{R: 0x33, G: 0x41, B: 0x55, A: 0xff})
 			if strip == nil {
-				continue
-			}
-			if sw > avail {
 				continue
 			}
 			// Rotated 90° CCW: strip width becomes vertical extent.
@@ -509,6 +617,30 @@ func drawBarCategoryLabels(pngBytes []byte, graph chart.BarChart, series []chart
 		return pngBytes, nil
 	}
 	return out.Bytes(), nil
+}
+
+// rotatedLabelFontPx shrinks the category font until a 90°-turned label fits
+// the per-category pitch, so removing the "Other" cap cannot make neighbouring
+// labels collide.
+func rotatedLabelFontPx(slot int) float64 {
+	px := float64(slot) / 1.7
+	if px > 9 {
+		px = 9
+	}
+	if px < 5 {
+		px = 5
+	}
+	return px
+}
+
+// fitLabelToPx ellipsises a label that is longer than the band reserved for it
+// so it is shortened rather than dropped.
+func fitLabelToPx(s string, fontPx float64, availPx int) string {
+	n := int(float64(availPx-4) / (fontPx * 0.62))
+	if n < 3 {
+		n = 3
+	}
+	return truncateLabel(s, n)
 }
 
 func maxLabelChars(slot int, fontPx float64) int {
@@ -628,7 +760,6 @@ func renderLineChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	}
 	xs := make([]float64, len(series))
 	ys := make([]float64, len(series))
-	ticks := make([]chart.Tick, 0, len(series))
 	minY, maxY := series[0].Value, series[0].Value
 	for i, p := range series {
 		xs[i] = float64(i)
@@ -639,22 +770,30 @@ func renderLineChartPNG(series []chartSeriesPoint) ([]byte, error) {
 		if p.Value > maxY {
 			maxY = p.Value
 		}
-		ticks = append(ticks, chart.Tick{Value: float64(i), Label: truncateLabel(p.Label, 12)})
 	}
+	// Every point equal (one category, or a constant measure) gives a zero span,
+	// which repeats one tick label down the whole axis; anchor it at zero so the
+	// value can still be read off.
 	if maxY <= minY {
-		maxY = minY + 1
+		if maxY > 0 {
+			minY = 0
+		} else if maxY < 0 {
+			maxY = 0
+		} else {
+			maxY = minY + 1
+		}
 	}
 	pad := (maxY - minY) * 0.1
+	width, height := categoryChartSize(len(series))
 	graph := chart.Chart{
-		Width:  760,
-		Height: 380,
+		Width:  width,
+		Height: height,
 		Background: chart.Style{
-			Padding:   chart.Box{Top: 28, Left: 48, Right: 28, Bottom: 20},
+			Padding:   chart.Box{Top: 28, Left: 48, Right: 28, Bottom: 96},
 			FillColor: drawing.ColorWhite,
 		},
 		XAxis: chart.XAxis{
-			Ticks: ticks,
-			Style: chart.Style{FontSize: 9, FontColor: drawing.ColorFromHex("334155")},
+			Style: chart.Style{Hidden: true},
 			Range: &chart.ContinuousRange{Min: 0, Max: float64(len(series) - 1)},
 		},
 		YAxis: chart.YAxis{
@@ -676,8 +815,8 @@ func renderLineChartPNG(series []chartSeriesPoint) ([]byte, error) {
 				Style: chart.Style{
 					StrokeColor: drawing.ColorFromHex("0f766e"),
 					StrokeWidth: 2.5,
-					DotColor:    drawing.ColorFromHex("0b3d2e"),
-					DotWidth:    5,
+					DotColor:    lineDotColor,
+					DotWidth:    lineDotWidth(len(series)),
 				},
 			},
 		},
@@ -687,7 +826,97 @@ func renderLineChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	if err := graph.Render(chart.PNG, &buf); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	return drawLineCategoryLabels(buf.Bytes(), graph, series)
+}
+
+// lineDotColor is unique to the plotted points — the legend sample and the line
+// itself use the stroke colour — so the dots can be located by exact colour.
+var lineDotColor = drawing.ColorFromHex("0b3d2e")
+
+func lineDotWidth(n int) float64 {
+	if n > 30 {
+		return 3
+	}
+	return 5
+}
+
+// detectDotColumns returns the x centre of every run of dot-coloured pixels,
+// left to right, which locates the points go-chart actually plotted.
+func detectDotColumns(img *image.RGBA, dot drawing.Color) []int {
+	b := img.Bounds()
+	if b.Dx() <= 0 {
+		return nil
+	}
+	hit := make([]bool, b.Dx())
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			c := img.RGBAAt(x, y)
+			if c.A == 0xff && c.R == dot.R && c.G == dot.G && c.B == dot.B {
+				hit[x-b.Min.X] = true
+			}
+		}
+	}
+	var centers []int
+	start := -1
+	for i := 0; i <= len(hit); i++ {
+		on := i < len(hit) && hit[i]
+		if on && start < 0 {
+			start = i
+		} else if !on && start >= 0 {
+			centers = append(centers, b.Min.X+(start+i-1)/2)
+			start = -1
+		}
+	}
+	return centers
+}
+
+// drawLineCategoryLabels paints each point's dimension label turned 90° under
+// the plot. go-chart can only draw x-axis ticks horizontally, which runs long
+// ids into each other, so the axis is hidden and the labels painted here.
+func drawLineCategoryLabels(pngBytes []byte, graph chart.Chart, series []chartSeriesPoint) ([]byte, error) {
+	src, err := png.Decode(bytes.NewReader(pngBytes))
+	if err != nil {
+		return pngBytes, nil
+	}
+	canvas := image.NewRGBA(src.Bounds())
+	draw.Draw(canvas, src.Bounds(), src, src.Bounds().Min, draw.Src)
+
+	ttf, err := chart.GetDefaultFont()
+	if err != nil {
+		return pngBytes, nil
+	}
+	centers := detectDotColumns(canvas, lineDotColor)
+	if len(centers) < 2 || len(series) < 2 {
+		return pngBytes, nil
+	}
+	// Dots can merge once the pitch is tighter than the dot itself, so the band
+	// is rebuilt from its ends rather than trusting one run per point.
+	first := centers[0]
+	step := float64(centers[len(centers)-1]-first) / float64(len(series)-1)
+	if step <= 0 {
+		return pngBytes, nil
+	}
+	bottom := graph.GetHeight() - graph.Background.Padding.GetBottom(20)
+	avail := canvas.Bounds().Dy() - bottom - 8
+	if avail <= 8 {
+		return pngBytes, nil
+	}
+	fontPx := rotatedLabelFontPx(int(step))
+	col := color.RGBA{R: 0x33, G: 0x41, B: 0x55, A: 0xff}
+	for i, p := range series {
+		strip, sw, sh := renderTextStrip(ttf, fontPx, fitLabelToPx(p.Label, fontPx, avail), col)
+		if strip == nil {
+			continue
+		}
+		dx := first + int(math.Round(float64(i)*step)) - sh/2
+		blitRotated90(canvas, strip, dx, bottom+6, sw, sh)
+	}
+
+	var out bytes.Buffer
+	if err := png.Encode(&out, canvas); err != nil {
+		return pngBytes, nil
+	}
+	return out.Bytes(), nil
 }
 
 // sliceChartValues builds pie/donut slices. Captions are drawn only on slices
@@ -734,6 +963,22 @@ func sliceChartValues(series []chartSeriesPoint, percentOnly bool) ([]chart.Valu
 	return values, len(values) > 0
 }
 
+// splitLoneSlice works around go-chart drawing a single-value pie or donut as a
+// path it never fills, which comes out as a blank image. Two halves of the one
+// colour paint the same full circle through the multi-slice path that does
+// fill; their strokes match the fill so the seam stays invisible.
+func splitLoneSlice(values []chart.Value) []chart.Value {
+	if len(values) != 1 {
+		return values
+	}
+	first := values[0]
+	first.Value = values[0].Value / 2
+	first.Style.StrokeColor = first.Style.FillColor
+	second := first
+	second.Label = ""
+	return []chart.Value{first, second}
+}
+
 func renderPieChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	// Keep pie readable: top 8 + Other already applied by caller; ensure positive values.
 	values, ok := sliceChartValues(series, false)
@@ -743,7 +988,7 @@ func renderPieChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	pie := chart.PieChart{
 		Width:  720,
 		Height: 520,
-		Values: values,
+		Values: splitLoneSlice(values),
 		Background: chart.Style{
 			Padding:   chart.Box{Top: 20, Left: 20, Right: 20, Bottom: 20},
 			FillColor: drawing.ColorWhite,
@@ -769,7 +1014,7 @@ func renderDonutChartPNG(series []chartSeriesPoint) ([]byte, error) {
 	donut := chart.DonutChart{
 		Width:  720,
 		Height: 520,
-		Values: values,
+		Values: splitLoneSlice(values),
 		Background: chart.Style{
 			Padding:   chart.Box{Top: 30, Left: 60, Right: 60, Bottom: 30},
 			FillColor: drawing.ColorWhite,
