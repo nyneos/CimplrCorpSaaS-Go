@@ -1712,9 +1712,16 @@ func GetExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p updateStatusesParams) (int, error) {
+type settlementStatusResult struct {
+	Count    int
+	Awaiting int
+	Blocked  string
+}
+
+func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p updateStatusesParams) (settlementStatusResult, error) {
 	ids, status, actor, userID, comments, actionType := p.IDs, p.Status, p.Actor, p.UserID, p.Comments, p.ActionType
 	count := 0
+	awaiting := 0
 	updatedIDs := make([]string, 0, len(ids))
 	deletedIDs := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -1725,6 +1732,66 @@ func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p
 		oldSnap := settlementSnapshot(ctx, pool, id)
 		var prevStatus string
 		_ = pool.QueryRow(ctx, `SELECT processing_status FROM public.exposure_settlement_document WHERE settlement_id = $1::uuid`, id).Scan(&prevStatus)
+
+		var engineActed bool
+		if actionType == "CONFIRM" {
+			if policyRow, loadErr := LoadExposureSettlementRow(ctx, pool, id); loadErr == nil {
+				if lazyMatrixID := runtime.ResolveTriggerApprovalMatrix(ctx, pool, runtime.EnforceInput{
+					EventCode:   common.TriggerPreCreate,
+					ModuleCode:  common.ModuleFX,
+					SubModule:   "EXPOSURE_SETTLEMENT",
+					EntityCode:  policyRow.Entity,
+					ActorUserID: userID,
+					HandlerName: "ApproveExposureSettlementDocuments",
+					APIPath:     "/fx/exposures/settlements/approve",
+					Fields:      BuildExposureSettlementPolicyFields(policyRow),
+				}); lazyMatrixID != "" {
+					txnType := "FX_SETTLEMENT_CREATE"
+					switch strings.ToUpper(strings.TrimSpace(policyRow.SettlementMethod)) {
+					case "ROLLOVER":
+						txnType = "FX_SETTLEMENT_ROLLOVER"
+					case "CANCELLATION":
+						txnType = "FX_SETTLEMENT_CANCELLATION"
+					}
+					_, _ = approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+						ModuleCode:          "FX",
+						TransactionType:     txnType,
+						RecordID:            id,
+						MatrixID:            lazyMatrixID,
+						RequirePinnedMatrix: true,
+						AutoApplyIfUnpinned: false,
+						SubmittedByEmail:    sessionEmail(userID),
+					})
+				}
+			}
+		}
+		if actionType == "CONFIRM" || actionType == "REJECT" {
+			userEmail := ""
+			for _, s := range auth.GetActiveSessions() {
+				if s.UserID == userID {
+					userEmail = s.Email
+					break
+				}
+			}
+			actionStr := "APPROVED"
+			if actionType == "REJECT" {
+				actionStr = "REJECTED"
+			}
+			gate := approvalengine.Gate(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FX", RecordID: id, UserID: userID, UserEmail: userEmail,
+				Action: actionStr, Comment: comments,
+			})
+			if gate.Blocked {
+				return settlementStatusResult{Blocked: gate.Reason}, nil
+			}
+			if gate.Acted {
+				engineActed = true
+				if !gate.Finalized {
+					awaiting++
+					continue
+				}
+			}
+		}
 
 		if actionType == "CONFIRM" && strings.EqualFold(prevStatus, constants.StatusPendingDeleteApproval) {
 			_, err := pool.Exec(ctx, `
@@ -1759,28 +1826,6 @@ func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p
 					// keep approved status but report via audit new values
 					_ = applyErr
 				}
-			}
-		}
-
-		var engineActed bool
-		if actionType == "CONFIRM" || actionType == "REJECT" {
-			userEmail := ""
-			for _, s := range auth.GetActiveSessions() {
-				if s.UserID == userID {
-					userEmail = s.Email
-					break
-				}
-			}
-			actionStr := "APPROVED"
-			if actionType == "REJECT" {
-				actionStr = "REJECTED"
-			}
-			res, err := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
-				ModuleCode: "FX", RecordID: id, UserID: userID, UserEmail: userEmail,
-				Action: actionStr, Comment: comments,
-			})
-			if err == nil && res.Acted {
-				engineActed = true
 			}
 		}
 
@@ -1836,7 +1881,7 @@ func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p
 			})
 		}
 	}
-	return count, nil
+	return settlementStatusResult{Count: count, Awaiting: awaiting}, nil
 }
 
 func excludeSettlementIDs(ids []string, exclude []string) []string {
@@ -1895,7 +1940,7 @@ func ApproveExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		n, err := updateExposureSettlementStatuses(ctx, pool, updateStatusesParams{
+		res, err := updateExposureSettlementStatuses(ctx, pool, updateStatusesParams{
 			IDs: req.SettlementIDs, Status: constants.StatusApproved, Actor: actor, UserID: req.UserID,
 			Comments: strings.TrimSpace(req.Comments), ActionType: "CONFIRM",
 		})
@@ -1903,7 +1948,16 @@ func ApproveExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "failed to approve settlements")
 			return
 		}
-		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d settlement(s) approved", n), map[string]any{"count": n})
+		if res.Blocked != "" {
+			respondWithError(w, http.StatusUnprocessableEntity, res.Blocked)
+			return
+		}
+		n := res.Count
+		msg := fmt.Sprintf("%d settlement(s) approved", n)
+		if res.Awaiting > 0 {
+			msg = fmt.Sprintf("%s; %d awaiting further approval", msg, res.Awaiting)
+		}
+		respondWithSuccess(w, http.StatusOK, msg, map[string]any{"count": n, "awaiting": res.Awaiting})
 	}
 }
 
@@ -1945,7 +1999,7 @@ func RejectExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		n, err := updateExposureSettlementStatuses(ctx, pool, updateStatusesParams{
+		res, err := updateExposureSettlementStatuses(ctx, pool, updateStatusesParams{
 			IDs: req.SettlementIDs, Status: constants.StatusRejected, Actor: actor, UserID: req.UserID,
 			Comments: strings.TrimSpace(req.Comments), ActionType: "REJECT",
 		})
@@ -1953,7 +2007,16 @@ func RejectExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "failed to reject settlements")
 			return
 		}
-		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d settlement(s) rejected", n), map[string]any{"count": n})
+		if res.Blocked != "" {
+			respondWithError(w, http.StatusUnprocessableEntity, res.Blocked)
+			return
+		}
+		n := res.Count
+		msg := fmt.Sprintf("%d settlement(s) rejected", n)
+		if res.Awaiting > 0 {
+			msg = fmt.Sprintf("%s; %d awaiting further approval", msg, res.Awaiting)
+		}
+		respondWithSuccess(w, http.StatusOK, msg, map[string]any{"count": n, "awaiting": res.Awaiting})
 	}
 }
 
@@ -1998,7 +2061,7 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				triggerMatrices[id] = tID
 			}
 		}
-		n, err := updateExposureSettlementStatuses(ctx, pool, updateStatusesParams{
+		res, err := updateExposureSettlementStatuses(ctx, pool, updateStatusesParams{
 			IDs: req.SettlementIDs, Status: constants.StatusPendingDeleteApproval, Actor: actor, UserID: req.UserID,
 			Comments: strings.TrimSpace(req.Comments), ActionType: "DELETE",
 		})
@@ -2006,6 +2069,11 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "failed to delete settlements")
 			return
 		}
+		if res.Blocked != "" {
+			respondWithError(w, http.StatusUnprocessableEntity, res.Blocked)
+			return
+		}
+		n := res.Count
 
 		makerEmail := ""
 		for _, s := range auth.GetActiveSessions() {
@@ -2031,6 +2099,10 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}(req.SettlementIDs, makerEmail, triggerMatrices)
 
-		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d settlement(s) marked for delete", n), map[string]any{"count": n})
+		msg := fmt.Sprintf("%d settlement(s) marked for delete", n)
+		if res.Awaiting > 0 {
+			msg = fmt.Sprintf("%s; %d awaiting further approval", msg, res.Awaiting)
+		}
+		respondWithSuccess(w, http.StatusOK, msg, map[string]any{"count": n, "awaiting": res.Awaiting})
 	}
 }
