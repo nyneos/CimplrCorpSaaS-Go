@@ -286,6 +286,8 @@ func resolveActorEntity(ctx context.Context, pool *pgxpool.Pool, actorValue stri
 					r.entity = r.entities[0]
 				}
 				out = append(out, r)
+			} else {
+				api.LogError("[NOTIF] resolveActorEntity: scan failed — actor will resolve to no entity: %v", err)
 			}
 		}
 		return out, rows.Err()
@@ -294,9 +296,9 @@ func resolveActorEntity(ctx context.Context, pool *pgxpool.Pool, actorValue stri
 	// sel returns EVERY entity name mapped to the user (empty array if none mapped);
 	// a user scoped to several entities must match events scoped to any of them.
 	const sel = `SELECT u.id::text, COALESCE(u.email,''), COALESCE(u.employee_name,''),
-		COALESCE((SELECT array_agg(uem.entity_name ORDER BY uem.entity_id)
+		COALESCE((SELECT array_agg(TRIM(uem.entity_name::text) ORDER BY uem.entity_id)
 		          FROM user_entity_mappings uem
-		          WHERE uem.user_id = u.id AND COALESCE(uem.entity_name,'') <> ''), '{}')
+		          WHERE uem.user_id = u.id AND COALESCE(TRIM(uem.entity_name::text),'') <> ''), '{}'::text[])
 	FROM public.users u`
 
 	// ── Tier 1: CIMPLR ID prefix or exact PK match ─────────────────────────
@@ -478,6 +480,10 @@ func dispatchNotification(
 	}
 	if len(events) == 0 {
 		api.LogInfo("[NOTIF] no active approved event for route=%s entity=%q — skipping", sourceRoute, actorEntityLabel)
+		if others, oerr := lookupEvents(ctx, pool, sourceRoute); oerr == nil && len(others) > 0 {
+			api.LogInfo("[NOTIF] route=%s has %d active approved event(s) scoped to other entities — no alert for entity=%q", sourceRoute, len(others), actorEntityLabel)
+			return nil
+		}
 		PushSystemNotification(resolution, SystemNotifParams{
 			Level:         LevelWarn,
 			Subject:       "Notification not configured",
