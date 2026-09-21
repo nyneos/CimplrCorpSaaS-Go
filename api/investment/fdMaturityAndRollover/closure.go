@@ -183,7 +183,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Maturity-dashboard eligibility rules:
 		//   SHOW  — FD has no closure entry at all
-		//   SHOW  — FD's only closure entries are is_deleted=true (operator deleted → re-admitted)
+		//   SHOW  — Fd's only closure entries are is_deleted=true (operator deleted → re-admitted)
 		//   HIDE  — FD has ANY non-deleted closure entry regardless of status
 		//           (PENDING_APPROVAL, APPROVED, POSTED, REJECTED — all hide the FD)
 		//

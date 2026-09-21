@@ -308,7 +308,7 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, e := range errs {
 			results = append(results, map[string]interface{}{"success": false, "error": e})
 		}
-		fdclosingcommon.RespondSuccess(w, "FD(s) added to scope; checklist seeded", map[string]interface{}{
+		fdclosingcommon.RespondSuccess(w, "Fd's added to scope; checklist seeded", map[string]interface{}{
 			"cycle_id": req.CycleID, "results": results,
 		})
 		api.LogInfo("[FDClosingScope] CreateScope (immediate): cycle=%s created=%d errors=%d by=%s",

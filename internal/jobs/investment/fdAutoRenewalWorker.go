@@ -243,7 +243,7 @@ func processAutoRenewalFD(ctx context.Context, p AutoRenewalFDParams) error {
 	)
 
 	// Create fd_booking_request (BOOKING_PENDING) so ops can place the new FD
-	// with the bank. The entry mirrors the source FD's configuration.
+	// with the bank. The entry mirrors the source Fd's configuration.
 	var newBookingID string
 	bookErr := db.QueryRow(ctx, `
 		INSERT INTO investment.fd_booking_request (

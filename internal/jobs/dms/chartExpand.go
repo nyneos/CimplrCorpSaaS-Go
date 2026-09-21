@@ -74,11 +74,7 @@ func expandChartPlaceholders(
 			rows = []map[string]any{headerRow}
 		}
 
-		series := aggregateChartSeries(rows, dimension, measure, 12)
-		ct := strings.ToLower(strings.TrimSpace(chartType))
-		if ct == "pie" || ct == "donut" || ct == "radial_bar" {
-			series = aggregateChartSeries(rows, dimension, measure, 8)
-		}
+		series := aggregateChartSeries(rows, dimension, measure, 0)
 		if len(series) == 0 {
 			var b strings.Builder
 			b.WriteString(`<div class="dms-chart-block" style="margin:14px 0 22px;page-break-inside:avoid">`)

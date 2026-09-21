@@ -2839,7 +2839,7 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 	tds, _ := loadTDSConfig(ctx, exec, fd.TDSPlanID)
 	logger.LogInfo("[CFGEN][%s] ✓ loadTDSConfig (+%s)", fd.ConfirmationID, time.Since(t2).Round(time.Millisecond))
 
-	// Resolve day count convention from master — prefer fd's day_count_code, fall back to bank config's.
+	// Resolve day count convention from master — prefer Fd's day_count_code, fall back to bank config's.
 	dcRef := firstNonEmpty(fd.DayCountConvention, cfg.DayCountCode)
 	t3 := time.Now()
 	dcInfo := loadDayCountConvention(ctx, exec, dcRef)

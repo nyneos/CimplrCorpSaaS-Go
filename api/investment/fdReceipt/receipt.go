@@ -232,7 +232,7 @@ func checkFDDates(fdStart, fdMaturity time.Time, labels, values []string) string
 		}
 		if t.Before(fdStart) || t.After(fdMaturity) {
 			return fmt.Sprintf(
-				"%s (%s) must be within this FD's window (%s to %s)",
+				"%s (%s) must be within this Fd's window (%s to %s)",
 				labels[i], v, fdStart.Format(constants.DateFormat), fdMaturity.Format(constants.DateFormat))
 		}
 	}
@@ -892,7 +892,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Validate updated date fields against FD's active period
+		// Validate updated date fields against Fd's active period
 		if fdIDForReceipt != "" {
 			var fdStartU, fdMaturityU time.Time
 			if scanErr := pool.QueryRow(ctx,
@@ -3939,12 +3939,12 @@ func GetExceptions(pool *pgxpool.Pool) http.HandlerFunc {
 func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID             string `json:"user_id"`
-			ExceptionID        string `json:"exception_id"`
-			ProposedResolution string `json:"proposed_resolution"`
-			ReasonCode         string `json:"reason_code"`
-			ResolutionRemarks  string `json:"resolution_remarks"`
-			Attachment         string `json:"attachment"`
+			UserID                 string `json:"user_id"`
+			ExceptionID            string `json:"exception_id"`
+			ProposedResolution     string `json:"proposed_resolution"`
+			ReasonCode             string `json:"reason_code"`
+			ResolutionRemarks      string `json:"resolution_remarks"`
+			Attachment             string `json:"attachment"`
 			CarryForwardReason     string `json:"carry_forward_reason"`
 			TargetResolutionPeriod string `json:"target_resolution_period"`
 		}
