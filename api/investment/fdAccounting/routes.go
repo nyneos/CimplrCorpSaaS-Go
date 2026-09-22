@@ -33,6 +33,7 @@ func RegisterFDAccountingRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
 	mux.Handle("/investment/fd/accounting/journal/bulk-approve", mid(http.HandlerFunc(ApproveJournal(pool))))
 	mux.Handle("/investment/fd/accounting/journal/reject", mid(http.HandlerFunc(RejectJournal(pool))))
 	mux.Handle("/investment/fd/accounting/journal/bulk-reject", mid(http.HandlerFunc(RejectJournal(pool))))
+	mux.Handle("/investment/fd/accounting/journal/validate", mid(http.HandlerFunc(ValidateJournal(pool))))
 	mux.Handle("/investment/fd/accounting/journal/post", mid(http.HandlerFunc(PostJournal(pool))))
 	mux.Handle("/investment/fd/accounting/journal/retry", mid(http.HandlerFunc(RetryJournal(pool))))
 
