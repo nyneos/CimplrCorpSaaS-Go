@@ -298,7 +298,9 @@ func resolveActorEntity(ctx context.Context, pool *pgxpool.Pool, actorValue stri
 	const sel = `SELECT u.id::text, COALESCE(u.email,''), COALESCE(u.employee_name,''),
 		COALESCE((SELECT array_agg(TRIM(uem.entity_name::text) ORDER BY uem.entity_id)
 		          FROM user_entity_mappings uem
-		          WHERE uem.user_id = u.id AND COALESCE(TRIM(uem.entity_name::text),'') <> ''), '{}'::text[])
+		          WHERE uem.user_id = u.id
+		            AND COALESCE(uem.is_deleted, false) = false
+		            AND COALESCE(TRIM(uem.entity_name::text),'') <> ''), '{}'::text[])
 	FROM public.users u`
 
 	// ── Tier 1: CIMPLR ID prefix or exact PK match ─────────────────────────

@@ -62,6 +62,14 @@ func HandleCheck(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.Variables == nil {
 			req.Variables = map[string]string{}
 		}
+		// Fill gaps from the persisted record so a pre-flight check sees the
+		// same CDM variables the handler's Enforce will. Caller-supplied values
+		// win — they carry unsaved form state.
+		for path, value := range runtime.ResolveRecordVariables(r.Context(), pool, req.SubModule, req.BusinessRecordID) {
+			if existing, ok := req.Variables[path]; !ok || strings.TrimSpace(existing) == "" {
+				req.Variables[path] = value
+			}
+		}
 
 		traceID := common.ResolveTraceID(w, r, req.TraceID)
 		correlationID := common.ResolveCorrelationID(r, req.CorrelationID)

@@ -3,6 +3,7 @@ package exposures
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -21,6 +22,8 @@ import (
 )
 
 const errProposalIDsRequired = "proposal_ids is required"
+
+const hedgingProposalRecordTable = "public.hedging_proposal_document"
 
 type hedgingProposalLineInput struct {
 	BusinessUnit          string      `json:"business_unit"`
@@ -353,6 +356,7 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 					ModuleCode:          "FX",
 					TransactionType:     tType,
 					RecordID:            id,
+					RecordTable:         hedgingProposalRecordTable,
 					MatrixID:            tID,
 					RequirePinnedMatrix: true,
 					AutoApplyIfUnpinned: false,
@@ -606,48 +610,87 @@ func updateHedgingProposalDocumentStatuses(ctx context.Context, pool *pgxpool.Po
 	}
 	count := 0
 	updatedIDs := make([]string, 0, len(ids))
+	deletedIDs := make([]string, 0, len(ids))
+	// The approval matrix owns the decision: record this actor's eye first and
+	// only mutate the document once the instance resolves. A first-of-two eye on
+	// a sequential matrix must leave the row pending, and an out-of-turn actor
+	// must be refused instead of falling through to the direct status update.
+	engineActedIDs := make(map[string]bool, len(ids))
+	if actionType == "CONFIRM" || actionType == "REJECT" {
+		userEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == userID {
+				userEmail = s.Email
+				break
+			}
+		}
+		actionStr := approvalengine.ActionApproved
+		if actionType == "REJECT" {
+			actionStr = approvalengine.ActionRejected
+		}
+		actionableIDs := make([]string, 0, len(ids))
+		for _, id := range ids {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			gate := approvalengine.Gate(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FX", RecordID: id, UserID: userID, UserEmail: userEmail,
+				Action: actionStr, Comment: comments,
+			})
+			if gate.Blocked {
+				return count, errors.New(gate.Reason)
+			}
+			if gate.Acted {
+				engineActedIDs[id] = true
+				if !gate.Finalized {
+					continue
+				}
+			}
+			actionableIDs = append(actionableIDs, id)
+		}
+		ids = actionableIDs
+	}
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
 		if id == "" {
 			continue
 		}
 		oldSnap := documentSnapshot(ctx, pool, id)
-		tag, err := pool.Exec(ctx, `
-			UPDATE public.hedging_proposal_document
-			SET processing_status = $1,
-			    comments = COALESCE(NULLIF($2, ''), comments),
-			    updated_by = $3,
-			    updated_at = NOW()
-			WHERE proposal_id = $4::uuid
-			  AND COALESCE(is_deleted, false) = false
-		`, status, comments, actor, id)
-		if err != nil || tag.RowsAffected() == 0 {
-			continue
+		var prevStatus string
+		_ = pool.QueryRow(ctx, `SELECT processing_status FROM public.hedging_proposal_document WHERE proposal_id = $1::uuid`, id).Scan(&prevStatus)
+
+		if actionType == "CONFIRM" && strings.EqualFold(prevStatus, constants.StatusPendingDeleteApproval) {
+			_, err := pool.Exec(ctx, `
+				UPDATE public.hedging_proposal_document
+				SET is_deleted = true,
+				    processing_status = $1,
+				    comments = COALESCE(NULLIF($2, ''), comments),
+				    updated_by = $3,
+				    updated_at = NOW()
+				WHERE proposal_id = $4::uuid
+			`, status, comments, actor, id)
+			if err != nil {
+				continue
+			}
+			deletedIDs = append(deletedIDs, id)
+		} else {
+			tag, err := pool.Exec(ctx, `
+				UPDATE public.hedging_proposal_document
+				SET processing_status = $1,
+				    comments = COALESCE(NULLIF($2, ''), comments),
+				    updated_by = $3,
+				    updated_at = NOW()
+				WHERE proposal_id = $4::uuid
+				  AND COALESCE(is_deleted, false) = false
+			`, status, comments, actor, id)
+			if err != nil || tag.RowsAffected() == 0 {
+				continue
+			}
 		}
 		newSnap := documentSnapshot(ctx, pool, id)
-		var engineActed bool
-		if actionType == "CONFIRM" || actionType == "REJECT" {
-			userEmail := ""
-			for _, s := range auth.GetActiveSessions() {
-				if s.UserID == userID {
-					userEmail = s.Email
-					break
-				}
-			}
-			actionStr := "APPROVED"
-			if actionType == "REJECT" {
-				actionStr = "REJECTED"
-			}
-			res, err := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{
-				ModuleCode: "FX", RecordID: id, UserID: userID, UserEmail: userEmail,
-				Action: actionStr, Comment: comments,
-			})
-			if err == nil && res.Acted {
-				engineActed = true
-			}
-		}
 
-		if !engineActed {
+		if !engineActedIDs[id] {
 			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{
 				TableName:    auditutil.TableHedgeProposalDocument,
 				ParentColumn: "proposal_id",
@@ -673,7 +716,14 @@ func updateHedgingProposalDocumentStatuses(ctx context.Context, pool *pgxpool.Po
 		count++
 		updatedIDs = append(updatedIDs, id)
 	}
-	if len(updatedIDs) > 0 {
+	if len(deletedIDs) > 0 {
+		dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", "POST_DELETE", deletedIDs, actor)
+		triggerHedgingProposalNotif(ctx, pool, hedgingProposalNotifInput{
+			Route: routeHedgingProposalDelete, Action: "DELETE", UserID: userID, RequestedBy: actor,
+			ProcessingStatus: status, CheckerComment: comments, ProposalIDs: deletedIDs,
+		})
+	}
+	if updatedIDs = excludeSettlementIDs(updatedIDs, deletedIDs); len(updatedIDs) > 0 {
 		switch actionType {
 		case "CONFIRM":
 			dmsjobs.FireDmsEvent(pool, "FX", "FX_HEDGING_PROPOSAL", "POST_APPROVE", updatedIDs, actor)
@@ -742,7 +792,7 @@ func ApproveHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			Comments: strings.TrimSpace(req.Comments), ActionType: "CONFIRM",
 		})
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "failed to approve hedging proposals")
+			respondWithError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
 		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d proposal(s) approved", n), map[string]any{"count": n})
@@ -793,7 +843,7 @@ func RejectHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			Comments: strings.TrimSpace(req.Comments), ActionType: "REJECT",
 		})
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "failed to reject hedging proposals")
+			respondWithError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
 		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d proposal(s) rejected", n), map[string]any{"count": n})
@@ -865,6 +915,7 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 					ModuleCode:          "FX",
 					TransactionType:     "FX_HEDGE_PROPOSAL_DELETE",
 					RecordID:            id,
+					RecordTable:         hedgingProposalRecordTable,
 					MatrixID:            matrices[id],
 					SubmittedByEmail:    email,
 					RequirePinnedMatrix: true,

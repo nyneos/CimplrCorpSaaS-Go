@@ -683,31 +683,42 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 		payloadMap["HedgedAmount"] = req.HedgedAmount
 		fxnotif.TriggerFX(context.WithoutCancel(ctx), pool, fxnotif.SourceRouteLinkExposureHedge, fxnotif.CorrelationID("FXLINK", req.ExposureHeaderID), payloadMap)
 
-		makerEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				makerEmail = s.Email
-				break
-			}
-		}
-
-		go func(tID string) {
-			_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
+		if triggerMatrixID != "" {
+			_, _ = approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
 				ModuleCode:          "FX",
 				TransactionType:     "FX_LINKAGE_CREATE",
-				RecordID:            req.ExposureHeaderID,
-				MatrixID:            tID,
+				RecordID:            hedgeLinkRecordID(req.ExposureHeaderID, req.BookingID),
+				RecordTable:         hedgeLinkRecordTable,
+				MatrixID:            triggerMatrixID,
 				RequirePinnedMatrix: true,
 				AutoApplyIfUnpinned: false,
-				SubmittedByEmail:    makerEmail,
+				SubmittedByEmail:    sessionEmail(req.UserID),
 			})
-		}(triggerMatrixID)
+		}
 	}
 }
 
 type hedgeLinkPair struct {
 	ExposureHeaderID string `json:"exposure_header_id"`
 	BookingID        string `json:"booking_id"`
+}
+
+const hedgeLinkRecordTable = "public.exposure_hedge_links"
+
+// hedgeLinkRecordID keys the approval instance on the link, not the exposure —
+// one exposure can be linked to several bookings. Must stay in step with the
+// record_id join in HedgeLinksDetails.
+func hedgeLinkRecordID(exposureHeaderID, bookingID string) string {
+	return exposureHeaderID + ":" + bookingID
+}
+
+func sessionEmail(userID string) string {
+	for _, s := range auth.GetActiveSessions() {
+		if s.UserID == userID {
+			return s.Email
+		}
+	}
+	return ""
 }
 
 // ApproveHedgeLinks activates pending links and posts utilization ledger rows.
@@ -726,6 +737,7 @@ func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 
 		approved := 0
 		skipped := []string{}
+		pending := []string{}
 		approvedExposureIDs := make([]string, 0, len(req.Links))
 		for _, link := range req.Links {
 			expID := strings.TrimSpace(link.ExposureHeaderID)
@@ -738,7 +750,7 @@ func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 				logger.LogError("approve hedge link policy load failed exposure=%s booking=%s: %v", expID, bookID, loadErr)
 				continue
 			}
-			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
+			ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
 				EventCode:           common.TriggerPreApprove,
 				ModuleCode:          common.ModuleFX,
 				SubModule:           "HEDGE_LINK",
@@ -748,9 +760,49 @@ func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 				APIPath:             "/fx/exposures/approve-hedge-links",
 				DefaultBlockMessage: "Hedge link approval blocked by policy",
 				Fields:              buildHedgeLinkPolicyFields(linkRow),
-			}); !ok {
+			})
+			if !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
 				return
+			}
+			recordID := hedgeLinkRecordID(expID, bookID)
+			if lazyMatrixID := runtime.ResolveTriggerApprovalMatrix(ctx, pool, runtime.EnforceInput{
+				EventCode:   common.TriggerPreCreate,
+				ModuleCode:  common.ModuleFX,
+				SubModule:   "HEDGE_LINK",
+				EntityCode:  exposureEntityForHeader(ctx, pool, expID),
+				ActorUserID: req.UserID,
+				HandlerName: "ApproveHedgeLinks",
+				APIPath:     "/fx/exposures/approve-hedge-links",
+				Fields:      buildHedgeLinkPolicyFields(linkRow),
+			}); lazyMatrixID != "" {
+				instanceID, instErr := approvalengine.CreateInstance(ctx, pool, approvalengine.InstanceRequest{
+					ModuleCode:          "FX",
+					TransactionType:     "FX_LINKAGE_CREATE",
+					RecordID:            recordID,
+					RecordTable:         hedgeLinkRecordTable,
+					MatrixID:            lazyMatrixID,
+					RequirePinnedMatrix: true,
+					AutoApplyIfUnpinned: false,
+					SubmittedByEmail:    sessionEmail(req.UserID),
+				})
+				if instErr != nil {
+					logger.LogError("hedge link approval instance failed record=%s matrix=%s: %v", recordID, lazyMatrixID, instErr)
+				} else if instanceID == "" {
+					logger.LogError("hedge link approval instance not created record=%s matrix=%s email=%q", recordID, lazyMatrixID, sessionEmail(req.UserID))
+				}
+			}
+			gate := approvalengine.Gate(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FX", RecordID: recordID, UserID: req.UserID, UserEmail: sessionEmail(req.UserID),
+				Action: approvalengine.ActionApproved, Comment: strings.TrimSpace(req.ApprovalComment),
+			})
+			if gate.Blocked {
+				respondWithError(w, http.StatusUnprocessableEntity, gate.Reason)
+				return
+			}
+			if gate.Acted && !gate.Finalized {
+				pending = append(pending, expID)
+				continue
 			}
 			// The exposure may have been settled (payment / rollover / cancellation
 			// approved) while this link sat in the queue — it is terminal now.
@@ -828,9 +880,13 @@ func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 		if len(skipped) > 0 {
 			msg = fmt.Sprintf("%d approved; %d refused because the exposure is already settled: %s", approved, len(skipped), strings.Join(skipped, ", "))
 		}
+		if len(pending) > 0 {
+			msg = fmt.Sprintf("%d approved; %d awaiting the remaining approver(s) in the approval matrix: %s", approved, len(pending), strings.Join(pending, ", "))
+		}
 		respondWithSuccess(w, http.StatusOK, msg, map[string]interface{}{
 			"approved": approved,
 			"skipped":  skipped,
+			"pending":  pending,
 		})
 	}
 }
@@ -874,6 +930,16 @@ func RejectHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 				Fields:              buildHedgeLinkPolicyFields(linkRow),
 			}); !ok {
 				respondWithError(w, http.StatusUnprocessableEntity, msg)
+				return
+			}
+			// A reject closes any instance a prior approver already opened, so the
+			// link is not left with a PENDING matrix nobody can act on.
+			gate := approvalengine.Gate(ctx, pool, approvalengine.ActOnPendingRequest{
+				ModuleCode: "FX", RecordID: hedgeLinkRecordID(expID, bookID), UserID: req.UserID, UserEmail: sessionEmail(req.UserID),
+				Action: approvalengine.ActionRejected, Comment: strings.TrimSpace(req.RejectionComment),
+			})
+			if gate.Blocked {
+				respondWithError(w, http.StatusUnprocessableEntity, gate.Reason)
 				return
 			}
 			var hedged float64
