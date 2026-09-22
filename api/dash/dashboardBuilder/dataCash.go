@@ -573,6 +573,8 @@ func queryCashSweepExecution(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 			c.effective_date,
 			COALESCE(c.execution_time::text, '') AS execution_time,
 			COALESCE(c.requires_initiation, true) AS requires_initiation,
+			COALESCE(c.buffer_amount, 0) AS buffer_amount,
+			COALESCE(c.sweep_amount, 0) AS sweep_amount,
 			CASE WHEN l.initiation_id IS NULL THEN 'CRON' ELSE 'MANUAL' END AS execution_mode,
 			l.execution_date,
 			COALESCE(l.amount_swept, 0) AS amount_swept,
