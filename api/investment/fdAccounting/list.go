@@ -23,6 +23,9 @@ const journalSelect = `
 		COALESCE(je.activity_id::text,'')            AS activity_id,
 		COALESCE(je.entity_id,'')                    AS entity_id,
 		COALESCE(je.entity_name,'')                  AS entity_name,
+		COALESCE(fm.bank_id,'')                      AS bank_id,
+		COALESCE(fm.bank_name,'')                    AS bank_name,
+		COALESCE(fm.bank_fd_ref_no,'')               AS fd_ref_no,
 		COALESCE(je.fd_id,'')                        AS fd_id,
 		COALESCE(je.receipt_id,'')                   AS receipt_id,
 		COALESCE(je.accrual_run_id,'')               AS accrual_run_id,
@@ -32,6 +35,11 @@ const journalSelect = `
 		COALESCE(je.reversal_of_entry_id,'')         AS reversal_of_entry_id,
 		TO_CHAR(je.entry_date,'YYYY-MM-DD')          AS entry_date,
 		COALESCE(je.accounting_period,'')            AS accounting_period,
+		COALESCE(NULLIF(rc.currency,''),'INR')       AS currency,
+		COALESCE(NULLIF(je.accrual_run_id,''), NULLIF(je.closure_request_id::text,''),
+		         NULLIF(je.receipt_id,''), NULLIF(je.activity_id::text,'')) AS journal_batch_id,
+		COALESCE(cyc.status,'OPEN')                  AS period_status,
+		COALESCE(cyc.cycle_id::text,'')              AS period_cycle_id,
 		COALESCE(je.entry_type,'')                   AS entry_type,
 		COALESCE(je.description,'')                  AS description,
 		COALESCE(je.total_debit,0)                   AS total_debit,
@@ -65,8 +73,24 @@ const journalSelect = `
 		COALESCE(l.checker_by,'')                    AS checker_by,
 		COALESCE(TO_CHAR(l.checker_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
 		COALESCE(l.checker_comment,'')               AS checker_comment,
-		COALESCE(l.reason,'')                        AS audit_reason
+		COALESCE(l.reason,'')                        AS audit_reason,
+		COALESCE(TO_CHAR(GREATEST(
+			je.created_at,
+			je.posted_at   AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata',
+			l.requested_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata',
+			l.checker_at   AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'
+		),'YYYY-MM-DD HH24:MI:SS'),'') AS last_activity_at
 	FROM ` + journalTable + ` je
+	LEFT JOIN investment.fd_master fm ON fm.fd_id = je.fd_id
+	LEFT JOIN investment.fd_interest_receipt rc ON rc.receipt_id = je.receipt_id
+	LEFT JOIN LATERAL (
+		SELECT cc.cycle_id, cc.status FROM investment.fd_closing_cycle cc
+		WHERE (cc.entity_id = je.entity_id OR cc.entity_name = je.entity_name)
+		  AND cc.status IN ('LOCKED','CLOSED')
+		  AND je.entry_date BETWEEN cc.period_start AND cc.period_end
+		  AND COALESCE(cc.is_deleted,false) = false
+		ORDER BY cc.period_end DESC LIMIT 1
+	) cyc ON true
 	LEFT JOIN LATERAL (
 		SELECT a.* FROM ` + journalAuditTable + ` a
 		WHERE a.entry_id = je.entry_id
@@ -136,7 +160,7 @@ func ListJournals(pool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, strings.TrimSpace(req.ProcessingStatus))
 			q += " AND COALESCE(l.processing_status,'') = $" + strconv.Itoa(len(args))
 		}
-		q += " ORDER BY je.entry_date DESC, je.created_at DESC, je.entry_id DESC"
+		q += " ORDER BY last_activity_at DESC, je.entry_date DESC, je.created_at DESC, je.entry_id DESC"
 
 		rows, err := pool.Query(ctx, q, args...)
 		if err != nil {
