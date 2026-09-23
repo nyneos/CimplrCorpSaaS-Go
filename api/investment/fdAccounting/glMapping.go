@@ -206,6 +206,16 @@ func CreateGlMapping(pool *pgxpool.Pool) http.HandlerFunc {
 			fdclosingcommon.RespondError(w, http.StatusBadRequest, "mapping needs at least one DEBIT and one CREDIT line")
 			return
 		}
+		for i, l := range req.Lines {
+			if msg := validateCentre(r.Context(), pool, strings.TrimSpace(l.CostCenter), "COST%", "cost_center"); msg != "" {
+				fdclosingcommon.RespondError(w, http.StatusBadRequest, fmt.Sprintf("line %d: %s", i+1, msg))
+				return
+			}
+			if msg := validateCentre(r.Context(), pool, strings.TrimSpace(l.ProfitCenter), "PROFIT%", "profit_center"); msg != "" {
+				fdclosingcommon.RespondError(w, http.StatusBadRequest, fmt.Sprintf("line %d: %s", i+1, msg))
+				return
+			}
+		}
 		if req.RoundingDecimals <= 0 {
 			req.RoundingDecimals = 2
 		}
@@ -295,6 +305,40 @@ type glActionRequest struct {
 	MappingID  string   `json:"mapping_id"`
 	MappingIDs []string `json:"mapping_ids"`
 	Comment    string   `json:"comment"`
+}
+
+// validateCentre rejects a dimension code that is not an APPROVED + ACTIVE row
+// of the matching type in mastercostprofitcenter. An empty code is allowed —
+// dimensions are optional on a mapping line.
+func validateCentre(ctx context.Context, pool *pgxpool.Pool, code, typePattern, field string) string {
+	if code == "" {
+		return ""
+	}
+	var ok bool
+	err := pool.QueryRow(ctx, `
+		WITH latest AS (
+			SELECT DISTINCT ON (centre_id) centre_id, processing_status
+			FROM auditactioncostprofitcenter
+			WHERE actiontype IN ('CREATE','EDIT','DELETE')
+			ORDER BY centre_id, requested_at DESC
+		)
+		SELECT EXISTS(
+			SELECT 1 FROM mastercostprofitcenter m
+			JOIN latest l ON l.centre_id = m.centre_id
+			WHERE m.centre_code = $1
+			  AND UPPER(l.processing_status) = 'APPROVED'
+			  AND UPPER(m.status) = 'ACTIVE'
+			  AND COALESCE(m.is_deleted,false) = false
+			  AND UPPER(COALESCE(m.centre_type,'')) LIKE $2
+		)`, code, typePattern).Scan(&ok)
+	if err != nil {
+		api.LogError("[FDAccounting] validateCentre %s: %v", code, err)
+		return field + " could not be validated"
+	}
+	if !ok {
+		return field + " " + code + " is not an approved, active centre"
+	}
+	return ""
 }
 
 // ApproveGlMapping / RejectGlMapping — same engine-then-direct gating as journals.
@@ -408,12 +452,33 @@ func glTransition(pool *pgxpool.Pool, actionType, from, to string) http.HandlerF
 		}
 		email := api.SystemIfBlank(actor.Email)
 		if to == "ACTIVE" {
-			if _, err := tx.Exec(ctx, `
+			// Auto-retired predecessors need their own audit row, otherwise the
+			// superseded version flips to RETIRED with nothing explaining why.
+			superseded, err := tx.Query(ctx, `
 				UPDATE `+glMappingTable+` SET status = 'RETIRED', retired_by = $4, retired_at = now()
-				WHERE entity_id = $1 AND COALESCE(bank_id,'') = $2 AND event_type = $3 AND status = 'ACTIVE' AND is_deleted = false`,
-				entityID, bankID, eventType, email); err != nil {
+				WHERE entity_id = $1 AND COALESCE(bank_id,'') = $2 AND event_type = $3 AND status = 'ACTIVE' AND is_deleted = false
+				RETURNING mapping_id`,
+				entityID, bankID, eventType, email)
+			if err != nil {
 				fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 				return
+			}
+			retiredIDs := []string{}
+			for superseded.Next() {
+				var id string
+				if err := superseded.Scan(&id); err == nil {
+					retiredIDs = append(retiredIDs, id)
+				}
+			}
+			superseded.Close()
+			for _, id := range retiredIDs {
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO `+glMappingAudit+` (mapping_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip)
+					VALUES ($1,'RETIRE','COMPLETED',$2,$3,now(),$4,$3,now(),$4)`,
+					id, "Superseded by "+req.MappingID, email, api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
+					fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+					return
+				}
 			}
 			if _, err := tx.Exec(ctx, `UPDATE `+glMappingTable+` SET status = 'ACTIVE', activated_by = $2, activated_at = now() WHERE mapping_id = $1`, req.MappingID, email); err != nil {
 				fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())

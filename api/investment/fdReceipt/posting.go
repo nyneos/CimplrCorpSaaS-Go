@@ -5,6 +5,7 @@ import (
 	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"strings"
 	"time"
@@ -79,18 +80,47 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 		return "", "", fmt.Errorf("activity insert: %w", err)
 	}
 
-	// Step 2: INSERT interest journal entry (Dr Bank, Cr Accrued Interest)
+	// Step 2: INSERT interest journal entry. An ACTIVE GL mapping for this
+	// (entity, bank, event) drives the lines, amount bases and rounding; with no
+	// mapping configured the built-in Dr Bank / Cr Accrued Interest pair is used.
+	var bankID string
+	_ = pool.QueryRow(ctx, `SELECT COALESCE(bank_id,'') FROM investment.fd_master WHERE fd_id = $1`, rec.FDID).Scan(&bankID)
+	mapping, mErr := fdAccounting.LoadActiveMapping(ctx, tx, rec.EntityID, bankID, "FD_INTEREST_RECEIPT")
+	if mErr != nil {
+		return "", "", fmt.Errorf("resolve gl mapping: %w", mErr)
+	}
+
+	interestDebit, interestCredit := rec.GrossInterestReceived, rec.GrossInterestReceived
+	mappingVersion := ""
+	var genLines []fdAccounting.GeneratedLine
+	if mapping != nil {
+		genLines, interestDebit, interestCredit = mapping.BuildLines(fdAccounting.AmountSet{
+			Full: rec.GrossInterestReceived,
+			TDS:  rec.TDSAmountDeducted,
+			Net:  rec.GrossInterestReceived - rec.TDSAmountDeducted,
+		}, fmt.Sprintf("| receipt_id=%s | fd_id=%s", rec.ReceiptID, rec.FDID))
+		mappingVersion = mapping.Version()
+		
+		if len(genLines) == 0 {
+			return "", "", fmt.Errorf("GL mapping %s generates no journal lines for this receipt; check the configured amount bases", mapping.Version())
+		}
+		if math.Abs(interestDebit-interestCredit) > 0.005 {
+			return "", "", fmt.Errorf("GL mapping %s generates an unbalanced journal: debit %.2f vs credit %.2f; fix the mapping before posting receipts",
+				mapping.Version(), interestDebit, interestCredit)
+		}
+	}
+
 	_, err = tx.Exec(ctx, `
 		INSERT INTO investment.accounting_journal_entry (
 			entry_id, activity_id, entry_type, entry_date, accounting_period,
 			entity_id, entity_name, fd_id, receipt_id,
-			description, total_debit, total_credit,
+			description, total_debit, total_credit, gl_mapping_version,
 			created_by, created_at, is_deleted, status
-		) VALUES ($1,$2,'FD_INTEREST_RECEIPT',$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,now(),false,'PENDING_APPROVAL')`,
+		) VALUES ($1,$2,'FD_INTEREST_RECEIPT',$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),$13,now(),false,'PENDING_APPROVAL')`,
 		interestEntryID, activityID, entryDate, period,
 		rec.EntityID, entityName, rec.FDID, rec.ReceiptID,
 		fmt.Sprintf("Interest receipt for FD %s period %s", rec.FdRefNo, period),
-		rec.GrossInterestReceived, userEmail)
+		interestDebit, interestCredit, mappingVersion, userEmail)
 	if err != nil {
 		return "", "", fmt.Errorf("interest journal insert: %w", err)
 	}
@@ -98,31 +128,57 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 		return "", "", err
 	}
 
-	_, err = tx.Exec(ctx, `
-		INSERT INTO investment.accounting_journal_entry_line
-			(entry_id, line_number, account_number, account_name, debit_amount, credit_amount)
-		VALUES
-			($1, 1, '1001-BANK', 'Bank Account', $2, 0),
-			($1, 2, '1201-ACCRUED-INT', 'Accrued Interest Income', 0, $2)`,
-		interestEntryID, rec.GrossInterestReceived)
-	if err != nil {
-		return "", "", fmt.Errorf("interest journal lines insert: %w", err)
+	if mapping != nil {
+		for _, l := range genLines {
+			if _, lerr := tx.Exec(ctx, `
+				INSERT INTO investment.accounting_journal_entry_line
+					(entry_id, line_number, account_number, account_name, account_type, debit_amount, credit_amount, narration)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+				interestEntryID, l.LineNumber, l.AccountNumber, l.AccountName, l.AccountType, l.Debit, l.Credit, l.Narration); lerr != nil {
+				return "", "", fmt.Errorf("interest journal lines insert: %w", lerr)
+			}
+		}
+	} else {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO investment.accounting_journal_entry_line
+				(entry_id, line_number, account_number, account_name, debit_amount, credit_amount)
+			VALUES
+				($1, 1, '1001-BANK', 'Bank Account', $2, 0),
+				($1, 2, '1201-ACCRUED-INT', 'Accrued Interest Income', 0, $2)`,
+			interestEntryID, rec.GrossInterestReceived)
+		if err != nil {
+			return "", "", fmt.Errorf("interest journal lines insert: %w", err)
+		}
 	}
 
-	// Step 2: INSERT TDS journal entry if TDS > 0
+	// Step 2: INSERT TDS journal entry if TDS > 0. Driven by the ACTIVE
+	// FD_TDS_DEDUCTED mapping when one is configured.
 	if rec.TDSAmountDeducted > 0 {
 		tdsEntryID = fmt.Sprintf("JE_%d_%04d", time.Now().UnixMilli(), rand.Intn(10000))
+		tdsMapped, tErr := fdAccounting.BuildMappedJournal(ctx, tx, rec.EntityID, bankID, "FD_TDS_DEDUCTED",
+			fdAccounting.AmountSet{
+				Full: rec.TDSAmountDeducted,
+				TDS:  rec.TDSAmountDeducted,
+				Net:  rec.GrossInterestReceived - rec.TDSAmountDeducted,
+			}, fmt.Sprintf("| receipt_id=%s | fd_id=%s", rec.ReceiptID, rec.FDID))
+		if tErr != nil {
+			return "", "", tErr
+		}
+		tdsDebit, tdsCredit := rec.TDSAmountDeducted, rec.TDSAmountDeducted
+		if tdsMapped.Mapped {
+			tdsDebit, tdsCredit = tdsMapped.Debit, tdsMapped.Credit
+		}
 		_, err = tx.Exec(ctx, `
 			INSERT INTO investment.accounting_journal_entry (
 				entry_id, activity_id, entry_type, entry_date, accounting_period,
 				entity_id, entity_name, fd_id, receipt_id,
-				description, total_debit, total_credit,
+				description, total_debit, total_credit, gl_mapping_version,
 				created_by, created_at, is_deleted, status
-			) VALUES ($1,$2,'FD_TDS_DEDUCTED',$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,now(),false,'PENDING_APPROVAL')`,
+			) VALUES ($1,$2,'FD_TDS_DEDUCTED',$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),$13,now(),false,'PENDING_APPROVAL')`,
 			tdsEntryID, activityID, entryDate, period,
 			rec.EntityID, entityName, rec.FDID, rec.ReceiptID,
 			fmt.Sprintf("TDS deducted for FD %s period %s", rec.FdRefNo, period),
-			rec.TDSAmountDeducted, userEmail)
+			tdsDebit, tdsCredit, tdsMapped.Version, userEmail)
 		if err != nil {
 			return "", "", fmt.Errorf("tds journal insert: %w", err)
 		}
@@ -130,15 +186,21 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 			return "", "", err
 		}
 
-		_, err = tx.Exec(ctx, `
-			INSERT INTO investment.accounting_journal_entry_line
-				(entry_id, line_number, account_number, account_name, debit_amount, credit_amount)
-			VALUES
-				($1, 1, '1301-TDS-RECV', 'TDS Receivable', $2, 0),
-				($1, 2, '1001-BANK', 'Bank Account', 0, $2)`,
-			tdsEntryID, rec.TDSAmountDeducted)
-		if err != nil {
-			return "", "", fmt.Errorf("tds journal lines insert: %w", err)
+		if tdsMapped.Mapped {
+			if lerr := tdsMapped.InsertLines(ctx, tx, tdsEntryID); lerr != nil {
+				return "", "", fmt.Errorf("tds journal lines insert: %w", lerr)
+			}
+		} else {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO investment.accounting_journal_entry_line
+					(entry_id, line_number, account_number, account_name, debit_amount, credit_amount)
+				VALUES
+					($1, 1, '1301-TDS-RECV', 'TDS Receivable', $2, 0),
+					($1, 2, '1001-BANK', 'Bank Account', 0, $2)`,
+				tdsEntryID, rec.TDSAmountDeducted)
+			if err != nil {
+				return "", "", fmt.Errorf("tds journal lines insert: %w", err)
+			}
 		}
 	}
 

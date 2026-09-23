@@ -3842,20 +3842,37 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 		description := fmt.Sprintf("FD accrual %s period %s→%s | fd_id=%s | run_id=%s",
 			lr.FDID, lr.PeriodStart.Format(constants.DateFormat), lr.PeriodEnd.Format(constants.DateFormat), lr.FDID, runID)
 
+		// An ACTIVE FD_INTEREST_ACCRUAL mapping drives the lines; with none
+		// configured the built-in receivable / income pair is used.
+		var accrualBankID string
+		_ = tx.QueryRow(ctx, `SELECT COALESCE(bank_id,'') FROM investment.fd_master WHERE fd_id = $1`, lr.FDID).Scan(&accrualBankID)
+		mapped, mapErr := fdAccounting.BuildMappedJournal(ctx, tx, lr.EntityID, accrualBankID, "FD_INTEREST_ACCRUAL",
+			fdAccounting.AmountSet{Full: amount, TDS: math.Round(lr.TDS*100) / 100, Net: amount - math.Round(lr.TDS*100)/100},
+			fmt.Sprintf("| fd_id=%s | accrual_run_id=%s | accrual_ledger_id=%s", lr.FDID, runID, lr.LedgerID))
+		if mapErr != nil {
+			_ = tx.Rollback(ctx)
+			api.LogError("[FDAccrual] GL mapping failed fd %s: %v", lr.FDID, mapErr)
+			continue
+		}
+		totalDr, totalCr := amount, amount
+		if mapped.Mapped {
+			totalDr, totalCr = mapped.Debit, mapped.Credit
+		}
+
 		var entryID string
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO investment.accounting_journal_entry (
 				activity_id, entity_id, entity_name,
 				entry_date, accounting_period,
 				entry_type, description,
-				total_debit, total_credit,
+				total_debit, total_credit, gl_mapping_version,
 				status, created_by,
 				fd_id, accrual_run_id, accrual_ledger_id
-			) VALUES ($1,$2,$3,$4,$5,'FD_INTEREST_ACCRUAL',$6,$7,$8,'PENDING_APPROVAL',$9,$10,$11,$12)
+			) VALUES ($1,$2,$3,$4,$5,'FD_INTEREST_ACCRUAL',$6,$7,$8,NULLIF($9,''),'PENDING_APPROVAL',$10,$11,$12,$13)
 			RETURNING entry_id`,
 			activityID, nullIfEmpty(lr.EntityID), nullIfEmpty(lr.EntityName),
 			lr.PeriodEnd, buildAccrualPeriod(lr.PeriodEnd),
-			description, amount, amount, userEmail,
+			description, totalDr, totalCr, mapped.Version, userEmail,
 			nullIfEmpty(lr.FDID), nullIfEmpty(runID), nullIfEmpty(lr.LedgerID),
 		).Scan(&entryID); err != nil {
 			_ = tx.Rollback(ctx)
@@ -3868,22 +3885,27 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 			continue
 		}
 
-		// Line 1: debit interest receivable
-		_, err1 := tx.Exec(ctx, `
-			INSERT INTO investment.accounting_journal_entry_line (
-				entry_id, line_number, account_number, account_name, account_type,
-				debit_amount, credit_amount, narration
-			) VALUES ($1,1,'INTEREST_RECEIVABLE','Interest Receivable on FD','ASSET',$2,0,$3)`,
-			entryID, amount,
-			fmt.Sprintf("FD accrual %s | accrual_run_id=%s | accrual_ledger_id=%s", lr.FDID, runID, lr.LedgerID))
-		// Line 2: credit interest income
-		_, err2 := tx.Exec(ctx, `
-			INSERT INTO investment.accounting_journal_entry_line (
-				entry_id, line_number, account_number, account_name, account_type,
-				debit_amount, credit_amount, narration
-			) VALUES ($1,2,'INTEREST_INCOME_FD','Interest Income - Fixed Deposit','INCOME',0,$2,$3)`,
-			entryID, amount,
-			fmt.Sprintf("FD accrual %s | accrual_run_id=%s | accrual_ledger_id=%s", lr.FDID, runID, lr.LedgerID))
+		var err1, err2 error
+		if mapped.Mapped {
+			err1 = mapped.InsertLines(ctx, tx, entryID)
+		} else {
+			// Line 1: debit interest receivable
+			_, err1 = tx.Exec(ctx, `
+				INSERT INTO investment.accounting_journal_entry_line (
+					entry_id, line_number, account_number, account_name, account_type,
+					debit_amount, credit_amount, narration
+				) VALUES ($1,1,'INTEREST_RECEIVABLE','Interest Receivable on FD','ASSET',$2,0,$3)`,
+				entryID, amount,
+				fmt.Sprintf("FD accrual %s | accrual_run_id=%s | accrual_ledger_id=%s", lr.FDID, runID, lr.LedgerID))
+			// Line 2: credit interest income
+			_, err2 = tx.Exec(ctx, `
+				INSERT INTO investment.accounting_journal_entry_line (
+					entry_id, line_number, account_number, account_name, account_type,
+					debit_amount, credit_amount, narration
+				) VALUES ($1,2,'INTEREST_INCOME_FD','Interest Income - Fixed Deposit','INCOME',0,$2,$3)`,
+				entryID, amount,
+				fmt.Sprintf("FD accrual %s | accrual_run_id=%s | accrual_ledger_id=%s", lr.FDID, runID, lr.LedgerID))
+		}
 
 		if err1 != nil || err2 != nil {
 			_ = tx.Rollback(ctx)
@@ -3913,38 +3935,57 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 					var tdsEntryID string
 					tdsDesc := fmt.Sprintf("FD TDS accrual %s period %s→%s | run_id=%s",
 						lr.FDID, lr.PeriodStart.Format(constants.DateFormat), lr.PeriodEnd.Format(constants.DateFormat), runID)
-					tdsErr = tdsTx.QueryRow(ctx, `
+					tdsMapped, tdsMapErr := fdAccounting.BuildMappedJournal(ctx, tdsTx, lr.EntityID, accrualBankID, "FD_TDS_ACCRUAL",
+						fdAccounting.AmountSet{Full: tdsAmt, TDS: tdsAmt, Net: amount - tdsAmt},
+						fmt.Sprintf("| fd_id=%s | accrual_run_id=%s | accrual_ledger_id=%s", lr.FDID, runID, lr.LedgerID))
+					tdsDr, tdsCr := tdsAmt, tdsAmt
+					if tdsMapped.Mapped {
+						tdsDr, tdsCr = tdsMapped.Debit, tdsMapped.Credit
+					}
+					if tdsMapErr != nil {
+						// Skip only the TDS journal — the interest journal is
+						// already committed and the ledger row still needs POSTED.
+						api.LogError("[FDAccrual] TDS GL mapping failed fd %s: %v", lr.FDID, tdsMapErr)
+						tdsErr = tdsMapErr
+					} else {
+						tdsErr = tdsTx.QueryRow(ctx, `
 						INSERT INTO investment.accounting_journal_entry (
 							activity_id, entity_id, entity_name,
 							entry_date, accounting_period,
 							entry_type, description,
-							total_debit, total_credit,
+							total_debit, total_credit, gl_mapping_version,
 							status, created_by,
 							fd_id, accrual_run_id, accrual_ledger_id
-						) VALUES ($1,$2,$3,$4,$5,'FD_TDS_ACCRUAL',$6,$7,$8,'PENDING_APPROVAL',$9,$10,$11,$12)
+						) VALUES ($1,$2,$3,$4,$5,'FD_TDS_ACCRUAL',$6,$7,$8,NULLIF($9,''),'PENDING_APPROVAL',$10,$11,$12,$13)
 						RETURNING entry_id`,
-						tdsActivityID, nullIfEmpty(lr.EntityID), nullIfEmpty(lr.EntityName),
-						lr.PeriodEnd, buildAccrualPeriod(lr.PeriodEnd),
-						tdsDesc, tdsAmt, tdsAmt, userEmail,
-						nullIfEmpty(lr.FDID), nullIfEmpty(runID), nullIfEmpty(lr.LedgerID),
-					).Scan(&tdsEntryID)
+							tdsActivityID, nullIfEmpty(lr.EntityID), nullIfEmpty(lr.EntityName),
+							lr.PeriodEnd, buildAccrualPeriod(lr.PeriodEnd),
+							tdsDesc, tdsDr, tdsCr, tdsMapped.Version, userEmail,
+							nullIfEmpty(lr.FDID), nullIfEmpty(runID), nullIfEmpty(lr.LedgerID),
+						).Scan(&tdsEntryID)
+					}
 					if tdsErr == nil {
 						tdsErr = fdAccounting.StageJournalForApproval(ctx, tdsTx, tdsEntryID, userEmail, "TDS accrual journal run "+runID)
 					}
 					if tdsErr == nil {
 						tdsNarration := fmt.Sprintf("FD TDS %s | accrual_run_id=%s | accrual_ledger_id=%s", lr.FDID, runID, lr.LedgerID)
-						_, tdsErr1 := tdsTx.Exec(ctx, `
-							INSERT INTO investment.accounting_journal_entry_line (
-								entry_id, line_number, account_number, account_name, account_type,
-								debit_amount, credit_amount, narration
-							) VALUES ($1,1,'TDS_EXPENSE','TDS on FD Interest','EXPENSE',$2,0,$3)`,
-							tdsEntryID, tdsAmt, tdsNarration)
-						_, tdsErr2 := tdsTx.Exec(ctx, `
-							INSERT INTO investment.accounting_journal_entry_line (
-								entry_id, line_number, account_number, account_name, account_type,
-								debit_amount, credit_amount, narration
-							) VALUES ($1,2,'TDS_PAYABLE','TDS Payable on FD','LIABILITY',0,$2,$3)`,
-							tdsEntryID, tdsAmt, tdsNarration)
+						var tdsErr1, tdsErr2 error
+						if tdsMapped.Mapped {
+							tdsErr1 = tdsMapped.InsertLines(ctx, tdsTx, tdsEntryID)
+						} else {
+							_, tdsErr1 = tdsTx.Exec(ctx, `
+								INSERT INTO investment.accounting_journal_entry_line (
+									entry_id, line_number, account_number, account_name, account_type,
+									debit_amount, credit_amount, narration
+								) VALUES ($1,1,'TDS_EXPENSE','TDS on FD Interest','EXPENSE',$2,0,$3)`,
+								tdsEntryID, tdsAmt, tdsNarration)
+							_, tdsErr2 = tdsTx.Exec(ctx, `
+								INSERT INTO investment.accounting_journal_entry_line (
+									entry_id, line_number, account_number, account_name, account_type,
+									debit_amount, credit_amount, narration
+								) VALUES ($1,2,'TDS_PAYABLE','TDS Payable on FD','LIABILITY',0,$2,$3)`,
+								tdsEntryID, tdsAmt, tdsNarration)
+						}
 						if tdsErr1 != nil || tdsErr2 != nil {
 							_ = tdsTx.Rollback(ctx)
 							api.LogError("[FDAccrual] TDS journal lines failed fd %s: e1=%v e2=%v", lr.FDID, tdsErr1, tdsErr2)
