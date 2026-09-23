@@ -537,6 +537,8 @@ const (
 	FdmaturityLabel                       = "fd-maturity"
 	FDMaturity                            = "FD Maturity"
 	AccrualRun                            = "Accrual Run"
+	FDRateNegotiationLabel                = "FD Rate Negotiation"
+	FDRateNegotiation                     = "fd-rate-negotiation"
 	FREQQ                                 = "FREQ-Q"
 	FREQM                                 = "FREQ-M"
 	PreviewPrefix                         = "PREVIEW-"

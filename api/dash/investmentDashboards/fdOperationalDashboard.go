@@ -630,19 +630,43 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		// ── 7. posting queue ─────────────────────────────────────────────────
+		// Real FD journal-posting batches from investment.accounting_journal_entry
+		// (api/investment/fdAccounting / accountingWorkbench's shared ledger
+		// table) — one row per posted/failed/pending journal entry, not the
+		// legacy fd_journal_posting_batch stub. fdJournalPredicate mirrors
+		// fdAccounting/common.go's own filter, since the same table also holds
+		// mutual-fund entries (scheme_id / folio_id / demat_id).
 		run("posting_queue", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
 				SELECT
-				  COALESCE(batch_id,'') AS batch_id,
-				  COALESCE(records_count,0) AS records,
-				  COALESCE(posting_status,'') AS status,
-				  COALESCE(TO_CHAR(posted_at,'YYYY-MM-DD"T"HH24:MI:SS'),'') AS posting_time,
-				  COALESCE(error_message,'') AS error_message
-				FROM investment.fd_journal_posting_batch
-				WHERE created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
-				ORDER BY created_at DESC
-				LIMIT 20`)
+				  je.entry_id AS batch_id,
+				  (SELECT COUNT(*) FROM investment.accounting_journal_entry_line jl
+				   WHERE jl.entry_id = je.entry_id) AS records,
+				  CASE je.status
+				    WHEN 'POSTED' THEN 'Posted'
+				    WHEN 'FAILED' THEN 'Failed'
+				    WHEN 'REVERSED' THEN 'Reversed'
+				    WHEN 'APPROVED' THEN 'Ready to Post'
+				    ELSE 'Pending'
+				  END AS status,
+				  COALESCE(
+				    TO_CHAR(je.posted_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD"T"HH24:MI:SS'),
+				    TO_CHAR(je.created_at,'YYYY-MM-DD"T"HH24:MI:SS')
+				  ) AS posting_time,
+				  COALESCE(je.failure_reason,'') AS error_message
+				FROM investment.accounting_journal_entry je
+				WHERE COALESCE(je.is_deleted,false) = false
+				  AND (
+				    je.fd_id IS NOT NULL OR je.receipt_id IS NOT NULL OR je.accrual_run_id IS NOT NULL
+				    OR je.closure_request_id IS NOT NULL OR je.entry_type LIKE 'FD\_%'
+				    OR je.entry_type IN ('CLOSURE','REVERSAL')
+				  )
+				  AND (COALESCE(je.entity_id,'') = ANY(string_to_array($1, ',')))
+				  AND je.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
+				ORDER BY je.created_at DESC
+				LIMIT 20`, entityFilter)
 			if err != nil {
+				api.LogError("[OperationalDash] posting_queue query error: %v", err)
 				return []interface{}{}, nil
 			}
 			defer rows.Close()
@@ -663,6 +687,56 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			return out, nil
+		})
+
+		// ── 7b. FD activation pending ─────────────────────────────────────────
+		// FDs that have been booked and confirmed but are stuck before
+		// fd_status='ACTIVE' — the "booking → confirmation → activation" chain
+		// the ops team owns end-to-end. Mirrors the CFO dashboard's
+		// pendingActivationSQL (fdCfoDashboard.go) but scoped to this
+		// dashboard's own date/bank/fd-type filters.
+		run("activation_pending", func(ctx context.Context) (interface{}, error) {
+			rows, err := pool.Query(ctx, `
+				SELECT
+				  m.fd_id,
+				  COALESCE(b.entity_name, m.entity_name,'') AS entity,
+				  COALESCE(m.bank_name, m.bank_id, b.bank_name, b.bank_id,'') AS bank,
+				  COALESCE(m.principal_amount, b.principal_amount,0) AS principal,
+				  COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD"T"HH24:MI:SS'),'') AS requested_at,
+				  COALESCE(m.fd_status,'') AS status
+				FROM investment.fd_master m
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				WHERE COALESCE(m.is_deleted,false)=false
+				  AND UPPER(COALESCE(m.fd_status,'')) = 'PENDING_ACTIVATION'
+				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
+				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2)
+				  AND ($3::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$3)
+				ORDER BY m.created_at DESC
+				LIMIT 100`, entityFilter, bankFilter, fdTypeFilter)
+			if err != nil {
+				api.LogError("[OperationalDash] activation_pending query error: %v", err)
+				return map[string]interface{}{"rows": []interface{}{}, "count": 0}, nil
+			}
+			defer rows.Close()
+
+			type actRow struct {
+				FDID        string  `json:"id"`
+				Entity      string  `json:"entity"`
+				Bank        string  `json:"bank"`
+				Principal   float64 `json:"principal"`
+				RequestedAt string  `json:"requested_at"`
+				Status      string  `json:"status"`
+			}
+			out := []actRow{}
+			for rows.Next() {
+				var ar actRow
+				if err2 := rows.Scan(&ar.FDID, &ar.Entity, &ar.Bank, &ar.Principal, &ar.RequestedAt, &ar.Status); err2 != nil {
+					continue
+				}
+				ar.Principal = fdRound(ar.Principal, 2)
+				out = append(out, ar)
+			}
+			return map[string]interface{}{"rows": out, "count": len(out)}, nil
 		})
 
 		// ── 8. SLA distribution by aging band ────────────────────────────────
@@ -1402,6 +1476,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		var tdsCount int64
 		var excCount int64
 		var receiptsPendingCount, tdsPendingApprovalCount int64
+		var activationPendingCount int64
 
 		if ac, ok := get("accurate_counts").(map[string]int64); ok {
 			bookingCount = ac["booking_requests"]
@@ -1449,6 +1524,11 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				tdsPendingApprovalCount = readInt(m["pending_count"])
 			}
 		}
+		if v := get("activation_pending"); v != nil {
+			if m, ok := v.(map[string]interface{}); ok {
+				activationPendingCount = readInt(m["count"])
+			}
+		}
 		// failed posting fallback from posting_queue if accurate_counts missed it
 		if failedPostings == 0 {
 			if v := get("posting_queue"); v != nil {
@@ -1487,6 +1567,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"failed_posting_batches":    failedPostings,
 				"receipts_pending_approval": receiptsPendingCount,
 				"tds_pending_approval":      tdsPendingApprovalCount,
+				"activation_pending":        activationPendingCount,
+				"pending_workflows":         bookingCount + confirmCount + activationPendingCount,
 				"total_work_items":          bookingCount + confirmCount + unmatchedCount + tdsCount + excCount + receiptsPendingCount + tdsPendingApprovalCount,
 			},
 			"tables": map[string]interface{}{
@@ -1497,6 +1579,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"tds_receipts":          get("tds_receipts"),
 				"exceptions":            get("exceptions"),
 				"posting_queue":         get("posting_queue"),
+				"activation_pending":    get("activation_pending"),
 			},
 			"top_mismatch_causes": get("top_mismatch_causes"),
 			"lifecycle_pipeline":  get("lifecycle_pipeline"),

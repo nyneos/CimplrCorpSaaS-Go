@@ -264,6 +264,7 @@ type govChecklistItem struct {
 	Blocker      bool   `json:"blocker"`
 	PendingCount int    `json:"pending_count"`
 	Detail       string `json:"detail,omitempty"`
+	IsCritical   bool   `json:"is_critical,omitempty"`
 }
 
 type govFetchItemsRequest struct {
@@ -597,10 +598,40 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		ORDER BY sort_ts DESC
 		LIMIT 200`
 
+	// FD Rate Negotiation — bank rate offers awaiting checker approval
+	// (investment.fd_rate_offer, joined to fd_rate_negotiation for
+	// entity/amount, same "latest audit not yet finalised" convention as
+	// booking/confirmation above).
+	pendingRateNegotiationSQL := `
+		SELECT
+		  '' AS booking_id, '' AS fd_id,
+		  COALESCE(n.entity_name,''), COALESCE(n.entity_id,''),
+		  COALESCE(o.bank_name, o.bank_id,''),
+		  COALESCE(n.proposed_fd_amount,0), COALESCE(o.offered_interest_rate,0),
+		  COALESCE(TO_CHAR(o.valid_till_date,'YYYY-MM-DD'),''),
+		  COALESCE(la.processing_status, o.offer_status,''),
+		  COALESCE(la.requested_by, o.created_by,''),
+		  COALESCE(TO_CHAR(COALESCE(la.requested_at, o.created_at),'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')
+		FROM investment.fd_rate_offer o
+		JOIN investment.fd_rate_negotiation n ON n.rate_request_id = o.rate_request_id
+		LEFT JOIN LATERAL (
+		  SELECT processing_status, requested_by, requested_at
+		  FROM investment.fd_rate_offer_audit a
+		  WHERE a.offer_id = o.offer_id
+		  ORDER BY a.requested_at DESC
+		  LIMIT 1
+		) la ON true
+		WHERE COALESCE(o.is_deleted,false)=false
+		  AND UPPER(COALESCE(la.processing_status, o.offer_status,'')) NOT IN ('APPROVED','REJECTED','DELETED')
+		  AND (COALESCE(n.entity_id,'') = ANY(string_to_array($1, ',')))
+		  AND ($2::text='' OR o.bank_id=$2 OR o.bank_name=$2)
+		ORDER BY COALESCE(la.requested_at, o.created_at) DESC LIMIT 200`
+
 	bookingItems := govFetchBookingItems(ctx, pool, entityFilter, bankFilter, pendingBookingSQL, constants.FDBookingLabel, constants.FDBooking)
 	confirmItems := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingConfirmSQL, Action: "PENDING_CONFIRMATION_APPROVAL", Source: constants.FDConfirmation, SourcePage: constants.FDConfirmationLabel})
 	activationItems := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingActivationSQL, Action: "PENDING_ACTIVATION_APPROVAL", Source: constants.FDActivationLabel, SourcePage: constants.FDActivation})
 	maturityItems := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingClosureSQL, Action: "PENDING_CLOSURE_APPROVAL", Source: constants.FDMaturity, SourcePage: constants.FdmaturityLabel})
+	rateNegotiationItems := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingRateNegotiationSQL, Action: constants.StatusPendingApproval, Source: constants.FDRateNegotiationLabel, SourcePage: constants.FDRateNegotiation})
 
 	accrualItems := govFetchAccrualRunItems(ctx, pool, entityFilter, snapshotDate)
 	accrualRunCount := int64(len(accrualItems))
@@ -657,28 +688,24 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 			Source: "Accrual Engine", SourcePage: constants.FDAccrualEngine,
 			Count: len(accrualItems), Value: govSumPrincipal(accrualItems),
 			Priority: "Medium", Items: accrualItems},
+		{Type: constants.FDRateNegotiationLabel, Category: constants.FDRateNegotiationLabel, Status: constants.StatusPendingApproval,
+			Source: constants.FDRateNegotiationLabel, SourcePage: constants.FDRateNegotiation,
+			Count: len(rateNegotiationItems), Value: govSumPrincipal(rateNegotiationItems),
+			Priority: "Medium", Items: rateNegotiationItems},
 	}
 
 	maturityPending := len(maturityItems) + int(unprocessedMaturities)
 	accrualPending := int(accrualRunCount)
 
-	checklist := []govChecklistItem{
-		{ID: "fd_booking", Label: constants.FDBookingLabel, Category: constants.FDBookingLabel, SourcePage: constants.FDBooking,
-			PendingCount: len(bookingItems), Done: len(bookingItems) == 0, Blocker: len(bookingItems) > 0,
-			Detail: formatInt64(int64(len(bookingItems))) + " pending approval(s)"},
-		{ID: "fd_confirmation", Label: constants.FDConfirmation, Category: constants.FDConfirmation, SourcePage: constants.FDConfirmationLabel,
-			PendingCount: len(confirmItems), Done: len(confirmItems) == 0, Blocker: len(confirmItems) > 0,
-			Detail: formatInt64(int64(len(confirmItems))) + " pending confirmation(s)"},
-		{ID: "fd_activation", Label: constants.FDActivationLabel, Category: constants.FDActivationLabel, SourcePage: constants.FDActivation,
-			PendingCount: len(activationItems), Done: len(activationItems) == 0, Blocker: len(activationItems) > 0,
-			Detail: formatInt64(int64(len(activationItems))) + " pending activation(s)"},
-		{ID: "fd_maturity", Label: constants.FDMaturity, Category: constants.FDMaturity, SourcePage: constants.FdmaturityLabel,
-			PendingCount: maturityPending, Done: maturityPending == 0, Blocker: maturityPending > 0,
-			Detail: formatInt64(int64(len(maturityItems))) + " closure approval(s), " + formatInt64(unprocessedMaturities) + " unprocessed maturity"},
-		{ID: "accrual_run", Label: constants.AccrualRun, Category: constants.AccrualRun, SourcePage: constants.FDAccrualEngine,
-			PendingCount: accrualPending, Done: accrualPosted && accrualRunCount == 0, Blocker: accrualRunCount > 0,
-			Detail: "Latest run: " + latestRunStatus + "; " + formatInt64(accrualRunCount) + " pending approval(s)"},
-	}
+	// Silence "declared and not used" for the approval-proxy figures that used
+	// to feed the checklist directly — they still feed the approvals widget
+	// above, just no longer the closing-readiness checklist below.
+	_ = maturityPending
+	_ = accrualPending
+	_ = accrualPosted
+	_ = latestRunStatus
+
+	checklist := buildPeriodClosingChecklist(ctx, pool, entityFilter)
 
 	completed, blockers := int64(0), int64(0)
 	for _, it := range checklist {
@@ -704,6 +731,65 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		},
 		"closing_checklist": checklist,
 	}
+}
+
+// buildPeriodClosingChecklist returns the real Month/Quarter-End Closing
+// checklist — investment.fd_closing_checklist_item, grouped by step_code
+// across every still-open (not LOCKED) closing cycle in entity scope. This is
+// the same step vocabulary the Closing Checklist Dashboard works from
+// (Accrual Run Completed/Approved, Interest Receipts Captured, Receipts
+// Reconciled, TDS Validated, Variances & Exceptions Closed, Accounting
+// Consolidated, ...), NOT a proxy built from FD lifecycle approval counts.
+func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityFilter string) []govChecklistItem {
+	sqlStr := `
+		SELECT
+		  i.step_code,
+		  MAX(i.step_name)               AS step_name,
+		  MIN(i.sequence)                AS sequence,
+		  BOOL_OR(i.is_critical)          AS is_critical,
+		  COUNT(*)                       AS total_items,
+		  COUNT(*) FILTER (WHERE i.status = 'COMPLETED') AS completed_items,
+		  COUNT(*) FILTER (WHERE i.status = 'BLOCKED')   AS blocked_items
+		FROM investment.fd_closing_checklist_item i
+		JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
+		WHERE COALESCE(i.is_deleted,false) = false
+		  AND COALESCE(c.is_deleted,false) = false
+		  AND COALESCE(c.status,'') <> 'LOCKED'
+		  AND c.entity_id = ANY(string_to_array($1, ','))
+		GROUP BY i.step_code
+		ORDER BY MIN(i.sequence) ASC`
+
+	rows, err := pool.Query(ctx, sqlStr, entityFilter)
+	if err != nil {
+		api.LogError("[CfoDash] period_closing checklist query error: %v", err)
+		return []govChecklistItem{}
+	}
+	defer rows.Close()
+
+	out := []govChecklistItem{}
+	for rows.Next() {
+		var stepCode, stepName string
+		var sequence int
+		var isCritical bool
+		var total, completedCnt, blockedCnt int64
+		if scanErr := rows.Scan(&stepCode, &stepName, &sequence, &isCritical, &total, &completedCnt, &blockedCnt); scanErr != nil {
+			continue
+		}
+		pending := total - completedCnt
+		detail := formatInt64(completedCnt) + "/" + formatInt64(total) + " FDs completed"
+		out = append(out, govChecklistItem{
+			ID:           stepCode,
+			Label:        stepName,
+			Category:     stepName,
+			SourcePage:   "closing-checklist-dashboard",
+			PendingCount: int(pending),
+			Done:         total > 0 && completedCnt == total,
+			Blocker:      blockedCnt > 0,
+			Detail:       detail,
+			IsCritical:   isCritical,
+		})
+	}
+	return out
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -806,15 +892,18 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		// ── 2. bank_concentration ─────────────────────────────────────────────
-		// Per-bank exposure vs derived bank limit.
+		// Per-bank exposure vs real bank limit (cimplrcorpsaas.bank_limit).
 		//
-		// Bank limit derivation (no dedicated `credit_limit` column exists in
-		// fd_bank_config_master, so we derive the cap):
-		//   1. Configured cap = SUM(maximum_amount) across that bank's active
-		//      product configs (each product's max-per-FD aggregates into a
-		//      coarse bank-level cap).
+		// Bank limit derivation:
+		//   1. Real cap = SUM(sanctioned_amount) across that bank's APPROVED
+		//      bank_limit rows tagged for FD (limit_type/limit_sub_type
+		//      matching FD / TERM DEPOSIT / FIXED DEPOSIT — bank_limit has no
+		//      dedicated module/instrument_type column, so this is a text-match
+		//      filter). Sourced from the same cash/limit approval workflow used
+		//      by GetApprovedBankLimits.
 		//   2. Fallback policy cap = 30% of total portfolio exposure
-		//      (industry-standard single-counterparty concentration limit).
+		//      (industry-standard single-counterparty concentration limit),
+		//      used only when a bank has no FD-tagged bank_limit row on file.
 		// The larger of the two is taken so we never under-state a bank's room
 		// but always have a non-zero number to compare against.
 		run("bank_concentration", func(ctx context.Context) (interface{}, error) {
@@ -840,11 +929,22 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				LEFT JOIN LATERAL (
-				  SELECT COALESCE(SUM(COALESCE(bc.maximum_amount, 0)), 0) AS bank_cap
-				  FROM investment.fd_bank_config_master bc
-				  WHERE (bc.bank_code = m.bank_id OR bc.bank_code = m.bank_name)
-				    AND COALESCE(bc.is_deleted, false) = false
-				    AND COALESCE(bc.effective_to, '9999-12-31'::date) >= CURRENT_DATE
+				  SELECT COALESCE(SUM(bl.sanctioned_amount), 0) AS bank_cap
+				  FROM cimplrcorpsaas.bank_limit bl
+				  INNER JOIN LATERAL (
+				    SELECT processing_status
+				    FROM cimplrcorpsaas.auditactionbanklimit
+				    WHERE limit_id = bl.limit_id
+				    ORDER BY requested_at DESC
+				    LIMIT 1
+				  ) abl ON abl.processing_status = 'APPROVED'
+				  WHERE COALESCE(bl.is_deleted, false) = false
+				    AND (bl.bank_name = m.bank_name OR bl.bank_name = m.bank_id)
+				    AND (
+				      bl.limit_type ILIKE '%FD%' OR bl.limit_sub_type ILIKE '%FD%' OR
+				      bl.limit_type ILIKE '%TERM DEPOSIT%' OR bl.limit_sub_type ILIKE '%TERM DEPOSIT%' OR
+				      bl.limit_type ILIKE '%FIXED DEPOSIT%' OR bl.limit_sub_type ILIKE '%FIXED DEPOSIT%'
+				    )
 				) lim ON true
 				WHERE m.is_deleted=false AND m.fd_status = 'ACTIVE'
 				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
@@ -880,7 +980,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if bankCap > 0 {
 					br.Limit = bankCap
-					br.LimitSource = "bank_config"
+					br.LimitSource = "bank_limit"
 				} else {
 					br.Limit = policyCap
 					br.LimitSource = "policy_30pct"
@@ -1151,10 +1251,69 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				finalCount = sumCounts
 			}
 
+			// (d) breakdown by FD module (Booking / Confirmation / Activation /
+			// Accrual) — same two exception sources as (a)+(b), grouped by
+			// module instead of by exception/variance type. Always returns all
+			// four modules (zero-filled) so the UI can render a stable list.
+			byModuleSQL := `
+				SELECT module, COUNT(*) AS cnt FROM (
+				  SELECT 'FD_BOOKING' AS module
+				  FROM public.variance_log vl
+				  WHERE vl.module_code='FD_BOOKING' AND vl.status='OPEN'
+				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
+				  UNION ALL
+				  SELECT 'FD_CONFIRMATION'
+				  FROM public.variance_log vl
+				  WHERE vl.module_code='FD_CONFIRMATION' AND vl.status='OPEN'
+				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
+				  UNION ALL
+				  SELECT 'FD_ACTIVATION'
+				  FROM public.variance_log vl
+				  WHERE vl.module_code='FD_ACTIVATION' AND vl.status='OPEN'
+				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
+				  UNION ALL
+				  SELECT 'FD_ACCRUAL'
+				  FROM public.variance_log vl
+				  WHERE vl.module_code='FD_ACCRUAL' AND vl.status='OPEN'
+				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
+				  UNION ALL
+				  SELECT 'FD_ACCRUAL'
+				  FROM investment.fd_accrual_exception ae
+				  LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
+				  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				  WHERE COALESCE(ae.is_deleted,false)=false
+				    AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
+				    AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
+				) x
+				GROUP BY module`
+			moduleCounts := map[string]int64{
+				"FD_BOOKING":      0,
+				"FD_CONFIRMATION": 0,
+				"FD_ACTIVATION":   0,
+				"FD_ACCRUAL":      0,
+			}
+			if mrows, merr := pool.Query(ctx, byModuleSQL, entityFilter); merr == nil {
+				for mrows.Next() {
+					var mod string
+					var cnt int64
+					if scanErr := mrows.Scan(&mod, &cnt); scanErr == nil {
+						moduleCounts[mod] = cnt
+					}
+				}
+				mrows.Close()
+			}
+			byModule := []bkRow{
+				{Type: "Booking", Count: moduleCounts["FD_BOOKING"]},
+				{Type: "Confirmation", Count: moduleCounts["FD_CONFIRMATION"]},
+				{Type: "Activation", Count: moduleCounts["FD_ACTIVATION"]},
+				{Type: "Accrual", Count: moduleCounts["FD_ACCRUAL"]},
+			}
+
 			return map[string]interface{}{
-				"count":   finalCount,
-				"value":   fdRound(totalVal, 2),
-				"breakup": breakup,
+				"count":     finalCount,
+				"value":     fdRound(totalVal, 2),
+				"breakup":   breakup,
+				"by_module": byModule,
 			}, nil
 		})
 

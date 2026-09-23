@@ -187,34 +187,48 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		// ── 3. rate negotiations (open/sent/received) ─────────────────────────
+		// Real data from the FD Rate Negotiation module (investment.fd_rate_negotiation
+		// + investment.fd_rate_offer — api/investment/fdRateNegotiation), not the
+		// legacy/never-populated investment.fd_bank_rate_negotiation stub. One row
+		// per rate request, joined to its best (highest-rate) live offer so the
+		// "All Rate Negotiations" table and the KPI tiles share one real source.
 		run("negotiations", func(ctx context.Context) (interface{}, error) {
-			// Try fd_bank_rate_negotiation if it exists; graceful fallback to empty
 			rows, err := pool.Query(ctx, `
 				SELECT
-				  n.negotiation_id,
-				  COALESCE(n.bank_name, n.bank_id, '') AS bank,
-				  COALESCE(b.entity_name, n.entity_id, '') AS entity,
-				  COALESCE(n.amount, 0) AS amount,
-				  COALESCE(n.requested_rate, 0) AS requested_rate,
-				  COALESCE(n.offered_rate, 0) AS offered_rate,
-				  COALESCE(n.tenor, '') AS tenor,
-				  COALESCE(n.negotiation_status, '') AS status,
-				  COALESCE(n.aging_days, 0) AS aging_days,
-				  COALESCE(TO_CHAR(n.offer_expiry_at, 'YYYY-MM-DD"T"HH24:MI:SS'), '') AS expires_at
-				FROM investment.fd_bank_rate_negotiation n
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = n.booking_id
-				WHERE COALESCE(n.is_deleted,false)=false
+				  n.rate_request_id::text,
+				  COALESCE(best.bank_name, '') AS bank,
+				  COALESCE(n.entity_name, n.entity_id, '') AS entity,
+				  COALESCE(n.proposed_fd_amount, 0) AS amount,
+				  COALESCE(best.offered_interest_rate, 0) AS offered_rate,
+				  TRIM(BOTH ' ' FROM COALESCE(n.tenure_value::text,'') || ' ' || COALESCE(n.tenure_type,'')) AS tenor,
+				  UPPER(COALESCE(n.request_status,'')) AS request_status,
+				  (best.offer_id IS NOT NULL) AS has_offer,
+				  GREATEST(0, EXTRACT(DAY FROM now() - n.created_at)::int) AS aging_days,
+				  COALESCE(TO_CHAR(best.valid_till_date,'YYYY-MM-DD"T"HH24:MI:SS'), '') AS expires_at
+				FROM investment.fd_rate_negotiation n
+				LEFT JOIN LATERAL (
+				  SELECT o.offer_id, o.bank_name, o.offered_interest_rate, o.valid_till_date
+				  FROM investment.fd_rate_offer o
+				  WHERE o.rate_request_id = n.rate_request_id
+				    AND COALESCE(o.is_deleted,false) = false
+				    AND UPPER(COALESCE(o.offer_status,'')) NOT IN ('REJECTED','EXPIRED','INACTIVE')
+				  ORDER BY o.offered_interest_rate DESC NULLS LAST, o.created_at DESC
+				  LIMIT 1
+				) best ON true
+				WHERE COALESCE(n.is_deleted,false) = false
+				  AND UPPER(COALESCE(n.request_status,'')) NOT IN ('DELETED')
 				  AND (n.entity_id = ANY(string_to_array($1, ',')))`+snapNegotiationFilter+`
 				ORDER BY n.created_at DESC
 				LIMIT 50`, entityFilter)
 			if err != nil {
-				// Table may not exist - return empty gracefully
+				api.LogError("[TreasuryDash] negotiations query error: %v", err)
 				return map[string]interface{}{
-					"rows":         []interface{}{},
-					"open_count":   0,
-					"avg_aging":    0,
-					"best_rate":    0,
-					"offers_today": []interface{}{},
+					"rows":           []interface{}{},
+					"open_count":     0,
+					"avg_aging":      0,
+					"best_rate":      0,
+					"benchmark_rate": 0,
+					"offers_today":   []interface{}{},
 				}, nil
 			}
 			defer rows.Close()
@@ -233,12 +247,35 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			var negRows []negRow
 			for rows.Next() {
-				var nr negRow
-				if err2 := rows.Scan(&nr.ID, &nr.Bank, &nr.Entity, &nr.Amount,
-					&nr.RequestedRate, &nr.OfferedRate, &nr.Tenor, &nr.Status,
-					&nr.AgingDays, &nr.ExpiresAt); err2 == nil {
-					negRows = append(negRows, nr)
+				var (
+					id, bank, entity, tenor, requestStatus, expiresAt string
+					amount, offeredRate                               float64
+					hasOffer                                          bool
+					agingDays                                         int
+				)
+				if err2 := rows.Scan(&id, &bank, &entity, &amount, &offeredRate, &tenor,
+					&requestStatus, &hasOffer, &agingDays, &expiresAt); err2 != nil {
+					continue
 				}
+				// Map the maker-checker request_status onto the simple lifecycle
+				// label the dashboard/table already renders (Draft/Sent/Offer
+				// Received/Approved/Converted).
+				status := "Sent"
+				switch {
+				case requestStatus == "DRAFT":
+					status = "Draft"
+				case requestStatus == "CONVERTED_TO_FD":
+					status = "Converted"
+				case requestStatus == "APPROVED":
+					status = "Approved"
+				case hasOffer:
+					status = "Offer Received"
+				}
+				negRows = append(negRows, negRow{
+					ID: id, Bank: bank, Entity: entity, Amount: fdRound(amount, 2),
+					OfferedRate: fdRound(offeredRate, 2), Tenor: tenor, Status: status,
+					AgingDays: agingDays, ExpiresAt: expiresAt,
+				})
 			}
 			if negRows == nil {
 				negRows = []negRow{}
@@ -246,15 +283,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 			openCount := 0
 			agingSum := 0
-			bestRate := 0.0
 			var offersToday []negRow
 			for _, nr := range negRows {
-				if nr.Status == "SENT" || nr.Status == "DRAFT" || nr.Status == "PENDING" {
+				if nr.Status == "Sent" || nr.Status == "Draft" || nr.Status == "Offer Received" {
 					openCount++
 					agingSum += nr.AgingDays
-				}
-				if nr.OfferedRate > bestRate {
-					bestRate = nr.OfferedRate
 				}
 				if nr.ExpiresAt != "" && nr.ExpiresAt[:10] == snapshotDate {
 					offersToday = append(offersToday, nr)
@@ -267,12 +300,28 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			if offersToday == nil {
 				offersToday = []negRow{}
 			}
+
+			// best_rate / benchmark_rate come from the live offer pool directly
+			// (not just the "best per request" rows above) — best_rate is the
+			// single highest live offer; benchmark_rate is the average of all
+			// live offers, i.e. the real prevailing rate to compare it against.
+			var bestRate, benchmarkRate float64
+			_ = pool.QueryRow(ctx, `
+				SELECT COALESCE(MAX(o.offered_interest_rate),0), COALESCE(AVG(o.offered_interest_rate),0)
+				FROM investment.fd_rate_offer o
+				JOIN investment.fd_rate_negotiation n ON n.rate_request_id = o.rate_request_id
+				WHERE COALESCE(o.is_deleted,false) = false
+				  AND UPPER(COALESCE(o.offer_status,'')) NOT IN ('REJECTED','EXPIRED','INACTIVE')
+				  AND (n.entity_id = ANY(string_to_array($1, ',')))`,
+				entityFilter).Scan(&bestRate, &benchmarkRate)
+
 			return map[string]interface{}{
-				"rows":         negRows,
-				"open_count":   openCount,
-				"avg_aging":    avgAging,
-				"best_rate":    fdRound(bestRate, 2),
-				"offers_today": offersToday,
+				"rows":           negRows,
+				"open_count":     openCount,
+				"avg_aging":      avgAging,
+				"best_rate":      fdRound(bestRate, 2),
+				"benchmark_rate": fdRound(benchmarkRate, 2),
+				"offers_today":   offersToday,
 			}, nil
 		})
 
