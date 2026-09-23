@@ -186,7 +186,7 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := insertJournalAudit(ctx, tx, newEntryID, "CREATE", statusPendingApproval,
-			"Reversal of "+req.EntryID+" ("+strings.TrimSpace(req.ReasonCode)+")", actor.Email, false); err != nil {
+			"Reversal of "+req.EntryID+" ("+strings.TrimSpace(req.ReasonCode)+"): "+strings.TrimSpace(req.Remarks), actor.Email, false); err != nil {
 			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
