@@ -146,6 +146,8 @@ func RegisterDashRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool
 	mux.Handle("/dash/investment/fd/bod-eod-checklist/save", midDashFull(investmentdashboards.SaveBodEodChecklistItems(pgxPool)))
 	// FD Audit & Governance Dashboard — audit log, maker-checker rate, overrides, missing evidence, period reopens
 	mux.Handle("/dash/investment/fd/audit-dashboard", midDashFull(investmentdashboards.GetFDAuditDashboard(pgxPool)))
+	// FD Lifecycle Journey — FD picker + rate negotiation → booking → confirmation → activation trace
+	mux.Handle("/dash/investment/fd/lifecycle-journey", midDashFull(investmentdashboards.GetFDLifecycleJourney(pgxPool)))
 
 	// --- Hedging Proposal Dashboard Routes ---
 	// Forward Dashboard

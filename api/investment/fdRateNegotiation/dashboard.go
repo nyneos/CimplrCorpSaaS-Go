@@ -186,7 +186,8 @@ func DashboardSummary(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(o.bank_name,''),
 				COALESCE(o.offered_interest_rate,0),
 				COALESCE(o.offer_status,''),
-				COALESCE(TO_CHAR(o.valid_till_date,'YYYY-MM-DD'),'')
+				COALESCE(TO_CHAR(o.valid_till_date,'YYYY-MM-DD'),''),
+				COALESCE(o.applicable_tenure,'')
 			FROM investment.fd_rate_offer o
 			JOIN investment.fd_rate_negotiation m ON m.rate_request_id = o.rate_request_id
 			WHERE COALESCE(o.is_deleted,false)=false
@@ -197,9 +198,9 @@ func DashboardSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			defer offerRows.Close()
 			items := make([]map[string]interface{}, 0)
 			for offerRows.Next() {
-				var id, requestID, ref, bank, status, valid string
+				var id, requestID, ref, bank, status, valid, tenure string
 				var rate float64
-				if err := offerRows.Scan(&id, &requestID, &ref, &bank, &rate, &status, &valid); err != nil {
+				if err := offerRows.Scan(&id, &requestID, &ref, &bank, &rate, &status, &valid, &tenure); err != nil {
 					continue
 				}
 				items = append(items, map[string]interface{}{
@@ -210,6 +211,7 @@ func DashboardSummary(pool *pgxpool.Pool) http.HandlerFunc {
 					"offered_interest_rate": rate,
 					"offer_status":          status,
 					"valid_till_date":       valid,
+					"applicable_tenure":     tenure,
 				})
 			}
 			out["recent_offers"] = items

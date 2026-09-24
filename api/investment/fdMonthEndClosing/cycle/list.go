@@ -48,6 +48,10 @@ const listWithAuditQuery = `
 		), 0) AS fd_count,
 		COALESCE(agg.readiness_score,0) AS readiness_score,
 		COALESCE(agg.blocker_count,0) AS blocker_count,
+		COALESCE(agg.total_count,0)::int AS checklist_total,
+		COALESCE(agg.completed_count,0)::int AS checklist_completed,
+		COALESCE(agg.critical_total,0)::int AS critical_total,
+		COALESCE(agg.critical_completed,0)::int AS critical_completed,
 		CASE
 			WHEN COALESCE(agg.total_count,0) = 0 THEN 'NOT_READY'
 			WHEN agg.completed_count = agg.total_count THEN 'READY_TO_CLOSE'
@@ -97,7 +101,9 @@ const listWithAuditQuery = `
 			CASE WHEN COUNT(*) = 0 THEN 0
 			     ELSE ROUND(COUNT(*) FILTER (WHERE i.status = 'COMPLETED') * 100.0 / COUNT(*), 2)
 			END AS readiness_score,
-			COUNT(*) FILTER (WHERE i.is_critical = true AND i.status <> 'COMPLETED') AS critical_incomplete
+			COUNT(*) FILTER (WHERE i.is_critical = true AND i.status <> 'COMPLETED') AS critical_incomplete,
+			COUNT(*) FILTER (WHERE i.is_critical = true) AS critical_total,
+			COUNT(*) FILTER (WHERE i.is_critical = true AND i.status = 'COMPLETED') AS critical_completed
 		FROM investment.fd_closing_checklist_item i
 		JOIN investment.fd_closing_cycle_fd_scope s
 		  ON s.scope_id = i.scope_id AND s.is_deleted = false

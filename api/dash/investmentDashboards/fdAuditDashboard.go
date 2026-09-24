@@ -8,9 +8,9 @@
 //   - audit_log           — unified trail from all fd_audit_* tables (latest 200 rows)
 //   - overrides           — fd_accrual_ledger rows where is_overridden=true
 //   - missing_evidence    — overrides that have no attachment
-//   - period_reopens      — fd_accrual_period_lock rows where unlocked_at IS NOT NULL
+//   - period_reopens      — fd_closing_reopen_request rows (Period Reopen screen)
 //   - approvals_register  — checker decisions (booking + master audit)
-//   - evidence_packs      — period lock list as evidence archive
+//   - evidence_packs      — fd_closing_evidence_pack rows (Closing Evidence Pack screen)
 //   - policy_exceptions   — open variance confirmations + unresolved accrual exceptions
 //   - transaction_trace   — full lifecycle for a specific fd_id (optional)
 //
@@ -811,42 +811,64 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 5. Missing evidence count ─────────────────────────────────────────
+		// ── 5. Missing evidence (FD Month/Quarter-End Closing) ────────────────
+		// Checklist steps marked COMPLETED with no evidence_ref on file, from
+		// investment.fd_closing_checklist_item (api/investment/fdMonthEndClosing).
 		run("missing_evidence", func(ctx context.Context) (interface{}, error) {
-			var count int64
-			err := pool.QueryRow(ctx, `
-				SELECT COUNT(*)
-				FROM investment.fd_accrual_ledger
-				WHERE is_overridden=true
-				  AND override_attachment IS NULL
-				  AND is_deleted=false
-				  AND (entity_id = ANY(string_to_array($1, ',')))
-				  AND ($2::text='' OR fd_id=$2)`, entityFilter, fdFilter).Scan(&count)
+			rows, err := pool.Query(ctx, `
+				SELECT i.step_name, COUNT(*)
+				FROM investment.fd_closing_checklist_item i
+				JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
+				WHERE COALESCE(i.is_deleted,false) = false
+				  AND COALESCE(c.is_deleted,false) = false
+				  AND i.status = 'COMPLETED'
+				  AND COALESCE(i.evidence_ref,'') = ''
+				  AND (c.entity_id = ANY(string_to_array($1, ',')))
+				  AND ($2::text='' OR i.fd_id=$2)
+				GROUP BY i.step_name, i.sequence
+				ORDER BY i.sequence`, entityFilter, fdFilter)
 			if err != nil {
 				api.LogError("[AuditDash] missing_evidence query error: %v", err)
-				return map[string]interface{}{"count": 0}, nil
+				return map[string]interface{}{"count": int64(0), "by_step": []interface{}{}}, nil
 			}
-			return map[string]interface{}{"count": count}, nil
+			defer rows.Close()
+			type stepRow struct {
+				StepName string `json:"step_name"`
+				Count    int64  `json:"count"`
+			}
+			byStep := []stepRow{}
+			var total int64
+			for rows.Next() {
+				var sr stepRow
+				if rows.Scan(&sr.StepName, &sr.Count) == nil {
+					byStep = append(byStep, sr)
+					total += sr.Count
+				}
+			}
+			return map[string]interface{}{"count": total, "by_step": byStep}, nil
 		})
 
-		// ── 6. Period reopens ─────────────────────────────────────────────────
+		// ── 6. Period reopens (FD Month/Quarter-End Closing) ──────────────────
+		// REOPEN events from investment.fd_closing_cycle_event_log — the same
+		// log the Period Reopen screen writes (fdMonthEndClosing/reopen/apply.go).
 		run("period_reopens", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
 				SELECT
-				  lock_id,
-				  entity_id,
-				  COALESCE(financial_period,'') AS financial_period,
-				  COALESCE(TO_CHAR(locked_at,'YYYY-MM-DD"T"HH24:MI:SS'),'') AS locked_at,
-				  COALESCE(locked_by,'') AS locked_by,
-				  COALESCE(TO_CHAR(unlocked_at,'YYYY-MM-DD"T"HH24:MI:SS'),'') AS unlocked_at,
-				  COALESCE(unlocked_by,'') AS unlocked_by,
-				  COALESCE(unlock_reason,'') AS unlock_reason,
-				  is_locked
-				FROM investment.fd_accrual_period_lock
-				WHERE unlocked_at IS NOT NULL
-				  AND (entity_id = ANY(string_to_array($1, ',')))
-				  AND unlocked_at >= $2::date
-				ORDER BY unlocked_at DESC
+				  rr.cycle_id,
+				  COALESCE(c.entity_id,'') AS entity_id,
+				  COALESCE(c.entity_name,'') AS entity_name,
+				  COALESCE(c.financial_period,'') AS financial_period,
+				  COALESCE(TO_CHAR(COALESCE(rr.reopened_at, rr.requested_at),'YYYY-MM-DD"T"HH24:MI:SS'),'') AS event_at,
+				  COALESCE(NULLIF(rr.reopened_by,''), rr.requested_by, '') AS event_by,
+				  COALESCE(rr.reason,'') AS reason,
+				  rr.request_id,
+				  COALESCE(rr.processing_status,'') AS processing_status
+				FROM investment.fd_closing_reopen_request rr
+				JOIN investment.fd_closing_cycle c ON c.cycle_id = rr.cycle_id
+				WHERE COALESCE(rr.is_deleted,false) = false
+				  AND (c.entity_id = ANY(string_to_array($1, ',')))
+				  AND COALESCE(rr.reopened_at, rr.requested_at) >= $2::date
+				ORDER BY COALESCE(rr.reopened_at, rr.requested_at) DESC
 				LIMIT 50`, entityFilter, startDate)
 			if err != nil {
 				api.LogError("[AuditDash] period_reopens query error: %v", err)
@@ -856,26 +878,28 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 			type periodRow struct {
 				LockID          string `json:"lock_id"`
+				CycleID         string `json:"cycle_id"`
 				EntityID        string `json:"entity_id"`
+				EntityName      string `json:"entity_name"`
 				FinancialPeriod string `json:"financial_period"`
-				LockedAt        string `json:"locked_at"`
-				LockedBy        string `json:"locked_by"`
 				UnlockedAt      string `json:"unlocked_at"`
 				UnlockedBy      string `json:"unlocked_by"`
 				UnlockReason    string `json:"unlock_reason"`
-				IsLocked        bool   `json:"is_locked"`
+				ReopenedAt      string `json:"reopened_at"`
+				ReopenedBy      string `json:"reopened_by"`
+				RequestID       string `json:"request_id"`
+				Status          string `json:"processing_status"`
 			}
 			out := []periodRow{}
 			for rows.Next() {
 				var pr periodRow
-				if err2 := rows.Scan(
-					&pr.LockID, &pr.EntityID, &pr.FinancialPeriod,
-					&pr.LockedAt, &pr.LockedBy,
-					&pr.UnlockedAt, &pr.UnlockedBy, &pr.UnlockReason, &pr.IsLocked,
-				); err2 != nil {
+				if err2 := rows.Scan(&pr.CycleID, &pr.EntityID, &pr.EntityName, &pr.FinancialPeriod,
+					&pr.UnlockedAt, &pr.UnlockedBy, &pr.UnlockReason, &pr.RequestID, &pr.Status); err2 != nil {
 					api.LogError("[AuditDash] period_reopens scan error: %v", err2)
 					continue
 				}
+				pr.LockID = pr.RequestID
+				pr.ReopenedAt, pr.ReopenedBy = pr.UnlockedAt, pr.UnlockedBy
 				out = append(out, pr)
 			}
 			return out, nil
@@ -1192,16 +1216,23 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		run("evidence_packs", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
 				SELECT
-				  lock_id,
-				  entity_id,
-				  COALESCE(financial_period,'') AS financial_period,
-				  COALESCE(TO_CHAR(locked_at,'YYYY-MM-DD"T"HH24:MI:SS'),'') AS locked_at,
-				  COALESCE(locked_by,'') AS locked_by,
-				  is_locked,
-				  (unlocked_at IS NOT NULL) AS has_been_reopened
-				FROM investment.fd_accrual_period_lock
-				WHERE (entity_id = ANY(string_to_array($1, ',')))
-				ORDER BY locked_at DESC
+				  p.pack_id, p.cycle_id,
+				  COALESCE(c.financial_period,'') AS financial_period,
+				  COALESCE(c.entity_name,'') AS entity_name,
+				  COALESCE(p.format,'') AS format,
+				  COALESCE(p.generated_by,'') AS generated_by,
+				  COALESCE(TO_CHAR((p.generated_at AT TIME ZONE 'Asia/Kolkata'),'YYYY-MM-DD HH24:MI:SS'),'') AS generated_time,
+				  COALESCE(p.download_count,0) AS download_count,
+				  COALESCE(p.include_accrual_ledger,false), COALESCE(p.include_reconciliation_report,false),
+				  COALESCE(p.include_exceptions_register,false), COALESCE(p.include_posting_summary,false),
+				  COALESCE(p.include_approval_logs,false), COALESCE(p.include_period_lock_certificate,false),
+				  COALESCE(p.include_audit_trail,false), COALESCE(p.include_supporting_documents,false)
+				FROM investment.fd_closing_evidence_pack p
+				JOIN investment.fd_closing_cycle c ON c.cycle_id = p.cycle_id
+				WHERE COALESCE(p.is_deleted,false) = false
+				  AND COALESCE(c.is_deleted,false) = false
+				  AND (c.entity_id = ANY(string_to_array($1, ',')))
+				ORDER BY p.generated_at DESC
 				LIMIT 100`, entityFilter)
 			if err != nil {
 				api.LogError("[AuditDash] evidence_packs query error: %v", err)
@@ -1209,24 +1240,33 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			defer rows.Close()
 
+			labels := []string{"Accrual Ledger", "Reconciliation Report", "Exceptions Register", "Posting Summary", "Approval Logs", "Period Lock Certificate", "Audit Trail", "Supporting Documents"}
 			type evidRow struct {
-				LockID          string `json:"lock_id"`
-				EntityID        string `json:"entity_id"`
-				FinancialPeriod string `json:"financial_period"`
-				LockedAt        string `json:"locked_at"`
-				LockedBy        string `json:"locked_by"`
-				IsLocked        bool   `json:"is_locked"`
-				HasBeenReopened bool   `json:"has_been_reopened"`
+				Period           string   `json:"period"`
+				PackID           string   `json:"pack_id"`
+				CycleID          string   `json:"cycle_id"`
+				EntityName       string   `json:"entity_name"`
+				Format           string   `json:"format"`
+				GeneratedBy      string   `json:"generated_by"`
+				GeneratedTime    string   `json:"generated_time"`
+				DownloadCount    int      `json:"download_count"`
+				ContentsIncluded []string `json:"contents_included"`
 			}
 			out := []evidRow{}
 			for rows.Next() {
 				var er evidRow
-				if err2 := rows.Scan(
-					&er.LockID, &er.EntityID, &er.FinancialPeriod,
-					&er.LockedAt, &er.LockedBy, &er.IsLocked, &er.HasBeenReopened,
-				); err2 != nil {
+				var inc [8]bool
+				if err2 := rows.Scan(&er.PackID, &er.CycleID, &er.Period, &er.EntityName, &er.Format,
+					&er.GeneratedBy, &er.GeneratedTime, &er.DownloadCount,
+					&inc[0], &inc[1], &inc[2], &inc[3], &inc[4], &inc[5], &inc[6], &inc[7]); err2 != nil {
 					api.LogError("[AuditDash] evidence_packs scan error: %v", err2)
 					continue
+				}
+				er.ContentsIncluded = []string{}
+				for i, on := range inc {
+					if on {
+						er.ContentsIncluded = append(er.ContentsIncluded, labels[i])
+					}
 				}
 				out = append(out, er)
 			}
@@ -1789,12 +1829,14 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"fd_id":       fdFilter,
 			},
 			"kpis": map[string]interface{}{
-				"total_audit_records":     totalRecords,
-				"total_pending_approvals": totalPending,
-				"maker_checker_rate_pct":  makerCheckerRate,
-				"missing_evidence_count":  missingEvCount,
-				"period_reopens":          countSlice(get("period_reopens")),
-				"open_policy_exceptions":  getNestedInt64(get("policy_exceptions"), "total"),
+				"total_audit_records":      totalRecords,
+				"total_pending_approvals":  totalPending,
+				"maker_checker_rate_pct":   makerCheckerRate,
+				"missing_evidence_count":   missingEvCount,
+				"period_reopens":           countSlice(get("period_reopens")),
+				"last_reopen_at":           lastReopenAt(get("period_reopens")),
+				"missing_evidence_by_step": missingEvidenceBySteps(get("missing_evidence")),
+				"open_policy_exceptions":   getNestedInt64(get("policy_exceptions"), "total"),
 			},
 			"audit_summary":      get("audit_summary"),
 			"maker_checker_rate": get("maker_checker_rate"),
@@ -1812,4 +1854,26 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", payload)
 	}
+}
+
+// lastReopenAt returns the newest reopen timestamp (list is ordered DESC).
+func lastReopenAt(v interface{}) string {
+	b, _ := json.Marshal(v)
+	var rows []struct {
+		ReopenedAt string `json:"reopened_at"`
+	}
+	if json.Unmarshal(b, &rows) != nil || len(rows) == 0 {
+		return ""
+	}
+	return rows[0].ReopenedAt
+}
+
+// missingEvidenceBySteps returns the per-step breakdown of missing evidence.
+func missingEvidenceBySteps(v interface{}) interface{} {
+	if m, ok := v.(map[string]interface{}); ok {
+		if bs, ok2 := m["by_step"]; ok2 {
+			return bs
+		}
+	}
+	return []interface{}{}
 }

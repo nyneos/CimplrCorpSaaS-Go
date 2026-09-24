@@ -604,7 +604,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 	// booking/confirmation above).
 	pendingRateNegotiationSQL := `
 		SELECT
-		  '' AS booking_id, '' AS fd_id,
+		  COALESCE(NULLIF(o.offer_reference_id,''), o.offer_id::text) AS booking_id, '' AS fd_id,
 		  COALESCE(n.entity_name,''), COALESCE(n.entity_id,''),
 		  COALESCE(o.bank_name, o.bank_id,''),
 		  COALESCE(n.proposed_fd_amount,0), COALESCE(o.offered_interest_rate,0),
@@ -735,7 +735,7 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 
 // buildPeriodClosingChecklist returns the real Month/Quarter-End Closing
 // checklist — investment.fd_closing_checklist_item, grouped by step_code
-// across every still-open (not LOCKED) closing cycle in entity scope. This is
+// across every approved, active (IN_PROGRESS / AWAITING_APPROVAL / REOPENED) closing cycle in entity scope — the same set the Period Close Setup screen lists via cycle/list-approved-active. This is
 // the same step vocabulary the Closing Checklist Dashboard works from
 // (Accrual Run Completed/Approved, Interest Receipts Captured, Receipts
 // Reconciled, TDS Validated, Variances & Exceptions Closed, Accounting
@@ -754,7 +754,13 @@ func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entity
 		JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 		WHERE COALESCE(i.is_deleted,false) = false
 		  AND COALESCE(c.is_deleted,false) = false
-		  AND COALESCE(c.status,'') <> 'LOCKED'
+		  AND c.status IN ('IN_PROGRESS','AWAITING_APPROVAL','REOPENED')
+		  AND EXISTS (
+		    SELECT 1 FROM investment.fd_closing_cycle_audit ca
+		    WHERE ca.cycle_id = c.cycle_id
+		      AND ca.action_type = 'CREATE'
+		      AND ca.processing_status = 'APPROVED'
+		  )
 		  AND c.entity_id = ANY(string_to_array($1, ','))
 		GROUP BY i.step_code
 		ORDER BY MIN(i.sequence) ASC`

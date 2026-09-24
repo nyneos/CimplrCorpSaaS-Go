@@ -934,30 +934,63 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── EOD: 12. GL postings today ────────────────────────────────────────
 		run("posting_today", func(ctx context.Context) (interface{}, error) {
-			var posted, failed, notPosted int64
-			var totalPosted float64
-			err := pool.QueryRow(ctx, `
-				SELECT
-				  SUM(CASE WHEN posting_status = 'POSTED' THEN 1 ELSE 0 END) AS posted,
-				  SUM(CASE WHEN posting_status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
-				  SUM(CASE WHEN posting_status = 'NOT_POSTED' THEN 1 ELSE 0 END) AS not_posted,
-				  COALESCE(SUM(CASE WHEN posting_status = 'POSTED' THEN COALESCE(net_cash_flow,interest_accrued,0) ELSE 0 END),0) AS total_posted
-				FROM investment.fd_cashflow_schedule cf
-				JOIN investment.fd_master m ON m.fd_id = cf.fd_id AND m.is_deleted=false
-				WHERE cf.is_deleted=false
-				  AND DATE(cf.last_modified_at) = $1::date
-				  AND (m.entity_id = ANY(string_to_array($2, ',')))
-				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
-				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))`, today, entityFilter, bankFilter, fdTypeFilter).Scan(&posted, &failed, &notPosted, &totalPosted)
+			// Same FD journal ledger the Accounting Workbench lists
+			// (investment.accounting_journal_entry, FD rows only).
+			rows, err := pool.Query(ctx, `
+				SELECT je.entry_id, COALESCE(je.fd_id,''), COALESCE(je.entity_name,''),
+				       COALESCE(je.entry_type,''), COALESCE(je.total_debit,0), COALESCE(je.status,''),
+				       COALESCE(TO_CHAR(COALESCE(je.posted_at, je.created_at),'YYYY-MM-DD HH24:MI:SS'),''),
+				       COALESCE(je.failure_reason,'')
+				FROM investment.accounting_journal_entry je
+				WHERE COALESCE(je.is_deleted,false) = false
+				  AND (
+				    je.fd_id IS NOT NULL OR je.receipt_id IS NOT NULL OR je.accrual_run_id IS NOT NULL
+				    OR je.closure_request_id IS NOT NULL OR je.entry_type LIKE 'FD\_%'
+				    OR je.entry_type IN ('CLOSURE','REVERSAL')
+				  )
+				  AND DATE(COALESCE(je.posted_at, je.created_at)) = $1::date
+				  AND (COALESCE(je.entity_id,'') = ANY(string_to_array($2, ',')))
+				ORDER BY COALESCE(je.posted_at, je.created_at) DESC`, today, entityFilter)
+			empty := map[string]interface{}{"posted": 0, "failed": 0, "not_posted": 0, "total_posted_amount": 0, "rows": []interface{}{}}
 			if err != nil {
 				api.LogError("[BodEodDash] posting_today query error: %v", err)
-				return map[string]interface{}{"posted": 0, "failed": 0, "not_posted": 0, "total_posted_amount": 0}, nil
+				return empty, nil
+			}
+			defer rows.Close()
+
+			var posted, failed, notPosted int64
+			var totalPosted float64
+			logs := []map[string]interface{}{}
+			for rows.Next() {
+				var entryID, fdRef, entity, typ, status, ts, errMsg string
+				var amt float64
+				if err2 := rows.Scan(&entryID, &fdRef, &entity, &typ, &amt, &status, &ts, &errMsg); err2 != nil {
+					continue
+				}
+				uiStatus := "Pending"
+				switch status {
+				case "POSTED":
+					posted++
+					totalPosted += amt
+					uiStatus = "Posted"
+				case "FAILED":
+					failed++
+					uiStatus = "Failed"
+				default:
+					notPosted++
+				}
+				logs = append(logs, map[string]interface{}{
+					"entryId": entryID, "fdRef": fdRef, "entity": entity, "bank": "",
+					"amount": amt, "currency": "INR", "type": typ, "status": uiStatus,
+					"timestamp": ts, "error": errMsg,
+				})
 			}
 			return map[string]interface{}{
 				"posted":              posted,
 				"failed":              failed,
 				"not_posted":          notPosted,
 				"total_posted_amount": fdRound(totalPosted, 2),
+				"rows":                logs,
 			}, nil
 		})
 
