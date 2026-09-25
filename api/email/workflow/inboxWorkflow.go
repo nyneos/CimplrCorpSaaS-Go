@@ -205,13 +205,10 @@ func submitInboxApproval(ctx context.Context, pool *pgxpool.Pool, req inboxAppro
 		SubmittedByEmail:    userEmail,
 		MatrixID:            req.MatrixID,
 		RequirePinnedMatrix: true,
-		AutoApplyIfUnpinned: true,
+		AutoApplyIfUnpinned: false,
 	})
 	if err != nil {
 		return "", err
-	}
-	if instID == "" && !approvalengine.PolicyPinned(req.MatrixID) {
-		finalizeEmailInboxApproval(ctx, pool, req.InboxID, req.TxType, approvalengine.InstStatusApproved, userEmail, "Auto-applied: policy did not trigger approval")
 	}
 	return instID, nil
 }
