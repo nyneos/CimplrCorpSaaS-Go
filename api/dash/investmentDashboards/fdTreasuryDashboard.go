@@ -585,33 +585,36 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 8. rate distribution (bank × rate bucket) for heatmap ────────────
 		run("rate_by_bank", func(ctx context.Context) (interface{}, error) {
+			// Bank x rate-bucket yield distribution from live, non-expired FD
+			// rate offers (investment/fd/rate-negotiation/offer/list +
+			// investment/fd/rate-negotiation/all for the entity scope), not
+			// booked FDs — this is the negotiation desk's comparison heatmap.
 			rows, err := pool.Query(ctx, `
 				SELECT
-				  COALESCE(m.bank_name, m.bank_id) AS bank,
+				  o.bank_name AS bank,
 				  CASE
-				    WHEN m.interest_rate < 5  THEN '<5%'
-				    WHEN m.interest_rate < 6  THEN '5-6%'
-				    WHEN m.interest_rate < 7  THEN '6-7%'
-				    WHEN m.interest_rate < 8  THEN '7-8%'
-				    WHEN m.interest_rate < 9  THEN '8-9%'
+				    WHEN COALESCE(o.effective_yield, o.offered_interest_rate) < 5  THEN '<5%'
+				    WHEN COALESCE(o.effective_yield, o.offered_interest_rate) < 6  THEN '5-6%'
+				    WHEN COALESCE(o.effective_yield, o.offered_interest_rate) < 7  THEN '6-7%'
+				    WHEN COALESCE(o.effective_yield, o.offered_interest_rate) < 8  THEN '7-8%'
+				    WHEN COALESCE(o.effective_yield, o.offered_interest_rate) < 9  THEN '8-9%'
 				    ELSE '9%+'
 				  END AS rate_bucket,
 				  COUNT(*) AS fd_count,
-				  COALESCE(SUM(m.principal_amount),0) AS exposure,
-				  COALESCE(
-				    SUM(m.principal_amount * m.interest_rate) / NULLIF(SUM(m.principal_amount),0),
-				    0
-				  ) AS avg_rate
-				FROM investment.fd_master m
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND (b.entity_id = ANY(string_to_array($1, ',')))
-				  AND ($2::text='' OR m.interest_type_code=$2)
-				  AND ($3::text='' OR m.bank_id=$3)`+
-				snapshotFilter+`
-				GROUP BY COALESCE(m.bank_name, m.bank_id), 2
-				ORDER BY COALESCE(m.bank_name, m.bank_id), MIN(m.interest_rate)`, entityFilter, fdTypeFilter, bankFilter)
+				  0 AS exposure,
+				  AVG(COALESCE(o.effective_yield, o.offered_interest_rate)) AS avg_rate
+				FROM investment.fd_rate_offer o
+				JOIN investment.fd_rate_negotiation n ON n.rate_request_id = o.rate_request_id
+				WHERE COALESCE(o.is_deleted,false) = false
+				  AND COALESCE(n.is_deleted,false) = false
+				  AND o.offer_status <> 'REJECTED'
+				  AND o.valid_till_date >= CURRENT_DATE
+				  AND (n.entity_id = ANY(string_to_array($1, ',')))
+				  AND ($2::text='' OR o.bank_id=$2 OR o.bank_name=$2)
+				GROUP BY o.bank_name, 2
+				ORDER BY o.bank_name, AVG(COALESCE(o.effective_yield, o.offered_interest_rate))`, entityFilter, bankFilter)
 			if err != nil {
+				api.LogError("[TreasuryDash] rate_by_bank query error: %v", err)
 				return []interface{}{}, nil
 			}
 			defer rows.Close()
@@ -627,7 +630,6 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			for rows.Next() {
 				var rr rateRow
 				if err2 := rows.Scan(&rr.Bank, &rr.RateBucket, &rr.FDCount, &rr.Exposure, &rr.AvgRate); err2 == nil {
-					rr.Exposure = fdRound(rr.Exposure, 2)
 					rr.AvgRate = fdRound(rr.AvgRate, 2)
 					out = append(out, rr)
 				}

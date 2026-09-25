@@ -912,43 +912,144 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── EOD: 11. Exceptions opened vs closed today ────────────────────────
 		run("exceptions_today", func(ctx context.Context) (interface{}, error) {
-			var opened, closed, escalated int64
-			err := pool.QueryRow(ctx, `
+			// Real variance/interest exceptions from the Interest Variance &
+			// Exception Management inbox (investment/fd/exception/all),
+			// investment.fd_receipt_exception. The drilldown lists only
+			// exceptions whose workflow (exception_status) is still open
+			// (OPEN or IN_REVIEW) — not date-scoped, so it always reflects
+			// what's actually open right now instead of what was raised today.
+			empty := map[string]interface{}{"opened": 0, "closed": 0, "escalated": 0, "rows": []interface{}{}}
+
+			var closed int64
+			if err := pool.QueryRow(ctx, `
+				SELECT COUNT(*)
+				FROM investment.fd_receipt_exception e
+				LEFT JOIN investment.fd_master m ON m.fd_id = e.fd_id
+				WHERE COALESCE(e.is_deleted,false)=false
+				  AND e.exception_status = 'CLOSE'
+				  AND (COALESCE(m.entity_id,'') = ANY(string_to_array($1, ',')))
+				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)`,
+				entityFilter, bankFilter).Scan(&closed); err != nil {
+				api.LogError("[BodEodDash] exceptions_today closed-count query error: %v", err)
+			}
+
+			rows, err := pool.Query(ctx, `
 				SELECT
-				  SUM(CASE WHEN exception_status NOT IN ('RESOLVED','CLOSED') THEN 1 ELSE 0 END) AS opened,
-				  SUM(CASE WHEN exception_status IN ('RESOLVED','CLOSED') THEN 1 ELSE 0 END) AS closed,
-				  SUM(CASE WHEN exception_status = 'ESCALATED' THEN 1 ELSE 0 END) AS escalated
-				FROM investment.fd_accrual_exception ae
-				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id AND m.is_deleted=false
-				WHERE COALESCE(ae.is_deleted,false)=false
-				  AND DATE(ae.created_at) = $1::date
-				  AND (m.entity_id = ANY(string_to_array($2, ',')))
-				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
-				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))`, today, entityFilter, bankFilter, fdTypeFilter).Scan(&opened, &closed, &escalated)
+				  e.exception_id, COALESCE(e.fd_ref_no,''), COALESCE(m.entity_name,''), COALESCE(m.bank_name,''),
+				  COALESCE(e.exception_type,''), COALESCE(e.severity,''),
+				  COALESCE(e.variance_amount,0), e.variance_outcome,
+				  COALESCE(e.exception_status,'OPEN'),
+				  COALESCE(la.processing_status,'')
+				FROM investment.fd_receipt_exception e
+				LEFT JOIN investment.fd_master m ON m.fd_id = e.fd_id
+				LEFT JOIN LATERAL (
+					SELECT a.processing_status
+					FROM investment.fd_receipt_exception_audit a
+					WHERE a.exception_id = e.exception_id
+					ORDER BY a.requested_at DESC
+					LIMIT 1
+				) la ON true
+				WHERE COALESCE(e.is_deleted,false)=false
+				  AND e.exception_status IN ('OPEN','IN_REVIEW')
+				  AND (COALESCE(m.entity_id,'') = ANY(string_to_array($1, ',')))
+				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)
+				ORDER BY e.raised_at DESC
+				LIMIT 200`, entityFilter, bankFilter)
 			if err != nil {
 				api.LogError("[BodEodDash] exceptions_today query error: %v", err)
-				return map[string]interface{}{"opened": 0, "closed": 0, "escalated": 0}, nil
+				return empty, nil
 			}
-			return map[string]interface{}{"opened": opened, "closed": closed, "escalated": escalated}, nil
+			defer rows.Close()
+
+			var opened int64
+			out := []map[string]interface{}{}
+			for rows.Next() {
+				var excID, fdRef, entity, bank, excType, severity, status, auditStatus string
+				var varianceAmt float64
+				var varianceOutcome *string
+				if err2 := rows.Scan(&excID, &fdRef, &entity, &bank, &excType, &severity,
+					&varianceAmt, &varianceOutcome, &status, &auditStatus); err2 != nil {
+					continue
+				}
+				opened++
+				outcome := ""
+				if varianceOutcome != nil {
+					outcome = *varianceOutcome
+				}
+				out = append(out, map[string]interface{}{
+					"exception_id":      excID,
+					"fd_ref_no":         fdRef,
+					"entity":            entity,
+					"bank":              bank,
+					"type":              excType,
+					"severity":          severity,
+					"variance_amount":   fdRound(varianceAmt, 2),
+					"variance_outcome":  outcome,
+					"exception_status":  status,
+					"processing_status": auditStatus,
+				})
+			}
+			return map[string]interface{}{"opened": opened, "closed": closed, "escalated": 0, "rows": out}, nil
 		})
 
 		// ── EOD: 12. GL postings today ────────────────────────────────────────
 		run("posting_today", func(ctx context.Context) (interface{}, error) {
 			// Same FD journal ledger the Accounting Workbench lists
-			// (investment.accounting_journal_entry, FD rows only).
+			// (investment.accounting_journal_entry / journal/list, FD rows only).
+			// Posted = status='POSTED' AND posted today; Failed = status='FAILED'
+			// AND last touched (posted_at, else updated/created) today.
 			rows, err := pool.Query(ctx, `
-				SELECT je.entry_id, COALESCE(je.fd_id,''), COALESCE(je.entity_name,''),
-				       COALESCE(je.entry_type,''), COALESCE(je.total_debit,0), COALESCE(je.status,''),
-				       COALESCE(TO_CHAR(COALESCE(je.posted_at, je.created_at),'YYYY-MM-DD HH24:MI:SS'),''),
-				       COALESCE(je.failure_reason,'')
+				SELECT
+				  je.entry_id,
+				  COALESCE(je.entry_type,''),
+				  COALESCE(
+				    NULLIF(je.accrual_run_id,''), NULLIF(je.closure_request_id::text,''),
+				    NULLIF(je.receipt_id,''), NULLIF(je.activity_id::text,'')
+				  ) AS source_ref,
+				  COALESCE(
+				    NULLIF(je.accrual_run_id,''), NULLIF(je.closure_request_id::text,''),
+				    NULLIF(je.receipt_id,''), NULLIF(je.activity_id::text,'')
+				  ) AS journal_batch_id,
+				  COALESCE(fm.bank_fd_ref_no, je.fd_id,'') AS reference,
+				  TO_CHAR(je.entry_date,'YYYY-MM-DD') AS value_date,
+				  COALESCE(je.accounting_period,'') AS posting_period,
+				  COALESCE(cyc.status,'OPEN') AS period_status,
+				  COALESCE(je.entity_name,'') AS entity,
+				  COALESCE(fm.bank_name,'') AS bank,
+				  COALESCE(NULLIF(rc.currency,''),'INR') AS currency,
+				  COALESCE(je.total_debit,0) AS amount,
+				  COALESCE(je.status,'') AS status,
+				  COALESCE(l.processing_status,'') AS approval_status,
+				  COALESCE(je.remarks,'') AS remarks,
+				  COALESCE(je.created_by,'') AS created_by,
+				  COALESCE(TO_CHAR(COALESCE(je.posted_at, je.created_at) AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD HH24:MI:SS'),'') AS ts,
+				  COALESCE(je.failure_reason,'') AS error_message
 				FROM investment.accounting_journal_entry je
+				LEFT JOIN investment.fd_master fm ON fm.fd_id = je.fd_id
+				LEFT JOIN investment.fd_interest_receipt rc ON rc.receipt_id = je.receipt_id
+				LEFT JOIN LATERAL (
+					SELECT cc.status FROM investment.fd_closing_cycle cc
+					WHERE (cc.entity_id = je.entity_id OR cc.entity_name = je.entity_name)
+					  AND cc.status IN ('LOCKED','CLOSED')
+					  AND je.entry_date BETWEEN cc.period_start AND cc.period_end
+					  AND COALESCE(cc.is_deleted,false) = false
+					ORDER BY cc.period_end DESC LIMIT 1
+				) cyc ON true
+				LEFT JOIN LATERAL (
+					SELECT a.processing_status FROM investment.auditaction_fd_accounting_journal a
+					WHERE a.entry_id = je.entry_id
+					ORDER BY a.requested_at DESC LIMIT 1
+				) l ON true
 				WHERE COALESCE(je.is_deleted,false) = false
 				  AND (
 				    je.fd_id IS NOT NULL OR je.receipt_id IS NOT NULL OR je.accrual_run_id IS NOT NULL
 				    OR je.closure_request_id IS NOT NULL OR je.entry_type LIKE 'FD\_%'
 				    OR je.entry_type IN ('CLOSURE','REVERSAL')
 				  )
-				  AND DATE(COALESCE(je.posted_at, je.created_at)) = $1::date
+				  AND (
+				    (je.status = 'POSTED' AND DATE(je.posted_at) = $1::date)
+				    OR (je.status = 'FAILED' AND DATE(COALESCE(je.posted_at, je.created_at)) = $1::date)
+				  )
 				  AND (COALESCE(je.entity_id,'') = ANY(string_to_array($2, ',')))
 				ORDER BY COALESCE(je.posted_at, je.created_at) DESC`, today, entityFilter)
 			empty := map[string]interface{}{"posted": 0, "failed": 0, "not_posted": 0, "total_posted_amount": 0, "rows": []interface{}{}}
@@ -958,13 +1059,16 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			defer rows.Close()
 
-			var posted, failed, notPosted int64
+			var posted, failed int64
 			var totalPosted float64
 			logs := []map[string]interface{}{}
 			for rows.Next() {
-				var entryID, fdRef, entity, typ, status, ts, errMsg string
+				var entryID, entryType, sourceRef, journalBatchID, reference, valueDate, postingPeriod,
+					periodStatus, entity, bank, currency, status, approvalStatus, remarks, createdBy, ts, errMsg string
 				var amt float64
-				if err2 := rows.Scan(&entryID, &fdRef, &entity, &typ, &amt, &status, &ts, &errMsg); err2 != nil {
+				if err2 := rows.Scan(&entryID, &entryType, &sourceRef, &journalBatchID, &reference, &valueDate,
+					&postingPeriod, &periodStatus, &entity, &bank, &currency, &amt, &status, &approvalStatus,
+					&remarks, &createdBy, &ts, &errMsg); err2 != nil {
 					continue
 				}
 				uiStatus := "Pending"
@@ -976,19 +1080,35 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				case "FAILED":
 					failed++
 					uiStatus = "Failed"
-				default:
-					notPosted++
 				}
 				logs = append(logs, map[string]interface{}{
-					"entryId": entryID, "fdRef": fdRef, "entity": entity, "bank": "",
-					"amount": amt, "currency": "INR", "type": typ, "status": uiStatus,
-					"timestamp": ts, "error": errMsg,
+					"entryId":        entryID,
+					"eventType":      entryType,
+					"source":         sourceRef,
+					"journalBatchId": journalBatchID,
+					"reference":      reference,
+					"valueDate":      valueDate,
+					"postingPeriod":  postingPeriod,
+					"periodStatus":   periodStatus,
+					"entity":         entity,
+					"bank":           bank,
+					"currency":       currency,
+					"amount":         fdRound(amt, 2),
+					"ledgerStatus":   uiStatus,
+					"approvalStatus": approvalStatus,
+					"remarks":        remarks,
+					"createdBy":      createdBy,
+					"fdRef":          reference,
+					"type":           entryType,
+					"status":         uiStatus,
+					"timestamp":      ts,
+					"error":          errMsg,
 				})
 			}
 			return map[string]interface{}{
 				"posted":              posted,
 				"failed":              failed,
-				"not_posted":          notPosted,
+				"not_posted":          0,
 				"total_posted_amount": fdRound(totalPosted, 2),
 				"rows":                logs,
 			}, nil

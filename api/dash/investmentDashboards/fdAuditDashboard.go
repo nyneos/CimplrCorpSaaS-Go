@@ -279,6 +279,46 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					FROM investment.fd_accrual_run_audit
 					WHERE requested_at >= $1::date AND requested_at < $2::date
 					  AND (EXISTS(SELECT 1 FROM investment.fd_accrual_run ar WHERE ar.run_id=fd_accrual_run_audit.run_id AND COALESCE(ar.entity_id,'') = ANY(string_to_array($3, ','))))`},
+				{"CLOSING_CYCLE", `
+					SELECT 'CLOSING_CYCLE',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_closing_cycle_audit
+					WHERE requested_at >= $1::date AND requested_at < $2::date
+					  AND EXISTS(SELECT 1 FROM investment.fd_closing_cycle cc WHERE cc.cycle_id=fd_closing_cycle_audit.cycle_id AND cc.entity_id = ANY(string_to_array($3, ',')))`},
+				{"RATE_NEGOTIATION", `
+					SELECT 'RATE_NEGOTIATION',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_audit_rate_negotiation
+					WHERE requested_at >= $1::date AND requested_at < $2::date
+					  AND EXISTS(SELECT 1 FROM investment.fd_rate_negotiation rn WHERE rn.rate_request_id=fd_audit_rate_negotiation.rate_request_id AND rn.entity_id = ANY(string_to_array($3, ',')))`},
+				{"RATE_OFFER", `
+					SELECT 'RATE_OFFER',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_rate_offer_audit
+					WHERE requested_at >= $1::date AND requested_at < $2::date
+					  AND EXISTS(SELECT 1 FROM investment.fd_rate_negotiation rn WHERE rn.rate_request_id=fd_rate_offer_audit.rate_request_id AND rn.entity_id = ANY(string_to_array($3, ',')))`},
+				{"ACCOUNTING_JOURNAL", `
+					SELECT 'ACCOUNTING_JOURNAL',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.auditaction_fd_accounting_journal
+					WHERE requested_at >= $1::date AND requested_at < $2::date
+					  AND EXISTS(SELECT 1 FROM investment.accounting_journal_entry je WHERE je.entry_id=auditaction_fd_accounting_journal.entry_id AND COALESCE(je.entity_id,'') = ANY(string_to_array($3, ',')))`},
 			}
 
 			out := []summaryRow{}
@@ -689,6 +729,93 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  WHERE requested_at >= $1::date AND requested_at < $2::date
 				    AND ($4::text='' OR action_type=$4)
 				    AND (EXISTS(SELECT 1 FROM investment.fd_accrual_run ar WHERE ar.run_id=fd_accrual_run_audit.run_id AND COALESCE(ar.entity_id,'') = ANY(string_to_array($3, ','))))
+				  UNION ALL
+
+				  SELECT
+				    'CLOSING_CYCLE',
+				    audit_id::text,
+				    cycle_id::text,
+				    action_type,
+				    processing_status,
+				    COALESCE(reason,''),
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.fd_closing_cycle_audit
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
+				    AND EXISTS(SELECT 1 FROM investment.fd_closing_cycle cc WHERE cc.cycle_id=fd_closing_cycle_audit.cycle_id AND cc.entity_id = ANY(string_to_array($3, ',')))
+
+				  UNION ALL
+
+				  SELECT
+				    'RATE_NEGOTIATION',
+				    audit_id::text,
+				    rate_request_id::text,
+				    action_type,
+				    processing_status,
+				    COALESCE(reason,''),
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.fd_audit_rate_negotiation
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
+				    AND EXISTS(SELECT 1 FROM investment.fd_rate_negotiation rn WHERE rn.rate_request_id=fd_audit_rate_negotiation.rate_request_id AND rn.entity_id = ANY(string_to_array($3, ',')))
+
+				  UNION ALL
+
+				  SELECT
+				    'RATE_OFFER',
+				    audit_id::text,
+				    offer_id::text,
+				    action_type,
+				    processing_status,
+				    COALESCE(reason,''),
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.fd_rate_offer_audit
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
+				    AND EXISTS(SELECT 1 FROM investment.fd_rate_negotiation rn WHERE rn.rate_request_id=fd_rate_offer_audit.rate_request_id AND rn.entity_id = ANY(string_to_array($3, ',')))
+
+				  UNION ALL
+
+				  SELECT
+				    'ACCOUNTING_JOURNAL',
+				    action_id::text,
+				    entry_id::text,
+				    actiontype,
+				    processing_status,
+				    COALESCE(reason,''),
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.auditaction_fd_accounting_journal
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR actiontype=$4)
+				    AND EXISTS(SELECT 1 FROM investment.accounting_journal_entry je WHERE je.entry_id=auditaction_fd_accounting_journal.entry_id AND COALESCE(je.entity_id,'') = ANY(string_to_array($3, ',')))
 				) combined
 				ORDER BY sort_ts DESC
 				LIMIT 500`, startDate, endDate, entityFilter, actionFilter, fdFilter)
@@ -1298,10 +1425,48 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				logger.LogError("policy exceptions open accrual exceptions: query row failed: %v", err)
 			}
 
+			// FD policy breaches recorded by the policy engine
+			// (policyengine_svc.execution_log, result = BREACH) for FD modules.
+			var breachTotal, breachedPolicies int64
+			byPolicy := []map[string]interface{}{}
+			brRows, brErr := pool.Query(ctx, `
+				SELECT COALESCE(l.policy_code,'UNKNOWN'),
+				       COALESCE(p.name, l.policy_code, 'Unknown policy'),
+				       COALESCE(p.criticality,''),
+				       COUNT(*)
+				FROM policyengine_svc.execution_log l
+				LEFT JOIN policyengine_svc.policy_master p ON p.policy_id = l.policy_id
+				WHERE l.result = 'BREACH'
+				  AND l.module_code IN ('INVESTMENT_FD','FIXED_DEPOSIT')
+				  AND l.evaluated_at >= $1::date AND l.evaluated_at < $2::date
+				  AND (COALESCE(l.entity_code,'') = '' OR l.entity_code = ANY(string_to_array($3, ',')))
+				GROUP BY l.policy_code, p.name, p.criticality
+				ORDER BY COUNT(*) DESC`, startDate, endDate, entityFilter)
+			if brErr != nil {
+				logger.LogError("policy exceptions fd policy breaches: query failed: %v", brErr)
+			} else {
+				defer brRows.Close()
+				for brRows.Next() {
+					var code, name, crit string
+					var cnt int64
+					if err2 := brRows.Scan(&code, &name, &crit, &cnt); err2 != nil {
+						continue
+					}
+					breachTotal += cnt
+					breachedPolicies++
+					byPolicy = append(byPolicy, map[string]interface{}{
+						"policy_code": code, "policy_name": name, "criticality": crit, "count": cnt,
+					})
+				}
+			}
+
 			return map[string]interface{}{
 				"open_variance_confirmations": openVariance,
 				"open_accrual_exceptions":     openAccrualExc,
 				"total":                       openVariance + openAccrualExc,
+				"policy_breaches":             breachTotal,
+				"breached_policies":           breachedPolicies,
+				"by_policy":                   byPolicy,
 			}, nil
 		})
 
@@ -1837,6 +2002,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"last_reopen_at":           lastReopenAt(get("period_reopens")),
 				"missing_evidence_by_step": missingEvidenceBySteps(get("missing_evidence")),
 				"open_policy_exceptions":   getNestedInt64(get("policy_exceptions"), "total"),
+				"policy_breaches":          getNestedInt64(get("policy_exceptions"), "policy_breaches"),
 			},
 			"audit_summary":      get("audit_summary"),
 			"maker_checker_rate": get("maker_checker_rate"),
