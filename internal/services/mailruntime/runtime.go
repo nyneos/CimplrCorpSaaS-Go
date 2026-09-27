@@ -1,33 +1,30 @@
+// Package mailruntime is the in-process mail engine used by api/email and
+// internal/jobs/email. It used to relay every call over HTTP to a standalone
+// CIMPLR-Email-Service process; that service's code now lives locally under
+// internal/mailengine (plus internal/services/{imapmail,graphmail}), and
+// Runtime's methods call straight into it. The exported type/method surface
+// below is unchanged on purpose so no caller in api/email or
+// internal/jobs/email had to change.
 package mailruntime
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"strconv"
-	"strings"
-	"time"
 )
 
-type Runtime struct {
-	wireRoot string
-	token    string
-	http     *http.Client
+// Runtime is the mail engine handle. It carries no network config anymore —
+// kept as a struct (rather than package-level functions) so call sites did
+// not need to change when the HTTP relay was removed.
+type Runtime struct{}
+
+func NewRuntime() *Runtime {
+	return &Runtime{}
 }
 
-type serviceEnvelope struct {
-	Success    *bool           `json:"success"`
-	StatusCode int             `json:"statusCode"`
-	Message    string          `json:"message"`
-	Data       json.RawMessage `json:"data"`
-	Error      struct {
-		Code    string `json:"code"`
-		Details string `json:"details"`
-	} `json:"error"`
+// Ready reports whether the mail engine can be used. There is no longer a
+// separate service/token to misconfigure, so this is always true; HealthCheck
+// is the meaningful readiness signal (it verifies S3/AWS config resolves).
+func (r *Runtime) Ready() bool {
+	return true
 }
 
 type ParsedEmail = ParsedMessage
@@ -173,232 +170,6 @@ type OAuthPullResult struct {
 	Messages    []OAuthPulledMessage `json:"messages"`
 }
 
-func NewRuntime() *Runtime {
-	wireRoot := strings.TrimRight(materializeRelayWire(), "/")
-	token := strings.TrimSpace(os.Getenv("EMAIL_SERVICE_KEY"))
-	timeout := defaultTimeout()
-	if v := strings.TrimSpace(os.Getenv("MAIL_RUNTIME_TIMEOUT_SECS")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			timeout = time.Duration(n) * time.Second
-		}
-	}
-	return &Runtime{
-		wireRoot: wireRoot,
-		token:    token,
-		http: &http.Client{
-			Timeout: timeout,
-		},
-	}
-}
-
-func defaultTimeout() time.Duration {
-	return 5 * time.Minute
-}
-
-func pullTimeout() time.Duration {
-	if v := strings.TrimSpace(os.Getenv("MAIL_RUNTIME_PULL_TIMEOUT_SECS")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return time.Duration(n) * time.Second
-		}
-	}
-	return 10 * time.Minute
-}
-
-func (r *Runtime) Ready() bool {
-	return r.token != ""
-}
-
-// HealthCheck verifies the standalone email service is reachable (GET /v1/health).
-func (r *Runtime) HealthCheck(ctx context.Context) error {
-	if !r.Ready() {
-		return fmt.Errorf("mail processing not configured")
-	}
-	checkCtx, cancel := context.WithTimeout(ctx, healthCheckTimeout())
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, r.wireRoot+"/v1/health", nil)
-	if err != nil {
-		return err
-	}
-	client := &http.Client{Timeout: healthCheckTimeout()}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("email service unreachable: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("email service unavailable (status %d)", resp.StatusCode)
-	}
-	return nil
-}
-
-func healthCheckTimeout() time.Duration {
-	if v := strings.TrimSpace(os.Getenv("MAIL_RUNTIME_HEALTH_TIMEOUT_SECS")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return time.Duration(n) * time.Second
-		}
-	}
-	return 5 * time.Second
-}
-
-func (r *Runtime) invoke(ctx context.Context, route string, payload map[string]interface{}, out interface{}, timeout time.Duration) error {
-	if payload == nil {
-		payload = map[string]interface{}{}
-	}
-	payload["service_key"] = r.token
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.wireRoot+route, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+r.token)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := r.http
-	if timeout > 0 && client.Timeout != timeout {
-		clone := *client
-		clone.Timeout = timeout
-		client = &clone
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	var envelope serviceEnvelope
-	if err := json.Unmarshal(respBody, &envelope); err == nil && envelope.Success != nil {
-		if !*envelope.Success {
-			details := strings.TrimSpace(envelope.Error.Details)
-			if details == "" {
-				details = strings.TrimSpace(envelope.Message)
-			}
-			if details == "" {
-				details = fmt.Sprintf("mail operation failed (status %d)", resp.StatusCode)
-			}
-			return fmt.Errorf("%s", details)
-		}
-		if out != nil && len(envelope.Data) > 0 && string(envelope.Data) != "null" {
-			if err := json.Unmarshal(envelope.Data, out); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("mail operation failed (status %d)", resp.StatusCode)
-	}
-	if out != nil {
-		if err := json.Unmarshal(respBody, out); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (r *Runtime) ListPendingKeys(ctx context.Context, after string, limit int) ([]string, error) {
-	payload := map[string]interface{}{"after": after}
-	if limit > 0 {
-		payload["limit"] = limit
-	}
-	var out PendingKeysResult
-	if err := r.invoke(ctx, "/v1/list-new", payload, &out, 0); err != nil {
-		return nil, err
-	}
-	return out.Keys, nil
-}
-
-func (r *Runtime) DecodeMessages(ctx context.Context, keys []string) (*BatchDecodeResult, error) {
-	var out BatchDecodeResult
-	err := r.invoke(ctx, "/v1/parse/batch", map[string]interface{}{
-		"s3_raw_keys": keys,
-	}, &out, 0)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (r *Runtime) DecodeMessage(ctx context.Context, rawKey string) (*ParsedMessage, error) {
-	var out ParsedMessage
-	err := r.invoke(ctx, "/v1/parse", map[string]interface{}{
-		"s3_raw_key": rawKey,
-	}, &out, 0)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (r *Runtime) ExtractStructured(ctx context.Context, s3ParsedKey, module string) (*StructuredExtractResult, error) {
-	var out StructuredExtractResult
-	err := r.invoke(ctx, "/v1/extract", map[string]interface{}{
-		"s3_parsed_key": s3ParsedKey,
-		"module":        module,
-	}, &out, 0)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (r *Runtime) ApplyInboundRules(ctx context.Context, ruleSetName, bucket, prefix string, rules []InboundRuleSpec) (*InboundRuleSyncResult, error) {
-	var out InboundRuleSyncResult
-	payload := map[string]interface{}{"rules": rules}
-	if ruleSetName != "" {
-		payload["rule_set_name"] = ruleSetName
-	}
-	if bucket != "" {
-		payload["s3_bucket"] = bucket
-	}
-	if prefix != "" {
-		payload["s3_prefix"] = prefix
-	}
-	err := r.invoke(ctx, "/v1/ses/rules/sync", payload, &out, 0)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (r *Runtime) RemoveInboundRule(ctx context.Context, ruleSetName, ruleName string) error {
-	payload := map[string]interface{}{"rule_name": ruleName}
-	if ruleSetName != "" {
-		payload["rule_set_name"] = ruleSetName
-	}
-	return r.invoke(ctx, "/v1/ses/rules/delete", payload, nil, 0)
-}
-
-func (r *Runtime) VerifyIMAP(ctx context.Context, mailbox string, cfg IMAPConnection) error {
-	var out map[string]interface{}
-	return r.invoke(ctx, "/v1/imap/test", map[string]interface{}{
-		"mailbox_address": mailbox,
-		"imap":            cfg,
-	}, &out, 0)
-}
-
-func (r *Runtime) VerifyGraph(ctx context.Context, cfg GraphConnection) error {
-	var out map[string]interface{}
-	return r.invoke(ctx, "/v1/graph/test", map[string]interface{}{
-		"graph": cfg,
-	}, &out, 0)
-}
-
-func (r *Runtime) VerifyGmailDWD(ctx context.Context, mailbox string, cfg GmailDWDConnection) error {
-	var out map[string]interface{}
-	return r.invoke(ctx, "/v1/gmail-dwd/test", map[string]interface{}{
-		"mailbox_address": mailbox,
-		"gmail_dwd":       cfg,
-	}, &out, 0)
-}
-
 type IMAPPullRequest struct {
 	InboxID             string
 	Mailbox             string
@@ -409,30 +180,6 @@ type IMAPPullRequest struct {
 	Conn                IMAPConnection
 	SkipIMAPMessageKeys []string
 	FiltersJSON         json.RawMessage
-}
-
-func (r *Runtime) PullIMAPMessages(ctx context.Context, req IMAPPullRequest) (*IMAPPullResult, error) {
-	var out IMAPPullResult
-	payload := map[string]interface{}{
-		"inbox_id":        req.InboxID,
-		"mailbox_address": req.Mailbox,
-		"folder":          req.Folder,
-		"direction":       req.Direction,
-		"last_uid":        req.LastUID,
-		"batch":           req.PageSize,
-		"imap":            req.Conn,
-	}
-	if len(req.SkipIMAPMessageKeys) > 0 {
-		payload["skip_imap_message_keys"] = req.SkipIMAPMessageKeys
-	}
-	if len(req.FiltersJSON) > 0 {
-		payload["filters_json"] = json.RawMessage(req.FiltersJSON)
-	}
-	err := r.invoke(ctx, "/v1/imap/poll-folder", payload, &out, pullTimeout())
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
 }
 
 // GraphPullRequest groups the parameters for PullGraphMessages.
@@ -447,29 +194,6 @@ type GraphPullRequest struct {
 	FiltersJSON    []byte
 }
 
-func (r *Runtime) PullGraphMessages(ctx context.Context, req GraphPullRequest) (*GraphPullResult, error) {
-	var out GraphPullResult
-	payload := map[string]interface{}{
-		"inbox_id":        req.InboxID,
-		"mailbox_address": req.Mailbox,
-		"sent_folder":     req.SentFolder,
-		"since":           req.Since,
-		"batch":           req.PageSize,
-		"graph":           req.Conn,
-	}
-	if len(req.SkipMessageIDs) > 0 {
-		payload["skip_message_ids"] = req.SkipMessageIDs
-	}
-	if len(req.FiltersJSON) > 0 {
-		payload["filters_json"] = json.RawMessage(req.FiltersJSON)
-	}
-	err := r.invoke(ctx, "/v1/graph/poll-page", payload, &out, pullTimeout())
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
 // GmailDWDPullRequest groups the parameters for PullGmailDWDMessages.
 type GmailDWDPullRequest struct {
 	InboxID        string
@@ -480,80 +204,6 @@ type GmailDWDPullRequest struct {
 	Conn           GmailDWDConnection
 	SkipMessageIDs []string
 	FiltersJSON    []byte
-}
-
-func (r *Runtime) PullGmailDWDMessages(ctx context.Context, req GmailDWDPullRequest) (*GraphPullResult, error) {
-	var out GraphPullResult
-	payload := map[string]interface{}{
-		"inbox_id":        req.InboxID,
-		"mailbox_address": req.Mailbox,
-		"sent_folder":     req.SentFolder,
-		"since":           req.Since,
-		"batch":           req.PageSize,
-		"gmail_dwd":       req.Conn,
-	}
-	if len(req.SkipMessageIDs) > 0 {
-		payload["skip_message_ids"] = req.SkipMessageIDs
-	}
-	if len(req.FiltersJSON) > 0 {
-		payload["filters_json"] = json.RawMessage(req.FiltersJSON)
-	}
-	err := r.invoke(ctx, "/v1/gmail-dwd/poll-page", payload, &out, pullTimeout())
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (r *Runtime) OAuthAuthorizeURL(ctx context.Context, provider, transport, redirectURI, state string) (string, error) {
-	var out struct {
-		AuthorizeURL string `json:"authorize_url"`
-	}
-	err := r.invoke(ctx, "/v1/oauth/authorize-url", map[string]interface{}{
-		"provider":     provider,
-		"transport":    transport,
-		"redirect_uri": redirectURI,
-		"state":        state,
-	}, &out, 0)
-	if err != nil {
-		return "", err
-	}
-	return out.AuthorizeURL, nil
-}
-
-func (r *Runtime) OAuthExchange(ctx context.Context, provider, transport, code, redirectURI string) (*OAuthExchangeResult, error) {
-	var out OAuthExchangeResult
-	err := r.invoke(ctx, "/v1/oauth/exchange", map[string]interface{}{
-		"provider":     provider,
-		"transport":    transport,
-		"code":         code,
-		"redirect_uri": redirectURI,
-	}, &out, 0)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (r *Runtime) OAuthRefresh(ctx context.Context, provider, transport, refreshToken string) (*OAuthRefreshResult, error) {
-	var out OAuthRefreshResult
-	err := r.invoke(ctx, "/v1/oauth/refresh", map[string]interface{}{
-		"provider":      provider,
-		"transport":     transport,
-		"refresh_token": refreshToken,
-	}, &out, 0)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (r *Runtime) VerifyOAuth(ctx context.Context, provider, accessToken string) error {
-	var out map[string]interface{}
-	return r.invoke(ctx, "/v1/oauth/test", map[string]interface{}{
-		"provider":     provider,
-		"access_token": accessToken,
-	}, &out, 0)
 }
 
 type OAuthPullRequest struct {
@@ -568,31 +218,7 @@ type OAuthPullRequest struct {
 	FiltersJSON    json.RawMessage
 }
 
-func (r *Runtime) PullOAuthMessages(ctx context.Context, req OAuthPullRequest) (*OAuthPullResult, error) {
-	var out OAuthPullResult
-	payload := map[string]interface{}{
-		"inbox_id":        req.InboxID,
-		"mailbox_address": req.Mailbox,
-		"provider":        req.Provider,
-		"sent_folder":     req.SentFolder,
-		"since":           req.Since,
-		"batch":           req.PageSize,
-		"access_token":    req.Conn.AccessToken,
-	}
-	if len(req.SkipMessageIDs) > 0 {
-		payload["skip_message_ids"] = req.SkipMessageIDs
-	}
-	if len(req.FiltersJSON) > 0 {
-		payload["filters_json"] = json.RawMessage(req.FiltersJSON)
-	}
-	err := r.invoke(ctx, "/v1/oauth/poll-page", payload, &out, pullTimeout())
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-// StoragePutRequest is forwarded to CIMPLR-Email-Service POST /v1/storage/put.
+// StoragePutRequest mirrors internal/mailengine/storage.Put's request shape.
 type StoragePutRequest struct {
 	ContentBase64    string `json:"content_base64"`
 	ContentType      string `json:"content_type,omitempty"`
@@ -611,39 +237,12 @@ type StoragePutRequest struct {
 	APIAuthToken     string `json:"api_auth_token,omitempty"`
 }
 
-// StoragePutResult is the data payload from /v1/storage/put.
+// StoragePutResult is the data payload of a storage put.
 type StoragePutResult struct {
 	DestinationType string `json:"destination_type"`
 	OutputFilename  string `json:"output_filename"`
 	OutputLocation  string `json:"output_location"`
 	S3Key           string `json:"s3_key,omitempty"`
-}
-
-// PutStorage asks the email service to save file bytes to S3/LOCAL/SFTP/API
-// and apply the naming convention (prefix + optional date/time).
-func (r *Runtime) PutStorage(ctx context.Context, req StoragePutRequest) (*StoragePutResult, error) {
-	var out StoragePutResult
-	payload := map[string]interface{}{
-		"content_base64":     req.ContentBase64,
-		"content_type":       req.ContentType,
-		"file_ext":           req.FileExt,
-		"destination_type":   req.DestinationType,
-		"output_name_prefix": req.OutputNamePrefix,
-		"append_datetime":    req.AppendDatetime,
-		"s3_prefix":          req.S3Prefix,
-		"local_folder":       req.LocalFolder,
-		"sftp_host":          req.SftpHost,
-		"sftp_port":          req.SftpPort,
-		"sftp_user":          req.SftpUser,
-		"sftp_password":      req.SftpPassword,
-		"sftp_folder":        req.SftpFolder,
-		"api_url":            req.APIURL,
-		"api_auth_token":     req.APIAuthToken,
-	}
-	if err := r.invoke(ctx, "/v1/storage/put", payload, &out, 0); err != nil {
-		return nil, err
-	}
-	return &out, nil
 }
 
 // ReadAPIInboxRequest fetches a file saved by the demo test-receive endpoints.
@@ -652,24 +251,11 @@ type ReadAPIInboxRequest struct {
 	Folder   string `json:"folder"` // api-inbox | api-inbox-2
 }
 
-// ReadAPIInboxResult is the data payload from /v1/storage/read-api-inbox.
+// ReadAPIInboxResult is the data payload of a read-api-inbox call.
 type ReadAPIInboxResult struct {
 	Filename      string `json:"filename"`
 	Folder        string `json:"folder"`
 	Path          string `json:"path"`
 	ContentBase64 string `json:"content_base64"`
 	ByteSize      int    `json:"byte_size"`
-}
-
-// ReadAPIInbox reads back a transformed file from the email service demo API inbox folders.
-func (r *Runtime) ReadAPIInbox(ctx context.Context, req ReadAPIInboxRequest) (*ReadAPIInboxResult, error) {
-	var out ReadAPIInboxResult
-	payload := map[string]interface{}{
-		"filename": req.Filename,
-		"folder":   req.Folder,
-	}
-	if err := r.invoke(ctx, "/v1/storage/read-api-inbox", payload, &out, 0); err != nil {
-		return nil, err
-	}
-	return &out, nil
 }

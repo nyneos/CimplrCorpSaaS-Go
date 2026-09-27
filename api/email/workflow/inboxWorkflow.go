@@ -1471,11 +1471,7 @@ func HandleEmailServiceHealth(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondMethodNotAllowed(w)
 			return
 		}
-		healthy := emailjobs.SyncEmailServiceStatus(r.Context(), pool)
-		msg := ""
-		if !healthy {
-			msg = emailjobs.EmailSubscriptionExpiredMsg
-		}
+		healthy, msg := emailjobs.SyncEmailServiceStatus(r.Context(), pool)
 		emailcommon.RespondPayload(w, "service/health", map[string]interface{}{
 			"healthy": healthy,
 			"message": msg,

@@ -24,8 +24,8 @@ type Config struct {
 	Port        int    `json:"port"`
 	Username    string `json:"username"`
 	Password    string `json:"password,omitempty"`
-	AuthMode    string `json:"auth_mode,omitempty"`
-	AccessToken string `json:"access_token,omitempty"`
+	AuthMode    string `json:"auth_mode,omitempty"`    // password | oauth
+	AccessToken string `json:"access_token,omitempty"` // OAuth2 bearer token for XOAUTH2
 	UseTLS      bool   `json:"use_tls"`
 	InboxFolder string `json:"inbox_folder"`
 	SentFolder  string `json:"sent_folder"`

@@ -10,7 +10,7 @@ import (
 )
 
 // ruleDestination carries storage + naming config for one destination row.
-// S3 / SFTP / API → CIMPLR-Email-Service POST /v1/storage/put.
+// S3 / SFTP / API → mailruntime.PutStorage (internal/mailengine/storage).
 // LOCAL → written on this Cimplr Go host (per-user folder under CIMPLR_TRANSFORMED_LOCAL_DIR).
 type ruleDestination struct {
 	DestinationID    string
@@ -53,9 +53,6 @@ func deliverTransformed(
 	}
 
 	rt := mailruntime.NewRuntime()
-	if !rt.Ready() {
-		return "", "", "", fmt.Errorf("email service not configured (EMAIL_SERVICE_URL / EMAIL_SERVICE_KEY)")
-	}
 	out, err := rt.PutStorage(ctx, mailruntime.StoragePutRequest{
 		ContentBase64:    base64.StdEncoding.EncodeToString(body),
 		ContentType:      contentType,
