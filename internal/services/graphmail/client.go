@@ -47,11 +47,6 @@ func (m Message) ToAddresses() []string {
 	return out
 }
 
-// FromAddress returns the Graph from address (may be empty).
-func (m Message) FromAddress() string {
-	return strings.TrimSpace(m.From.EmailAddress.Address)
-}
-
 // CursorTime returns the timestamp used for sync cursor advancement.
 func (m Message) CursorTime(sentFolder bool) time.Time {
 	if sentFolder && !m.SentDateTime.IsZero() {
@@ -79,9 +74,9 @@ type Client struct {
 	clientSecret string
 	http         *http.Client
 
-	mu       sync.Mutex
-	token    string
-	tokenExp time.Time
+	mu        sync.Mutex
+	token     string
+	tokenExp  time.Time
 }
 
 // NewClient builds a Graph client from GRAPH_* or AZURE_* env vars.

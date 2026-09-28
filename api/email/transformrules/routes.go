@@ -31,11 +31,4 @@ func RegisterTransformRuleRoutes(mux *http.ServeMux, pool *pgxpool.Pool, chain f
 	mux.Handle("/email/transform-rules/audit-log", chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handleAuditLog(w, r, pool)
 	})))
-
-	// Unauthenticated on purpose: these two are a dummy partner API for
-	// locally testing an "API" destination end to end (storage.Put's putAPI
-	// posts here as if it were a real external partner), so they can't sit
-	// behind the session chain like the CRUD routes above.
-	mux.HandleFunc("/email/transform-rules/test-receive", testReceiveHandler)
-	mux.HandleFunc("/email/transform-rules/test-receive-2", testReceive2Handler)
 }
