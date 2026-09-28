@@ -2704,7 +2704,7 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 	}
 
 	var activityID string
-	err = tx.QueryRow(ctx, `INSERT INTO investment.accounting_activity (activity_type,activity_subtype,effective_date,accounting_period,data_source,status) VALUES ('FIXED_DEPOSIT',$1,CURRENT_DATE,$2,'FD_CLOSURE','APPROVED') RETURNING activity_id`, activitySubtype, accountingPeriod).Scan(&activityID)
+	err = tx.QueryRow(ctx, `INSERT INTO investment.accounting_activity (activity_type,activity_subtype,effective_date,accounting_period,data_source,status) VALUES ('FIXED_DEPOSIT',$1,CURRENT_DATE,$2,'FD_CLOSURE','PENDING_APPROVAL') RETURNING activity_id`, activitySubtype, accountingPeriod).Scan(&activityID)
 	if err != nil {
 		return fmt.Errorf("postClosureJournals create activity: %w", err)
 	}
@@ -2879,49 +2879,66 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		return err
 	}
 
-	// Balanced journal lines:
-	//   DR Bank/Settlement  netPayout      (cash received from bank)
-	//   DR TDS Receivable   tdsAmt         (TDS withheld — recoverable)
-	//   DR Penalty Expense  penaltyAmt     (premature withdrawal cost)
-	//   CR FD Investment    principal      (close investment asset)
-	//   CR Interest Income  interest       (gross income recognised)
-	// Total DR = netPayout + tds + penalty = principal + interest  ✓
-	// Total CR = principal + interest                              ✓
-	type jLine struct {
-		num                         int
-		acctNum, acctName, acctType string
-		debitAmt, creditAmt         float64
-		narration                   string
+	var bankID string
+	_ = tx.QueryRow(ctx, `SELECT COALESCE(bank_id,'') FROM investment.fd_master WHERE fd_id=$1`, fdID).Scan(&bankID)
+	mapped, mapErr := fdAccounting.BuildMappedJournal(ctx, tx, entityID, bankID, "CLOSURE",
+		fdAccounting.ClosureAmountSet(principalAmt, accruedInterest, tdsAmt, netPayout, penaltyAmt),
+		fmt.Sprintf("| fd_id=%s | closure_request_id=%s", fdID, closureRequestID))
+	if mapErr != nil {
+		return fmt.Errorf("postClosureJournals GL mapping: %w", mapErr)
 	}
-	lineNum := 1
-	lines := []jLine{}
-	lines = append(lines, jLine{lineNum, bankAccountNumber, bankAccountName, "ASSET",
-		roundToFour(netPayout), 0, "Cash received on FD closure — " + closureType})
-	lineNum++
-	if tdsAmt > 0 {
-		lines = append(lines, jLine{lineNum, constants.TDSReceivable, constants.TDSReceivableLabel, "ASSET",
-			roundToFour(tdsAmt), 0, "TDS withheld at source — recoverable"})
+	if mapped.Mapped {
+		if _, err = tx.Exec(ctx, `
+			UPDATE investment.accounting_journal_entry
+			SET total_debit=$2, total_credit=$3, gl_mapping_version=NULLIF($4,'')
+			WHERE entry_id=$1`, entryID, mapped.Debit, mapped.Credit, mapped.Version); err != nil {
+			return fmt.Errorf("postClosureJournals update mapped totals: %w", err)
+		}
+		if err = mapped.InsertLinesForFD(ctx, tx, entryID, fdID); err != nil {
+			return fmt.Errorf("postClosureJournals insert mapped lines: %w", err)
+		}
+	} else {
+		// Balanced journal lines (built-in fallback when no ACTIVE CLOSURE mapping):
+		//   DR Bank/Settlement  netPayout
+		//   DR TDS Receivable   tdsAmt
+		//   DR Penalty Expense  penaltyAmt
+		//   CR FD Investment    principal
+		//   CR Interest Income  interest
+		type jLine struct {
+			num                         int
+			acctNum, acctName, acctType string
+			debitAmt, creditAmt         float64
+			narration                   string
+		}
+		lineNum := 1
+		lines := []jLine{}
+		lines = append(lines, jLine{lineNum, bankAccountNumber, bankAccountName, "ASSET",
+			roundToFour(netPayout), 0, "Cash received on FD closure — " + closureType})
 		lineNum++
-	}
-	if penaltyAmt > 0 {
-		lines = append(lines, jLine{lineNum, "PENALTY-EXP", "Premature Withdrawal Penalty", "EXPENSE",
-			roundToFour(penaltyAmt), 0, "Penalty for premature withdrawal"})
+		if tdsAmt > 0 {
+			lines = append(lines, jLine{lineNum, constants.TDSReceivable, constants.TDSReceivableLabel, "ASSET",
+				roundToFour(tdsAmt), 0, "TDS withheld at source — recoverable"})
+			lineNum++
+		}
+		if penaltyAmt > 0 {
+			lines = append(lines, jLine{lineNum, "PENALTY-EXP", "Premature Withdrawal Penalty", "EXPENSE",
+				roundToFour(penaltyAmt), 0, "Penalty for premature withdrawal"})
+			lineNum++
+		}
+		lines = append(lines, jLine{lineNum, constants.FDInvestmentPrefix + fdID, "FD Investment — " + fdID, "ASSET",
+			0, roundToFour(principalAmt), "Close FD investment asset — " + closureType})
 		lineNum++
-	}
-	lines = append(lines, jLine{lineNum, constants.FDInvestmentPrefix + fdID, "FD Investment — " + fdID, "ASSET",
-		0, roundToFour(principalAmt), "Close FD investment asset — " + closureType})
-	lineNum++
-	if interestCredit > 0 {
-		lines = append(lines, jLine{lineNum, constants.FDInterestIncome + fdID, "Interest Income — FD", "INCOME",
-			0, interestCredit, "Gross interest income recognised on closure"})
-		lineNum++ //nolint:ineffassign
-	}
-
-	for _, l := range lines {
-		_, err = tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-			entryID, l.num, l.acctNum, l.acctName, l.acctType, l.debitAmt, l.creditAmt, l.narration, fdID)
-		if err != nil {
-			return fmt.Errorf("postClosureJournals insert journal line %d: %w", l.num, err)
+		if interestCredit > 0 {
+			lines = append(lines, jLine{lineNum, constants.FDInterestIncome + fdID, "Interest Income — FD", "INCOME",
+				0, interestCredit, "Gross interest income recognised on closure"})
+			lineNum++ //nolint:ineffassign
+		}
+		for _, l := range lines {
+			_, err = tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+				entryID, l.num, l.acctNum, l.acctName, l.acctType, l.debitAmt, l.creditAmt, l.narration, fdID)
+			if err != nil {
+				return fmt.Errorf("postClosureJournals insert journal line %d: %w", l.num, err)
+			}
 		}
 	}
 
@@ -3134,14 +3151,18 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 			//    CR Settlement Account = rolloverAmt  (cash reinvested from old FD)
 			// These lines are self-balancing (DR = CR = rolloverAmt) so they
 			// don't disturb the closure journal's balance.
+			var nextLine int
+			_ = tx.QueryRow(ctx, `SELECT COALESCE(MAX(line_number),0)+1 FROM investment.accounting_journal_entry_line WHERE entry_id=$1`, entryID).Scan(&nextLine)
+			if nextLine < 1 {
+				nextLine = 1
+			}
 			_, _ = tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-				entryID, lineNum, "FD-INVEST-NEW-"+newBookingID, "New FD Investment (Rollover)", "ASSET",
+				entryID, nextLine, "FD-INVEST-NEW-"+newBookingID, "New FD Investment (Rollover)", "ASSET",
 				roundToFour(rolloverAmt), float64(0), "New FD booking from rollover — "+newBookingID, fdID)
-			lineNum++
+			nextLine++
 			_, _ = tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-				entryID, lineNum, bankAccountNumber, bankAccountName, "ASSET",
+				entryID, nextLine, bankAccountNumber, bankAccountName, "ASSET",
 				float64(0), roundToFour(rolloverAmt), "Cash reinvested into new FD rollover — "+newBookingID, fdID)
-			lineNum++ //nolint:ineffassign
 		}
 	}
 

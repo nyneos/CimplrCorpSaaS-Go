@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -19,18 +20,30 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type reverseLineIn struct {
+	LineNumber   int     `json:"line_number"`
+	DebitAmount  float64 `json:"debit_amount"`
+	CreditAmount float64 `json:"credit_amount"`
+}
+
 // ReverseJournal handles POST /investment/fd/accounting/journal/reverse (AP-07).
-// Creates a mirrored entry (Dr/Cr swapped) in PENDING_APPROVAL, linked to the
-// original via reversal_of_entry_id. The original is untouched until the
-// reversal is approved AND posted (post.go flips it to REVERSED).
+// Creates a NEW mirrored entry (Dr/Cr swapped) in PENDING_APPROVAL, linked to the
+// original via reversal_of_entry_id. That new entry is the cancellation journal —
+// reversal never rewrites the original lines.
+// FULL uses every original amount; PARTIAL accepts maker-edited amounts
+// (≤ mirrored original, Dr total = Cr total).
+// On post: FULL flips original → REVERSED; PARTIAL leaves original POSTED
+// (remaining exposure stays). A corrected replacement journal is a separate
+// producer write (new accrual/receipt/etc.), not part of reverse.
 func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			EntryID      string `json:"entry_id"`
-			ReversalType string `json:"reversal_type"` // FULL only (partial reversals are out of scope without ERP lines to reconcile)
-			ReversalDate string `json:"reversal_date"` // YYYY-MM-DD, defaults to today
-			ReasonCode   string `json:"reason_code"`
-			Remarks      string `json:"remarks"`
+			EntryID      string          `json:"entry_id"`
+			ReversalType string          `json:"reversal_type"` // FULL (default) | PARTIAL
+			ReversalDate string          `json:"reversal_date"` // YYYY-MM-DD, defaults to today
+			ReasonCode   string          `json:"reason_code"`
+			Remarks      string          `json:"remarks"`
+			Lines        []reverseLineIn `json:"lines"` // required when PARTIAL — swapped amounts
 		}
 		isMultipart := strings.Contains(strings.ToLower(r.Header.Get(constants.ContentTypeText)), "multipart/form-data")
 		if isMultipart {
@@ -43,6 +56,9 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 			req.ReversalDate = r.FormValue("reversal_date")
 			req.ReasonCode = r.FormValue("reason_code")
 			req.Remarks = r.FormValue("remarks")
+			if s := strings.TrimSpace(r.FormValue("lines")); s != "" {
+				_ = json.Unmarshal([]byte(s), &req.Lines)
+			}
 		} else {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				fdclosingcommon.RespondError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -62,8 +78,12 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 			fdclosingcommon.RespondError(w, http.StatusBadRequest, "remarks are required")
 			return
 		}
-		if req.ReversalType != "" && !strings.EqualFold(req.ReversalType, "FULL") {
-			fdclosingcommon.RespondError(w, http.StatusBadRequest, "only FULL reversals are supported")
+		reversalType := strings.ToUpper(strings.TrimSpace(req.ReversalType))
+		if reversalType == "" {
+			reversalType = "FULL"
+		}
+		if reversalType != "FULL" && reversalType != "PARTIAL" {
+			fdclosingcommon.RespondError(w, http.StatusBadRequest, "reversal_type must be FULL or PARTIAL")
 			return
 		}
 		actor, ok := fdclosingcommon.ActorFromRequest(r)
@@ -176,6 +196,12 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		revLines, revDr, revCr, buildErr := buildReversalLines(reversalType, req.EntryID, lines, req.Lines)
+		if buildErr != "" {
+			fdclosingcommon.RespondError(w, http.StatusBadRequest, buildErr)
+			return
+		}
+
 		// Parent activity row (FK) in the same shape producers use.
 		var newActivityID string
 		if err := tx.QueryRow(ctx, `
@@ -186,7 +212,11 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		newDesc := fmt.Sprintf("REVERSAL of %s (%s) — %s: %s", req.EntryID, entryType, strings.TrimSpace(req.ReasonCode), strings.TrimSpace(req.Remarks))
+		typeLabel := "REVERSAL"
+		if reversalType == "PARTIAL" {
+			typeLabel = "PARTIAL REVERSAL"
+		}
+		newDesc := fmt.Sprintf("%s of %s (%s) — %s: %s", typeLabel, req.EntryID, entryType, strings.TrimSpace(req.ReasonCode), strings.TrimSpace(req.Remarks))
 		var newEntryID string
 		// accrual_ledger_id / closure_request_id are typed differently across
 		// producers; the reversal keeps the text refs (fd/receipt/run) and the
@@ -202,34 +232,37 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO `+journalTable+` (
 				activity_id, entity_id, entity_name, fd_id, receipt_id, accrual_run_id,
 				entry_date, accounting_period, entry_type, description, total_debit, total_credit, status,
-				is_reversal, reversal_of_entry_id, reason_code, remarks, requested_by, created_by, evidence_s3_key
+				is_reversal, reversal_of_entry_id, reversal_type, reason_code, remarks, requested_by, created_by, evidence_s3_key
 			) VALUES (
 				$1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), NULLIF($5,''), NULLIF($6,''),
 				$7, $8, $9, $10, $11, $12, $13,
-				true, $14, $15, $16, $17, $18, NULLIF($19,'')
+				true, $14, $15, $16, $17, $18, $19, NULLIF($20,'')
 			) RETURNING entry_id`,
 			newActivityID, entityID, entityName, fdID, receiptID, accrualRunID,
-			reversalDate, reversalDate.Format(constants.DateFormatYearMonth), entryTypeReversal, newDesc, totalCredit, totalDebit, statusPendingApproval,
-			req.EntryID, strings.TrimSpace(req.ReasonCode), strings.TrimSpace(req.Remarks), actorEmail, actorEmail, evidenceS3Key,
+			reversalDate, reversalDate.Format(constants.DateFormatYearMonth), entryTypeReversal, newDesc, revDr, revCr, statusPendingApproval,
+			req.EntryID, reversalType, strings.TrimSpace(req.ReasonCode), strings.TrimSpace(req.Remarks), actorEmail, actorEmail, evidenceS3Key,
 		).Scan(&newEntryID); err != nil {
 			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "insert reversal entry: "+err.Error())
 			return
 		}
 
-		for _, l := range lines {
+		for _, l := range revLines {
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO `+journalLineTable+` (entry_id, line_number, account_number, account_name, account_type, debit_amount, credit_amount, narration)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+				INSERT INTO `+journalLineTable+` (
+					entry_id, line_number, account_number, account_name, account_type,
+					debit_amount, credit_amount, narration,
+					cost_center, profit_center, project_code, tax_code
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),NULLIF($12,''))`,
 				newEntryID, l.LineNumber, l.AccountNumber, l.AccountName, l.AccountType,
-				l.Credit, l.Debit, // swapped
-				fmt.Sprintf("Reversal of %s | %s", req.EntryID, l.Narration)); err != nil {
+				l.Debit, l.Credit,
+				l.Narration, l.CostCenter, l.ProfitCenter, l.ProjectCode, l.TaxCode); err != nil {
 				fdclosingcommon.RespondError(w, http.StatusInternalServerError, "insert reversal line: "+err.Error())
 				return
 			}
 		}
 
 		if err := insertJournalAudit(ctx, tx, newEntryID, "CREATE", statusPendingApproval,
-			"Reversal of "+req.EntryID+" ("+strings.TrimSpace(req.ReasonCode)+"): "+strings.TrimSpace(req.Remarks), actor.Email, false); err != nil {
+			typeLabel+" of "+req.EntryID+" ("+strings.TrimSpace(req.ReasonCode)+"): "+strings.TrimSpace(req.Remarks), actor.Email, false); err != nil {
 			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
@@ -242,9 +275,12 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 		fdclosingcommon.RespondSuccess(w, "Reversal submitted for approval", map[string]interface{}{
 			"entry_id":             newEntryID,
 			"reversal_of_entry_id": req.EntryID,
+			"reversal_type":        reversalType,
 			"status":               statusPendingApproval,
+			"total_debit":          revDr,
+			"total_credit":         revCr,
 		})
-		api.LogInfo("[FDAccounting] Reversal %s of %s requested by %s", newEntryID, req.EntryID, actor.Email)
+		api.LogInfo("[FDAccounting] %s %s of %s requested by %s", typeLabel, newEntryID, req.EntryID, actor.Email)
 
 		// Approval-engine instance, same fire-and-forget shape as lock/request.go.
 		newID, entity, email, uid := newEntryID, entityID, actor.Email, actor.UserID
@@ -252,7 +288,7 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 			instID, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 				ModuleCode: moduleCode, EntityCode: entity, TransactionType: txJournalReversal,
 				RecordID: newID, RecordTable: journalTable, AuditTable: journalAuditTable, AuditIDColumn: "entry_id",
-				ActionType: "CREATE", Amount: totalDebit, SubmittedBy: uid, SubmittedByEmail: email,
+				ActionType: "CREATE", Amount: revDr, SubmittedBy: uid, SubmittedByEmail: email,
 				RequirePinnedMatrix: true, AutoApplyIfUnpinned: false,
 			})
 			if err != nil {
@@ -264,4 +300,102 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		})
 	}
+}
+
+// buildReversalLines returns the lines to write for a FULL or PARTIAL reversal.
+// Mirrored sides: reversal debit ≤ original credit; reversal credit ≤ original debit.
+func buildReversalLines(reversalType, originalEntryID string, original []journalLineRec, partial []reverseLineIn) ([]journalLineRec, float64, float64, string) {
+	byNum := make(map[int]journalLineRec, len(original))
+	for _, l := range original {
+		byNum[l.LineNumber] = l
+	}
+
+	out := make([]journalLineRec, 0, len(original))
+	var revDr, revCr float64
+
+	if reversalType == "FULL" {
+		for _, l := range original {
+			out = append(out, journalLineRec{
+				LineNumber:    l.LineNumber,
+				AccountNumber: l.AccountNumber,
+				AccountName:   l.AccountName,
+				AccountType:   l.AccountType,
+				Debit:         l.Credit,
+				Credit:        l.Debit,
+				Narration:     fmt.Sprintf("Reversal of %s | %s", originalEntryID, l.Narration),
+				CostCenter:    l.CostCenter,
+				ProfitCenter:  l.ProfitCenter,
+				ProjectCode:   l.ProjectCode,
+				TaxCode:       l.TaxCode,
+			})
+			revDr += l.Credit
+			revCr += l.Debit
+		}
+		return out, revDr, revCr, ""
+	}
+
+	if len(partial) == 0 {
+		return nil, 0, 0, "lines are required for PARTIAL reversal"
+	}
+	seen := make(map[int]bool, len(partial))
+	for _, in := range partial {
+		orig, ok := byNum[in.LineNumber]
+		if !ok {
+			return nil, 0, 0, fmt.Sprintf("line_number %d is not on the original journal", in.LineNumber)
+		}
+		if seen[in.LineNumber] {
+			return nil, 0, 0, fmt.Sprintf("duplicate line_number %d in lines", in.LineNumber)
+		}
+		seen[in.LineNumber] = true
+
+		dr, cr := in.DebitAmount, in.CreditAmount
+		if dr < 0 || cr < 0 {
+			return nil, 0, 0, fmt.Sprintf("line %d amounts must be ≥ 0", in.LineNumber)
+		}
+		if dr > 0 && cr > 0 {
+			return nil, 0, 0, fmt.Sprintf("line %d cannot have both debit and credit", in.LineNumber)
+		}
+		// Mirrored caps: only the swapped side of the original may carry amount.
+		maxDr, maxCr := orig.Credit, orig.Debit
+		if dr-maxDr > 0.005 {
+			return nil, 0, 0, fmt.Sprintf("line %d debit %.2f exceeds original credit %.2f", in.LineNumber, dr, maxDr)
+		}
+		if cr-maxCr > 0.005 {
+			return nil, 0, 0, fmt.Sprintf("line %d credit %.2f exceeds original debit %.2f", in.LineNumber, cr, maxCr)
+		}
+		if maxDr <= 0.005 && dr > 0.005 {
+			return nil, 0, 0, fmt.Sprintf("line %d had no original credit to reverse as debit", in.LineNumber)
+		}
+		if maxCr <= 0.005 && cr > 0.005 {
+			return nil, 0, 0, fmt.Sprintf("line %d had no original debit to reverse as credit", in.LineNumber)
+		}
+		if dr <= 0.005 && cr <= 0.005 {
+			continue // omit fully-zeroed lines from the partial journal
+		}
+		out = append(out, journalLineRec{
+			LineNumber:    orig.LineNumber,
+			AccountNumber: orig.AccountNumber,
+			AccountName:   orig.AccountName,
+			AccountType:   orig.AccountType,
+			Debit:         dr,
+			Credit:        cr,
+			Narration:     fmt.Sprintf("Partial reversal of %s | %s", originalEntryID, orig.Narration),
+			CostCenter:    orig.CostCenter,
+			ProfitCenter:  orig.ProfitCenter,
+			ProjectCode:   orig.ProjectCode,
+			TaxCode:       orig.TaxCode,
+		})
+		revDr += dr
+		revCr += cr
+	}
+	if len(out) < 2 {
+		return nil, 0, 0, "partial reversal needs at least one debit and one credit line"
+	}
+	if math.Abs(revDr-revCr) > 0.005 {
+		return nil, 0, 0, fmt.Sprintf("partial reversal is unbalanced: debit %.2f vs credit %.2f", revDr, revCr)
+	}
+	if revDr <= 0.005 {
+		return nil, 0, 0, "partial reversal amounts must be greater than zero"
+	}
+	return out, revDr, revCr, ""
 }

@@ -5,7 +5,6 @@ import (
 	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	"context"
 	"fmt"
-	"math"
 	"math/rand"
 	"strings"
 	"time"
@@ -72,7 +71,7 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 		) VALUES (
 			'FIXED_DEPOSIT', 'INTEREST_RECEIPT',
 			$1, $2,
-			'Manual', 'POSTED'
+			'Manual', 'PENDING_APPROVAL'
 		) RETURNING activity_id`,
 		entryDate, period,
 	).Scan(&activityID)
@@ -85,29 +84,21 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 	// mapping configured the built-in Dr Bank / Cr Accrued Interest pair is used.
 	var bankID string
 	_ = pool.QueryRow(ctx, `SELECT COALESCE(bank_id,'') FROM investment.fd_master WHERE fd_id = $1`, rec.FDID).Scan(&bankID)
-	mapping, mErr := fdAccounting.LoadActiveMapping(ctx, tx, rec.EntityID, bankID, "FD_INTEREST_RECEIPT")
-	if mErr != nil {
-		return "", "", fmt.Errorf("resolve gl mapping: %w", mErr)
-	}
-
-	interestDebit, interestCredit := rec.GrossInterestReceived, rec.GrossInterestReceived
-	mappingVersion := ""
-	var genLines []fdAccounting.GeneratedLine
-	if mapping != nil {
-		genLines, interestDebit, interestCredit = mapping.BuildLines(fdAccounting.AmountSet{
+	mapped, mErr := fdAccounting.BuildMappedJournal(ctx, tx, rec.EntityID, bankID, "FD_INTEREST_RECEIPT",
+		fdAccounting.AmountSet{
 			Full: rec.GrossInterestReceived,
 			TDS:  rec.TDSAmountDeducted,
 			Net:  rec.GrossInterestReceived - rec.TDSAmountDeducted,
 		}, fmt.Sprintf("| receipt_id=%s | fd_id=%s", rec.ReceiptID, rec.FDID))
-		mappingVersion = mapping.Version()
-		
-		if len(genLines) == 0 {
-			return "", "", fmt.Errorf("GL mapping %s generates no journal lines for this receipt; check the configured amount bases", mapping.Version())
-		}
-		if math.Abs(interestDebit-interestCredit) > 0.005 {
-			return "", "", fmt.Errorf("GL mapping %s generates an unbalanced journal: debit %.2f vs credit %.2f; fix the mapping before posting receipts",
-				mapping.Version(), interestDebit, interestCredit)
-		}
+	if mErr != nil {
+		return "", "", mErr
+	}
+
+	interestDebit, interestCredit := rec.GrossInterestReceived, rec.GrossInterestReceived
+	mappingVersion := ""
+	if mapped.Mapped {
+		interestDebit, interestCredit = mapped.Debit, mapped.Credit
+		mappingVersion = mapped.Version
 	}
 
 	_, err = tx.Exec(ctx, `
@@ -128,15 +119,9 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 		return "", "", err
 	}
 
-	if mapping != nil {
-		for _, l := range genLines {
-			if _, lerr := tx.Exec(ctx, `
-				INSERT INTO investment.accounting_journal_entry_line
-					(entry_id, line_number, account_number, account_name, account_type, debit_amount, credit_amount, narration)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-				interestEntryID, l.LineNumber, l.AccountNumber, l.AccountName, l.AccountType, l.Debit, l.Credit, l.Narration); lerr != nil {
-				return "", "", fmt.Errorf("interest journal lines insert: %w", lerr)
-			}
+	if mapped.Mapped {
+		if lerr := mapped.InsertLines(ctx, tx, interestEntryID); lerr != nil {
+			return "", "", fmt.Errorf("interest journal lines insert: %w", lerr)
 		}
 	} else {
 		_, err = tx.Exec(ctx, `

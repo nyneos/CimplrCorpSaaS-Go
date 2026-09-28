@@ -33,6 +33,10 @@ type JournalEntryLine struct {
 	FolioID       string
 	DematID       string
 	Narration     string
+	CostCenter    string
+	ProfitCenter  string
+	ProjectCode   string
+	TaxCode       string
 }
 
 // JournalEntry represents a complete journal entry
@@ -49,6 +53,7 @@ type JournalEntry struct {
 	Lines            []JournalEntryLine
 	TotalDebit       float64
 	TotalCredit      float64
+	GlMappingVersion string
 }
 
 // BankAccountInfo holds account details fetched from database

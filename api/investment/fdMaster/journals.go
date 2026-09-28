@@ -57,7 +57,10 @@ func loadBankAccountInfo(ctx context.Context, exec queryExecutor, bankAccountID 
 	return &info, nil
 }
 
-func buildJournalEntries(fd *FDRecord, bankInfo *accountingworkbench.BankAccountInfo, activityID string) []*accountingworkbench.JournalEntry {
+// buildJournalEntries builds the FD_ACTIVATION journal. When an ACTIVE GL
+// mapping exists for (entity, bank, FD_ACTIVATION) it drives the lines and
+// dimensions; otherwise the built-in Dr FD Investment / Cr Bank pair is used.
+func buildJournalEntries(ctx context.Context, exec queryExecutor, fd *FDRecord, bankInfo *accountingworkbench.BankAccountInfo, activityID string) ([]*accountingworkbench.JournalEntry, error) {
 	amount := math.Round(fd.PrincipalAmount*100) / 100
 	entryDate := fd.ValueDate
 	if entryDate.IsZero() {
@@ -80,6 +83,13 @@ func buildJournalEntries(fd *FDRecord, bankInfo *accountingworkbench.BankAccount
 		}
 	}
 
+	narration := fmt.Sprintf(constants.FormatFDActivation, fd.FDID)
+	mapped, mapErr := fdAccounting.BuildMappedJournal(ctx, exec, fd.EntityID, fd.BankID, "FD_ACTIVATION",
+		fdAccounting.AmountSet{Full: amount}, fmt.Sprintf("| fd_id=%s", fd.FDID))
+	if mapErr != nil {
+		return nil, mapErr
+	}
+
 	je := &accountingworkbench.JournalEntry{
 		ActivityID:       activityID,
 		EntityID:         fd.EntityID,
@@ -87,10 +97,33 @@ func buildJournalEntries(fd *FDRecord, bankInfo *accountingworkbench.BankAccount
 		EntryDate:        entryDate,
 		AccountingPeriod: buildAccountingPeriod(entryDate),
 		EntryType:        "FD_ACTIVATION",
-		Description:      fmt.Sprintf(constants.FormatFDActivation, fd.FDID),
+		Description:      narration,
 		TotalDebit:       amount,
 		TotalCredit:      amount,
-		Lines: []accountingworkbench.JournalEntryLine{
+	}
+
+	if mapped.Mapped {
+		je.TotalDebit = mapped.Debit
+		je.TotalCredit = mapped.Credit
+		je.GlMappingVersion = mapped.Version
+		je.Lines = make([]accountingworkbench.JournalEntryLine, 0, len(mapped.Lines))
+		for _, l := range mapped.Lines {
+			je.Lines = append(je.Lines, accountingworkbench.JournalEntryLine{
+				LineNumber:    l.LineNumber,
+				AccountNumber: l.AccountNumber,
+				AccountName:   l.AccountName,
+				AccountType:   l.AccountType,
+				DebitAmount:   l.Debit,
+				CreditAmount:  l.Credit,
+				Narration:     l.Narration,
+				CostCenter:    l.CostCenter,
+				ProfitCenter:  l.ProfitCenter,
+				ProjectCode:   l.ProjectCode,
+				TaxCode:       l.TaxCode,
+			})
+		}
+	} else {
+		je.Lines = []accountingworkbench.JournalEntryLine{
 			{
 				LineNumber:    1,
 				AccountNumber: "FD_INVESTMENT",
@@ -98,7 +131,7 @@ func buildJournalEntries(fd *FDRecord, bankInfo *accountingworkbench.BankAccount
 				AccountType:   "ASSET",
 				DebitAmount:   amount,
 				CreditAmount:  0,
-				Narration:     fmt.Sprintf(constants.FormatFDActivation, fd.FDID),
+				Narration:     narration,
 			},
 			{
 				LineNumber:    2,
@@ -107,12 +140,12 @@ func buildJournalEntries(fd *FDRecord, bankInfo *accountingworkbench.BankAccount
 				AccountType:   "ASSET",
 				DebitAmount:   0,
 				CreditAmount:  amount,
-				Narration:     fmt.Sprintf(constants.FormatFDActivation, fd.FDID),
+				Narration:     narration,
 			},
-		},
+		}
 	}
 
-	return []*accountingworkbench.JournalEntry{je}
+	return []*accountingworkbench.JournalEntry{je}, nil
 }
 
 func CreateFDAccountingActivity(ctx context.Context, exec queryExecutor, fdID string, effectiveDate time.Time, userEmail string) (string, error) {
@@ -122,16 +155,17 @@ func CreateFDAccountingActivity(ctx context.Context, exec queryExecutor, fdID st
 			activity_type, activity_subtype, effective_date, accounting_period, data_source, status
 		) VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING activity_id
-	`, "FIXED_DEPOSIT", "ACTIVATION", effectiveDate, buildAccountingPeriod(effectiveDate), "FD_MASTER", constants.StatusApproved).Scan(&activityID)
+	`, "FIXED_DEPOSIT", "ACTIVATION", effectiveDate, buildAccountingPeriod(effectiveDate), "FD_MASTER", constants.StatusPendingApproval).Scan(&activityID)
 	if err != nil {
 		return "", fmt.Errorf("create accounting activity: %w", err)
 	}
 
+	// Activity mirrors the journal: pending until FD Accounting Workbench approve/post.
 	if _, err := exec.Exec(ctx, `
 		INSERT INTO investment.auditactionaccountingactivity (
-			activity_id, actiontype, processing_status, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip, checker_comment
-		) VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $3, $2, now(), $3, $4)
-	`, activityID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)), fmt.Sprintf(constants.FormatFDActivation, fdID)); err != nil {
+			activity_id, actiontype, processing_status, requested_by, requested_at, requested_ip
+		) VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
+	`, activityID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 		return "", fmt.Errorf("create accounting activity audit: %w", err)
 	}
 
@@ -148,11 +182,13 @@ func SaveFDJournalEntries(ctx context.Context, exec queryExecutor, fdID string, 
 		err := exec.QueryRow(ctx, `
 			INSERT INTO investment.accounting_journal_entry (
 				activity_id, entity_id, entity_name, folio_id, demat_id, entry_date,
-				accounting_period, entry_type, description, total_debit, total_credit, status, fd_id, created_by
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'PENDING_APPROVAL',$12,$13)
+				accounting_period, entry_type, description, total_debit, total_credit,
+				gl_mapping_version, status, fd_id, created_by
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),'PENDING_APPROVAL',$13,$14)
 			RETURNING entry_id
 		`, je.ActivityID, je.EntityID, je.EntityName, je.FolioID, je.DematID, je.EntryDate,
-			je.AccountingPeriod, je.EntryType, fmt.Sprintf("%s | fd_id=%s", je.Description, fdID), je.TotalDebit, je.TotalCredit, fdID, userEmail,
+			je.AccountingPeriod, je.EntryType, fmt.Sprintf("%s | fd_id=%s", je.Description, fdID),
+			je.TotalDebit, je.TotalCredit, je.GlMappingVersion, fdID, userEmail,
 		).Scan(&entryID)
 		if err != nil {
 			return fmt.Errorf("insert journal entry: %w", err)
@@ -165,10 +201,13 @@ func SaveFDJournalEntries(ctx context.Context, exec queryExecutor, fdID string, 
 			if _, err := exec.Exec(ctx, `
 				INSERT INTO investment.accounting_journal_entry_line (
 					entry_id, line_number, account_number, account_name, account_type,
-					debit_amount, credit_amount, scheme_id, folio_id, demat_id, narration
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+					debit_amount, credit_amount, scheme_id, folio_id, demat_id, narration,
+					cost_center, profit_center, project_code, tax_code
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),NULLIF($13,''),NULLIF($14,''),NULLIF($15,''))
 			`, entryID, line.LineNumber, line.AccountNumber, line.AccountName, line.AccountType,
-				line.DebitAmount, line.CreditAmount, line.SchemeID, line.FolioID, line.DematID, fmt.Sprintf("%s | fd_id=%s", line.Narration, fdID),
+				line.DebitAmount, line.CreditAmount, line.SchemeID, line.FolioID, line.DematID,
+				fmt.Sprintf("%s | fd_id=%s", line.Narration, fdID),
+				line.CostCenter, line.ProfitCenter, line.ProjectCode, line.TaxCode,
 			); err != nil {
 				return fmt.Errorf("insert journal line: %w", err)
 			}

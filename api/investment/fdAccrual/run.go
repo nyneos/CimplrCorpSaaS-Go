@@ -3824,7 +3824,7 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 			INSERT INTO investment.accounting_activity (
 				activity_type, activity_subtype, effective_date,
 				accounting_period, data_source, status
-			) VALUES ('FIXED_DEPOSIT','FD_INTEREST_ACCRUAL',$1,$2,'FD_ACCRUAL','APPROVED')
+			) VALUES ('FIXED_DEPOSIT','FD_INTEREST_ACCRUAL',$1,$2,'FD_ACCRUAL','PENDING_APPROVAL')
 			RETURNING activity_id`,
 			lr.PeriodEnd, buildAccrualPeriod(lr.PeriodEnd),
 		).Scan(&activityID); err != nil {
@@ -3927,7 +3927,7 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 					INSERT INTO investment.accounting_activity (
 						activity_type, activity_subtype, effective_date,
 						accounting_period, data_source, status
-					) VALUES ('FIXED_DEPOSIT','FD_TDS_ACCRUAL',$1,$2,'FD_ACCRUAL','APPROVED')
+					) VALUES ('FIXED_DEPOSIT','FD_TDS_ACCRUAL',$1,$2,'FD_ACCRUAL','PENDING_APPROVAL')
 					RETURNING activity_id`,
 					lr.PeriodEnd, buildAccrualPeriod(lr.PeriodEnd),
 				).Scan(&tdsActivityID)

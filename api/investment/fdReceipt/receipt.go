@@ -2376,13 +2376,25 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		defer exceptionRows.Close()
 		exceptionData, _ := rowsToMapSlice(exceptionRows)
 
-		// 5. Journal entries
+		// 5. Journal entries (join latest audit for processing / approval status)
 		jeRows, err := pool.Query(ctx, `
-			SELECT je.*, json_agg(jel.*) AS lines
+			SELECT je.entry_id, je.activity_id, je.entity_id, je.entity_name,
+			       je.fd_id, je.receipt_id, je.entry_date, je.accounting_period,
+			       je.entry_type, je.description, je.total_debit, je.total_credit,
+			       je.status, je.created_by, je.created_at, je.posted_by, je.posted_at,
+			       COALESCE(l.processing_status,'') AS processing_status,
+			       json_agg(jel.*) FILTER (WHERE jel.line_id IS NOT NULL) AS lines
 			FROM investment.accounting_journal_entry je
 			LEFT JOIN investment.accounting_journal_entry_line jel ON jel.entry_id=je.entry_id
-			WHERE je.receipt_id=$1
-			GROUP BY je.entry_id
+			LEFT JOIN LATERAL (
+				SELECT a.processing_status
+				FROM investment.auditaction_fd_accounting_journal a
+				WHERE a.entry_id = je.entry_id
+				  AND UPPER(COALESCE(a.actiontype,'')) NOT IN ('UPLOAD_FILE','DOWNLOAD')
+				ORDER BY a.requested_at DESC LIMIT 1
+			) l ON true
+			WHERE je.receipt_id=$1 AND COALESCE(je.is_deleted,false)=false
+			GROUP BY je.entry_id, l.processing_status
 			ORDER BY je.entry_date`, req.ReceiptID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Journal query failed: "+err.Error())

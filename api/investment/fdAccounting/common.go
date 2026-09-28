@@ -1,12 +1,14 @@
 // Package fdAccounting implements the FD Accounting Preview & Posting workbench
 // (BRD AP-01 … AP-08) over the shared journal store
 // investment.accounting_journal_entry(+_line). There is no ERP: "posting" means
-// flipping an approved workbench-created entry to POSTED in our own ledger.
+// flipping an approved entry to POSTED in our own ledger.
 //
-// Producer-created journals (activation, accrual, receipt, closure) are already
-// POSTED when they arrive — their maker-checker happened upstream. The
-// lifecycle here (DRAFT → PENDING_APPROVAL → APPROVED → POSTED / FAILED)
-// governs only what this workbench creates itself: reversals.
+// Every journal — producer-created (activation, accrual, receipt, TDS, closure)
+// and workbench reversals — is born PENDING_APPROVAL (ledger status) with a
+// matching CREATE audit row via StageJournalForApproval. The workbench owns
+// Approve/Reject (AP-04) → Post to Ledger (AP-05) → Failed/Retry (AP-06) →
+// Reverse (AP-07). Lifecycle: DRAFT → PENDING_APPROVAL → APPROVED → POSTED /
+// FAILED; side states REJECTED, REVERSED.
 //
 // Maker-checker follows the repo's auditaction_* convention: the latest row in
 // investment.auditaction_fd_accounting_journal per entry_id is the
@@ -36,12 +38,14 @@ const (
 	journalAuditTable  = "investment.auditaction_fd_accounting_journal"
 	glMappingTable     = "investment.fd_gl_mapping"
 	glMappingLineTable = "investment.fd_gl_mapping_line"
+	glMappingAllocTable = "investment.fd_gl_mapping_line_allocation"
 	glMappingAudit     = "investment.auditaction_fd_gl_mapping"
 
 	txJournalReversal = "FD_JOURNAL_REVERSAL"
 	txGlMappingCreate = "FD_GL_MAPPING_CREATE"
 
-	// Journal lifecycle (entry.status). Producers write POSTED directly.
+	// Journal lifecycle (entry.status). Producers write PENDING_APPROVAL
+	// (pending-posted); workbench approve → APPROVED; post → POSTED.
 	statusDraft           = "DRAFT"
 	statusPendingApproval = "PENDING_APPROVAL"
 	statusApproved        = "APPROVED"
@@ -173,12 +177,17 @@ type journalLineRec struct {
 	Debit         float64
 	Credit        float64
 	Narration     string
+	CostCenter    string
+	ProfitCenter  string
+	ProjectCode   string
+	TaxCode       string
 }
 
 func loadLines(ctx context.Context, exec dbExec, entryID string) ([]journalLineRec, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT line_number, COALESCE(account_number,''), COALESCE(account_name,''), COALESCE(account_type,''),
-		       COALESCE(debit_amount,0), COALESCE(credit_amount,0), COALESCE(narration,'')
+		       COALESCE(debit_amount,0), COALESCE(credit_amount,0), COALESCE(narration,''),
+		       COALESCE(cost_center,''), COALESCE(profit_center,''), COALESCE(project_code,''), COALESCE(tax_code,'')
 		FROM `+journalLineTable+` WHERE entry_id = $1 ORDER BY line_number`, entryID)
 	if err != nil {
 		return nil, err
@@ -187,7 +196,8 @@ func loadLines(ctx context.Context, exec dbExec, entryID string) ([]journalLineR
 	out := []journalLineRec{}
 	for rows.Next() {
 		var l journalLineRec
-		if err := rows.Scan(&l.LineNumber, &l.AccountNumber, &l.AccountName, &l.AccountType, &l.Debit, &l.Credit, &l.Narration); err != nil {
+		if err := rows.Scan(&l.LineNumber, &l.AccountNumber, &l.AccountName, &l.AccountType, &l.Debit, &l.Credit, &l.Narration,
+			&l.CostCenter, &l.ProfitCenter, &l.ProjectCode, &l.TaxCode); err != nil {
 			return nil, err
 		}
 		out = append(out, l)

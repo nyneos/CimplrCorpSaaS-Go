@@ -1310,8 +1310,10 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						activityID, err := CreateFDAccountingActivity(ctx, tx, fdID, rec.ValueDate, userEmail)
 						if err == nil {
 							bankInfo, _ := loadBankAccountInfo(ctx, tx, rec.BankAccountID)
-							journalEntries := buildJournalEntries(rec, bankInfo, activityID)
-							_ = SaveFDJournalEntries(ctx, tx, fdID, userEmail, journalEntries)
+							journalEntries, jErr := buildJournalEntries(ctx, tx, rec, bankInfo, activityID)
+							if jErr == nil {
+								_ = SaveFDJournalEntries(ctx, tx, fdID, userEmail, journalEntries)
+							}
 						}
 					}
 					if cerr := tx.Commit(ctx); cerr != nil {
@@ -1358,7 +1360,12 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				bankInfo, _ := loadBankAccountInfo(ctx, tx, rec.BankAccountID)
-				journalEntries := buildJournalEntries(rec, bankInfo, activityID)
+				journalEntries, jErr := buildJournalEntries(ctx, tx, rec, bankInfo, activityID)
+				if jErr != nil {
+					_ = tx.Rollback(ctx)
+					errors = append(errors, fdID+": journal build failed: "+jErr.Error())
+					continue
+				}
 				if err := SaveFDJournalEntries(ctx, tx, fdID, userEmail, journalEntries); err != nil {
 					_ = tx.Rollback(ctx)
 					errors = append(errors, fdID+": journal save failed")
@@ -2206,6 +2213,7 @@ func GetFDJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				TO_CHAR(je.entry_date, 'YYYY-MM-DD') AS entry_date,
 				je.accounting_period, je.entry_type, je.description,
 				je.total_debit, je.total_credit, je.status,
+				COALESCE(l.processing_status,'') AS processing_status,
 				TO_CHAR(je.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
 				je.created_by,
 				jl.line_id, jl.line_number, jl.account_number, jl.account_name,
@@ -2213,6 +2221,13 @@ func GetFDJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				jl.folio_id, jl.demat_id
 			FROM investment.accounting_journal_entry je
 			LEFT JOIN investment.accounting_journal_entry_line jl ON jl.entry_id = je.entry_id
+			LEFT JOIN LATERAL (
+				SELECT a.processing_status
+				FROM investment.auditaction_fd_accounting_journal a
+				WHERE a.entry_id = je.entry_id
+				  AND UPPER(COALESCE(a.actiontype,'')) NOT IN ('UPLOAD_FILE','DOWNLOAD')
+				ORDER BY a.requested_at DESC LIMIT 1
+			) l ON true
 			WHERE je.fd_id = $1 AND je.is_deleted = false
 			ORDER BY je.entry_date DESC, jl.line_number ASC`, fdID)
 		if err != nil {

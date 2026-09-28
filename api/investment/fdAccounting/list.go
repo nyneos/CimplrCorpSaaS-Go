@@ -33,6 +33,7 @@ const journalSelect = `
 		COALESCE(je.closure_request_id::text,'')     AS closure_request_id,
 		COALESCE(je.is_reversal,false)               AS is_reversal,
 		COALESCE(je.reversal_of_entry_id,'')         AS reversal_of_entry_id,
+		COALESCE(je.reversal_type,'')                AS reversal_type,
 		TO_CHAR(je.entry_date,'YYYY-MM-DD')          AS entry_date,
 		COALESCE(je.accounting_period,'')            AS accounting_period,
 		COALESCE(NULLIF(rc.currency,''),'INR')       AS currency,
@@ -64,7 +65,11 @@ const journalSelect = `
 			'account_number', COALESCE(jl.account_number,''), 'account_name', COALESCE(jl.account_name,''),
 			'account_type', COALESCE(jl.account_type,''),
 			'debit_amount', COALESCE(jl.debit_amount,0), 'credit_amount', COALESCE(jl.credit_amount,0),
-			'narration', COALESCE(jl.narration,'')) ORDER BY jl.line_number), '[]'::json)
+			'narration', COALESCE(jl.narration,''),
+			'cost_center', COALESCE(jl.cost_center,''),
+			'profit_center', COALESCE(jl.profit_center,''),
+			'project_code', COALESCE(jl.project_code,''),
+			'tax_code', COALESCE(jl.tax_code,'')) ORDER BY jl.line_number), '[]'::json)
 		 FROM ` + journalLineTable + ` jl WHERE jl.entry_id = je.entry_id) AS line_items,
 		COALESCE(l.actiontype,'')                    AS action_type,
 		COALESCE(l.processing_status,'')             AS processing_status,

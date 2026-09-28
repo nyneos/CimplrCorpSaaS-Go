@@ -1207,7 +1207,8 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
                 WHERE actiontype IN ('CREATE','EDIT','DELETE')
                 ORDER BY centre_id, requested_at DESC
             )
-            SELECT m.centre_id, m.centre_code, m.centre_name, m.centre_type
+            SELECT m.centre_id, m.centre_code, m.centre_name, m.centre_type,
+                   COALESCE(m.entity_name,'')
             FROM mastercostprofitcenter m
             JOIN latest l ON l.centre_id = m.centre_id
             WHERE UPPER(l.processing_status) = 'APPROVED' AND UPPER(m.status) = 'ACTIVE' AND is_deleted = false
@@ -1223,9 +1224,15 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		out := []map[string]interface{}{}
 		for rows.Next() {
 			var id string
-			var code, name, typ interface{}
-			if err := rows.Scan(&id, &code, &name, &typ); err == nil {
-				out = append(out, map[string]interface{}{"centre_id": id, "centre_code": ifaceToString(code), "centre_name": ifaceToString(name), "centre_type": ifaceToString(typ)})
+			var code, name, typ, entName interface{}
+			if err := rows.Scan(&id, &code, &name, &typ, &entName); err == nil {
+				out = append(out, map[string]interface{}{
+					"centre_id":   id,
+					"centre_code": ifaceToString(code),
+					"centre_name": ifaceToString(name),
+					"centre_type": ifaceToString(typ),
+					"entity_name": ifaceToString(entName),
+				})
 			}
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})

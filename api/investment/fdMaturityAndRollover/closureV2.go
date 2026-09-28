@@ -2882,7 +2882,7 @@ func finalizeCimplrConfirmApprovalTx(ctx context.Context, tx pgx.Tx, closureConf
 func postCimplrClosureJournalsTx(ctx context.Context, tx pgx.Tx, closureConfirmID, actorEmail, comment string) error {
 
 	var err error
-	var fdID, closureType, entityID, entityName, sourceAccountID, bookingID string
+	var fdID, closureType, entityID, entityName, sourceAccountID, bookingID, bankID string
 	var principal, interest, tds, penalty, netPayout float64
 	var accountingPosted bool
 	// fd_closure_premature_confirm has no premature_type column in this
@@ -2897,14 +2897,14 @@ func postCimplrClosureJournalsTx(ctx context.Context, tx pgx.Tx, closureConfirmI
 		       CASE WHEN c.closure_type='PREMATURE' THEN COALESCE(pc.penalty_amount,0) ELSE 0 END,
 		       COALESCE(c.net_amount_received, c.net_expected, 0),
 		       COALESCE(b.source_account_id,''), c.accounting_posted,
-		       COALESCE(b.booking_id, '')
+		       COALESCE(b.booking_id, ''), COALESCE(m.bank_id,'')
 		FROM cimplr.fd_closure_confirm c
 		LEFT JOIN cimplr.fd_closure_premature_confirm pc ON pc.closure_confirm_id=c.closure_confirm_id AND pc.is_deleted=false
 		LEFT JOIN investment.fd_master m ON m.fd_id=c.fd_id
 		LEFT JOIN investment.fd_booking_request b ON b.booking_id=m.booking_id
 		WHERE c.closure_confirm_id=$1 AND c.is_deleted=false
 		FOR UPDATE OF c`, closureConfirmID,
-	).Scan(&fdID, &closureType, &entityID, &entityName, &principal, &interest, &tds, &penalty, &netPayout, &sourceAccountID, &accountingPosted, &bookingID)
+	).Scan(&fdID, &closureType, &entityID, &entityName, &principal, &interest, &tds, &penalty, &netPayout, &sourceAccountID, &accountingPosted, &bookingID, &bankID)
 	if err != nil {
 		return err
 	}
@@ -2941,7 +2941,7 @@ func postCimplrClosureJournalsTx(ctx context.Context, tx pgx.Tx, closureConfirmI
 	}
 
 	var activityID, entryID string
-	if err := tx.QueryRow(ctx, `INSERT INTO investment.accounting_activity (activity_type,activity_subtype,effective_date,accounting_period,data_source,status) VALUES ('FIXED_DEPOSIT',$1,CURRENT_DATE,$2,'FD_CLOSURE','APPROVED') RETURNING activity_id`, activitySubtype, accountingPeriod).Scan(&activityID); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO investment.accounting_activity (activity_type,activity_subtype,effective_date,accounting_period,data_source,status) VALUES ('FIXED_DEPOSIT',$1,CURRENT_DATE,$2,'FD_CLOSURE','PENDING_APPROVAL') RETURNING activity_id`, activitySubtype, accountingPeriod).Scan(&activityID); err != nil {
 		return err
 	}
 	totalDebit := roundToFour(netPayout + tds + penalty)
@@ -2965,31 +2965,49 @@ func postCimplrClosureJournalsTx(ctx context.Context, tx pgx.Tx, closureConfirmI
 		return err
 	}
 
-	lineNum := 1
-	insertLine := func(acctNum, acctName, acctType string, debit, credit float64, narration string) error {
-		if debit == 0 && credit == 0 {
-			return nil
+	narration := fmt.Sprintf("| fd_id=%s | closure_confirm_id=%s", fdID, closureConfirmID)
+	mapped, mapErr := fdAccounting.BuildMappedJournal(ctx, tx, entityID, bankID, "CLOSURE",
+		fdAccounting.ClosureAmountSet(principal, interest, tds, netPayout, penalty), narration)
+	if mapErr != nil {
+		return fmt.Errorf("closure GL mapping: %w", mapErr)
+	}
+	if mapped.Mapped {
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.accounting_journal_entry
+			SET total_debit=$2, total_credit=$3, gl_mapping_version=NULLIF($4,'')
+			WHERE entry_id=$1`, entryID, mapped.Debit, mapped.Credit, mapped.Version); err != nil {
+			return err
 		}
-		_, e := tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-			entryID, lineNum, acctNum, acctName, acctType, roundToFour(debit), roundToFour(credit), narration, fdID)
-		lineNum++
-		return e
-	}
-	if err := insertLine(bankAccountNumber, bankAccountName, "ASSET", netPayout, 0, "Cash received on FD closure"); err != nil {
-		return err
-	}
-	if err := insertLine(constants.TDSReceivable, constants.TDSReceivableLabel, "ASSET", tds, 0, "TDS withheld at source"); err != nil {
-		return err
-	}
-	if err := insertLine("PENALTY-EXP", "Premature Withdrawal Penalty", "EXPENSE", penalty, 0, "Premature withdrawal penalty"); err != nil {
-		return err
-	}
-	if err := insertLine(constants.FDInvestmentPrefix+fdID, constants.FormatFDInvestment+fdID, "ASSET", 0, principal, "Close FD investment asset"); err != nil {
-		return err
-	}
-	interestCredit := roundToFour(totalCredit - principal)
-	if err := insertLine(constants.FDInterestIncome+fdID, constants.FormatInterestIncome, "INCOME", 0, interestCredit, "Interest recognised on closure"); err != nil {
-		return err
+		if err := mapped.InsertLinesForFD(ctx, tx, entryID, fdID); err != nil {
+			return err
+		}
+	} else {
+		lineNum := 1
+		insertLine := func(acctNum, acctName, acctType string, debit, credit float64, lineNarration string) error {
+			if debit == 0 && credit == 0 {
+				return nil
+			}
+			_, e := tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+				entryID, lineNum, acctNum, acctName, acctType, roundToFour(debit), roundToFour(credit), lineNarration, fdID)
+			lineNum++
+			return e
+		}
+		if err := insertLine(bankAccountNumber, bankAccountName, "ASSET", netPayout, 0, "Cash received on FD closure"); err != nil {
+			return err
+		}
+		if err := insertLine(constants.TDSReceivable, constants.TDSReceivableLabel, "ASSET", tds, 0, "TDS withheld at source"); err != nil {
+			return err
+		}
+		if err := insertLine("PENALTY-EXP", "Premature Withdrawal Penalty", "EXPENSE", penalty, 0, "Premature withdrawal penalty"); err != nil {
+			return err
+		}
+		if err := insertLine(constants.FDInvestmentPrefix+fdID, constants.FormatFDInvestment+fdID, "ASSET", 0, principal, "Close FD investment asset"); err != nil {
+			return err
+		}
+		interestCredit := roundToFour(totalCredit - principal)
+		if err := insertLine(constants.FDInterestIncome+fdID, constants.FormatInterestIncome, "INCOME", 0, interestCredit, "Interest recognised on closure"); err != nil {
+			return err
+		}
 	}
 
 	newFDStatus := "MATURED"
@@ -3114,7 +3132,7 @@ func createCimplrRolloverBookingTx(ctx context.Context, tx pgx.Tx, closureConfir
 	now := time.Now()
 	accountingPeriod := fmt.Sprintf("%d-%02d", now.Year(), now.Month())
 	var activityID, entryID string
-	if err := tx.QueryRow(ctx, `INSERT INTO investment.accounting_activity (activity_type,activity_subtype,effective_date,accounting_period,data_source,status) VALUES ('FIXED_DEPOSIT','FD_ROLLOVER',CURRENT_DATE,$1,'FD_CLOSURE','APPROVED') RETURNING activity_id`, accountingPeriod).Scan(&activityID); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO investment.accounting_activity (activity_type,activity_subtype,effective_date,accounting_period,data_source,status) VALUES ('FIXED_DEPOSIT','FD_ROLLOVER',CURRENT_DATE,$1,'FD_CLOSURE','PENDING_APPROVAL') RETURNING activity_id`, accountingPeriod).Scan(&activityID); err != nil {
 		return err
 	}
 	totalDebit := roundToFour(netPayout + tds)
@@ -3137,28 +3155,46 @@ func createCimplrRolloverBookingTx(ctx context.Context, tx pgx.Tx, closureConfir
 	if err := fdAccounting.StageJournalForApproval(ctx, tx, entryID, actorEmail, "FD closure journal"); err != nil {
 		return err
 	}
-	lineNum := 1
-	insertLine := func(acctNum, acctName, acctType string, debit, credit float64, narration string) error {
-		if debit == 0 && credit == 0 {
-			return nil
+	narration := fmt.Sprintf("| fd_id=%s | closure_confirm_id=%s | rollover", fdID, closureConfirmID)
+	mapped, mapErr := fdAccounting.BuildMappedJournal(ctx, tx, entityID, bankID, "CLOSURE",
+		fdAccounting.ClosureAmountSet(principal, interest, tds, netPayout, 0), narration)
+	if mapErr != nil {
+		return fmt.Errorf("rollover closure GL mapping: %w", mapErr)
+	}
+	if mapped.Mapped {
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.accounting_journal_entry
+			SET total_debit=$2, total_credit=$3, gl_mapping_version=NULLIF($4,'')
+			WHERE entry_id=$1`, entryID, mapped.Debit, mapped.Credit, mapped.Version); err != nil {
+			return err
 		}
-		_, e := tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-			entryID, lineNum, acctNum, acctName, acctType, roundToFour(debit), roundToFour(credit), narration, fdID)
-		lineNum++
-		return e
-	}
-	if err := insertLine(firstNonEmpty(sourceAccountNumber, targetAccountID), sourceAccountName, "ASSET", netPayout, 0, "Rollover closure settlement value"); err != nil {
-		return err
-	}
-	if err := insertLine(constants.TDSReceivable, constants.TDSReceivableLabel, "ASSET", tds, 0, "TDS withheld at source on rollover"); err != nil {
-		return err
-	}
-	if err := insertLine(constants.FDInvestmentPrefix+fdID, constants.FormatFDInvestment+fdID, "ASSET", 0, principal, "Close old FD investment asset on rollover"); err != nil {
-		return err
-	}
-	interestCredit := roundToFour(totalCredit - principal)
-	if err := insertLine(constants.FDInterestIncome+fdID, constants.FormatInterestIncome, "INCOME", 0, interestCredit, "Interest recognised on rollover closure"); err != nil {
-		return err
+		if err := mapped.InsertLinesForFD(ctx, tx, entryID, fdID); err != nil {
+			return err
+		}
+	} else {
+		lineNum := 1
+		insertLine := func(acctNum, acctName, acctType string, debit, credit float64, lineNarration string) error {
+			if debit == 0 && credit == 0 {
+				return nil
+			}
+			_, e := tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+				entryID, lineNum, acctNum, acctName, acctType, roundToFour(debit), roundToFour(credit), lineNarration, fdID)
+			lineNum++
+			return e
+		}
+		if err := insertLine(firstNonEmpty(sourceAccountNumber, targetAccountID), sourceAccountName, "ASSET", netPayout, 0, "Rollover closure settlement value"); err != nil {
+			return err
+		}
+		if err := insertLine(constants.TDSReceivable, constants.TDSReceivableLabel, "ASSET", tds, 0, "TDS withheld at source on rollover"); err != nil {
+			return err
+		}
+		if err := insertLine(constants.FDInvestmentPrefix+fdID, constants.FormatFDInvestment+fdID, "ASSET", 0, principal, "Close old FD investment asset on rollover"); err != nil {
+			return err
+		}
+		interestCredit := roundToFour(totalCredit - principal)
+		if err := insertLine(constants.FDInterestIncome+fdID, constants.FormatInterestIncome, "INCOME", 0, interestCredit, "Interest recognised on rollover closure"); err != nil {
+			return err
+		}
 	}
 
 	// New FD booking from a rollover. Booking status is 'SENT_TO_BANK' — the
@@ -3206,11 +3242,22 @@ func createCimplrRolloverBookingTx(ctx context.Context, tx pgx.Tx, closureConfir
 	// SQLSTATE 25P02 on the next statement, rolls back the new fd_booking_request
 	// insert above, and we lose the new FD entirely.
 	if newBookingID != "" {
-		if err := insertLine("FD-INVEST-NEW-"+newBookingID, "New FD Investment (Rollover)", "ASSET",
+		var nextLine int
+		_ = tx.QueryRow(ctx, `SELECT COALESCE(MAX(line_number),0)+1 FROM investment.accounting_journal_entry_line WHERE entry_id=$1`, entryID).Scan(&nextLine)
+		if nextLine < 1 {
+			nextLine = 1
+		}
+		appendLine := func(acctNum, acctName, acctType string, debit, credit float64, lineNarration string) error {
+			_, e := tx.Exec(ctx, `INSERT INTO investment.accounting_journal_entry_line (entry_id,line_number,account_number,account_name,account_type,debit_amount,credit_amount,narration,fd_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+				entryID, nextLine, acctNum, acctName, acctType, roundToFour(debit), roundToFour(credit), lineNarration, fdID)
+			nextLine++
+			return e
+		}
+		if err := appendLine("FD-INVEST-NEW-"+newBookingID, "New FD Investment (Rollover)", "ASSET",
 			roundToFour(newFDAmount), 0, "New FD booking from rollover — "+newBookingID); err != nil {
 			return fmt.Errorf("rollover new-FD investment line insert failed: %w", err)
 		}
-		if err := insertLine(firstNonEmpty(sourceAccountNumber, targetAccountID), sourceAccountName, "ASSET",
+		if err := appendLine(firstNonEmpty(sourceAccountNumber, targetAccountID), sourceAccountName, "ASSET",
 			0, roundToFour(newFDAmount), "Cash reinvested into new FD rollover — "+newBookingID); err != nil {
 			return fmt.Errorf("rollover settlement reinvest line insert failed: %w", err)
 		}
@@ -4971,8 +5018,20 @@ func CimplrJournalPreview(pool *pgxpool.Pool) http.HandlerFunc {
 			preview["closure_confirm_id"] = id
 			preview["accounting_posted"] = accountingPosted
 			preview["journal_entry_id"] = journalEntryID
-			if accountingPosted && journalEntryID != "" {
-				preview["posted_lines"] = fetchCimplrPostedJournalLines(ctx, pool, journalEntryID)
+			if journalEntryID != "" {
+				lines := fetchCimplrPostedJournalLines(ctx, pool, journalEntryID)
+				preview["posted_lines"] = lines
+				preview["lines"] = lines
+				pair, _ := fdAccounting.LookupJournalStatuses(ctx, pool, journalEntryID)
+				preview["ledger_status"] = pair.LedgerStatus
+				preview["processing_status"] = pair.ProcessingStatus
+				preview["journal_status"] = pair.LedgerStatus
+				// accounting_posted on confirm means "journal created"; ledger
+				// POSTED is the workbench outcome — surface both clearly.
+				preview["ledger_posted"] = strings.EqualFold(pair.LedgerStatus, "POSTED")
+				if pair.LedgerStatus != "" {
+					preview["posting_display"] = pair.LedgerStatus
+				}
 			}
 			api.RespondWithPayload(w, true, "", preview)
 			return
@@ -5082,6 +5141,21 @@ func enrichCimplrAccountingListItem(ctx context.Context, pool *pgxpool.Pool, ite
 	item["display_net_payout"] = roundToFour(displayNet)
 	item["display_interest"] = roundToFour(interest)
 
+	// Prefer real journal ledger + audit processing status over the confirm-side
+	// accounting_posted / posting_status flags (those flip when the journal is
+	// *created*, not when it is posted to the ledger via the workbench).
+	journalEntryID := strings.TrimSpace(fmt.Sprint(item["journal_entry_id"]))
+	if journalEntryID != "" {
+		pair, err := fdAccounting.LookupJournalStatuses(ctx, pool, journalEntryID)
+		if err == nil && pair.LedgerStatus != "" {
+			item["ledger_status"] = pair.LedgerStatus
+			item["journal_status"] = pair.LedgerStatus
+			item["processing_status"] = pair.ProcessingStatus
+			item["posting_display"] = pair.LedgerStatus
+			item["ledger_posted"] = strings.EqualFold(pair.LedgerStatus, "POSTED")
+			return
+		}
+	}
 	posted := false
 	switch v := item["accounting_posted"].(type) {
 	case bool:
@@ -5094,9 +5168,13 @@ func enrichCimplrAccountingListItem(ctx context.Context, pool *pgxpool.Pool, ite
 		item["posting_display"] = "POSTED"
 	case postingStatus == "FAILED":
 		item["posting_display"] = "FAILED"
+	case postingStatus == "PENDING_APPROVAL" || postingStatus == "PENDING":
+		item["posting_display"] = "PENDING_APPROVAL"
 	default:
-		item["posting_display"] = "PENDING"
+		item["posting_display"] = "PENDING_APPROVAL"
 	}
+	item["ledger_status"] = item["posting_display"]
+	item["journal_status"] = item["posting_display"]
 }
 
 func cimplrBuildEmbeddedPostedPreview(ctx context.Context, pool *pgxpool.Pool, journalEntryID, closureType, fdID string, row map[string]interface{}) map[string]interface{} {
@@ -5121,6 +5199,14 @@ func cimplrBuildEmbeddedPostedPreview(ctx context.Context, pool *pgxpool.Pool, j
 	preview["total_credit"] = roundToFour(totalCredit)
 	preview["accounting_posted"] = true
 	preview["journal_entry_id"] = journalEntryID
+	pair, _ := fdAccounting.LookupJournalStatuses(ctx, pool, journalEntryID)
+	preview["ledger_status"] = pair.LedgerStatus
+	preview["processing_status"] = pair.ProcessingStatus
+	preview["journal_status"] = pair.LedgerStatus
+	preview["ledger_posted"] = strings.EqualFold(pair.LedgerStatus, "POSTED")
+	if pair.LedgerStatus != "" {
+		preview["posting_display"] = pair.LedgerStatus
+	}
 	return preview
 }
 
@@ -5130,15 +5216,12 @@ func cimplrAccountingApprovedActiveRecords(ctx context.Context, pool *pgxpool.Po
 	}
 	out := make([]map[string]interface{}, 0)
 
-	// Accounting register = successfully POSTED confirm rows (payout, rollover,
-	// premature) with their journal lines embedded. Approved-but-not-posted
-	// rows must not appear here:
-	//   • Going forward, the approve handler's dry-run pre-check (Fix #2)
-	//     refuses approval if posting would fail, so we never create new
-	//     APPROVED-PENDING-POST or APPROVED-FAILED zombies.
-	//   • Legacy zombies from before the fix are reset via the maintenance
-	//     SQL (cimplr.fd_closure_confirm posting_status reset). After that
-	//     they go back to CONFIRM in the Maturity Dashboard for re-approval.
+	// Accounting register = confirm rows that have a journal (or are marked
+	// accounting_posted). Journals are born PENDING_APPROVAL and only become
+	// POSTED after FD Accounting Workbench approve→post, so this list must
+	// include pending / approved / failed / posted ledger states — not just
+	// confirm-side "POSTED". Ledger + audit processing_status come from
+	// LookupJournalStatuses inside enrichCimplrAccountingListItem.
 	listReq := req
 	listReq.ClosureType = ""
 	confirmRows, _, err := listCimplrRecords(ctx, pool, "confirm", listReq, false)
@@ -5169,13 +5252,15 @@ func cimplrAccountingApprovedActiveRecords(ctx context.Context, pool *pgxpool.Po
 		if status == constants.StatusRejected || status == "DELETED" {
 			continue
 		}
+		journalEntryID := strings.TrimSpace(fmt.Sprint(row["journal_entry_id"]))
 		posted := false
 		switch v := row["accounting_posted"].(type) {
 		case bool:
 			posted = v
 		}
-		// Strict POSTED-only filter — see the comment block above.
-		if !(posted || status == "POSTED") {
+		// Include any confirm that already has a journal (any ledger status),
+		// or legacy accounting_posted / closure POSTED rows.
+		if journalEntryID == "" && !(posted || status == "POSTED") {
 			continue
 		}
 		item := map[string]interface{}{}
@@ -5189,14 +5274,17 @@ func cimplrAccountingApprovedActiveRecords(ctx context.Context, pool *pgxpool.Po
 		} else {
 			item["queue_type"] = "CONFIRM"
 		}
-		item["workflow_stage"] = "POSTED"
 		item["can_generate_journals"] = false
 		item["can_post"] = false
-		journalEntryID := strings.TrimSpace(fmt.Sprint(row["journal_entry_id"]))
 		if journalEntryID != "" {
 			item["embedded_preview"] = cimplrBuildEmbeddedPostedPreview(ctx, pool, journalEntryID, fmt.Sprint(row["closure_type"]), fmt.Sprint(row["fd_id"]), row)
 		}
 		enrichCimplrAccountingListItem(ctx, pool, item)
+		if ls := strings.TrimSpace(fmt.Sprint(item["ledger_status"])); ls != "" {
+			item["workflow_stage"] = ls
+		} else {
+			item["workflow_stage"] = "PENDING_APPROVAL"
+		}
 		out = append(out, item)
 	}
 	return out, nil

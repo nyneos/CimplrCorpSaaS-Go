@@ -14,10 +14,26 @@ import (
 // AmountSet carries the producer's figures. A mapping line picks one of them
 // through its amount_basis.
 type AmountSet struct {
-	Full    float64
-	TDS     float64
-	Net     float64
-	Penalty float64
+	Full      float64 // generic / principal+interest for simple mappings
+	Principal float64 // FD principal (closure)
+	Interest  float64 // interest recognised (closure)
+	TDS       float64
+	Net       float64 // net cash / net of TDS
+	Penalty   float64
+}
+
+// ClosureAmountSet packages Maturity / Premature / Rollover figures for a
+// CLOSURE mapping. Mapping lines pick PRINCIPAL_AMOUNT, INTEREST_AMOUNT,
+// TDS_AMOUNT, NET_AMOUNT, PENALTY_AMOUNT, or FULL_AMOUNT (principal+interest).
+func ClosureAmountSet(principal, interest, tds, net, penalty float64) AmountSet {
+	return AmountSet{
+		Full:      principal + interest,
+		Principal: principal,
+		Interest:  interest,
+		TDS:       tds,
+		Net:       net,
+		Penalty:   penalty,
+	}
 }
 
 // MappingLine is one configured line of an ACTIVE mapping.
@@ -33,6 +49,16 @@ type MappingLine struct {
 	ProjectCode  string
 	TaxCode      string
 	Narration    string
+	// Allocations — when non-empty, BuildLines expands this line into N
+	// journal lines split by allocation_pct (BRD multi cost allocation).
+	Allocations []CostAllocation
+}
+
+// CostAllocation is one cost-centre share of a mapping line.
+type CostAllocation struct {
+	CostCenter string
+	Pct        float64
+	SortOrder  int
 }
 
 // ResolvedMapping is the ACTIVE mapping for one (entity, bank, event) key.
@@ -103,6 +129,32 @@ func LoadActiveMapping(ctx context.Context, exec dbExec, entityID, bankID, event
 	if len(m.Lines) == 0 {
 		return nil, nil
 	}
+	// Load cost allocations for all lines in one query.
+	aRows, aErr := exec.Query(ctx, `
+		SELECT line_number, COALESCE(cost_center,''), COALESCE(allocation_pct,0), COALESCE(sort_order,1)
+		FROM `+glMappingAllocTable+`
+		WHERE mapping_id = $1 AND COALESCE(is_deleted,false) = false
+		ORDER BY line_number, sort_order, allocation_id`, mappingID)
+	if aErr != nil {
+		return nil, aErr
+	}
+	defer aRows.Close()
+	byLine := map[int][]CostAllocation{}
+	for aRows.Next() {
+		var ln, sortOrd int
+		var cc string
+		var pct float64
+		if err := aRows.Scan(&ln, &cc, &pct, &sortOrd); err != nil {
+			return nil, err
+		}
+		byLine[ln] = append(byLine[ln], CostAllocation{CostCenter: cc, Pct: pct, SortOrder: sortOrd})
+	}
+	if err := aRows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range m.Lines {
+		m.Lines[i].Allocations = byLine[m.Lines[i].LineNumber]
+	}
 	return m, nil
 }
 
@@ -140,13 +192,24 @@ func BuildMappedJournal(ctx context.Context, exec dbExec, entityID, bankID, even
 	return MappedJournal{Mapped: true, Lines: lines, Debit: dr, Credit: cr, Version: m.Version()}, nil
 }
 
-// InsertLines writes the generated lines for an entry.
+// InsertLines writes the generated lines for an entry, including GL mapping
+// dimensions stamped from the ACTIVE mapping at generation time.
 func (j MappedJournal) InsertLines(ctx context.Context, exec dbExec, entryID string) error {
+	return j.InsertLinesForFD(ctx, exec, entryID, "")
+}
+
+// InsertLinesForFD is InsertLines plus optional fd_id on each line (closure).
+func (j MappedJournal) InsertLinesForFD(ctx context.Context, exec dbExec, entryID, fdID string) error {
 	for _, l := range j.Lines {
 		if _, err := exec.Exec(ctx, `
-			INSERT INTO `+journalLineTable+` (entry_id, line_number, account_number, account_name, account_type, debit_amount, credit_amount, narration)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-			entryID, l.LineNumber, l.AccountNumber, l.AccountName, l.AccountType, l.Debit, l.Credit, l.Narration); err != nil {
+			INSERT INTO `+journalLineTable+` (
+				entry_id, line_number, account_number, account_name, account_type,
+				debit_amount, credit_amount, narration,
+				cost_center, profit_center, project_code, tax_code, fd_id
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),NULLIF($12,''),NULLIF($13,''))`,
+			entryID, l.LineNumber, l.AccountNumber, l.AccountName, l.AccountType,
+			l.Debit, l.Credit, l.Narration,
+			l.CostCenter, l.ProfitCenter, l.ProjectCode, l.TaxCode, fdID); err != nil {
 			return err
 		}
 	}
@@ -172,6 +235,10 @@ func RoundAmount(v float64, decimals int, method string) float64 {
 // amountFor resolves a line's configured basis against the producer's figures.
 func (m *ResolvedMapping) amountFor(basis string, a AmountSet) float64 {
 	switch strings.ToUpper(strings.TrimSpace(basis)) {
+	case "PRINCIPAL_AMOUNT":
+		return a.Principal
+	case "INTEREST_AMOUNT":
+		return a.Interest
 	case "TDS_AMOUNT":
 		return a.TDS
 	case "NET_AMOUNT":
@@ -183,10 +250,10 @@ func (m *ResolvedMapping) amountFor(basis string, a AmountSet) float64 {
 	}
 }
 
-// BuildLines turns the mapping into journal lines, one per mapping line, with
-// each amount resolved by basis and rounded to the mapping's precision. Lines
-// that resolve to zero are dropped — a TDS line on a receipt with no TDS should
-// not post an empty row. Returns the lines plus the debit and credit totals.
+// BuildLines turns the mapping into journal lines, one per mapping line (or N
+// when cost allocations exist), with each amount resolved by basis and rounded.
+// Allocation shares use last-slice remainder so pennies balance. Lines that
+// resolve to zero are dropped. Returns the lines plus debit and credit totals.
 func (m *ResolvedMapping) BuildLines(a AmountSet, narration string) ([]GeneratedLine, float64, float64) {
 	out := make([]GeneratedLine, 0, len(m.Lines))
 	var totalDr, totalCr float64
@@ -196,26 +263,51 @@ func (m *ResolvedMapping) BuildLines(a AmountSet, narration string) ([]Generated
 		if amt == 0 {
 			continue
 		}
-		n++
-		g := GeneratedLine{
-			LineNumber:    n,
-			AccountNumber: l.GLCode,
-			AccountName:   l.GLName,
-			AccountType:   l.AccountType,
-			Narration:     strings.TrimSpace(l.Narration + " " + narration),
-			CostCenter:    l.CostCenter,
-			ProfitCenter:  l.ProfitCenter,
-			ProjectCode:   l.ProjectCode,
-			TaxCode:       l.TaxCode,
+		type share struct {
+			cc  string
+			amt float64
 		}
-		if strings.EqualFold(strings.TrimSpace(l.Leg), "CREDIT") {
-			g.Credit = amt
-			totalCr += amt
+		shares := []share{}
+		if len(l.Allocations) == 0 {
+			shares = append(shares, share{cc: l.CostCenter, amt: amt})
 		} else {
-			g.Debit = amt
-			totalDr += amt
+			remaining := amt
+			for i, al := range l.Allocations {
+				var part float64
+				if i == len(l.Allocations)-1 {
+					part = remaining
+				} else {
+					part = RoundAmount(amt*al.Pct/100.0, m.RoundingDecimals, m.RoundingMethod)
+					remaining = RoundAmount(remaining-part, m.RoundingDecimals, m.RoundingMethod)
+				}
+				if part == 0 {
+					continue
+				}
+				shares = append(shares, share{cc: al.CostCenter, amt: part})
+			}
 		}
-		out = append(out, g)
+		for _, sh := range shares {
+			n++
+			g := GeneratedLine{
+				LineNumber:    n,
+				AccountNumber: l.GLCode,
+				AccountName:   l.GLName,
+				AccountType:   l.AccountType,
+				Narration:     strings.TrimSpace(l.Narration + " " + narration),
+				CostCenter:    sh.cc,
+				ProfitCenter:  l.ProfitCenter,
+				ProjectCode:   l.ProjectCode,
+				TaxCode:       l.TaxCode,
+			}
+			if strings.EqualFold(strings.TrimSpace(l.Leg), "CREDIT") {
+				g.Credit = sh.amt
+				totalCr += sh.amt
+			} else {
+				g.Debit = sh.amt
+				totalDr += sh.amt
+			}
+			out = append(out, g)
+		}
 	}
 	return out, totalDr, totalCr
 }

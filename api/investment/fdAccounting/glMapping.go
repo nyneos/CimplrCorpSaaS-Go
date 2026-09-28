@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -39,7 +40,19 @@ const glMappingSelect = `
 			'account_type', COALESCE(ml.account_type,''), 'amount_basis', ml.amount_basis,
 			'cost_center', COALESCE(ml.cost_center,''), 'profit_center', COALESCE(ml.profit_center,''),
 			'project_code', COALESCE(ml.project_code,''), 'tax_code', COALESCE(ml.tax_code,''),
-			'line_narration', COALESCE(ml.line_narration,'')) ORDER BY ml.line_number), '[]'::json)
+			'line_narration', COALESCE(ml.line_narration,''),
+			'cost_allocations', COALESCE((
+				SELECT json_agg(json_build_object(
+					'allocation_id', al.allocation_id,
+					'cost_center', al.cost_center,
+					'allocation_pct', al.allocation_pct,
+					'sort_order', al.sort_order
+				) ORDER BY al.sort_order, al.allocation_id)
+				FROM ` + glMappingAllocTable + ` al
+				WHERE al.mapping_id = ml.mapping_id AND al.line_number = ml.line_number
+				  AND COALESCE(al.is_deleted,false) = false
+			), '[]'::json)
+			) ORDER BY ml.line_number), '[]'::json)
 		 FROM ` + glMappingLineTable + ` ml WHERE ml.mapping_id = m.mapping_id) AS lines,
 		COALESCE(l.actiontype,'') AS action_type,
 		COALESCE(l.processing_status,'') AS processing_status,
@@ -146,17 +159,24 @@ func DetailGlMapping(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+type glMappingAllocInput struct {
+	CostCenter    string  `json:"cost_center"`
+	AllocationPct float64 `json:"allocation_pct"`
+	SortOrder     int     `json:"sort_order"`
+}
+
 type glMappingLineInput struct {
-	Leg           string `json:"leg"`
-	GLAccountCode string `json:"gl_account_code"`
-	GLAccountName string `json:"gl_account_name"`
-	AccountType   string `json:"account_type"`
-	AmountBasis   string `json:"amount_basis"`
-	CostCenter    string `json:"cost_center"`
-	ProfitCenter  string `json:"profit_center"`
-	ProjectCode   string `json:"project_code"`
-	TaxCode       string `json:"tax_code"`
-	LineNarration string `json:"line_narration"`
+	Leg              string                 `json:"leg"`
+	GLAccountCode    string                 `json:"gl_account_code"`
+	GLAccountName    string                 `json:"gl_account_name"`
+	AccountType      string                 `json:"account_type"`
+	AmountBasis      string                 `json:"amount_basis"`
+	CostCenter       string                 `json:"cost_center"`
+	ProfitCenter     string                 `json:"profit_center"`
+	ProjectCode      string                 `json:"project_code"`
+	TaxCode          string                 `json:"tax_code"`
+	LineNarration    string                 `json:"line_narration"`
+	CostAllocations  []glMappingAllocInput  `json:"cost_allocations"`
 }
 
 // CreateGlMapping — POST /investment/fd/gl-mapping/create. Always creates a
@@ -207,11 +227,38 @@ func CreateGlMapping(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		for i, l := range req.Lines {
-			if msg := validateCentre(r.Context(), pool, strings.TrimSpace(l.CostCenter), "COST%", "cost_center"); msg != "" {
-				fdclosingcommon.RespondError(w, http.StatusBadRequest, fmt.Sprintf("line %d: %s", i+1, msg))
+			entityName := strings.TrimSpace(req.EntityName)
+			allocs := make([]glMappingAllocInput, 0, len(l.CostAllocations))
+			var pctSum float64
+			for j, a := range l.CostAllocations {
+				cc := strings.TrimSpace(a.CostCenter)
+				if cc == "" || a.AllocationPct <= 0 {
+					continue
+				}
+				if msg := validateCentre(r.Context(), pool, cc, "COST%", "cost_center", req.EntityID, entityName); msg != "" {
+					fdclosingcommon.RespondError(w, http.StatusBadRequest, fmt.Sprintf("line %d allocation %d: %s", i+1, j+1, msg))
+					return
+				}
+				pctSum += a.AllocationPct
+				allocs = append(allocs, glMappingAllocInput{CostCenter: cc, AllocationPct: a.AllocationPct, SortOrder: a.SortOrder})
+			}
+			if len(allocs) > 0 && math.Abs(pctSum-100) > 0.05 {
+				fdclosingcommon.RespondError(w, http.StatusBadRequest,
+					fmt.Sprintf("line %d: cost allocation percentages must sum to 100 (got %.4f)", i+1, pctSum))
 				return
 			}
-			if msg := validateCentre(r.Context(), pool, strings.TrimSpace(l.ProfitCenter), "PROFIT%", "profit_center"); msg != "" {
+			req.Lines[i].CostAllocations = allocs
+			// Single cost_center only when no multi-allocation rows.
+			parentCC := strings.TrimSpace(l.CostCenter)
+			if len(allocs) == 0 {
+				if msg := validateCentre(r.Context(), pool, parentCC, "COST%", "cost_center", req.EntityID, entityName); msg != "" {
+					fdclosingcommon.RespondError(w, http.StatusBadRequest, fmt.Sprintf("line %d: %s", i+1, msg))
+					return
+				}
+			} else {
+				req.Lines[i].CostCenter = "" // parent cleared; centres live on allocation children
+			}
+			if msg := validateCentre(r.Context(), pool, strings.TrimSpace(l.ProfitCenter), "PROFIT%", "profit_center", req.EntityID, entityName); msg != "" {
 				fdclosingcommon.RespondError(w, http.StatusBadRequest, fmt.Sprintf("line %d: %s", i+1, msg))
 				return
 			}
@@ -262,14 +309,28 @@ func CreateGlMapping(pool *pgxpool.Pool) http.HandlerFunc {
 			if basis == "" {
 				basis = "FULL_AMOUNT"
 			}
+			lineNo := i + 1
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO `+glMappingLineTable+` (mapping_id, line_number, leg, gl_account_code, gl_account_name, account_type,
 					amount_basis, cost_center, profit_center, project_code, tax_code, line_narration)
 				VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),NULLIF($12,''))`,
-				mappingID, i+1, strings.ToUpper(strings.TrimSpace(l.Leg)), strings.TrimSpace(l.GLAccountCode), strings.TrimSpace(l.GLAccountName),
+				mappingID, lineNo, strings.ToUpper(strings.TrimSpace(l.Leg)), strings.TrimSpace(l.GLAccountCode), strings.TrimSpace(l.GLAccountName),
 				strings.TrimSpace(l.AccountType), basis, l.CostCenter, l.ProfitCenter, l.ProjectCode, l.TaxCode, l.LineNarration); err != nil {
 				fdclosingcommon.RespondError(w, http.StatusInternalServerError, "insert mapping line: "+err.Error())
 				return
+			}
+			for j, a := range l.CostAllocations {
+				sortOrd := a.SortOrder
+				if sortOrd <= 0 {
+					sortOrd = j + 1
+				}
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO `+glMappingAllocTable+` (mapping_id, line_number, cost_center, allocation_pct, sort_order)
+					VALUES ($1,$2,$3,$4,$5)`,
+					mappingID, lineNo, strings.TrimSpace(a.CostCenter), a.AllocationPct, sortOrd); err != nil {
+					fdclosingcommon.RespondError(w, http.StatusInternalServerError, "insert cost allocation: "+err.Error())
+					return
+				}
 			}
 		}
 		if _, err := tx.Exec(ctx, `
@@ -308,9 +369,10 @@ type glActionRequest struct {
 }
 
 // validateCentre rejects a dimension code that is not an APPROVED + ACTIVE row
-// of the matching type in mastercostprofitcenter. An empty code is allowed —
-// dimensions are optional on a mapping line.
-func validateCentre(ctx context.Context, pool *pgxpool.Pool, code, typePattern, field string) string {
+// of the matching type in mastercostprofitcenter, scoped to the mapping entity
+// when entity_id / entity_name is provided (match entity_code or entity_name).
+// An empty code is allowed — dimensions are optional on a mapping line.
+func validateCentre(ctx context.Context, pool *pgxpool.Pool, code, typePattern, field, entityID, entityName string) string {
 	if code == "" {
 		return ""
 	}
@@ -330,13 +392,19 @@ func validateCentre(ctx context.Context, pool *pgxpool.Pool, code, typePattern, 
 			  AND UPPER(m.status) = 'ACTIVE'
 			  AND COALESCE(m.is_deleted,false) = false
 			  AND UPPER(COALESCE(m.centre_type,'')) LIKE $2
-		)`, code, typePattern).Scan(&ok)
+			  AND (
+			    NULLIF(TRIM($3),'') IS NULL AND NULLIF(TRIM($4),'') IS NULL
+			    OR UPPER(TRIM(COALESCE(m.entity_name,''))) = UPPER(TRIM($4))
+			    OR UPPER(TRIM(COALESCE(m.entity_name,''))) = UPPER(TRIM($3))
+			    OR NULLIF(TRIM(COALESCE(m.entity_name,'')),'') IS NULL
+			  )
+		)`, code, typePattern, entityID, entityName).Scan(&ok)
 	if err != nil {
 		api.LogError("[FDAccounting] validateCentre %s: %v", code, err)
 		return field + " could not be validated"
 	}
 	if !ok {
-		return field + " " + code + " is not an approved, active centre"
+		return field + " " + code + " is not an approved, active centre for this entity"
 	}
 	return ""
 }

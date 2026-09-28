@@ -1582,6 +1582,7 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 				TO_CHAR(je.entry_date, 'YYYY-MM-DD') AS entry_date,
 				je.accounting_period, je.entry_type, je.description,
 				je.total_debit, je.total_credit, je.status,
+				COALESCE(l.processing_status,'') AS processing_status,
 				TO_CHAR(je.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
 				je.created_by,
 				jl.line_id, jl.line_number, jl.account_number, jl.account_name,
@@ -1589,6 +1590,13 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 				jl.folio_id, jl.demat_id
 			FROM investment.accounting_journal_entry je
 			LEFT JOIN investment.accounting_journal_entry_line jl ON jl.entry_id = je.entry_id
+			LEFT JOIN LATERAL (
+				SELECT a.processing_status
+				FROM investment.auditaction_fd_accounting_journal a
+				WHERE a.entry_id = je.entry_id
+				  AND UPPER(COALESCE(a.actiontype,'')) NOT IN ('UPLOAD_FILE','DOWNLOAD')
+				ORDER BY a.requested_at DESC LIMIT 1
+			) l ON true
 			WHERE `+filterCol+` = $1 AND je.is_deleted = false`+dateClause+`
 			ORDER BY je.entry_date DESC, jl.line_number ASC`, args...)
 		if err != nil {

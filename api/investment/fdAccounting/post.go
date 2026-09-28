@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"CimplrCorpSaas/api"
@@ -156,10 +157,17 @@ func postOne(ctx context.Context, pool *pgxpool.Pool, entryID, actionType string
 		UPDATE investment.accounting_activity SET status = 'POSTED'
 		WHERE activity_id = (SELECT activity_id FROM `+journalTable+` WHERE entry_id = $1)`, entryID)
 	if isReversal && reversalOf != "" {
-		if _, uerr := tx.Exec(ctx, `UPDATE `+journalTable+` SET status = $2 WHERE entry_id = $1`, reversalOf, statusReversed); uerr != nil {
+		var revType string
+		_ = tx.QueryRow(ctx, `SELECT COALESCE(reversal_type,'FULL') FROM `+journalTable+` WHERE entry_id = $1`, entryID).Scan(&revType)
+		if strings.EqualFold(strings.TrimSpace(revType), "PARTIAL") {
+			// Partial only nets part of the original — leave original POSTED so
+			// the remaining exposure stays on the ledger. Audit records the link.
+			_ = insertJournalAudit(ctx, tx, reversalOf, "EDIT", "COMPLETED", "Partially reversed by "+entryID, actorEmail, true)
+		} else if _, uerr := tx.Exec(ctx, `UPDATE `+journalTable+` SET status = $2 WHERE entry_id = $1`, reversalOf, statusReversed); uerr != nil {
 			return fail("flip original to REVERSED: " + uerr.Error())
+		} else {
+			_ = insertJournalAudit(ctx, tx, reversalOf, "EDIT", "COMPLETED", "Reversed by "+entryID, actorEmail, true)
 		}
-		_ = insertJournalAudit(ctx, tx, reversalOf, "EDIT", "COMPLETED", "Reversed by "+entryID, actorEmail, true)
 	}
 	if aerr := insertJournalAudit(ctx, tx, entryID, actionType, "COMPLETED", "Posted to ledger ("+postingModeValue+")", actorEmail, true); aerr != nil {
 		return fail(constants.ErrAuditInsertFailed + aerr.Error())
