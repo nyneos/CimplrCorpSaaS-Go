@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	fdclosingcommon "CimplrCorpSaas/api/investment/fdMonthEndClosing/common"
+	"CimplrCorpSaas/api/utils/s3storage"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,9 +32,22 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 			ReasonCode   string `json:"reason_code"`
 			Remarks      string `json:"remarks"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			fdclosingcommon.RespondError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
+		isMultipart := strings.Contains(strings.ToLower(r.Header.Get(constants.ContentTypeText)), "multipart/form-data")
+		if isMultipart {
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				fdclosingcommon.RespondError(w, http.StatusBadRequest, "Invalid multipart form: "+err.Error())
+				return
+			}
+			req.EntryID = r.FormValue("entry_id")
+			req.ReversalType = r.FormValue("reversal_type")
+			req.ReversalDate = r.FormValue("reversal_date")
+			req.ReasonCode = r.FormValue("reason_code")
+			req.Remarks = r.FormValue("remarks")
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				fdclosingcommon.RespondError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+				return
+			}
 		}
 		req.EntryID = strings.TrimSpace(req.EntryID)
 		if req.EntryID == "" {
@@ -67,6 +82,34 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		evidenceS3Key := ""
+		if isMultipart && r.MultipartForm != nil {
+			if headers := s3storage.CollectMultipartFiles(r.MultipartForm, "evidence", "file", "files"); len(headers) > 0 && headers[0] != nil {
+				f, ferr := headers[0].Open()
+				if ferr != nil {
+					fdclosingcommon.RespondError(w, http.StatusBadRequest, "open evidence file: "+ferr.Error())
+					return
+				}
+				body, rerr := io.ReadAll(f)
+				f.Close()
+				if rerr != nil {
+					fdclosingcommon.RespondError(w, http.StatusBadRequest, "read evidence file: "+rerr.Error())
+					return
+				}
+				key := s3storage.BuildUploadedS3Key("fd/fd-accounting-journal/reversal-evidence", req.EntryID, headers[0].Filename, actor.Email, time.Now().UTC())
+				if uerr := s3storage.PutObjectToS3(ctx, key, body, s3storage.DetectContentType(body)); uerr != nil {
+					fdclosingcommon.RespondError(w, http.StatusInternalServerError, "S3 upload failed: "+uerr.Error())
+					return
+				}
+				evidenceS3Key = key
+			}
+		}
+		committed := false
+		defer func() {
+			if !committed && evidenceS3Key != "" {
+				_ = s3storage.DeleteFromS3(context.Background(), evidenceS3Key)
+			}
+		}()
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
@@ -159,15 +202,15 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO `+journalTable+` (
 				activity_id, entity_id, entity_name, fd_id, receipt_id, accrual_run_id,
 				entry_date, accounting_period, entry_type, description, total_debit, total_credit, status,
-				is_reversal, reversal_of_entry_id, reason_code, remarks, requested_by, created_by
+				is_reversal, reversal_of_entry_id, reason_code, remarks, requested_by, created_by, evidence_s3_key
 			) VALUES (
 				$1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), NULLIF($5,''), NULLIF($6,''),
 				$7, $8, $9, $10, $11, $12, $13,
-				true, $14, $15, $16, $17, $18
+				true, $14, $15, $16, $17, $18, NULLIF($19,'')
 			) RETURNING entry_id`,
 			newActivityID, entityID, entityName, fdID, receiptID, accrualRunID,
 			reversalDate, reversalDate.Format(constants.DateFormatYearMonth), entryTypeReversal, newDesc, totalCredit, totalDebit, statusPendingApproval,
-			req.EntryID, strings.TrimSpace(req.ReasonCode), strings.TrimSpace(req.Remarks), actorEmail, actorEmail,
+			req.EntryID, strings.TrimSpace(req.ReasonCode), strings.TrimSpace(req.Remarks), actorEmail, actorEmail, evidenceS3Key,
 		).Scan(&newEntryID); err != nil {
 			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "insert reversal entry: "+err.Error())
 			return
@@ -194,6 +237,7 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
+		committed = true
 
 		fdclosingcommon.RespondSuccess(w, "Reversal submitted for approval", map[string]interface{}{
 			"entry_id":             newEntryID,
