@@ -47,6 +47,7 @@ const journalSelect = `
 		COALESCE(je.status,'')                       AS status,
 		COALESCE(je.reason_code,'')                  AS reason_code,
 		COALESCE(je.remarks,'')                      AS remarks,
+		COALESCE(je.evidence_s3_key,'')              AS evidence_s3_key,
 		COALESCE(je.posted_by,'')                    AS posted_by,
 		COALESCE(TO_CHAR(je.posted_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD HH24:MI:SS'),'') AS posted_at,
 		COALESCE(je.posting_reference,'')            AS posting_reference,
