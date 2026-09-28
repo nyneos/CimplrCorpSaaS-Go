@@ -216,7 +216,10 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  LIMIT 1
 				) best ON true
 				WHERE COALESCE(n.is_deleted,false) = false
-				  AND UPPER(COALESCE(n.request_status,'')) NOT IN ('DELETED')
+				  AND UPPER(COALESCE(n.request_status,'')) NOT IN (
+				    'DELETED','REJECTED','CANCELLED',
+				    'PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL'
+				  )
 				  AND (n.entity_id = ANY(string_to_array($1, ',')))`+snapNegotiationFilter+`
 				ORDER BY n.created_at DESC
 				LIMIT 50`, entityFilter)
@@ -258,18 +261,24 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				// Map the maker-checker request_status onto the simple lifecycle
-				// label the dashboard/table already renders (Draft/Sent/Offer
-				// Received/Approved/Converted).
+				// label the dashboard/funnel renders — one stage per real status,
+				// no merging, so a "Sent to Banks" count always matches the raw
+				// SENT_TO_BANKS count. Driven by the persisted request_status
+				// itself (not the has_offer join). PENDING_APPROVAL/EDIT/DELETE
+				// and REJECTED/CANCELLED/DELETED are filtered out above — there
+				// is no pre-send/dead-deal stage in this pipeline.
 				status := "Sent"
-				switch {
-				case requestStatus == "DRAFT":
-					status = "Draft"
-				case requestStatus == "CONVERTED_TO_FD":
-					status = "Converted"
-				case requestStatus == "APPROVED":
-					status = "Approved"
-				case hasOffer:
+				switch requestStatus {
+				case "SENT_TO_BANKS":
+					status = "Sent"
+				case "RESPONSE_RECEIVED":
+					status = "Response Received"
+				case "OFFERS_RECEIVED":
 					status = "Offer Received"
+				case "APPROVED":
+					status = "Approved"
+				case "CONVERTED_TO_FD":
+					status = "Converted"
 				}
 				negRows = append(negRows, negRow{
 					ID: id, Bank: bank, Entity: entity, Amount: fdRound(amount, 2),
@@ -285,7 +294,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			agingSum := 0
 			var offersToday []negRow
 			for _, nr := range negRows {
-				if nr.Status == "Sent" || nr.Status == "Draft" || nr.Status == "Offer Received" {
+				if nr.Status == "Sent" || nr.Status == "Response Received" || nr.Status == "Offer Received" {
 					openCount++
 					agingSum += nr.AgingDays
 				}
