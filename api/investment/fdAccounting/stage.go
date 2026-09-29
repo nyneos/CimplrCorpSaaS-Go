@@ -27,7 +27,10 @@ func StageJournalForApproval(ctx context.Context, exec JournalExec, entryID, mak
 	if entryID == "" {
 		return fmt.Errorf("stage journal: entry_id is empty")
 	}
-	if err := insertJournalAudit(ctx, exec, entryID, "CREATE", statusPendingApproval, reason, makerEmail, false); err != nil {
+	if err := insertJournalAudit(ctx, exec, journalAuditWrite{
+		EntryID: entryID, ActionType: "CREATE", ProcessingStatus: statusPendingApproval,
+		Reason: reason, ActorEmail: makerEmail, Checker: false,
+	}); err != nil {
 		return fmt.Errorf("stage journal %s: %w", entryID, err)
 	}
 	return nil

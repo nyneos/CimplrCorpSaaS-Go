@@ -261,8 +261,11 @@ func ReverseJournal(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if err := insertJournalAudit(ctx, tx, newEntryID, "CREATE", statusPendingApproval,
-			typeLabel+" of "+req.EntryID+" ("+strings.TrimSpace(req.ReasonCode)+"): "+strings.TrimSpace(req.Remarks), actor.Email, false); err != nil {
+		if err := insertJournalAudit(ctx, tx, journalAuditWrite{
+			EntryID: newEntryID, ActionType: "CREATE", ProcessingStatus: statusPendingApproval,
+			Reason: typeLabel + " of " + req.EntryID + " (" + strings.TrimSpace(req.ReasonCode) + "): " + strings.TrimSpace(req.Remarks),
+			ActorEmail: actor.Email, Checker: false,
+		}); err != nil {
 			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}

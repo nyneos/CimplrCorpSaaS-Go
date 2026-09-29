@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -98,7 +99,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 				fmt.Sprintf("Entity:            %s (%s)", entityName, entityID),
 				fmt.Sprintf("Close Type:        %s", closeType),
 				fmt.Sprintf("Financial Period:  %s", financialPeriod),
-				fmt.Sprintf("Period Window:     %s → %s", periodStart.Format("02-01-2006"), periodEnd.Format("02-01-2006")),
+				fmt.Sprintf("Period Window:     %s → %s", periodStart.Format(constants.DateFormatAlt), periodEnd.Format(constants.DateFormatAlt)),
 				fmt.Sprintf("Cycle Status:      %s", status),
 				fmt.Sprintf("Eligibility:       %s", eligibility),
 				fmt.Sprintf("FDs in Scope:      %d", fdCount),
@@ -321,7 +322,7 @@ func MaterializeEvidencePack(ctx context.Context, pool *pgxpool.Pool, packID str
 			evRows.Close()
 			if closed {
 				body += fmt.Sprintf("\nThis certifies that closing period %s (%s to %s) for %s has been locked and closed.\n",
-					financialPeriod, periodStart.Format("02-01-2006"), periodEnd.Format("02-01-2006"), entityName)
+					financialPeriod, periodStart.Format(constants.DateFormatAlt), periodEnd.Format(constants.DateFormatAlt), entityName)
 			} else {
 				body += "\n(Period not yet closed at pack time.)\n"
 			}

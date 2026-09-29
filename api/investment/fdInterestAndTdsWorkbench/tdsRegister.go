@@ -239,7 +239,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if locked, why, lockErr := tdsPeriodLocked(ctx, pool, req.EntityID, req.PeriodStart, req.PeriodEnd, deductionDate); lockErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToCheckClosingPeriodLock)
 			return
 		} else if locked {
 			api.RespondWithError(w, http.StatusConflict, why)
@@ -774,7 +774,7 @@ func ApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if locked, why, lockErr := tdsPeriodLocked(ctx, pool, approveRow.EntityID, approveRow.PeriodStart, approveRow.PeriodEnd, approveRow.DeductionDate); lockErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToCheckClosingPeriodLock)
 			return
 		} else if locked {
 			api.RespondWithError(w, http.StatusConflict, why)
@@ -970,7 +970,7 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 		for _, lockRow := range []fdTDSRegisterRow{editBaseRow, editedRow} {
 			if locked, why, lockErr := tdsPeriodLocked(ctx, pool, lockRow.EntityID, lockRow.PeriodStart, lockRow.PeriodEnd, lockRow.DeductionDate); lockErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToCheckClosingPeriodLock)
 				return
 			} else if locked {
 				api.RespondWithError(w, http.StatusConflict, why)
@@ -1129,7 +1129,7 @@ func BulkApproveTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if locked, why, lockErr := tdsPeriodLocked(ctx, pool, bulkApproveRow.EntityID, bulkApproveRow.PeriodStart, bulkApproveRow.PeriodEnd, bulkApproveRow.DeductionDate); lockErr != nil {
-				results = append(results, result{TDSID: tdsID, OK: false, Message: "Failed to check closing period lock"})
+				results = append(results, result{TDSID: tdsID, OK: false, Message: constants.ErrFailedToCheckClosingPeriodLock})
 				continue
 			} else if locked {
 				results = append(results, result{TDSID: tdsID, OK: false, Message: why})
@@ -1399,7 +1399,7 @@ func RejectTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if locked, why, lockErr := tdsPeriodLocked(ctx, pool, rejectRow.EntityID, rejectRow.PeriodStart, rejectRow.PeriodEnd, rejectRow.DeductionDate); lockErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToCheckClosingPeriodLock)
 			return
 		} else if locked {
 			api.RespondWithError(w, http.StatusConflict, why)
