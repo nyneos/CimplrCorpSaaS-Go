@@ -734,12 +734,8 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 }
 
 // buildPeriodClosingChecklist returns the real Month/Quarter-End Closing
-// checklist — investment.fd_closing_checklist_item, grouped by step_code
-// across every approved, active (IN_PROGRESS / AWAITING_APPROVAL / REOPENED) closing cycle in entity scope — the same set the Period Close Setup screen lists via cycle/list-approved-active. This is
-// the same step vocabulary the Closing Checklist Dashboard works from
-// (Accrual Run Completed/Approved, Interest Receipts Captured, Receipts
-// Reconciled, TDS Validated, Variances & Exceptions Closed, Accounting
-// Consolidated, ...), NOT a proxy built from FD lifecycle approval counts.
+// Checklist totals use all non-deleted closing cycles, matching cycle/list and checklist/list.
+// A step is blocked only when at least one item explicitly has status BLOCKED.
 func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityFilter string) []govChecklistItem {
 	sqlStr := `
 		SELECT
@@ -754,13 +750,6 @@ func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entity
 		JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 		WHERE COALESCE(i.is_deleted,false) = false
 		  AND COALESCE(c.is_deleted,false) = false
-		  AND c.status IN ('IN_PROGRESS','AWAITING_APPROVAL','REOPENED')
-		  AND EXISTS (
-		    SELECT 1 FROM investment.fd_closing_cycle_audit ca
-		    WHERE ca.cycle_id = c.cycle_id
-		      AND ca.action_type = 'CREATE'
-		      AND ca.processing_status = 'APPROVED'
-		  )
 		  AND c.entity_id = ANY(string_to_array($1, ','))
 		GROUP BY i.step_code
 		ORDER BY MIN(i.sequence) ASC`
@@ -782,7 +771,7 @@ func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entity
 			continue
 		}
 		pending := total - completedCnt
-		detail := formatInt64(completedCnt) + "/" + formatInt64(total) + " FDs completed"
+		detail := formatInt64(completedCnt) + "/" + formatInt64(total) + " FD-cycle items completed; " + formatInt64(pending) + " pending; " + formatInt64(blockedCnt) + " blocked"
 		out = append(out, govChecklistItem{
 			ID:           stepCode,
 			Label:        stepName,
@@ -1119,207 +1108,121 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 5. exceptions (Policy Exceptions Summary - TC-74) ─────────────────
-		// Aggregates two real exception sources so the CFO sees a true "policy
-		// exception" picture (count + value at risk):
-		//
-		//   a) Operational exceptions raised by the accrual engine
-		//      (investment.fd_accrual_exception, status NOT IN RESOLVED/CLOSED)
-		//
-		//   b) Policy variance exceptions raised by the variance engine
-		//      (public.variance_log, module_code LIKE 'FD_%' AND status='OPEN')
-		//      - these capture rate / amount / tenor / date breaches the user
-		//      hasn't yet resolved.
-		//
-		// "value" = principal at risk across distinct FDs that have at least
-		// one open exception (regardless of source) so a single FD with
-		// multiple exceptions is only counted once.
+		// ── 5. exceptions (TDS + Interest Receipt Exceptions) ──────────────────
+		// Sourced entirely from investment.fd_receipt_exception — the same
+		// table the Variance & Exception Inbox (interestVarianceAndExceptionManagement
+		// /VarianceExceptionInbox.tsx, POST /investment/fd/exception/all) works
+		// from. No booking/confirmation/activation/accrual-engine data here —
+		// this tile is TDS + Interest Receipt reconciliation exceptions only.
+		// Open = exception_status IN ('OPEN','IN_REVIEW') (not 'CLOSE').
+		// "value" = sum of |variance_amount| across those open exceptions.
 		run("exceptions", func(ctx context.Context) (interface{}, error) {
-			// (a) accrual-engine breakdown
-			accSQL := `
-				SELECT
-				  ae.exception_type,
-				  COUNT(DISTINCT ae.exception_id) AS cnt
-				FROM investment.fd_accrual_exception ae
-				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE COALESCE(ae.is_deleted,false)=false
-				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
-				GROUP BY ae.exception_type
-				ORDER BY cnt DESC`
-			rows, err := pool.Query(ctx, accSQL, entityFilter)
-			if err != nil {
-				return nil, err
-			}
 			type bkRow struct {
 				Type  string `json:"type"`
 				Count int64  `json:"count"`
 			}
-			breakup := []bkRow{}
+			type exceptionItem struct {
+				ExceptionID     string  `json:"exception_id"`
+				FDID            string  `json:"fd_id"`
+				FDRefNo         string  `json:"fd_ref_no"`
+				ResultType      string  `json:"result_type"` // TDS | INTEREST
+				ExceptionType   string  `json:"exception_type"`
+				Severity        string  `json:"severity"`
+				ExceptionStatus string  `json:"exception_status"`
+				ExpectedAmount  float64 `json:"expected_amount"`
+				ReceivedAmount  float64 `json:"received_amount"`
+				VarianceAmount  float64 `json:"variance_amount"`
+				Bank            string  `json:"bank"`
+				Entity          string  `json:"entity"`
+				Principal       float64 `json:"principal"`
+				Rate            float64 `json:"rate"`
+				MaturityDate    string  `json:"maturity_date"`
+				RaisedAt        string  `json:"raised_at"`
+			}
+
+			rows, err := pool.Query(ctx, `
+				SELECT
+				  e.exception_id, e.fd_id, e.fd_ref_no, e.result_type, e.exception_type, e.severity,
+				  e.exception_status,
+				  COALESCE(e.expected_amount,0), COALESCE(e.received_amount,0), COALESCE(e.variance_amount,0),
+				  COALESCE(m.bank_name,''), COALESCE(m.entity_name,''),
+				  COALESCE(m.principal_amount,0), COALESCE(m.interest_rate,0),
+				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),''),
+				  COALESCE(TO_CHAR(e.raised_at,'YYYY-MM-DD HH24:MI'),'')
+				FROM investment.fd_receipt_exception e
+				JOIN investment.fd_master m ON m.fd_id = e.fd_id AND COALESCE(m.is_deleted,false) = false
+				WHERE COALESCE(e.is_deleted,false) = false
+				  AND e.exception_status IN ('OPEN','IN_REVIEW')
+				  AND e.result_type IN ('TDS','INTEREST')
+				  AND (m.entity_id = ANY(string_to_array($1, ',')))
+				ORDER BY e.raised_at DESC
+				LIMIT 200`, entityFilter)
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+
+			items := []exceptionItem{}
+			typeCounts := map[string]int64{}
+			moduleCounts := map[string]int64{"TDS": 0, "INTEREST": 0}
+			var totalVal float64
+			var totalCount int64
 			for rows.Next() {
-				var br bkRow
-				if err := rows.Scan(&br.Type, &br.Count); err != nil {
+				var it exceptionItem
+				if scanErr := rows.Scan(&it.ExceptionID, &it.FDID, &it.FDRefNo, &it.ResultType,
+					&it.ExceptionType, &it.Severity, &it.ExceptionStatus,
+					&it.ExpectedAmount, &it.ReceivedAmount, &it.VarianceAmount,
+					&it.Bank, &it.Entity, &it.Principal, &it.Rate, &it.MaturityDate, &it.RaisedAt); scanErr != nil {
 					continue
 				}
-				if br.Type == "" {
-					br.Type = "Accrual Exception"
+				it.ExpectedAmount = fdRound(it.ExpectedAmount, 2)
+				it.ReceivedAmount = fdRound(it.ReceivedAmount, 2)
+				it.VarianceAmount = fdRound(it.VarianceAmount, 2)
+				it.Principal = fdRound(it.Principal, 2)
+				it.Rate = fdRound(it.Rate, 4)
+				items = append(items, it)
+				totalCount++
+				totalVal += math.Abs(it.VarianceAmount)
+				if it.ExceptionType == "" {
+					typeCounts["UNMATCHED"]++
+				} else {
+					typeCounts[it.ExceptionType]++
 				}
-				breakup = append(breakup, br)
+				moduleCounts[it.ResultType]++
 			}
-			rows.Close()
-
-			// (b) variance-engine breakdown (variance_type → count)
-			varSQL := `
-				SELECT
-				  COALESCE(NULLIF(vl.variance_type,''),'OTHER') AS variance_type,
-				  COUNT(*) AS cnt
-				FROM public.variance_log vl
-				WHERE vl.module_code LIKE 'FD_%'
-				  AND vl.status='OPEN'
-				  AND (vl.entity_id = ANY(string_to_array($1, ',')))
-				GROUP BY 1
-				ORDER BY cnt DESC`
-			if vrows, verr := pool.Query(ctx, varSQL, entityFilter); verr == nil {
-				for vrows.Next() {
-					var t string
-					var c int64
-					if scanErr := vrows.Scan(&t, &c); scanErr != nil {
-						continue
-					}
-					breakup = append(breakup, bkRow{Type: "Variance: " + t, Count: c})
-				}
-				vrows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 
-			// (c) total distinct FDs at risk + principal sum (de-duplicated).
-			// The variance_log.record_id can be a closure_request_id /
-			// booking_id depending on module_code; resolve back to fd_master
-			// through those tables before summing the principal-at-risk so
-			// the alert tile is not stuck at ₹0.
-			var distinctCount int64
-			var totalVal float64
+			// This 200-row page is enough for the drill sidebar, but the tile's
+			// count/value should reflect the true open total, not just the page.
+			var trueCount int64
+			var trueVal float64
 			_ = pool.QueryRow(ctx, `
-				WITH at_risk AS (
-				  -- accrual exceptions hold fd_id directly
-				  SELECT DISTINCT ae.fd_id AS fd_id
-				  FROM investment.fd_accrual_exception ae
-				  WHERE COALESCE(ae.is_deleted,false)=false
-				    AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				  UNION
-				  -- legacy variance on closure → fd_id via fd_closure_request
-				  SELECT DISTINCT cr.fd_id
-				  FROM public.variance_log vl
-				  JOIN investment.fd_closure_request cr
-				    ON cr.closure_request_id = vl.record_id
-				  WHERE vl.module_code='FD_CLOSURE' AND vl.status='OPEN'
-				  UNION
-				  -- cimplr variance on closure initiate → fd_id directly
-				  SELECT DISTINCT ci.fd_id
-				  FROM public.variance_log vl
-				  JOIN cimplr.fd_closure_initiate ci
-				    ON ci.closure_initiate_id = vl.record_id
-				  WHERE vl.module_code='FD_CLOSURE' AND vl.status='OPEN'
-				    AND COALESCE(ci.is_deleted,false)=false
-				  UNION
-				  -- cimplr variance on closure confirm → fd_id directly
-				  SELECT DISTINCT cc.fd_id
-				  FROM public.variance_log vl
-				  JOIN cimplr.fd_closure_confirm cc
-				    ON cc.closure_confirm_id = vl.record_id
-				  WHERE vl.module_code='FD_CLOSURE' AND vl.status='OPEN'
-				    AND COALESCE(cc.is_deleted,false)=false
-				  UNION
-				  -- variance on booking/confirmation → fd_id via fd_master.booking_id
-				  SELECT DISTINCT m2.fd_id
-				  FROM public.variance_log vl
-				  JOIN investment.fd_master m2 ON m2.booking_id = vl.record_id
-				  WHERE vl.module_code IN ('FD_BOOKING','FD_CONFIRMATION') AND vl.status='OPEN'
-				)
-				SELECT
-				  COUNT(DISTINCT m.fd_id),
-				  COALESCE(SUM(m.principal_amount),0)
-				FROM at_risk a
-				JOIN investment.fd_master m ON m.fd_id = a.fd_id
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE m.is_deleted=false
-				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))`,
-				entityFilter).Scan(&distinctCount, &totalVal)
+				SELECT COUNT(*), COALESCE(SUM(ABS(e.variance_amount)),0)
+				FROM investment.fd_receipt_exception e
+				JOIN investment.fd_master m ON m.fd_id = e.fd_id AND COALESCE(m.is_deleted,false) = false
+				WHERE COALESCE(e.is_deleted,false) = false
+				  AND e.exception_status IN ('OPEN','IN_REVIEW')
+				  AND e.result_type IN ('TDS','INTEREST')
+				  AND (m.entity_id = ANY(string_to_array($1, ',')))`,
+				entityFilter).Scan(&trueCount, &trueVal)
 
-			// Sum of breakup counts is a reasonable proxy when the join above
-			// returns 0 (e.g. variance_log holds non-fd_id record_ids).
-			var sumCounts int64
-			for _, b := range breakup {
-				sumCounts += b.Count
-			}
-			finalCount := distinctCount
-			if finalCount == 0 {
-				finalCount = sumCounts
-			}
-
-			// (d) breakdown by FD module (Booking / Confirmation / Activation /
-			// Accrual) — same two exception sources as (a)+(b), grouped by
-			// module instead of by exception/variance type. Always returns all
-			// four modules (zero-filled) so the UI can render a stable list.
-			byModuleSQL := `
-				SELECT module, COUNT(*) AS cnt FROM (
-				  SELECT 'FD_BOOKING' AS module
-				  FROM public.variance_log vl
-				  WHERE vl.module_code='FD_BOOKING' AND vl.status='OPEN'
-				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
-				  UNION ALL
-				  SELECT 'FD_CONFIRMATION'
-				  FROM public.variance_log vl
-				  WHERE vl.module_code='FD_CONFIRMATION' AND vl.status='OPEN'
-				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
-				  UNION ALL
-				  SELECT 'FD_ACTIVATION'
-				  FROM public.variance_log vl
-				  WHERE vl.module_code='FD_ACTIVATION' AND vl.status='OPEN'
-				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
-				  UNION ALL
-				  SELECT 'FD_ACCRUAL'
-				  FROM public.variance_log vl
-				  WHERE vl.module_code='FD_ACCRUAL' AND vl.status='OPEN'
-				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
-				  UNION ALL
-				  SELECT 'FD_ACCRUAL'
-				  FROM investment.fd_accrual_exception ae
-				  LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
-				  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				  WHERE COALESCE(ae.is_deleted,false)=false
-				    AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				    AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
-				) x
-				GROUP BY module`
-			moduleCounts := map[string]int64{
-				"FD_BOOKING":      0,
-				"FD_CONFIRMATION": 0,
-				"FD_ACTIVATION":   0,
-				"FD_ACCRUAL":      0,
-			}
-			if mrows, merr := pool.Query(ctx, byModuleSQL, entityFilter); merr == nil {
-				for mrows.Next() {
-					var mod string
-					var cnt int64
-					if scanErr := mrows.Scan(&mod, &cnt); scanErr == nil {
-						moduleCounts[mod] = cnt
-					}
-				}
-				mrows.Close()
+			breakup := []bkRow{}
+			for t, c := range typeCounts {
+				breakup = append(breakup, bkRow{Type: t, Count: c})
 			}
 			byModule := []bkRow{
-				{Type: "Booking", Count: moduleCounts["FD_BOOKING"]},
-				{Type: "Confirmation", Count: moduleCounts["FD_CONFIRMATION"]},
-				{Type: "Activation", Count: moduleCounts["FD_ACTIVATION"]},
-				{Type: "Accrual", Count: moduleCounts["FD_ACCRUAL"]},
+				{Type: "TDS", Count: moduleCounts["TDS"]},
+				{Type: "Interest Receipt", Count: moduleCounts["INTEREST"]},
 			}
 
 			return map[string]interface{}{
-				"count":     finalCount,
-				"value":     fdRound(totalVal, 2),
+				"count":     trueCount,
+				"value":     fdRound(trueVal, 2),
 				"breakup":   breakup,
 				"by_module": byModule,
+				"items":     items,
 			}, nil
 		})
 
