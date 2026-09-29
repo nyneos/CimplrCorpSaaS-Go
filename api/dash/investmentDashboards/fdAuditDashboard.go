@@ -7,7 +7,7 @@
 //   - maker_checker_rate  — % of requests that passed 2nd-level checker
 //   - audit_log           — unified trail from all fd_audit_* tables (latest 200 rows)
 //   - overrides           — fd_accrual_ledger rows where is_overridden=true
-//   - missing_evidence    — overrides that have no attachment
+//   - missing_evidence    — closing evidence packs without uploaded files
 //   - period_reopens      — fd_closing_reopen_request rows (Period Reopen screen)
 //   - approvals_register  — checker decisions (booking + master audit)
 //   - evidence_packs      — fd_closing_evidence_pack rows (Closing Evidence Pack screen)
@@ -938,41 +938,54 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 5. Missing evidence (FD Month/Quarter-End Closing) ────────────────
-		// Checklist steps marked COMPLETED with no evidence_ref on file, from
-		// investment.fd_closing_checklist_item (api/investment/fdMonthEndClosing).
+		// ── 5. Evidence packs without uploaded supporting evidence ───────────
 		run("missing_evidence", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
-				SELECT i.step_name, COUNT(*)
-				FROM investment.fd_closing_checklist_item i
-				JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
-				WHERE COALESCE(i.is_deleted,false) = false
-				  AND COALESCE(c.is_deleted,false) = false
-				  AND i.status = 'COMPLETED'
-				  AND COALESCE(i.evidence_ref,'') = ''
-				  AND (c.entity_id = ANY(string_to_array($1, ',')))
-				  AND ($2::text='' OR i.fd_id=$2)
-				GROUP BY i.step_name, i.sequence
-				ORDER BY i.sequence`, entityFilter, fdFilter)
+				SELECT p.pack_id, p.cycle_id, COALESCE(c.entity_name, c.entity_id, ''),
+				       COALESCE(c.financial_period, ''), COALESCE(c.close_type, ''),
+				       COALESCE(p.format, ''), COALESCE(p.generated_by, ''),
+				       COALESCE(TO_CHAR(p.generated_at AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'), '')
+				FROM investment.fd_closing_evidence_pack p
+				JOIN investment.fd_closing_cycle c ON c.cycle_id = p.cycle_id
+				WHERE COALESCE(p.is_deleted, false) = false
+				  AND COALESCE(c.is_deleted, false) = false
+				  AND c.entity_id = ANY(string_to_array($1, ','))
+				  AND ($2::text = '' OR EXISTS (
+				      SELECT 1 FROM investment.fd_closing_checklist_item i
+				      WHERE i.cycle_id = c.cycle_id AND i.fd_id = $2
+				        AND COALESCE(i.is_deleted, false) = false))
+				  AND NOT EXISTS (
+				      SELECT 1 FROM investment.fd_closing_evidence_pack_files f
+				      WHERE f.pack_id = p.pack_id AND COALESCE(f.is_deleted, false) = false
+				        AND COALESCE(TRIM(f.upload_s3_key), '') <> '')
+				ORDER BY p.generated_at DESC, p.pack_id`, entityFilter, fdFilter)
 			if err != nil {
-				api.LogError("[AuditDash] missing_evidence query error: %v", err)
-				return map[string]interface{}{"count": int64(0), "by_step": []interface{}{}}, nil
+				return nil, err
 			}
 			defer rows.Close()
-			type stepRow struct {
-				StepName string `json:"step_name"`
-				Count    int64  `json:"count"`
+			type missingPackRow struct {
+				PackID        string `json:"pack_id"`
+				CycleID       string `json:"cycle_id"`
+				EntityName    string `json:"entity_name"`
+				Period        string `json:"period"`
+				CloseType     string `json:"close_type"`
+				Format        string `json:"format"`
+				GeneratedBy   string `json:"generated_by"`
+				GeneratedTime string `json:"generated_time"`
 			}
-			byStep := []stepRow{}
-			var total int64
+			out := []missingPackRow{}
 			for rows.Next() {
-				var sr stepRow
-				if rows.Scan(&sr.StepName, &sr.Count) == nil {
-					byStep = append(byStep, sr)
-					total += sr.Count
+				var pack missingPackRow
+				if err := rows.Scan(&pack.PackID, &pack.CycleID, &pack.EntityName, &pack.Period,
+					&pack.CloseType, &pack.Format, &pack.GeneratedBy, &pack.GeneratedTime); err != nil {
+					return nil, err
 				}
+				out = append(out, pack)
 			}
-			return map[string]interface{}{"count": total, "by_step": byStep}, nil
+			if err := rows.Err(); err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{"count": int64(len(out)), "rows": out}, nil
 		})
 
 		// ── 6. Period reopens (FD Month/Quarter-End Closing) ──────────────────
