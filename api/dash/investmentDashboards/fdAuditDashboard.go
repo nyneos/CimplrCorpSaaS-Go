@@ -7,7 +7,7 @@
 //   - maker_checker_rate  — % of requests that passed 2nd-level checker
 //   - audit_log           — unified trail from all fd_audit_* tables (latest 200 rows)
 //   - overrides           — fd_accrual_ledger rows where is_overridden=true
-//   - missing_evidence    — closing evidence packs without uploaded files
+//   - missing_evidence    — closing evidence packs with excluded report sections
 //   - period_reopens      — fd_closing_reopen_request rows (Period Reopen screen)
 //   - approvals_register  — checker decisions (booking + master audit)
 //   - evidence_packs      — fd_closing_evidence_pack rows (Closing Evidence Pack screen)
@@ -938,15 +938,30 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 5. Evidence packs without uploaded supporting evidence ───────────
+		// ── 5. Evidence packs with excluded report sections ───────────
 		run("missing_evidence", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
 				SELECT p.pack_id, p.cycle_id, COALESCE(c.entity_name, c.entity_id, ''),
 				       COALESCE(c.financial_period, ''), COALESCE(c.close_type, ''),
 				       COALESCE(p.format, ''), COALESCE(p.generated_by, ''),
-				       COALESCE(TO_CHAR(p.generated_at AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'), '')
+				       COALESCE(TO_CHAR(p.generated_at AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD HH24:MI:SS'), ''),
+				       missing.sections
 				FROM investment.fd_closing_evidence_pack p
 				JOIN investment.fd_closing_cycle c ON c.cycle_id = p.cycle_id
+				CROSS JOIN LATERAL (
+				    SELECT COALESCE(array_agg(section.label ORDER BY section.position)
+				        FILTER (WHERE NOT COALESCE(section.included, false)), ARRAY[]::text[]) AS sections
+				    FROM (VALUES
+				        (1, 'Accrual Ledger Report', p.include_accrual_ledger),
+				        (2, 'Reconciliation Report', p.include_reconciliation_report),
+				        (3, 'Exceptions Register', p.include_exceptions_register),
+				        (4, 'Posting Summary', p.include_posting_summary),
+				        (5, 'Approval Logs', p.include_approval_logs),
+				        (6, 'Period Lock Certificate', p.include_period_lock_certificate),
+				        (7, 'Audit Trail', p.include_audit_trail),
+				        (8, 'Supporting Documents', p.include_supporting_documents)
+				    ) AS section(position, label, included)
+				) missing
 				WHERE COALESCE(p.is_deleted, false) = false
 				  AND COALESCE(c.is_deleted, false) = false
 				  AND c.entity_id = ANY(string_to_array($1, ','))
@@ -954,30 +969,28 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				      SELECT 1 FROM investment.fd_closing_checklist_item i
 				      WHERE i.cycle_id = c.cycle_id AND i.fd_id = $2
 				        AND COALESCE(i.is_deleted, false) = false))
-				  AND NOT EXISTS (
-				      SELECT 1 FROM investment.fd_closing_evidence_pack_files f
-				      WHERE f.pack_id = p.pack_id AND COALESCE(f.is_deleted, false) = false
-				        AND COALESCE(TRIM(f.upload_s3_key), '') <> '')
+				  AND cardinality(missing.sections) > 0
 				ORDER BY p.generated_at DESC, p.pack_id`, entityFilter, fdFilter)
 			if err != nil {
 				return nil, err
 			}
 			defer rows.Close()
 			type missingPackRow struct {
-				PackID        string `json:"pack_id"`
-				CycleID       string `json:"cycle_id"`
-				EntityName    string `json:"entity_name"`
-				Period        string `json:"period"`
-				CloseType     string `json:"close_type"`
-				Format        string `json:"format"`
-				GeneratedBy   string `json:"generated_by"`
-				GeneratedTime string `json:"generated_time"`
+				PackID          string   `json:"pack_id"`
+				CycleID         string   `json:"cycle_id"`
+				EntityName      string   `json:"entity_name"`
+				Period          string   `json:"period"`
+				CloseType       string   `json:"close_type"`
+				Format          string   `json:"format"`
+				GeneratedBy     string   `json:"generated_by"`
+				GeneratedTime   string   `json:"generated_time"`
+				MissingSections []string `json:"missing_sections"`
 			}
 			out := []missingPackRow{}
 			for rows.Next() {
 				var pack missingPackRow
 				if err := rows.Scan(&pack.PackID, &pack.CycleID, &pack.EntityName, &pack.Period,
-					&pack.CloseType, &pack.Format, &pack.GeneratedBy, &pack.GeneratedTime); err != nil {
+					&pack.CloseType, &pack.Format, &pack.GeneratedBy, &pack.GeneratedTime, &pack.MissingSections); err != nil {
 					return nil, err
 				}
 				out = append(out, pack)
