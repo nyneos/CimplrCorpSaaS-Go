@@ -137,7 +137,10 @@ func postOne(ctx context.Context, pool *pgxpool.Pool, entryID, actionType string
 			entryID, statusFailed, reason); uerr != nil {
 			return fail(constants.ErrUpdateFailed + uerr.Error())
 		}
-		if aerr := insertJournalAudit(ctx, tx, entryID, actionType, "FAILED", reason, actorEmail, true); aerr != nil {
+		if aerr := insertJournalAudit(ctx, tx, journalAuditWrite{
+			EntryID: entryID, ActionType: actionType, ProcessingStatus: "FAILED",
+			Reason: reason, ActorEmail: actorEmail, Checker: true,
+		}); aerr != nil {
 			return fail(constants.ErrAuditInsertFailed + aerr.Error())
 		}
 		if cerr := tx.Commit(ctx); cerr != nil {
@@ -162,14 +165,23 @@ func postOne(ctx context.Context, pool *pgxpool.Pool, entryID, actionType string
 		if strings.EqualFold(strings.TrimSpace(revType), "PARTIAL") {
 			// Partial only nets part of the original — leave original POSTED so
 			// the remaining exposure stays on the ledger. Audit records the link.
-			_ = insertJournalAudit(ctx, tx, reversalOf, "EDIT", "COMPLETED", "Partially reversed by "+entryID, actorEmail, true)
+			_ = insertJournalAudit(ctx, tx, journalAuditWrite{
+				EntryID: reversalOf, ActionType: "EDIT", ProcessingStatus: "COMPLETED",
+				Reason: "Partially reversed by " + entryID, ActorEmail: actorEmail, Checker: true,
+			})
 		} else if _, uerr := tx.Exec(ctx, `UPDATE `+journalTable+` SET status = $2 WHERE entry_id = $1`, reversalOf, statusReversed); uerr != nil {
 			return fail("flip original to REVERSED: " + uerr.Error())
 		} else {
-			_ = insertJournalAudit(ctx, tx, reversalOf, "EDIT", "COMPLETED", "Reversed by "+entryID, actorEmail, true)
+			_ = insertJournalAudit(ctx, tx, journalAuditWrite{
+				EntryID: reversalOf, ActionType: "EDIT", ProcessingStatus: "COMPLETED",
+				Reason: "Reversed by " + entryID, ActorEmail: actorEmail, Checker: true,
+			})
 		}
 	}
-	if aerr := insertJournalAudit(ctx, tx, entryID, actionType, "COMPLETED", "Posted to ledger ("+postingModeValue+")", actorEmail, true); aerr != nil {
+	if aerr := insertJournalAudit(ctx, tx, journalAuditWrite{
+		EntryID: entryID, ActionType: actionType, ProcessingStatus: "COMPLETED",
+		Reason: "Posted to ledger (" + postingModeValue + ")", ActorEmail: actorEmail, Checker: true,
+	}); aerr != nil {
 		return fail(constants.ErrAuditInsertFailed + aerr.Error())
 	}
 	if cerr := tx.Commit(ctx); cerr != nil {

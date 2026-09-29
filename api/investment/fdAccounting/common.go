@@ -115,23 +115,35 @@ func scopeClause(scope ctxutil.RequestScope, args *[]interface{}) string {
 	return " AND (" + strings.Join(clauses, " OR ") + ")"
 }
 
-// insertJournalAudit writes one auditaction_* row. When checker is true the row
+// journalAuditWrite carries the fields for one auditaction_* insert so
+// insertJournalAudit stays under Sonar's parameter-count threshold.
+type journalAuditWrite struct {
+	EntryID          string
+	ActionType       string
+	ProcessingStatus string
+	Reason           string
+	ActorEmail       string
+	Checker          bool
+}
+
+// insertJournalAudit writes one auditaction_* row. When Checker is true the row
 // is stamped as already checked (used for POST/RETRY outcomes and backfills).
-func insertJournalAudit(ctx context.Context, exec dbExec, entryID, actionType, processingStatus, reason, actorEmail string, checker bool) error {
+func insertJournalAudit(ctx context.Context, exec dbExec, p journalAuditWrite) error {
 	ip := api.SystemIfBlank(api.ClientIPFromContext(ctx))
-	if checker {
+	actor := api.SystemIfBlank(p.ActorEmail)
+	if p.Checker {
 		_, err := exec.Exec(ctx, `
 			INSERT INTO `+journalAuditTable+`
 				(entry_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip)
 			VALUES ($1,$2,$3,NULLIF($4,''),$5,now(),$6,$5,now(),$6)`,
-			entryID, actionType, processingStatus, reason, api.SystemIfBlank(actorEmail), ip)
+			p.EntryID, p.ActionType, p.ProcessingStatus, p.Reason, actor, ip)
 		return err
 	}
 	_, err := exec.Exec(ctx, `
 		INSERT INTO `+journalAuditTable+`
 			(entry_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
 		VALUES ($1,$2,$3,NULLIF($4,''),$5,now(),$6)`,
-		entryID, actionType, processingStatus, reason, api.SystemIfBlank(actorEmail), ip)
+		p.EntryID, p.ActionType, p.ProcessingStatus, p.Reason, actor, ip)
 	return err
 }
 

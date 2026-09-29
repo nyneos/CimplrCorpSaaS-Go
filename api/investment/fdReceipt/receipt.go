@@ -500,7 +500,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		lockFrom, lockTo := receiptLockWindow(map[string]interface{}{"receipt_date": req.ReceiptDate, "period_start": req.PeriodStart, "period_end": req.PeriodEnd}, "receipt_date", nil, nil, nil)
 		if locked, why, lockErr := receiptPeriodLocked(ctx, pool, entityID, lockFrom, lockTo); lockErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToCheckClosingPeriodLock)
 			return
 		} else if locked {
 			api.RespondWithError(w, http.StatusConflict, why)
@@ -946,7 +946,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, fields := range []map[string]interface{}{nil, req.Fields} {
 			lockFrom, lockTo := receiptLockWindow(fields, "receipt_date", currentReceiptDate, currentPeriodStart, currentPeriodEnd)
 			if locked, why, lockErr := receiptPeriodLocked(ctx, pool, entityID, lockFrom, lockTo); lockErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToCheckClosingPeriodLock)
 				return
 			} else if locked {
 				api.RespondWithError(w, http.StatusConflict, why)
@@ -1157,7 +1157,7 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			lockFrom, lockTo := receiptLockWindow(nil, "receipt_date", delReceiptDate, delPeriodStart, delPeriodEnd)
 			if locked, why, lockErr := receiptPeriodLocked(ctx, pool, delEntityID, lockFrom, lockTo); lockErr != nil {
-				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "Failed to check closing period lock"})
+				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": constants.ErrFailedToCheckClosingPeriodLock})
 				continue
 			} else if locked {
 				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": why})
@@ -4014,7 +4014,7 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if hdr, hdrErr := loadVarianceCase(ctx, pool, req.ExceptionID); hdrErr == nil {
 			if locked, why, lockErr := exceptionPeriodLocked(ctx, pool, hdr, entityID); lockErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToCheckClosingPeriodLock)
 				return
 			} else if locked {
 				api.RespondWithError(w, http.StatusConflict, why)
@@ -4176,7 +4176,7 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 			lockFrom, lockTo := receiptLockWindow(nil, "receipt_date", receiptDateRaw, periodStartRaw, periodEndRaw)
 			if locked, why, lockErr := receiptPeriodLocked(ctx, pool, rec.EntityID, lockFrom, lockTo); lockErr != nil {
 				skipped++
-				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": "Failed to check closing period lock"})
+				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": constants.ErrFailedToCheckClosingPeriodLock})
 				continue
 			} else if locked {
 				skipped++
@@ -4376,7 +4376,7 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, fields := range []map[string]interface{}{nil, req.Fields} {
 			lockFrom, lockTo := receiptLockWindow(fields, "deduction_date", currentDeductionDate, currentPeriodStart, currentPeriodEnd)
 			if locked, why, lockErr := receiptPeriodLocked(ctx, pool, entityID, lockFrom, lockTo); lockErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToCheckClosingPeriodLock)
 				return
 			} else if locked {
 				api.RespondWithError(w, http.StatusConflict, why)

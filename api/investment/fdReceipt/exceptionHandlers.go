@@ -78,7 +78,7 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 
 		excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
 		if locked, why, lockErr := exceptionPeriodLocked(ctx, pool, hdr, excEntityID); lockErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToCheckClosingPeriodLock)
 			return
 		} else if locked {
 			api.RespondWithError(w, http.StatusConflict, why)
@@ -361,7 +361,7 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 			excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
 			if locked, why, lockErr := exceptionPeriodLocked(ctx, pool, hdr, excEntityID); lockErr != nil {
-				res["error"] = "Failed to check closing period lock"
+				res["error"] = constants.ErrFailedToCheckClosingPeriodLock
 				results = append(results, res)
 				continue
 			} else if locked {
@@ -479,7 +479,7 @@ func closeOneVariance(ctx context.Context, r *http.Request, pool *pgxpool.Pool, 
 	// enforcement anywhere in its call chain. Added 2026-07-27.
 	excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
 	if locked, why, lockErr := exceptionPeriodLocked(ctx, pool, hdr, excEntityID); lockErr != nil {
-		res["error"] = "Failed to check closing period lock"
+		res["error"] = constants.ErrFailedToCheckClosingPeriodLock
 		return res
 	} else if locked {
 		res["error"] = why
@@ -693,7 +693,7 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 			excEntityID := exceptionPolicyEntityID(ctx, pool, hdr)
 			if locked, why, lockErr := exceptionPeriodLocked(ctx, pool, hdr, excEntityID); lockErr != nil {
-				res["error"] = "Failed to check closing period lock"
+				res["error"] = constants.ErrFailedToCheckClosingPeriodLock
 				results = append(results, res)
 				continue
 			} else if locked {

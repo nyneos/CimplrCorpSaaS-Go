@@ -25,6 +25,10 @@ import (
 
 const errSettlementIDsRequired = "settlement_ids is required"
 
+// msgAwaitingFurtherApproval suffixes bulk approve/reject/delete responses when
+// some settlements still need another approval level.
+const msgAwaitingFurtherApproval = "%s; %d awaiting further approval"
+
 const settlementRecordTable = "public.exposure_settlement_document"
 
 type settlementLineInput struct {
@@ -1955,7 +1959,7 @@ func ApproveExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		n := res.Count
 		msg := fmt.Sprintf("%d settlement(s) approved", n)
 		if res.Awaiting > 0 {
-			msg = fmt.Sprintf("%s; %d awaiting further approval", msg, res.Awaiting)
+			msg = fmt.Sprintf(msgAwaitingFurtherApproval, msg, res.Awaiting)
 		}
 		respondWithSuccess(w, http.StatusOK, msg, map[string]any{"count": n, "awaiting": res.Awaiting})
 	}
@@ -2014,7 +2018,7 @@ func RejectExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		n := res.Count
 		msg := fmt.Sprintf("%d settlement(s) rejected", n)
 		if res.Awaiting > 0 {
-			msg = fmt.Sprintf("%s; %d awaiting further approval", msg, res.Awaiting)
+			msg = fmt.Sprintf(msgAwaitingFurtherApproval, msg, res.Awaiting)
 		}
 		respondWithSuccess(w, http.StatusOK, msg, map[string]any{"count": n, "awaiting": res.Awaiting})
 	}
@@ -2101,7 +2105,7 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 
 		msg := fmt.Sprintf("%d settlement(s) marked for delete", n)
 		if res.Awaiting > 0 {
-			msg = fmt.Sprintf("%s; %d awaiting further approval", msg, res.Awaiting)
+			msg = fmt.Sprintf(msgAwaitingFurtherApproval, msg, res.Awaiting)
 		}
 		respondWithSuccess(w, http.StatusOK, msg, map[string]any{"count": n, "awaiting": res.Awaiting})
 	}

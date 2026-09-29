@@ -201,7 +201,7 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// narrower fd_accrual_period_lock table.
 		if blocked, reason, lockErr := closingCycleBlocksAccrual(ctx, pgxPool, req.EntityID, input.AccrualPeriodStart, input.AccrualPeriodEnd); lockErr != nil {
 			api.LogError("[FDAccrual] CreateAccrualRun closing-lock check: %v", lockErr)
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToCheckClosingPeriodLock)
 			return
 		} else if blocked {
 			api.RespondWithError(w, http.StatusConflict, reason)
@@ -498,7 +498,7 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&lockEntityID, &lockPeriodStart, &lockPeriodEnd); err == nil {
 			if blocked, reason, lockErr := closingCycleBlocksAccrual(ctx, pgxPool, lockEntityID, lockPeriodStart, lockPeriodEnd); lockErr != nil {
 				api.LogError("[FDAccrual] RunAccrual closing-lock check: %v", lockErr)
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToCheckClosingPeriodLock)
 				return
 			} else if blocked {
 				api.RespondWithError(w, http.StatusConflict, reason)
@@ -2364,7 +2364,7 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&lockEntityID, &lockPeriodStart, &lockPeriodEnd); err == nil {
 			if blocked, reason, lockErr := closingCycleBlocksAccrual(ctx, pgxPool, lockEntityID, lockPeriodStart, lockPeriodEnd); lockErr != nil {
 				api.LogError("[FDAccrual] ProposeOverride closing-lock check: %v", lockErr)
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to check closing period lock")
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToCheckClosingPeriodLock)
 				return
 			} else if blocked {
 				api.RespondWithError(w, http.StatusConflict, reason)
