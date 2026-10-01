@@ -46,6 +46,22 @@ const listWithAuditQuery = `
 			  AND s.is_deleted = false
 			  AND s.selection_status = 'APPROVED'
 		), 0) AS fd_count,
+        COALESCE((
+            SELECT json_agg(json_build_object(
+                'fd_id', fm.fd_id, 'bank_id', COALESCE(fm.bank_id,''),
+                'bank_name', COALESCE(fm.bank_name,''), 'principal', COALESCE(fm.principal_amount,0),
+                'currency', COALESCE(NULLIF(to_jsonb(c)->>'currency',''), NULLIF(to_jsonb(c)->>'currency_code',''),
+                    NULLIF(to_jsonb(b)->>'currency',''), NULLIF(to_jsonb(b)->>'currency_code',''), NULLIF(m.currency_code,''), '')
+            ))
+            FROM investment.fd_master fm
+            LEFT JOIN investment.fd_confirmation c ON c.confirmation_id = fm.confirmation_id
+            LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+            WHERE EXISTS (
+                SELECT 1 FROM investment.fd_closing_cycle_fd_scope s
+                WHERE s.cycle_id = m.cycle_id AND s.fd_id = fm.fd_id
+                  AND s.is_deleted = false AND s.selection_status = 'APPROVED'
+            )
+        ), '[]'::json) AS scope_fds,
 		COALESCE(agg.readiness_score,0) AS readiness_score,
 		COALESCE(agg.blocker_count,0) AS blocker_count,
 		COALESCE(agg.total_count,0)::int AS checklist_total,
