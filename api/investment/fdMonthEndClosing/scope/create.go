@@ -70,6 +70,7 @@ var checklistSteps = []checklistStep{
 	{StepCode: "TDS_VALIDATED", StepName: "TDS Validated", OwnerRole: "FINANCE", Sequence: 5, IsCritical: true, DependsOnStep: strPtr("RECEIPTS_CAPTURED")},
 	{StepCode: "VARIANCES_CLOSED", StepName: "Variances & Exceptions Closed", OwnerRole: "FINANCE", Sequence: 6, IsCritical: true, DependsOnStep: strPtr("TDS_VALIDATED")},
 	{StepCode: "ACCOUNTING_CONSOLIDATED", StepName: "Accounting Consolidated", OwnerRole: "FINANCE", Sequence: 7, IsCritical: true, DependsOnStep: strPtr("VARIANCES_CLOSED")},
+	{StepCode: "ACCOUNTING_POSTED", StepName: "Accounting Posted", OwnerRole: "FINANCE", Sequence: 8, IsCritical: true, DependsOnStep: strPtr("ACCOUNTING_CONSOLIDATED")},
 }
 
 // CreateScope handles both POST /investment/fd-closing/scope/create (single

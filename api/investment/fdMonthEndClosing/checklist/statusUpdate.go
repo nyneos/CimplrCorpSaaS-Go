@@ -207,6 +207,35 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		if req.Status == "COMPLETED" && stepCode == "ACCOUNTING_POSTED" && fdID != "" {
+			var unapprovedEntries int
+			if err = tx.QueryRow(ctx, `
+				SELECT COUNT(*)
+				FROM investment.accounting_journal_entry je
+				JOIN investment.fd_closing_cycle c ON c.cycle_id = $2
+				WHERE je.fd_id = $1
+				  AND je.is_deleted = false
+				  AND je.entry_date BETWEEN c.period_start AND c.period_end
+				  AND COALESCE((
+					SELECT a.processing_status
+					FROM investment.auditaction_fd_accounting_journal a
+					WHERE a.entry_id = je.entry_id
+					  AND UPPER(COALESCE(a.actiontype,'')) NOT IN ('UPLOAD_FILE','DOWNLOAD')
+					ORDER BY a.requested_at DESC
+					LIMIT 1), '') NOT IN ('APPROVED','COMPLETED')`,
+				fdID, cycleID,
+			).Scan(&unapprovedEntries); err != nil {
+				api.LogErrorForResponse(w, "[FDClosingChecklist] UpdateChecklistItem journal approval check: %v", err)
+				fdclosingcommon.RespondError(w, http.StatusInternalServerError, "Failed to check journal entry approvals")
+				return
+			}
+			if unapprovedEntries > 0 {
+				fdclosingcommon.RespondError(w, http.StatusBadRequest,
+					"Cannot complete "+stepCode+" — FD "+fdID+" has "+strconv.Itoa(unapprovedEntries)+" journal entr(ies) in the cycle period not yet approved; approve them in the FD Accounting Workbench first")
+				return
+			}
+		}
+
 		// Supersede any earlier pending EDIT/DELETE for this item.
 		if _, err = tx.Exec(ctx, `
 			UPDATE investment.fd_closing_checklist_item_audit
@@ -269,7 +298,7 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[FDClosingChecklist] CancelPendingInstances(EDIT) failed for item %s: %v", itemID, err)
 				return
 			}
-			instID, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+			_, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 				ModuleCode:          moduleCode,
 				EntityCode:          entity,
 				TransactionType:     TxEditChecklist,
@@ -285,24 +314,6 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if err != nil {
 				api.LogError("[FDClosingChecklist] CreateInstance(EDIT) failed for item %s: %v", itemID, err)
-				return
-			}
-			if instID != "" {
-				return
-			}
-			// No matrix — apply staged edit directly.
-			tx2, err := pool.Begin(bgCtx)
-			if err != nil {
-				api.LogError("[FDClosingChecklist] no-matrix EDIT begin tx failed for item %s: %v", itemID, err)
-				return
-			}
-			defer tx2.Rollback(bgCtx) //nolint:errcheck
-			if err := ApplyEditToMaster(bgCtx, tx2, itemID, api.SystemIfBlank(actorEmail), "Auto-applied (no approval matrix)", "PENDING_EDIT_APPROVAL", true); err != nil {
-				api.LogError("[FDClosingChecklist] no-matrix EDIT apply failed for item %s: %v", itemID, err)
-				return
-			}
-			if err := tx2.Commit(bgCtx); err != nil {
-				api.LogError("[FDClosingChecklist] no-matrix EDIT commit failed for item %s: %v", itemID, err)
 			}
 		})
 	}
