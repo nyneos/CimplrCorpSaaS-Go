@@ -139,7 +139,7 @@ func stageChecklistDelete(ctx context.Context, pool *pgxpool.Pool, itemID string
 			api.LogError("[FDClosingChecklist] CancelPendingInstances(DELETE) failed for item %s: %v", itemID, err)
 			return
 		}
-		instID, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
+		_, err := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 			ModuleCode:          moduleCode,
 			EntityCode:          entityID,
 			TransactionType:     TxDeleteChecklist,
@@ -155,21 +155,7 @@ func stageChecklistDelete(ctx context.Context, pool *pgxpool.Pool, itemID string
 		})
 		if err != nil {
 			api.LogError("[FDClosingChecklist] CreateInstance(DELETE) failed for item %s: %v", itemID, err)
-			return
 		}
-		if instID != "" {
-			return
-		}
-		tx2, err := pool.Begin(bgCtx)
-		if err != nil {
-			return
-		}
-		defer tx2.Rollback(bgCtx) //nolint:errcheck
-		if err := ApplyDeleteToMaster(bgCtx, tx2, itemID, api.SystemIfBlank(actorEmail), "Auto-applied (no approval matrix)", "PENDING_DELETE_APPROVAL", true); err != nil {
-			api.LogError("[FDClosingChecklist] no-matrix DELETE apply failed for item %s: %v", itemID, err)
-			return
-		}
-		_ = tx2.Commit(bgCtx)
 	})
 	return nil
 }
