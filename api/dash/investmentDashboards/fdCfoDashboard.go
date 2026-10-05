@@ -1112,9 +1112,9 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// Three real sources, one unified item shape (same fields the
 		// variance_impact drill below already uses, so the frontend's existing
 		// mapVarianceLogItems works unchanged on this list too):
-		//   a) investment.fd_receipt_exception, result_type='TDS'        (open = OPEN/IN_REVIEW)
-		//   b) investment.fd_receipt_exception, result_type='INTEREST'   (open = OPEN/IN_REVIEW)
-		//   c) public.variance_log, module_code='FD_CONFIRMATION'        (open = status='OPEN')
+		//   a) investment.fd_receipt_exception, result_type='TDS'        (case_type='EXCEPTION', any status)
+		//   b) investment.fd_receipt_exception, result_type='INTEREST'   (case_type='EXCEPTION', any status)
+		//   c) public.variance_log, module_code='FD_CONFIRMATION'        (status='EXCEPTION' = variance accepted/VARIANCE_ACCEPTED)
 		// No booking/activation/accrual-engine data — those stay off this tile.
 		run("exceptions", func(ctx context.Context) (interface{}, error) {
 			type bkRow struct {
@@ -1158,8 +1158,8 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_receipt_exception e
 				JOIN investment.fd_master m ON m.fd_id = e.fd_id AND COALESCE(m.is_deleted,false) = false
 				WHERE COALESCE(e.is_deleted,false) = false
-				  AND e.exception_status IN ('OPEN','IN_REVIEW')
 				  AND e.result_type IN ('TDS','INTEREST')
+				  AND e.case_type = 'EXCEPTION'
 				  AND (m.entity_id = ANY(string_to_array($1, ',')))
 				ORDER BY e.raised_at DESC`, entityFilter)
 			if err != nil {
@@ -1212,7 +1212,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = vl.record_id
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND COALESCE(m.is_deleted,false) = false
 				WHERE vl.module_code = 'FD_CONFIRMATION'
-				  AND vl.status = 'OPEN'
+				  AND vl.status = 'EXCEPTION'
 				  AND (vl.entity_id = ANY(string_to_array($1, ',')))
 				ORDER BY ABS(vl.variance_delta) DESC`, entityFilter)
 			if cErr == nil {
@@ -1252,18 +1252,18 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  SELECT 'TDS' AS mod, ABS(e.variance_amount) AS val
 				  FROM investment.fd_receipt_exception e
 				  JOIN investment.fd_master m ON m.fd_id = e.fd_id AND COALESCE(m.is_deleted,false) = false
-				  WHERE COALESCE(e.is_deleted,false) = false AND e.exception_status IN ('OPEN','IN_REVIEW')
-				    AND e.result_type = 'TDS' AND (m.entity_id = ANY(string_to_array($1, ',')))
+				  WHERE COALESCE(e.is_deleted,false) = false
+				    AND e.result_type = 'TDS' AND e.case_type = 'EXCEPTION' AND (m.entity_id = ANY(string_to_array($1, ',')))
 				  UNION ALL
 				  SELECT 'INTEREST', ABS(e.variance_amount)
 				  FROM investment.fd_receipt_exception e
 				  JOIN investment.fd_master m ON m.fd_id = e.fd_id AND COALESCE(m.is_deleted,false) = false
-				  WHERE COALESCE(e.is_deleted,false) = false AND e.exception_status IN ('OPEN','IN_REVIEW')
-				    AND e.result_type = 'INTEREST' AND (m.entity_id = ANY(string_to_array($1, ',')))
+				  WHERE COALESCE(e.is_deleted,false) = false
+				    AND e.result_type = 'INTEREST' AND e.case_type = 'EXCEPTION' AND (m.entity_id = ANY(string_to_array($1, ',')))
 				  UNION ALL
 				  SELECT 'FD_CONFIRMATION', COALESCE(ABS(vl.variance_delta),0)
 				  FROM public.variance_log vl
-				  WHERE vl.module_code = 'FD_CONFIRMATION' AND vl.status = 'OPEN'
+				  WHERE vl.module_code = 'FD_CONFIRMATION' AND vl.status = 'EXCEPTION'
 				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
 				) x GROUP BY mod`, entityFilter)
 			if combinedRows != nil {
@@ -1287,6 +1287,61 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			// the tile's total exception count and its own by_module line.
 			trueVal := moduleValues["TDS"] + moduleValues["INTEREST"]
 
+			// Open-only subset for the Operational dashboard's "Exceptions
+			// Awaiting Action" tile, which — unlike this tile's own
+			// count/value/items above — wants case_type='EXCEPTION' still
+			// OPEN (not yet actioned) for TDS/Interest, and the FD_CONFIRMATION
+			// variance still VARIANCE_PENDING (variance_log status='OPEN',
+			// not the accepted 'EXCEPTION' status this tile counts).
+			openItems := []item{}
+			openVal := 0.0
+			for _, it := range items {
+				if (it.ModuleCode == "FD_TDS" || it.ModuleCode == "FD_INTEREST") && it.Status == "OPEN" {
+					openItems = append(openItems, it)
+					openVal += it.Delta
+				}
+			}
+			openConfRows, ocErr := pool.Query(ctx, `
+				SELECT
+				  COALESCE(vl.variance_id,''), COALESCE(vl.record_id,''),
+				  COALESCE(m.fd_id,''), COALESCE(b.booking_id, m.booking_id,''),
+				  COALESCE(m.bank_name, b.bank_name,''), COALESCE(m.entity_name, b.entity_name,''),
+				  COALESCE(m.entity_id, b.entity_id, vl.entity_id,''),
+				  COALESCE(m.principal_amount, b.principal_amount,0),
+				  COALESCE(m.interest_rate, b.interest_rate,0),
+				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'), TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'),''),
+				  COALESCE(vl.field_name,''), COALESCE(vl.variance_type,''), COALESCE(vl.priority,''),
+				  COALESCE(ABS(vl.variance_delta),0), COALESCE(vl.expected_value,''), COALESCE(vl.actual_value,''),
+				  COALESCE(vl.system_comment,''), COALESCE(vl.status,'')
+				FROM public.variance_log vl
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = vl.record_id
+				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND COALESCE(m.is_deleted,false) = false
+				WHERE vl.module_code = 'FD_CONFIRMATION'
+				  AND vl.status = 'OPEN'
+				  AND (vl.entity_id = ANY(string_to_array($1, ',')))
+				ORDER BY ABS(vl.variance_delta) DESC`, entityFilter)
+			if ocErr == nil {
+				for openConfRows.Next() {
+					var varianceID, recordID, fdID, bookingID, bank, entity, entityID, maturityDate string
+					var fieldName, varianceType, priority, expectedValue, actualValue, systemComment, status string
+					var principal, rate, delta float64
+					if scanErr := openConfRows.Scan(&varianceID, &recordID, &fdID, &bookingID, &bank, &entity, &entityID,
+						&principal, &rate, &maturityDate, &fieldName, &varianceType, &priority, &delta,
+						&expectedValue, &actualValue, &systemComment, &status); scanErr != nil {
+						continue
+					}
+					openItems = append(openItems, item{
+						VarianceID: varianceID, RecordID: recordID, FDID: fdID, BookingID: bookingID,
+						Bank: bank, Entity: entity, EntityID: entityID,
+						Principal: fdRound(principal, 2), Rate: fdRound(rate, 4), MaturityDate: maturityDate,
+						FieldName: fieldName, VarianceType: varianceType, Priority: priority, Delta: fdRound(delta, 4),
+						ExpectedValue: expectedValue, ActualValue: actualValue, SystemComment: systemComment,
+						ModuleCode: "FD_CONFIRMATION", Status: status,
+					})
+				}
+				openConfRows.Close()
+			}
+
 			breakup := []bkRow{}
 			for t, c := range typeCounts {
 				breakup = append(breakup, bkRow{Type: t, Count: c})
@@ -1298,11 +1353,14 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			return map[string]interface{}{
-				"count":     trueCount,
-				"value":     fdRound(trueVal, 2),
-				"breakup":   breakup,
-				"by_module": byModule,
-				"items":     items,
+				"count":      trueCount,
+				"value":      fdRound(trueVal, 2),
+				"breakup":    breakup,
+				"by_module":  byModule,
+				"items":      items,
+				"open_count": len(openItems),
+				"open_value": fdRound(openVal, 2),
+				"open_items": openItems,
 			}, nil
 		})
 
