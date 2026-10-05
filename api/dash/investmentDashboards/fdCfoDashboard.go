@@ -1114,7 +1114,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// mapVarianceLogItems works unchanged on this list too):
 		//   a) investment.fd_receipt_exception, result_type='TDS'        (case_type='EXCEPTION', any status)
 		//   b) investment.fd_receipt_exception, result_type='INTEREST'   (case_type='EXCEPTION', any status)
-		//   c) public.variance_log, module_code='FD_CONFIRMATION'        (status='EXCEPTION' = variance accepted/VARIANCE_ACCEPTED)
+		//   c) public.variance_log, module_code='FD_CONFIRMATION'        (fd_confirmation.confirmation_status='VARIANCE_ACCEPTED')
 		// No booking/activation/accrual-engine data — those stay off this tile.
 		run("exceptions", func(ctx context.Context) (interface{}, error) {
 			type bkRow struct {
@@ -1195,26 +1195,38 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			recRows.Close()
 
-			// (c) FD Confirmation variance (public.variance_log, module_code='FD_CONFIRMATION')
+			// (c) FD Confirmation variance — one row per confirmation whose
+			// confirmation_status is VARIANCE_ACCEPTED (same set AllBankConfirmationCapture.tsx
+			// lists), not one row per public.variance_log entry: a single accepted
+			// confirmation can have several flagged fields (principal, rate, dates
+			// all in one variance_log batch), which would otherwise multiply-count
+			// one confirmation into several tile rows. The representative variance
+			// shown per confirmation is its single largest delta.
 			confRows, cErr := pool.Query(ctx, `
 				SELECT
-				  COALESCE(vl.variance_id,''), COALESCE(vl.record_id,''),
+				  c.confirmation_id, c.booking_id,
 				  COALESCE(m.fd_id,''), COALESCE(b.booking_id, m.booking_id,''),
 				  COALESCE(m.bank_name, b.bank_name,''), COALESCE(m.entity_name, b.entity_name,''),
-				  COALESCE(m.entity_id, b.entity_id, vl.entity_id,''),
+				  COALESCE(m.entity_id, b.entity_id,''),
 				  COALESCE(m.principal_amount, b.principal_amount,0),
 				  COALESCE(m.interest_rate, b.interest_rate,0),
 				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'), TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'),''),
 				  COALESCE(vl.field_name,''), COALESCE(vl.variance_type,''), COALESCE(vl.priority,''),
 				  COALESCE(ABS(vl.variance_delta),0), COALESCE(vl.expected_value,''), COALESCE(vl.actual_value,''),
 				  COALESCE(vl.system_comment,''), COALESCE(vl.status,'')
-				FROM public.variance_log vl
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = vl.record_id
+				FROM investment.fd_confirmation c
+				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND COALESCE(m.is_deleted,false) = false
-				WHERE vl.module_code = 'FD_CONFIRMATION'
-				  AND vl.status = 'EXCEPTION'
-				  AND (vl.entity_id = ANY(string_to_array($1, ',')))
-				ORDER BY ABS(vl.variance_delta) DESC`, entityFilter)
+				LEFT JOIN LATERAL (
+					SELECT * FROM public.variance_log v
+					WHERE v.module_code = 'FD_CONFIRMATION' AND v.record_id = c.booking_id
+					ORDER BY ABS(v.variance_delta) DESC
+					LIMIT 1
+				) vl ON true
+				WHERE COALESCE(c.is_deleted,false) = false
+				  AND c.confirmation_status = 'VARIANCE_ACCEPTED'
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
+				ORDER BY COALESCE(ABS(vl.variance_delta),0) DESC`, entityFilter)
 			if cErr == nil {
 				for confRows.Next() {
 					var varianceID, recordID, fdID, bookingID, bank, entity, entityID, maturityDate string
@@ -1261,10 +1273,17 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  WHERE COALESCE(e.is_deleted,false) = false
 				    AND e.result_type = 'INTEREST' AND e.case_type = 'EXCEPTION' AND (m.entity_id = ANY(string_to_array($1, ',')))
 				  UNION ALL
-				  SELECT 'FD_CONFIRMATION', COALESCE(ABS(vl.variance_delta),0)
-				  FROM public.variance_log vl
-				  WHERE vl.module_code = 'FD_CONFIRMATION' AND vl.status = 'EXCEPTION'
-				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
+				  SELECT 'FD_CONFIRMATION',
+				    COALESCE((
+				      SELECT ABS(v.variance_delta) FROM public.variance_log v
+				      WHERE v.module_code = 'FD_CONFIRMATION' AND v.record_id = c.booking_id
+				      ORDER BY ABS(v.variance_delta) DESC LIMIT 1
+				    ), 0)
+				  FROM investment.fd_confirmation c
+				  JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+				  WHERE COALESCE(c.is_deleted,false) = false
+				    AND c.confirmation_status = 'VARIANCE_ACCEPTED'
+				    AND (b.entity_id = ANY(string_to_array($1, ',')))
 				) x GROUP BY mod`, entityFilter)
 			if combinedRows != nil {
 				for combinedRows.Next() {
@@ -1301,25 +1320,33 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					openVal += it.Delta
 				}
 			}
+			// Same one-row-per-confirmation shape as (c) above, but for
+			// confirmation_status='VARIANCE_PENDING' — still awaiting accept.
 			openConfRows, ocErr := pool.Query(ctx, `
 				SELECT
-				  COALESCE(vl.variance_id,''), COALESCE(vl.record_id,''),
+				  c.confirmation_id, c.booking_id,
 				  COALESCE(m.fd_id,''), COALESCE(b.booking_id, m.booking_id,''),
 				  COALESCE(m.bank_name, b.bank_name,''), COALESCE(m.entity_name, b.entity_name,''),
-				  COALESCE(m.entity_id, b.entity_id, vl.entity_id,''),
+				  COALESCE(m.entity_id, b.entity_id,''),
 				  COALESCE(m.principal_amount, b.principal_amount,0),
 				  COALESCE(m.interest_rate, b.interest_rate,0),
 				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'), TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'),''),
 				  COALESCE(vl.field_name,''), COALESCE(vl.variance_type,''), COALESCE(vl.priority,''),
 				  COALESCE(ABS(vl.variance_delta),0), COALESCE(vl.expected_value,''), COALESCE(vl.actual_value,''),
 				  COALESCE(vl.system_comment,''), COALESCE(vl.status,'')
-				FROM public.variance_log vl
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = vl.record_id
+				FROM investment.fd_confirmation c
+				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND COALESCE(m.is_deleted,false) = false
-				WHERE vl.module_code = 'FD_CONFIRMATION'
-				  AND vl.status = 'OPEN'
-				  AND (vl.entity_id = ANY(string_to_array($1, ',')))
-				ORDER BY ABS(vl.variance_delta) DESC`, entityFilter)
+				LEFT JOIN LATERAL (
+					SELECT * FROM public.variance_log v
+					WHERE v.module_code = 'FD_CONFIRMATION' AND v.record_id = c.booking_id
+					ORDER BY ABS(v.variance_delta) DESC
+					LIMIT 1
+				) vl ON true
+				WHERE COALESCE(c.is_deleted,false) = false
+				  AND c.confirmation_status = 'VARIANCE_PENDING'
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
+				ORDER BY COALESCE(ABS(vl.variance_delta),0) DESC`, entityFilter)
 			if ocErr == nil {
 				for openConfRows.Next() {
 					var varianceID, recordID, fdID, bookingID, bank, entity, entityID, maturityDate string
