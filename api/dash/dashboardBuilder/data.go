@@ -50,7 +50,6 @@ type DataRequest struct {
 	AsOfDate         string                 `json:"as_of_date"`
 	AsOnDate         string                 `json:"as_on_date"`
 	ViewType         string                 `json:"view_type"`
-	
 
 	EnforceDateWindow bool `json:"-"`
 	// AllowUnscopedBankAccount: when true, cashBankStatements /
@@ -101,6 +100,12 @@ var dataSources = map[string]dataSourceFn{
 	},
 	"fdRateNegotiation": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDRateNegotiation(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdBankCommunication": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDBankCommunication(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdRateOffer": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDRateOffer(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 	"fdConfirmation": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDConfirmation(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
@@ -884,6 +889,15 @@ func queryFDBooking(ctx context.Context, pool *pgxpool.Pool, entityIDs []string,
 func queryFDRateNegotiation(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "m")
 
+	bf := ""
+	if bankIDs, _ := ctx.Value(ctxKeyReqBankIDs).([]string); len(bankIDs) > 0 {
+		bf = fmt.Sprintf("AND m.target_bank_ids && $%d::text[]", len(args)+1)
+		args = append(args, bankIDs)
+	}
+	df, dfArgs := dateRangeFilter(ctx, "m", "request_date", len(args)+1)
+	args = append(args, dfArgs...)
+
+	// Explicit business-field projection: never return audit or approval metadata.
 	q := fmt.Sprintf(`
 		SELECT
 			COALESCE(m.rate_request_id::text, '') AS rate_request_id,
@@ -908,31 +922,115 @@ func queryFDRateNegotiation(ctx context.Context, pool *pgxpool.Pool, entityIDs [
 			COALESCE(m.selected_bank_id, '') AS selected_bank_id,
 			COALESCE(m.selected_bank_name, '') AS selected_bank_name,
 			COALESCE(m.selection_remarks, '') AS selection_remarks,
-			COALESCE(m.approval_decision, '') AS approval_decision,
-			COALESCE(m.approval_remarks, '') AS approval_remarks,
-			m.approval_date,
-			COALESCE(m.approved_by, '') AS approved_by,
 			COALESCE(m.booking_id, '') AS booking_id,
-			COALESCE(m.created_by, '') AS created_by,
-			m.created_at,
-			CASE
-				WHEN UPPER(COALESCE(m.processing_status,'')) LIKE 'PENDING%%'
-				 AND UPPER(COALESCE(la.processing_status,'')) IN ('APPROVED','REJECTED')
-				THEN la.processing_status
-				ELSE COALESCE(NULLIF(m.processing_status,''), la.processing_status, '')
-			END AS processing_status
+			COALESCE(m.processing_status, '') AS processing_status
 		FROM investment.fd_rate_negotiation m
-		LEFT JOIN LATERAL (
-			SELECT a.processing_status
-			FROM investment.fd_audit_rate_negotiation a
-			WHERE a.rate_request_id = m.rate_request_id
-			ORDER BY a.requested_at DESC, a.audit_id DESC
-			LIMIT 1
-		) la ON true
-		WHERE COALESCE(m.is_deleted, false) = false %s
-		ORDER BY m.created_at DESC NULLS LAST
+		WHERE COALESCE(m.is_deleted, false) = false %s %s %s
+		ORDER BY m.request_date DESC NULLS LAST, m.rate_request_id DESC
 		LIMIT NULLIF($1, 0) OFFSET $2
-	`, ef)
+	`, ef, bf, df)
+
+	return runSourceQuery(ctx, pool, q, args)
+}
+
+// queryFDBankCommunication returns one row per live communication, without audit data.
+func queryFDBankCommunication(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "n")
+	bf, bfArgs := bankIDFilter(ctx, "c", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "n", "request_date", len(args)+1)
+	args = append(args, dfArgs...)
+
+	q := fmt.Sprintf(`
+		SELECT
+			c.communication_id::text AS communication_id,
+			c.rate_request_id::text AS rate_request_id,
+			COALESCE(n.rate_request_ref, '') AS rate_request_ref,
+			COALESCE(n.request_status, '') AS request_status,
+			n.request_date,
+			COALESCE(n.entity_id, '') AS entity_id,
+			COALESCE(n.entity_name, '') AS entity_name,
+			COALESCE(c.bank_id, '') AS bank_id,
+			COALESCE(c.bank_name, '') AS bank_name,
+			COALESCE(c.communication_mode, '') AS communication_mode,
+			CASE WHEN UPPER(COALESCE(c.communication_status, '')) = 'RESPONSE_RECEIVED'
+				THEN 'RECEIVED' ELSE 'SENT' END AS direction,
+			COALESCE(c.communication_status, '') AS communication_status,
+			COALESCE(c.email_template_id::text, '') AS email_template_id,
+			COALESCE(c.email_template_name, '') AS email_template_name,
+			COALESCE(c.email_template_version, '') AS email_template_version,
+			COALESCE(recipients.email_to, '') AS email_to,
+			COALESCE(recipients.email_cc, '') AS email_cc,
+			COALESCE(recipients.recipients, '') AS recipients,
+			COALESCE(c.email_content, '') AS email_content,
+			COALESCE(c.response_source, '') AS response_source,
+			c.response_date,
+			COALESCE(c.email_message_id::text, '') AS email_message_id
+		FROM investment.fd_rate_communication c
+		JOIN investment.fd_rate_negotiation n ON n.rate_request_id = c.rate_request_id
+		LEFT JOIN LATERAL (
+			SELECT
+				STRING_AGG(r.email_address, '; ' ORDER BY r.email_address)
+					FILTER (WHERE r.recipient_role = 'TO') AS email_to,
+				STRING_AGG(r.email_address, '; ' ORDER BY r.email_address)
+					FILTER (WHERE r.recipient_role = 'CC') AS email_cc,
+				STRING_AGG(r.recipient_role || ': ' || r.email_address, '; '
+					ORDER BY r.recipient_role, r.email_address) AS recipients
+			FROM investment.fd_rate_communication_recipient r
+			WHERE r.communication_id = c.communication_id AND r.is_deleted = false
+		) recipients ON true
+		WHERE COALESCE(c.is_deleted, false) = false
+			AND COALESCE(n.is_deleted, false) = false %s %s %s
+		ORDER BY n.request_date DESC NULLS LAST, c.communication_id DESC
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef, bf, df)
+
+	return runSourceQuery(ctx, pool, q, args)
+}
+
+// queryFDRateOffer returns business data for each live offer, without audit joins.
+func queryFDRateOffer(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "n")
+	bf, bfArgs := bankIDFilter(ctx, "o", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "n", "request_date", len(args)+1)
+	args = append(args, dfArgs...)
+
+	q := fmt.Sprintf(`
+		SELECT
+			o.offer_id::text AS offer_id,
+			COALESCE(o.offer_reference_id, '') AS offer_reference_id,
+			o.rate_request_id::text AS rate_request_id,
+			COALESCE(n.rate_request_ref, '') AS rate_request_ref,
+			COALESCE(n.request_status, '') AS request_status,
+			n.request_date,
+			COALESCE(n.entity_id, '') AS entity_id,
+			COALESCE(n.entity_name, '') AS entity_name,
+			COALESCE(o.bank_id, '') AS bank_id,
+			COALESCE(o.bank_name, '') AS bank_name,
+			o.offered_interest_rate,
+			o.effective_yield,
+			COALESCE(o.applicable_tenure, '') AS applicable_tenure,
+			n.expected_start_date,
+			o.valid_till_date,
+			COALESCE(o.conditions_remarks, '') AS conditions_remarks,
+			COALESCE(o.communication_source, '') AS communication_source,
+			COALESCE(o.communication_id::text, '') AS communication_id,
+			COALESCE(o.email_message_id::text, '') AS email_message_id,
+			COALESCE(o.offer_status, '') AS offer_status,
+			COALESCE(n.selected_offer_id = o.offer_id, false) AS is_selected,
+			CASE
+				WHEN n.selected_offer_id = o.offer_id THEN 'Selected'
+				WHEN n.selected_offer_id IS NULL THEN 'Captured'
+				ELSE 'Not selected'
+			END AS selection_label
+		FROM investment.fd_rate_offer o
+		JOIN investment.fd_rate_negotiation n ON n.rate_request_id = o.rate_request_id
+		WHERE COALESCE(o.is_deleted, false) = false
+			AND COALESCE(n.is_deleted, false) = false %s %s %s
+		ORDER BY n.request_date DESC NULLS LAST, o.offer_id DESC
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef, bf, df)
 
 	return runSourceQuery(ctx, pool, q, args)
 }
