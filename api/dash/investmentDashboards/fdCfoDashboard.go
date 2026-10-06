@@ -734,12 +734,8 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 }
 
 // buildPeriodClosingChecklist returns the real Month/Quarter-End Closing
-// checklist — investment.fd_closing_checklist_item, grouped by step_code
-// across every approved, active (IN_PROGRESS / AWAITING_APPROVAL / REOPENED) closing cycle in entity scope — the same set the Period Close Setup screen lists via cycle/list-approved-active. This is
-// the same step vocabulary the Closing Checklist Dashboard works from
-// (Accrual Run Completed/Approved, Interest Receipts Captured, Receipts
-// Reconciled, TDS Validated, Variances & Exceptions Closed, Accounting
-// Consolidated, ...), NOT a proxy built from FD lifecycle approval counts.
+// Checklist totals use all non-deleted closing cycles, matching cycle/list and checklist/list.
+// A step is blocked only when at least one item explicitly has status BLOCKED.
 func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityFilter string) []govChecklistItem {
 	sqlStr := `
 		SELECT
@@ -754,13 +750,6 @@ func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entity
 		JOIN investment.fd_closing_cycle c ON c.cycle_id = i.cycle_id
 		WHERE COALESCE(i.is_deleted,false) = false
 		  AND COALESCE(c.is_deleted,false) = false
-		  AND c.status IN ('IN_PROGRESS','AWAITING_APPROVAL','REOPENED')
-		  AND EXISTS (
-		    SELECT 1 FROM investment.fd_closing_cycle_audit ca
-		    WHERE ca.cycle_id = c.cycle_id
-		      AND ca.action_type = 'CREATE'
-		      AND ca.processing_status = 'APPROVED'
-		  )
 		  AND c.entity_id = ANY(string_to_array($1, ','))
 		GROUP BY i.step_code
 		ORDER BY MIN(i.sequence) ASC`
@@ -782,7 +771,7 @@ func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entity
 			continue
 		}
 		pending := total - completedCnt
-		detail := formatInt64(completedCnt) + "/" + formatInt64(total) + " FDs completed"
+		detail := formatInt64(completedCnt) + "/" + formatInt64(total) + " FD-cycle items completed; " + formatInt64(pending) + " pending; " + formatInt64(blockedCnt) + " blocked"
 		out = append(out, govChecklistItem{
 			ID:           stepCode,
 			Label:        stepName,
@@ -1119,207 +1108,286 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 5. exceptions (Policy Exceptions Summary - TC-74) ─────────────────
-		// Aggregates two real exception sources so the CFO sees a true "policy
-		// exception" picture (count + value at risk):
-		//
-		//   a) Operational exceptions raised by the accrual engine
-		//      (investment.fd_accrual_exception, status NOT IN RESOLVED/CLOSED)
-		//
-		//   b) Policy variance exceptions raised by the variance engine
-		//      (public.variance_log, module_code LIKE 'FD_%' AND status='OPEN')
-		//      - these capture rate / amount / tenor / date breaches the user
-		//      hasn't yet resolved.
-		//
-		// "value" = principal at risk across distinct FDs that have at least
-		// one open exception (regardless of source) so a single FD with
-		// multiple exceptions is only counted once.
+		// ── 5. exceptions (TDS + Interest Receipt + FD Confirmation) ───────────
+		// Three real sources, one unified item shape (same fields the
+		// variance_impact drill below already uses, so the frontend's existing
+		// mapVarianceLogItems works unchanged on this list too):
+		//   a) investment.fd_receipt_exception, result_type='TDS'        (case_type='EXCEPTION', any status)
+		//   b) investment.fd_receipt_exception, result_type='INTEREST'   (case_type='EXCEPTION', any status)
+		//   c) public.variance_log, module_code='FD_CONFIRMATION'        (fd_confirmation.confirmation_status='VARIANCE_ACCEPTED')
+		// No booking/activation/accrual-engine data — those stay off this tile.
 		run("exceptions", func(ctx context.Context) (interface{}, error) {
-			// (a) accrual-engine breakdown
-			accSQL := `
-				SELECT
-				  ae.exception_type,
-				  COUNT(DISTINCT ae.exception_id) AS cnt
-				FROM investment.fd_accrual_exception ae
-				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE COALESCE(ae.is_deleted,false)=false
-				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
-				GROUP BY ae.exception_type
-				ORDER BY cnt DESC`
-			rows, err := pool.Query(ctx, accSQL, entityFilter)
-			if err != nil {
-				return nil, err
-			}
 			type bkRow struct {
 				Type  string `json:"type"`
 				Count int64  `json:"count"`
 			}
-			breakup := []bkRow{}
-			for rows.Next() {
-				var br bkRow
-				if err := rows.Scan(&br.Type, &br.Count); err != nil {
+			type item struct {
+				VarianceID    string  `json:"variance_id"`
+				RecordID      string  `json:"record_id"`
+				FDID          string  `json:"fd_id"`
+				BookingID     string  `json:"booking_id"`
+				Bank          string  `json:"bank"`
+				Entity        string  `json:"entity"`
+				EntityID      string  `json:"entity_id"`
+				Principal     float64 `json:"principal"`
+				Rate          float64 `json:"rate"`
+				MaturityDate  string  `json:"maturity_date"`
+				FieldName     string  `json:"field_name"`
+				VarianceType  string  `json:"variance_type"`
+				Priority      string  `json:"priority"`
+				Delta         float64 `json:"delta"`
+				ExpectedValue string  `json:"expected_value"`
+				ActualValue   string  `json:"actual_value"`
+				SystemComment string  `json:"system_comment"`
+				ModuleCode    string  `json:"module_code"`
+				Status        string  `json:"status"`
+			}
+
+			items := []item{}
+			typeCounts := map[string]int64{}
+
+			// (a) + (b) TDS / Interest Receipt reconciliation exceptions
+			recRows, err := pool.Query(ctx, `
+				SELECT
+				  e.exception_id, e.fd_id, COALESCE(m.booking_id,''), e.result_type, e.exception_type,
+				  e.severity, e.exception_status,
+				  COALESCE(e.expected_amount,0), COALESCE(e.received_amount,0), COALESCE(e.variance_amount,0),
+				  COALESCE(m.bank_name,''), COALESCE(m.entity_name,''), COALESCE(m.entity_id,''),
+				  COALESCE(m.principal_amount,0), COALESCE(m.interest_rate,0),
+				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'')
+				FROM investment.fd_receipt_exception e
+				JOIN investment.fd_master m ON m.fd_id = e.fd_id AND COALESCE(m.is_deleted,false) = false
+				WHERE COALESCE(e.is_deleted,false) = false
+				  AND e.result_type IN ('TDS','INTEREST')
+				  AND e.case_type = 'EXCEPTION'
+				  AND (m.entity_id = ANY(string_to_array($1, ',')))
+				ORDER BY e.raised_at DESC`, entityFilter)
+			if err != nil {
+				return nil, err
+			}
+			for recRows.Next() {
+				var exceptionID, fdID, bookingID, resultType, excType, severity, status, bank, entity, entityID, maturityDate string
+				var expected, received, variance, principal, rate float64
+				if scanErr := recRows.Scan(&exceptionID, &fdID, &bookingID, &resultType, &excType, &severity, &status,
+					&expected, &received, &variance, &bank, &entity, &entityID, &principal, &rate, &maturityDate); scanErr != nil {
 					continue
 				}
-				if br.Type == "" {
-					br.Type = "Accrual Exception"
+				variance = fdRound(variance, 2)
+				delta := math.Abs(variance)
+				modLabel := "TDS"
+				if resultType == "INTEREST" {
+					modLabel = "Interest Receipt"
 				}
-				breakup = append(breakup, br)
+				tKey := excType
+				if tKey == "" {
+					tKey = "UNMATCHED"
+				}
+				typeCounts[tKey]++
+				items = append(items, item{
+					VarianceID: exceptionID, RecordID: fdID, FDID: fdID, BookingID: bookingID,
+					Bank: bank, Entity: entity, EntityID: entityID,
+					Principal: fdRound(principal, 2), Rate: fdRound(rate, 4), MaturityDate: maturityDate,
+					FieldName: modLabel, VarianceType: excType, Priority: severity, Delta: delta,
+					ExpectedValue: fmt.Sprintf("%.2f", fdRound(expected, 2)),
+					ActualValue:   fmt.Sprintf("%.2f", fdRound(received, 2)),
+					ModuleCode:    "FD_" + resultType, Status: status,
+				})
 			}
-			rows.Close()
+			recRows.Close()
 
-			// (b) variance-engine breakdown (variance_type → count)
-			varSQL := `
+			// (c) FD Confirmation variance — one row per confirmation whose
+			// confirmation_status is VARIANCE_ACCEPTED (same set AllBankConfirmationCapture.tsx
+			// lists), not one row per public.variance_log entry: a single accepted
+			// confirmation can have several flagged fields (principal, rate, dates
+			// all in one variance_log batch), which would otherwise multiply-count
+			// one confirmation into several tile rows. The representative variance
+			// shown per confirmation is its single largest delta.
+			confRows, cErr := pool.Query(ctx, `
 				SELECT
-				  COALESCE(NULLIF(vl.variance_type,''),'OTHER') AS variance_type,
-				  COUNT(*) AS cnt
-				FROM public.variance_log vl
-				WHERE vl.module_code LIKE 'FD_%'
-				  AND vl.status='OPEN'
-				  AND (vl.entity_id = ANY(string_to_array($1, ',')))
-				GROUP BY 1
-				ORDER BY cnt DESC`
-			if vrows, verr := pool.Query(ctx, varSQL, entityFilter); verr == nil {
-				for vrows.Next() {
-					var t string
-					var c int64
-					if scanErr := vrows.Scan(&t, &c); scanErr != nil {
+				  c.confirmation_id, c.booking_id,
+				  COALESCE(m.fd_id,''), COALESCE(b.booking_id, m.booking_id,''),
+				  COALESCE(m.bank_name, b.bank_name,''), COALESCE(m.entity_name, b.entity_name,''),
+				  COALESCE(m.entity_id, b.entity_id,''),
+				  COALESCE(m.principal_amount, b.principal_amount,0),
+				  COALESCE(m.interest_rate, b.interest_rate,0),
+				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'), TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'),''),
+				  COALESCE(vl.field_name,''), COALESCE(vl.variance_type,''), COALESCE(vl.priority,''),
+				  COALESCE(ABS(vl.variance_delta),0), COALESCE(vl.expected_value,''), COALESCE(vl.actual_value,''),
+				  COALESCE(vl.system_comment,''), COALESCE(vl.status,'')
+				FROM investment.fd_confirmation c
+				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND COALESCE(m.is_deleted,false) = false
+				LEFT JOIN LATERAL (
+					SELECT * FROM public.variance_log v
+					WHERE v.module_code = 'FD_CONFIRMATION' AND v.record_id = c.booking_id
+					ORDER BY ABS(v.variance_delta) DESC
+					LIMIT 1
+				) vl ON true
+				WHERE COALESCE(c.is_deleted,false) = false
+				  AND c.confirmation_status = 'VARIANCE_ACCEPTED'
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
+				ORDER BY COALESCE(ABS(vl.variance_delta),0) DESC`, entityFilter)
+			if cErr == nil {
+				for confRows.Next() {
+					var varianceID, recordID, fdID, bookingID, bank, entity, entityID, maturityDate string
+					var fieldName, varianceType, priority, expectedValue, actualValue, systemComment, status string
+					var principal, rate, delta float64
+					if scanErr := confRows.Scan(&varianceID, &recordID, &fdID, &bookingID, &bank, &entity, &entityID,
+						&principal, &rate, &maturityDate, &fieldName, &varianceType, &priority, &delta,
+						&expectedValue, &actualValue, &systemComment, &status); scanErr != nil {
 						continue
 					}
-					breakup = append(breakup, bkRow{Type: "Variance: " + t, Count: c})
+					delta = fdRound(delta, 4)
+					tKey := varianceType
+					if tKey == "" {
+						tKey = "OTHER"
+					}
+					typeCounts["Confirmation: "+tKey]++
+					items = append(items, item{
+						VarianceID: varianceID, RecordID: recordID, FDID: fdID, BookingID: bookingID,
+						Bank: bank, Entity: entity, EntityID: entityID,
+						Principal: fdRound(principal, 2), Rate: fdRound(rate, 4), MaturityDate: maturityDate,
+						FieldName: fieldName, VarianceType: varianceType, Priority: priority, Delta: delta,
+						ExpectedValue: expectedValue, ActualValue: actualValue, SystemComment: systemComment,
+						ModuleCode: "FD_CONFIRMATION", Status: status,
+					})
 				}
-				vrows.Close()
+				confRows.Close()
 			}
 
-			// (c) total distinct FDs at risk + principal sum (de-duplicated).
-			// The variance_log.record_id can be a closure_request_id /
-			// booking_id depending on module_code; resolve back to fd_master
-			// through those tables before summing the principal-at-risk so
-			// the alert tile is not stuck at ₹0.
-			var distinctCount int64
-			var totalVal float64
-			_ = pool.QueryRow(ctx, `
-				WITH at_risk AS (
-				  -- accrual exceptions hold fd_id directly
-				  SELECT DISTINCT ae.fd_id AS fd_id
-				  FROM investment.fd_accrual_exception ae
-				  WHERE COALESCE(ae.is_deleted,false)=false
-				    AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				  UNION
-				  -- legacy variance on closure → fd_id via fd_closure_request
-				  SELECT DISTINCT cr.fd_id
-				  FROM public.variance_log vl
-				  JOIN investment.fd_closure_request cr
-				    ON cr.closure_request_id = vl.record_id
-				  WHERE vl.module_code='FD_CLOSURE' AND vl.status='OPEN'
-				  UNION
-				  -- cimplr variance on closure initiate → fd_id directly
-				  SELECT DISTINCT ci.fd_id
-				  FROM public.variance_log vl
-				  JOIN cimplr.fd_closure_initiate ci
-				    ON ci.closure_initiate_id = vl.record_id
-				  WHERE vl.module_code='FD_CLOSURE' AND vl.status='OPEN'
-				    AND COALESCE(ci.is_deleted,false)=false
-				  UNION
-				  -- cimplr variance on closure confirm → fd_id directly
-				  SELECT DISTINCT cc.fd_id
-				  FROM public.variance_log vl
-				  JOIN cimplr.fd_closure_confirm cc
-				    ON cc.closure_confirm_id = vl.record_id
-				  WHERE vl.module_code='FD_CLOSURE' AND vl.status='OPEN'
-				    AND COALESCE(cc.is_deleted,false)=false
-				  UNION
-				  -- variance on booking/confirmation → fd_id via fd_master.booking_id
-				  SELECT DISTINCT m2.fd_id
-				  FROM public.variance_log vl
-				  JOIN investment.fd_master m2 ON m2.booking_id = vl.record_id
-				  WHERE vl.module_code IN ('FD_BOOKING','FD_CONFIRMATION') AND vl.status='OPEN'
-				)
-				SELECT
-				  COUNT(DISTINCT m.fd_id),
-				  COALESCE(SUM(m.principal_amount),0)
-				FROM at_risk a
-				JOIN investment.fd_master m ON m.fd_id = a.fd_id
-				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE m.is_deleted=false
-				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))`,
-				entityFilter).Scan(&distinctCount, &totalVal)
-
-			// Sum of breakup counts is a reasonable proxy when the join above
-			// returns 0 (e.g. variance_log holds non-fd_id record_ids).
-			var sumCounts int64
-			for _, b := range breakup {
-				sumCounts += b.Count
-			}
-			finalCount := distinctCount
-			if finalCount == 0 {
-				finalCount = sumCounts
-			}
-
-			// (d) breakdown by FD module (Booking / Confirmation / Activation /
-			// Accrual) — same two exception sources as (a)+(b), grouped by
-			// module instead of by exception/variance type. Always returns all
-			// four modules (zero-filled) so the UI can render a stable list.
-			byModuleSQL := `
-				SELECT module, COUNT(*) AS cnt FROM (
-				  SELECT 'FD_BOOKING' AS module
-				  FROM public.variance_log vl
-				  WHERE vl.module_code='FD_BOOKING' AND vl.status='OPEN'
-				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
+			// True open totals for the same complete item lists above —
+			// one combined query so count/value on the tile are always exact.
+			var trueCount int64
+			var moduleCounts, moduleValues = map[string]int64{}, map[string]float64{}
+			combinedRows, _ := pool.Query(ctx, `
+				SELECT mod, COUNT(*), COALESCE(SUM(val),0) FROM (
+				  SELECT 'TDS' AS mod, ABS(e.variance_amount) AS val
+				  FROM investment.fd_receipt_exception e
+				  JOIN investment.fd_master m ON m.fd_id = e.fd_id AND COALESCE(m.is_deleted,false) = false
+				  WHERE COALESCE(e.is_deleted,false) = false
+				    AND e.result_type = 'TDS' AND e.case_type = 'EXCEPTION' AND (m.entity_id = ANY(string_to_array($1, ',')))
 				  UNION ALL
-				  SELECT 'FD_CONFIRMATION'
-				  FROM public.variance_log vl
-				  WHERE vl.module_code='FD_CONFIRMATION' AND vl.status='OPEN'
-				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
+				  SELECT 'INTEREST', ABS(e.variance_amount)
+				  FROM investment.fd_receipt_exception e
+				  JOIN investment.fd_master m ON m.fd_id = e.fd_id AND COALESCE(m.is_deleted,false) = false
+				  WHERE COALESCE(e.is_deleted,false) = false
+				    AND e.result_type = 'INTEREST' AND e.case_type = 'EXCEPTION' AND (m.entity_id = ANY(string_to_array($1, ',')))
 				  UNION ALL
-				  SELECT 'FD_ACTIVATION'
-				  FROM public.variance_log vl
-				  WHERE vl.module_code='FD_ACTIVATION' AND vl.status='OPEN'
-				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
-				  UNION ALL
-				  SELECT 'FD_ACCRUAL'
-				  FROM public.variance_log vl
-				  WHERE vl.module_code='FD_ACCRUAL' AND vl.status='OPEN'
-				    AND (vl.entity_id = ANY(string_to_array($1, ',')))
-				  UNION ALL
-				  SELECT 'FD_ACCRUAL'
-				  FROM investment.fd_accrual_exception ae
-				  LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
-				  LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				  WHERE COALESCE(ae.is_deleted,false)=false
-				    AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				    AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
-				) x
-				GROUP BY module`
-			moduleCounts := map[string]int64{
-				"FD_BOOKING":      0,
-				"FD_CONFIRMATION": 0,
-				"FD_ACTIVATION":   0,
-				"FD_ACCRUAL":      0,
-			}
-			if mrows, merr := pool.Query(ctx, byModuleSQL, entityFilter); merr == nil {
-				for mrows.Next() {
+				  SELECT 'FD_CONFIRMATION',
+				    COALESCE((
+				      SELECT ABS(v.variance_delta) FROM public.variance_log v
+				      WHERE v.module_code = 'FD_CONFIRMATION' AND v.record_id = c.booking_id
+				      ORDER BY ABS(v.variance_delta) DESC LIMIT 1
+				    ), 0)
+				  FROM investment.fd_confirmation c
+				  JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+				  WHERE COALESCE(c.is_deleted,false) = false
+				    AND c.confirmation_status = 'VARIANCE_ACCEPTED'
+				    AND (b.entity_id = ANY(string_to_array($1, ',')))
+				) x GROUP BY mod`, entityFilter)
+			if combinedRows != nil {
+				for combinedRows.Next() {
 					var mod string
 					var cnt int64
-					if scanErr := mrows.Scan(&mod, &cnt); scanErr == nil {
+					var val float64
+					if scanErr := combinedRows.Scan(&mod, &cnt, &val); scanErr == nil {
 						moduleCounts[mod] = cnt
+						moduleValues[mod] = val
+						trueCount += cnt
 					}
 				}
-				mrows.Close()
+				combinedRows.Close()
+			}
+			// FD_CONFIRMATION's variance_delta is a raw field-level delta (e.g.
+			// principal_amount off by a wrong data-entry value, or a rate typo)
+			// — a different unit than the receipt exceptions' money variance,
+			// and can be enormous (a mistyped principal). Money "at risk" stays
+			// TDS + Interest Receipt only; FD Confirmation still counts toward
+			// the tile's total exception count and its own by_module line.
+			trueVal := moduleValues["TDS"] + moduleValues["INTEREST"]
+
+			// Open-only subset for the Operational dashboard's "Exceptions
+			// Awaiting Action" tile, which — unlike this tile's own
+			// count/value/items above — wants case_type='EXCEPTION' still
+			// OPEN (not yet actioned) for TDS/Interest, and the FD_CONFIRMATION
+			// variance still VARIANCE_PENDING (variance_log status='OPEN',
+			// not the accepted 'EXCEPTION' status this tile counts).
+			openItems := []item{}
+			openVal := 0.0
+			for _, it := range items {
+				if (it.ModuleCode == "FD_TDS" || it.ModuleCode == "FD_INTEREST") && it.Status == "OPEN" {
+					openItems = append(openItems, it)
+					openVal += it.Delta
+				}
+			}
+			// Same one-row-per-confirmation shape as (c) above, but for
+			// confirmation_status='VARIANCE_PENDING' — still awaiting accept.
+			openConfRows, ocErr := pool.Query(ctx, `
+				SELECT
+				  c.confirmation_id, c.booking_id,
+				  COALESCE(m.fd_id,''), COALESCE(b.booking_id, m.booking_id,''),
+				  COALESCE(m.bank_name, b.bank_name,''), COALESCE(m.entity_name, b.entity_name,''),
+				  COALESCE(m.entity_id, b.entity_id,''),
+				  COALESCE(m.principal_amount, b.principal_amount,0),
+				  COALESCE(m.interest_rate, b.interest_rate,0),
+				  COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'), TO_CHAR(b.expected_maturity_date,'YYYY-MM-DD'),''),
+				  COALESCE(vl.field_name,''), COALESCE(vl.variance_type,''), COALESCE(vl.priority,''),
+				  COALESCE(ABS(vl.variance_delta),0), COALESCE(vl.expected_value,''), COALESCE(vl.actual_value,''),
+				  COALESCE(vl.system_comment,''), COALESCE(vl.status,'')
+				FROM investment.fd_confirmation c
+				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND COALESCE(m.is_deleted,false) = false
+				LEFT JOIN LATERAL (
+					SELECT * FROM public.variance_log v
+					WHERE v.module_code = 'FD_CONFIRMATION' AND v.record_id = c.booking_id
+					ORDER BY ABS(v.variance_delta) DESC
+					LIMIT 1
+				) vl ON true
+				WHERE COALESCE(c.is_deleted,false) = false
+				  AND c.confirmation_status = 'VARIANCE_PENDING'
+				  AND (b.entity_id = ANY(string_to_array($1, ',')))
+				ORDER BY COALESCE(ABS(vl.variance_delta),0) DESC`, entityFilter)
+			if ocErr == nil {
+				for openConfRows.Next() {
+					var varianceID, recordID, fdID, bookingID, bank, entity, entityID, maturityDate string
+					var fieldName, varianceType, priority, expectedValue, actualValue, systemComment, status string
+					var principal, rate, delta float64
+					if scanErr := openConfRows.Scan(&varianceID, &recordID, &fdID, &bookingID, &bank, &entity, &entityID,
+						&principal, &rate, &maturityDate, &fieldName, &varianceType, &priority, &delta,
+						&expectedValue, &actualValue, &systemComment, &status); scanErr != nil {
+						continue
+					}
+					openItems = append(openItems, item{
+						VarianceID: varianceID, RecordID: recordID, FDID: fdID, BookingID: bookingID,
+						Bank: bank, Entity: entity, EntityID: entityID,
+						Principal: fdRound(principal, 2), Rate: fdRound(rate, 4), MaturityDate: maturityDate,
+						FieldName: fieldName, VarianceType: varianceType, Priority: priority, Delta: fdRound(delta, 4),
+						ExpectedValue: expectedValue, ActualValue: actualValue, SystemComment: systemComment,
+						ModuleCode: "FD_CONFIRMATION", Status: status,
+					})
+				}
+				openConfRows.Close()
+			}
+
+			breakup := []bkRow{}
+			for t, c := range typeCounts {
+				breakup = append(breakup, bkRow{Type: t, Count: c})
 			}
 			byModule := []bkRow{
-				{Type: "Booking", Count: moduleCounts["FD_BOOKING"]},
-				{Type: "Confirmation", Count: moduleCounts["FD_CONFIRMATION"]},
-				{Type: "Activation", Count: moduleCounts["FD_ACTIVATION"]},
-				{Type: "Accrual", Count: moduleCounts["FD_ACCRUAL"]},
+				{Type: "TDS", Count: moduleCounts["TDS"]},
+				{Type: "Interest Receipt", Count: moduleCounts["INTEREST"]},
+				{Type: "FD Confirmation", Count: moduleCounts["FD_CONFIRMATION"]},
 			}
 
 			return map[string]interface{}{
-				"count":     finalCount,
-				"value":     fdRound(totalVal, 2),
-				"breakup":   breakup,
-				"by_module": byModule,
+				"count":      trueCount,
+				"value":      fdRound(trueVal, 2),
+				"breakup":    breakup,
+				"by_module":  byModule,
+				"items":      items,
+				"open_count": len(openItems),
+				"open_value": fdRound(openVal, 2),
+				"open_items": openItems,
 			}, nil
 		})
 

@@ -19,6 +19,7 @@ package investmentdashboards
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -113,7 +115,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_booking_request b
 				LEFT JOIN investment.fd_master m ON m.booking_id = b.booking_id AND m.is_deleted=false
 				WHERE b.is_deleted=false
-				  AND b.booking_status = 'SENT_TO_BANK'
+				  AND b.booking_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL')
 				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				  AND ($4::text='' OR (m.bank_id=$4 OR m.bank_name=$4 OR b.bank_id=$4 OR b.bank_name=$4))
 				  AND ($5::text='' OR COALESCE(m.interest_type_code, b.interest_type_code,'')=$5)
@@ -415,7 +417,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE COALESCE(ae.is_deleted,false)=false
-				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
+				  AND UPPER(REPLACE(TRIM(COALESCE(ae.exception_status,'')), ' ', '_')) IN ('OPEN','IN_REVIEW','ESCALATED','PENDING','PENDING_APPROVAL')
 				  AND ae.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
 				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
@@ -510,7 +512,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				   LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
 				   LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				   WHERE COALESCE(ae.is_deleted,false)=false
-				     AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
+				     AND UPPER(REPLACE(TRIM(COALESCE(ae.exception_status,'')), ' ', '_')) IN ('OPEN','IN_REVIEW','ESCALATED','PENDING','PENDING_APPROVAL')
 				     AND ae.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
 				     AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				     AND ($2::text='' OR (m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
@@ -552,7 +554,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(r.entity_id,'')                                         AS entity_id,
 				  COALESCE(r.entity_name,'')                                       AS entity_name,
 				  COALESCE(r.financial_period,'')                                  AS financial_period,
-				  COALESCE(TO_CHAR(r.run_at,'YYYY-MM-DD"T"HH24:MI:SS'),'')         AS run_time,
+				  COALESCE(TO_CHAR(COALESCE(r.run_date, r.created_at),'YYYY-MM-DD"T"HH24:MI:SS'),'')         AS run_time,
 				  COALESCE(TO_CHAR(r.accrual_period_start,'YYYY-MM-DD'),'')        AS period_start,
 				  COALESCE(TO_CHAR(r.accrual_period_end,'YYYY-MM-DD'),'')          AS period_end,
 				  COALESCE(r.fds_in_scope,0)                                       AS fds_in_scope,
@@ -566,7 +568,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE COALESCE(r.is_deleted,false)=false
 				  AND r.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
 				  AND (r.entity_id = ANY(string_to_array($1, ',')))
-				ORDER BY r.run_at DESC NULLS LAST, r.created_at DESC
+				ORDER BY COALESCE(r.run_date, r.created_at) DESC, r.created_at DESC
 				LIMIT 1`, entityFilter).Scan(
 				&runID, &runType, &runMode, &runStatus, &entityID, &entityName, &financialPeriod,
 				&runTime, &periodStart, &periodEnd,
@@ -574,7 +576,11 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				&totalInterestAccrued, &totalTDSDeducted, &ledgerCount,
 			)
 			if err != nil {
-				// No table or no rows — return placeholder shape the FE expects.
+				if !errors.Is(err, pgx.ErrNoRows) {
+					api.LogError("[OperationalDash] accrual_run query error: %v", err)
+					return map[string]interface{}{"status": "Unavailable"}, nil
+				}
+				// No matching run in the selected entity/date scope.
 				return map[string]interface{}{
 					"run_id":                 "",
 					"run_type":               "",
@@ -647,6 +653,9 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    WHEN 'FAILED' THEN 'Failed'
 				    WHEN 'REVERSED' THEN 'Reversed'
 				    WHEN 'APPROVED' THEN 'Ready to Post'
+				    WHEN 'PENDING_APPROVAL' THEN 'Pending Approval'
+				    WHEN 'REJECTED' THEN 'Rejected'
+				    WHEN 'DRAFT' THEN 'Draft'
 				    ELSE 'Pending'
 				  END AS status,
 				  COALESCE(
@@ -663,8 +672,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  )
 				  AND (COALESCE(je.entity_id,'') = ANY(string_to_array($1, ',')))
 				  AND je.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
-				ORDER BY je.created_at DESC
-				LIMIT 20`, entityFilter)
+				ORDER BY je.created_at DESC, je.entry_id DESC`, entityFilter)
 			if err != nil {
 				api.LogError("[OperationalDash] posting_queue query error: %v", err)
 				return []interface{}{}, nil
@@ -772,7 +780,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE COALESCE(ae.is_deleted,false)=false
-				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
+				  AND UPPER(REPLACE(TRIM(COALESCE(ae.exception_status,'')), ' ', '_')) IN ('OPEN','IN_REVIEW','ESCALATED','PENDING','PENDING_APPROVAL')
 				  AND ae.created_at <= ('` + endDateStr + `'::date + INTERVAL '1 day')
 				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
@@ -1063,7 +1071,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.fd_id = ae.fd_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE COALESCE(ae.is_deleted,false)=false
-				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
+				  AND UPPER(REPLACE(TRIM(COALESCE(ae.exception_status,'')), ' ', '_')) IN ('OPEN','IN_REVIEW','ESCALATED','PENDING','PENDING_APPROVAL')
 				  AND ae.created_at <= ('`+endDateStr+`'::date + INTERVAL '1 day')
 				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR (m.bank_id=$2 OR m.bank_name=$2 OR b.bank_id=$2 OR b.bank_name=$2))
