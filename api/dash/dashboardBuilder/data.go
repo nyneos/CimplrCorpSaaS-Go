@@ -170,6 +170,21 @@ var dataSources = map[string]dataSourceFn{
 	"fdClosingEvidencePack": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDClosingEvidencePack(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
+	"fdClosingCycle": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingCycle(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdClosingChecklist": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdClosingScope": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingScope(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdClosingLockRequest": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingLockRequest(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdClosingReopenRequest": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingReopenRequest(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
 	// ── Portfolio & Proposal ───────────────────────────────────────────────────
 	"investmentOnboardBatch": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryInvestmentOnboardBatch(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
