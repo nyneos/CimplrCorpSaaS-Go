@@ -185,6 +185,18 @@ var dataSources = map[string]dataSourceFn{
 	"fdClosingReopenRequest": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDClosingReopenRequest(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
+	"fdJournalEntry": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDJournalEntry(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdJournalLine": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDJournalLine(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdGlMapping": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDGlMapping(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdGlMappingLine": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDGlMappingLine(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
 	// ── Portfolio & Proposal ───────────────────────────────────────────────────
 	"investmentOnboardBatch": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryInvestmentOnboardBatch(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
