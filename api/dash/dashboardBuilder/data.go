@@ -107,6 +107,9 @@ var dataSources = map[string]dataSourceFn{
 	"fdRateOffer": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDRateOffer(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
+	"fdRateComparison": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDRateComparison(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
 	"fdConfirmation": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDConfirmation(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
@@ -169,6 +172,33 @@ var dataSources = map[string]dataSourceFn{
 	},
 	"fdClosingEvidencePack": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDClosingEvidencePack(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdClosingCycle": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingCycle(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdClosingChecklist": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdClosingScope": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingScope(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdClosingLockRequest": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingLockRequest(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdClosingReopenRequest": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingReopenRequest(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdJournalEntry": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDJournalEntry(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdJournalLine": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDJournalLine(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdGlMapping": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDGlMapping(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	},
+	"fdGlMappingLine": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDGlMappingLine(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 	// ── Portfolio & Proposal ───────────────────────────────────────────────────
 	"investmentOnboardBatch": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
@@ -1029,6 +1059,58 @@ func queryFDRateOffer(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 		WHERE COALESCE(o.is_deleted, false) = false
 			AND COALESCE(n.is_deleted, false) = false %s %s %s
 		ORDER BY n.request_date DESC NULLS LAST, o.offer_id DESC
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, ef, bf, df)
+
+	return runSourceQuery(ctx, pool, q, args)
+}
+
+func queryFDRateComparison(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "n")
+	bf, bfArgs := bankIDFilter(ctx, "c", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "n", "request_date", len(args)+1)
+	args = append(args, dfArgs...)
+
+	q := fmt.Sprintf(`
+		SELECT
+			c.comparison_id::text AS comparison_id,
+			c.selection_rate_request_id::text AS rate_request_id,
+			COALESCE(n.rate_request_ref, '') AS rate_request_ref,
+			COALESCE(n.request_status, '') AS request_status,
+			n.request_date,
+			COALESCE(n.entity_id, '') AS entity_id,
+			COALESCE(n.entity_name, '') AS entity_name,
+			COALESCE(c.selected_offer_id::text, '') AS selected_offer_id,
+			COALESCE(c.compared_offer_id::text, '') AS compared_offer_id,
+			COALESCE(o.offer_reference_id, '') AS offer_reference_id,
+			COALESCE(c.compared_rate_request_id::text, '') AS compared_rate_request_id,
+			COALESCE(rn.rate_request_ref, '') AS compared_rate_request_ref,
+			COALESCE(c.bank_id, '') AS bank_id,
+			COALESCE(c.bank_name, '') AS bank_name,
+			COALESCE(c.is_selected, false) AS is_selected,
+			CASE WHEN COALESCE(c.is_selected, false) THEN 'Selected' ELSE 'Not selected' END AS selection_label,
+			COALESCE(c.created_by, '') AS created_by,
+			c.created_at,
+			COALESCE(c.offered_interest_rate, 0) AS offered_interest_rate,
+			COALESCE(c.effective_yield, 0) AS effective_yield,
+			COALESCE(sel.offered_interest_rate - c.offered_interest_rate, 0) AS rate_gap_vs_selected,
+			COALESCE(sel.effective_yield - c.effective_yield, 0) AS yield_gap_vs_selected,
+			1 AS comparison_count
+		FROM investment.fd_rate_selection_comparison c
+		JOIN investment.fd_rate_negotiation n ON n.rate_request_id = c.selection_rate_request_id
+		LEFT JOIN investment.fd_rate_negotiation rn ON rn.rate_request_id = c.compared_rate_request_id
+		LEFT JOIN investment.fd_rate_offer o ON o.offer_id = c.compared_offer_id
+		LEFT JOIN LATERAL (
+			SELECT s.offered_interest_rate, s.effective_yield
+			FROM investment.fd_rate_selection_comparison s
+			WHERE s.selection_rate_request_id = c.selection_rate_request_id
+			  AND s.is_selected = true
+			ORDER BY s.created_at DESC
+			LIMIT 1
+		) sel ON true
+		WHERE COALESCE(n.is_deleted, false) = false %s %s %s
+		ORDER BY n.request_date DESC NULLS LAST, c.selection_rate_request_id, c.is_selected DESC, c.offered_interest_rate DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
 
