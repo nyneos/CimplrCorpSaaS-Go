@@ -169,12 +169,16 @@ func queryFDClosingCycle(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 	return runSourceQuery(ctx, pool, q, args)
 }
 
-func queryFDClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+func queryFDClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, stepCodes []string) ([]map[string]any, error) {
 	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "c")
 	bf, bfArgs := bankIDFilter(ctx, "fm", len(args)+1)
 	args = append(args, bfArgs...)
 	df, dfArgs := dateRangeFilter(ctx, "c", "period_end", len(args)+1)
 	args = append(args, dfArgs...)
+	if len(stepCodes) > 0 {
+		df += fmt.Sprintf(" AND i.step_code = ANY($%d)", len(args)+1)
+		args = append(args, stepCodes)
+	}
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -219,119 +223,6 @@ func queryFDClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 		  %s
 		  %s
 		ORDER BY c.period_end DESC NULLS LAST, i.cycle_id, i.fd_id, i.sequence
-		LIMIT NULLIF($1, 0) OFFSET $2
-	`, ef, bf, df)
-
-	return runSourceQuery(ctx, pool, q, args)
-}
-
-func queryFDClosingScope(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
-	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "c")
-	bf, bfArgs := bankIDFilter(ctx, "fm", len(args)+1)
-	args = append(args, bfArgs...)
-	df, dfArgs := dateRangeFilter(ctx, "c", "period_end", len(args)+1)
-	args = append(args, dfArgs...)
-
-	q := fmt.Sprintf(`
-		SELECT
-			COALESCE(s.scope_id::text, '') AS scope_id,
-			COALESCE(s.cycle_id::text, '') AS cycle_id,
-			COALESCE(s.fd_id::text, '') AS fd_id,
-			COALESCE(run.run_id, '') AS accrual_run_id,
-			COALESCE(fm.bank_fd_ref_no, '') AS bank_fd_ref_no,
-			COALESCE(c.entity_id, '') AS entity_id,
-			COALESCE(c.entity_name, '') AS entity_name,
-			COALESCE(fm.bank_name, '') AS bank_name,
-			COALESCE(NULLIF(to_jsonb(cf)->>'currency', ''), NULLIF(to_jsonb(cf)->>'currency_code', ''),
-				NULLIF(to_jsonb(b)->>'currency', ''), NULLIF(to_jsonb(b)->>'currency_code', ''), NULLIF(c.currency_code, ''), '') AS currency_code,
-			COALESCE(fm.fd_status, '') AS fd_status,
-			COALESCE(s.selection_status, '') AS selection_status,
-			COALESCE(s.added_by, '') AS added_by,
-			COALESCE(s.approved_by, '') AS approved_by,
-			COALESCE(la.processing_status, '') AS processing_status,
-			COALESCE(c.financial_period, '') AS financial_period,
-			s.added_at,
-			s.approved_at,
-			COALESCE(fm.principal_amount, 0) AS principal_amount,
-			COALESCE(fm.interest_rate, 0) AS interest_rate,
-			COALESCE(steps.steps_completed, 0)::int AS steps_completed,
-			COALESCE(steps.steps_blocked, 0)::int AS steps_blocked,
-			COALESCE((
-				SELECT COUNT(*)::int
-				FROM investment.fd_receipt_exception ex
-				LEFT JOIN LATERAL (
-					SELECT xa.processing_status
-					FROM investment.fd_receipt_exception_audit xa
-					WHERE xa.exception_id = ex.exception_id
-					ORDER BY xa.requested_at DESC, xa.audit_id DESC
-					LIMIT 1
-				) xla ON true
-				WHERE ex.fd_id = s.fd_id
-				  AND COALESCE(ex.is_deleted, false) = false
-				  AND UPPER(COALESCE(ex.exception_status, 'OPEN')) IN ('OPEN', 'IN_REVIEW')
-				  AND NOT (UPPER(COALESCE(ex.exception_status, '')) = 'IN_REVIEW' AND COALESCE(xla.processing_status, '') = 'APPROVED')
-			), 0) AS open_exceptions,
-			COALESCE(l.period_interest_accrued, 0) AS period_interest_accrued,
-			COALESCE(l.closing_accrued_balance, 0) AS closing_accrued_balance,
-			COALESCE(l.tds_deducted_in_period, 0) AS tds_deducted_in_period,
-			COALESCE(l.net_interest_in_period, 0) AS net_interest_in_period,
-			COALESCE(l.accrual_days, 0) AS accrual_days
-		FROM investment.fd_closing_cycle_fd_scope s
-		JOIN investment.fd_closing_cycle c ON c.cycle_id = s.cycle_id
-		JOIN investment.fd_master fm ON fm.fd_id = s.fd_id
-		LEFT JOIN investment.fd_confirmation cf ON cf.confirmation_id = fm.confirmation_id
-		LEFT JOIN investment.fd_booking_request b ON b.booking_id = cf.booking_id
-		LEFT JOIN LATERAL (
-			SELECT
-				COUNT(*) FILTER (WHERE i.status = 'COMPLETED') AS steps_completed,
-				COUNT(*) FILTER (WHERE i.status = 'BLOCKED') AS steps_blocked
-			FROM investment.fd_closing_checklist_item i
-			WHERE i.scope_id = s.scope_id AND COALESCE(i.is_deleted, false) = false
-		) steps ON true
-		LEFT JOIN LATERAL (
-			SELECT a.processing_status
-			FROM investment.fd_closing_cycle_fd_scope_audit a
-			WHERE a.scope_id = s.scope_id
-			ORDER BY GREATEST(a.requested_at, a.checker_at) DESC NULLS LAST
-			LIMIT 1
-		) la ON true
-		LEFT JOIN LATERAL (
-			SELECT COALESCE(
-				(SELECT NULLIF(i.evidence_ref, '')
-				 FROM investment.fd_closing_checklist_item i
-				 WHERE i.scope_id = s.scope_id
-				   AND i.step_code = 'ACCRUAL_RUN_APPROVED'
-				   AND i.status = 'COMPLETED'
-				   AND COALESCE(i.is_deleted, false) = false
-				 LIMIT 1),
-				(SELECT r.run_id::text
-				 FROM investment.fd_accrual_run r
-				 WHERE COALESCE(r.is_deleted, false) = false
-				   AND UPPER(COALESCE(r.run_mode, '')) = 'FINAL'
-				   AND r.run_status IN ('APPROVED', 'POSTED', 'POSTED_TO_GL', 'LOCKED')
-				   AND r.entity_id = c.entity_id
-				   AND r.accrual_period_start >= c.period_start
-				   AND r.accrual_period_end <= c.period_end
-				 ORDER BY r.accrual_period_end DESC NULLS LAST, r.run_date DESC NULLS LAST
-				 LIMIT 1)
-			) AS run_id
-		) run ON true
-		LEFT JOIN LATERAL (
-			SELECT al.period_interest_accrued, al.closing_accrued_balance, al.tds_deducted_in_period,
-			       al.net_interest_in_period, al.accrual_days
-			FROM investment.fd_accrual_ledger al
-			WHERE al.run_id::text = run.run_id
-			  AND al.fd_id::text = s.fd_id::text
-			  AND COALESCE(al.is_deleted, false) = false
-			ORDER BY al.created_at DESC NULLS LAST
-			LIMIT 1
-		) l ON true
-		WHERE s.is_deleted = false
-		  AND s.selection_status = 'APPROVED'
-		  AND COALESCE(c.is_deleted, false) = false %s
-		  %s
-		  %s
-		ORDER BY c.period_end DESC NULLS LAST, s.cycle_id, s.fd_id
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
 

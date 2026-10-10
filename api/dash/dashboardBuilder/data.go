@@ -177,10 +177,19 @@ var dataSources = map[string]dataSourceFn{
 		return queryFDClosingCycle(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 	"fdClosingChecklist": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
-		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, nil)
 	},
-	"fdClosingScope": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
-		return queryFDClosingScope(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
+	"fdClosingAccrualSteps": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"ACCRUAL_RUN_COMPLETED", "ACCRUAL_RUN_APPROVED"})
+	},
+	"fdClosingReceiptReconSteps": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"RECEIPTS_CAPTURED", "RECEIPTS_RECONCILED"})
+	},
+	"fdClosingVarianceSteps": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"VARIANCES_CLOSED"})
+	},
+	"fdClosingAccountingSteps": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
+		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"TDS_VALIDATED", "ACCOUNTING_CONSOLIDATED", "ACCOUNTING_POSTED"})
 	},
 	"fdClosingLockRequest": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDClosingLockRequest(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
