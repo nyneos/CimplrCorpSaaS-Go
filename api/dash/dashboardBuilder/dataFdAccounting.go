@@ -204,7 +204,7 @@ func queryFDGlMapping(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 			COALESCE(lc.credit_lines, 0)::int AS credit_lines,
 			COALESCE((
 				SELECT COUNT(*)::int FROM investment.accounting_journal_entry je
-				WHERE je.gl_mapping_version = m.mapping_id || ' v' || m.mapping_version::text
+				WHERE je.gl_mapping_version LIKE m.mapping_id || ' v%'
 				  AND COALESCE(je.is_deleted, false) = false
 			), 0) AS journals_using
 		FROM investment.fd_gl_mapping m

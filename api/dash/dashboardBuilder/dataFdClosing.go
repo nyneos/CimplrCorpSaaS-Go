@@ -90,13 +90,18 @@ func queryFDClosingCycle(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 				ELSE 'NOT_READY'
 			END AS eligibility,
 			COALESCE(c.source, '') AS source,
+			-- Non-locked cycles have no lock event yet, so they get an explicit
+			-- 'NOT_LOCKED' value instead of '' — a blank group value renders as
+			-- "No Data" in the dashboard builder's Group By, which made the
+			-- whole table look like Lock Type had no data at all whenever no
+			-- cycle happened to be currently locked.
 			CASE WHEN COALESCE(c.status, '') = 'LOCKED' THEN COALESCE((
 				SELECT COALESCE(e.lock_type, 'HARD_LOCK')
 				FROM investment.fd_closing_cycle_event_log e
 				WHERE e.cycle_id = c.cycle_id
 				  AND e.event_type IN ('LOCK', 'RELOCK')
 				ORDER BY e.performed_at DESC
-				LIMIT 1), '') ELSE '' END AS lock_type,
+				LIMIT 1), 'NOT_LOCKED') ELSE 'NOT_LOCKED' END AS lock_type,
 			COALESCE(c.initiated_by, '') AS initiated_by,
 			COALESCE(la.processing_status, '') AS processing_status,
 			c.period_start,

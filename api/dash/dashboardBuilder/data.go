@@ -1001,7 +1001,7 @@ func queryFDBankCommunication(ctx context.Context, pool *pgxpool.Pool, entityIDs
 			COALESCE(recipients.email_to, '') AS email_to,
 			COALESCE(recipients.email_cc, '') AS email_cc,
 			COALESCE(recipients.recipients, '') AS recipients,
-			COALESCE(c.email_content, '') AS email_content,
+			BTRIM(REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(COALESCE(c.email_content, ''), '<(br|/p|/div|/tr|/li|/h[1-6])[^>]*>', ' ', 'gi'), '<[^>]*>', '', 'g'), '\s+|&nbsp;', ' ', 'g')) AS email_content,
 			COALESCE(c.response_source, '') AS response_source,
 			c.response_date,
 			COALESCE(c.email_message_id::text, '') AS email_message_id
