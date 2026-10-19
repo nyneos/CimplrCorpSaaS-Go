@@ -35,16 +35,31 @@ func queryFDClosingEvidencePack(ctx context.Context, pool *pgxpool.Pool, entityI
 			COALESCE(p.include_period_lock_certificate, false) AS include_period_lock_certificate,
 			COALESCE(p.include_audit_trail, false) AS include_audit_trail,
 			COALESCE(p.include_supporting_documents, false) AS include_supporting_documents,
-			COALESCE(p.file_size, 0) AS file_size,
+			COALESCE(p.file_size, gd.file_size, 0) AS file_size,
 			COALESCE(p.report_count, 0) AS report_count,
 			COALESCE(p.page_count, 0) AS page_count,
 			COALESCE(p.document_count, 0) AS document_count,
-			COALESCE(p.checksum, '') AS checksum,
+			COALESCE(p.checksum, gd.checksum, '') AS checksum,
 			COALESCE(p.download_count, 0) AS download_count,
 			COALESCE(p.generated_by, '') AS generated_by,
+			COALESCE(gd.status, '') AS dms_status,
 			p.generated_at
 		FROM investment.fd_closing_evidence_pack p
-		JOIN investment.fd_closing_cycle c ON c.cycle_id = p.cycle_id
+		LEFT JOIN investment.fd_closing_cycle c ON c.cycle_id = p.cycle_id
+		LEFT JOIN LATERAL (
+			SELECT sr.run_id
+			FROM dms_svc.generation_run_source_row sr
+			WHERE sr.source_id = p.pack_id::text
+			ORDER BY sr.run_id DESC
+			LIMIT 1
+		) src ON true
+		LEFT JOIN LATERAL (
+			SELECT d.file_size, d.checksum, d.status
+			FROM dms_svc.generated_document d
+			WHERE d.run_id = src.run_id
+			ORDER BY (d.s3_key IS NULL), d.file_size DESC NULLS LAST
+			LIMIT 1
+		) gd ON true
 		WHERE COALESCE(p.is_deleted, false) = false %s
 		  %s
 		ORDER BY p.generated_at DESC NULLS LAST
@@ -174,7 +189,11 @@ func queryFDClosingCycle(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 	return runSourceQuery(ctx, pool, q, args)
 }
 
-func queryFDClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, stepCodes []string) ([]map[string]any, error) {
+func queryFDClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, stepCodes []string, liveExceptions bool) ([]map[string]any, error) {
+	exceptionExpr := "COALESCE(i.exception_count, 0)"
+	if liveExceptions {
+		exceptionExpr = "COALESCE(oe.open_exceptions, 0)"
+	}
 	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "c")
 	bf, bfArgs := bankIDFilter(ctx, "fm", len(args)+1)
 	args = append(args, bfArgs...)
@@ -207,7 +226,10 @@ func queryFDClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 			i.last_updated_at,
 			COALESCE(i.is_critical, false) AS is_critical,
 			COALESCE(i.sequence, 0) AS sequence,
-			COALESCE(i.exception_count, 0) AS exception_count,
+			%s AS exception_count,
+			CASE WHEN ROW_NUMBER() OVER (PARTITION BY i.cycle_id, i.fd_id ORDER BY i.sequence, i.item_id) = 1
+				THEN COALESCE(oe.open_exceptions, 0) ELSE 0 END AS open_exceptions_once,
+			COALESCE(i.exception_count, 0) AS step_exception_count,
 			CASE WHEN i.status = 'COMPLETED' THEN 1 ELSE 0 END AS is_completed,
 			CASE WHEN i.status = 'BLOCKED' THEN 1 ELSE 0 END AS is_blocked
 		FROM investment.fd_closing_checklist_item i
@@ -223,11 +245,87 @@ func queryFDClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 			ORDER BY GREATEST(a.requested_at, a.checker_at) DESC NULLS LAST
 			LIMIT 1
 		) la ON true
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*)::int AS open_exceptions
+			FROM investment.fd_receipt_exception ex
+			WHERE ex.fd_id = i.fd_id
+			  AND COALESCE(ex.is_deleted, false) = false
+			  AND UPPER(COALESCE(ex.exception_status, 'OPEN')) IN ('OPEN', 'IN_REVIEW')
+		) oe ON true
 		WHERE COALESCE(i.is_deleted, false) = false
 		  AND COALESCE(c.is_deleted, false) = false %s
 		  %s
 		  %s
 		ORDER BY c.period_end DESC NULLS LAST, i.cycle_id, i.fd_id, i.sequence
+		LIMIT NULLIF($1, 0) OFFSET $2
+	`, exceptionExpr, ef, bf, df)
+
+	return runSourceQuery(ctx, pool, q, args)
+}
+
+func queryFDClosingVarianceExceptions(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
+	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "cy")
+	bf, bfArgs := bankIDFilter(ctx, "m", len(args)+1)
+	args = append(args, bfArgs...)
+	df, dfArgs := dateRangeFilter(ctx, "cy", "period_end", len(args)+1)
+	args = append(args, dfArgs...)
+
+	q := fmt.Sprintf(`
+		SELECT
+			COALESCE(e.exception_id::text, '') AS exception_id,
+			COALESCE(cy.cycle_id::text, '') AS cycle_id,
+			COALESCE(cy.entity_id, '') AS entity_id,
+			COALESCE(cy.entity_name, '') AS entity_name,
+			COALESCE(cy.financial_period, '') AS financial_period,
+			COALESCE(cy.status, '') AS cycle_status,
+			COALESCE(e.fd_id::text, '') AS fd_id,
+			COALESCE(NULLIF(e.fd_ref_no, ''), m.bank_fd_ref_no, '') AS fd_ref_no,
+			COALESCE(m.bank_id, '') AS bank_id,
+			COALESCE(m.bank_name, '') AS bank_name,
+			COALESCE(e.result_type, 'INTEREST') AS result_type,
+			COALESCE(e.exception_type, '') AS exception_type,
+			COALESCE(e.severity, '') AS severity,
+			COALESCE(e.case_type, 'VARIANCE') AS case_type,
+			COALESCE(e.exception_status, 'OPEN') AS exception_status,
+			COALESCE(e.variance_outcome::text, '') AS variance_outcome,
+			COALESCE(e.proposed_resolution, '') AS proposed_resolution,
+			COALESCE(e.reason_code, '') AS reason_code,
+			COALESCE(la.processing_status, '') AS processing_status,
+			COALESCE(e.raised_by, '') AS raised_by,
+			e.raised_at,
+			COALESCE(e.expected_amount, 0) AS expected_amount,
+			COALESCE(e.received_amount, 0) AS received_amount,
+			COALESCE(e.variance_amount, 0) AS variance_amount,
+			1 AS exception_count,
+			CASE WHEN UPPER(COALESCE(e.exception_status, 'OPEN')) IN ('OPEN', 'IN_REVIEW') THEN 1 ELSE 0 END AS is_open,
+			CASE WHEN UPPER(COALESCE(e.exception_status, '')) IN ('CLOSE', 'CLOSED') THEN 1 ELSE 0 END AS is_closed,
+			CASE WHEN UPPER(COALESCE(e.severity, '')) = 'BLOCKER' THEN 1 ELSE 0 END AS is_blocker,
+			CASE WHEN UPPER(COALESCE(la.processing_status, '')) LIKE 'PENDING%%' THEN 1 ELSE 0 END AS is_pending_audit
+		FROM investment.fd_receipt_exception e
+		CROSS JOIN LATERAL (
+			SELECT c.cycle_id, c.entity_id, c.entity_name, c.financial_period, c.status, c.period_end
+			FROM investment.fd_closing_cycle_fd_scope s
+			JOIN investment.fd_closing_cycle c ON c.cycle_id = s.cycle_id
+			WHERE s.fd_id = e.fd_id
+			  AND s.is_deleted = false
+			  AND s.selection_status = 'APPROVED'
+			  AND COALESCE(c.is_deleted, false) = false
+			ORDER BY c.period_end DESC NULLS LAST, c.cycle_id DESC
+			LIMIT 1
+		) cy
+		LEFT JOIN investment.fd_master m
+		  ON m.fd_id = e.fd_id AND COALESCE(m.is_deleted, false) = false
+		LEFT JOIN LATERAL (
+			SELECT a.processing_status
+			FROM investment.fd_receipt_exception_audit a
+			WHERE a.exception_id = e.exception_id
+			ORDER BY a.requested_at DESC, a.audit_id DESC
+			LIMIT 1
+		) la ON true
+		WHERE COALESCE(e.is_deleted, false) = false %s
+		  %s
+		  %s
+		ORDER BY cy.period_end DESC NULLS LAST, cy.cycle_id, e.raised_at DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
 
@@ -266,8 +364,7 @@ func queryFDClosingLockRequest(ctx context.Context, pool *pgxpool.Pool, entityID
 			COALESCE(lr.applied_at::date - lr.requested_at::date, 0) AS days_to_lock
 		FROM investment.fd_closing_lock_request lr
 		JOIN investment.fd_closing_cycle c ON c.cycle_id = lr.cycle_id
-		WHERE COALESCE(lr.is_deleted, false) = false
-		  AND COALESCE(c.is_deleted, false) = false %s
+		WHERE COALESCE(lr.is_deleted, false) = false %s
 		  %s
 		  %s
 		ORDER BY lr.requested_at DESC NULLS LAST
@@ -311,11 +408,13 @@ func queryFDClosingReopenRequest(ctx context.Context, pool *pgxpool.Pool, entity
 			COALESCE(rr.reconciliation_valid, false) AS reconciliation_valid,
 			COALESCE(rr.accounting_valid, false) AS accounting_valid,
 			1 AS request_count,
-			COALESCE(rr.relocked_at::date - rr.reopened_at::date, 0) AS days_reopened
+			CASE WHEN rr.reopened_at IS NOT NULL
+				THEN COALESCE(rr.relocked_at, now())::date - rr.reopened_at::date ELSE 0 END AS days_reopened,
+			CASE WHEN rr.reopened_at IS NOT NULL THEN 1 ELSE 0 END AS is_reopened,
+			CASE WHEN rr.relocked_at IS NOT NULL THEN 1 ELSE 0 END AS is_relocked
 		FROM investment.fd_closing_reopen_request rr
 		JOIN investment.fd_closing_cycle c ON c.cycle_id = rr.cycle_id
-		WHERE COALESCE(rr.is_deleted, false) = false
-		  AND COALESCE(c.is_deleted, false) = false %s
+		WHERE COALESCE(rr.is_deleted, false) = false %s
 		  %s
 		  %s
 		ORDER BY rr.requested_at DESC NULLS LAST

@@ -48,7 +48,13 @@ const packWithDmsJoinQuery = `
 		ORDER BY sr.run_id DESC
 		LIMIT 1
 	) src ON true
-	LEFT JOIN dms_svc.generated_document gd ON gd.run_id = src.run_id`
+	LEFT JOIN LATERAL (
+		SELECT d.s3_key, d.file_size, d.checksum, d.status, d.file_format
+		FROM dms_svc.generated_document d
+		WHERE d.run_id = src.run_id
+		ORDER BY (d.s3_key IS NULL), d.file_size DESC NULLS LAST
+		LIMIT 1
+	) gd ON true`
 
 // ListEvidencePacks handles POST /investment/fd-closing/evidence/list.
 // cycle_id is optional: when supplied it scopes to that one cycle (the

@@ -177,19 +177,19 @@ var dataSources = map[string]dataSourceFn{
 		return queryFDClosingCycle(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 	"fdClosingChecklist": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
-		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, nil)
+		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, nil, false)
 	},
 	"fdClosingAccrualSteps": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
-		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"ACCRUAL_RUN_COMPLETED", "ACCRUAL_RUN_APPROVED"})
+		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"ACCRUAL_RUN_COMPLETED", "ACCRUAL_RUN_APPROVED"}, false)
 	},
 	"fdClosingReceiptReconSteps": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
-		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"RECEIPTS_CAPTURED", "RECEIPTS_RECONCILED"})
+		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"RECEIPTS_CAPTURED", "RECEIPTS_RECONCILED"}, true)
 	},
 	"fdClosingVarianceSteps": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
-		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"VARIANCES_CLOSED"})
+		return queryFDClosingVarianceExceptions(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 	"fdClosingAccountingSteps": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
-		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"TDS_VALIDATED", "ACCOUNTING_CONSOLIDATED", "ACCOUNTING_POSTED"})
+		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"TDS_VALIDATED", "ACCOUNTING_CONSOLIDATED"}, false)
 	},
 	"fdClosingLockRequest": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDClosingLockRequest(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
