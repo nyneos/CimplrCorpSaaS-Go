@@ -1076,55 +1076,55 @@ func queryFDRateOffer(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 
 func queryFDRateComparison(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "n")
-	bf, bfArgs := bankIDFilter(ctx, "c", len(args)+1)
+	bf, bfArgs := bankIDFilter(ctx, "o", len(args)+1)
 	args = append(args, bfArgs...)
 	df, dfArgs := dateRangeFilter(ctx, "n", "request_date", len(args)+1)
 	args = append(args, dfArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
-			c.comparison_id::text AS comparison_id,
-			c.selection_rate_request_id::text AS rate_request_id,
+			o.offer_id::text AS comparison_id,
+			o.rate_request_id::text AS rate_request_id,
 			COALESCE(n.rate_request_ref, '') AS rate_request_ref,
 			COALESCE(n.request_status, '') AS request_status,
 			n.request_date,
 			COALESCE(n.entity_id, '') AS entity_id,
 			COALESCE(n.entity_name, '') AS entity_name,
-			COALESCE(c.selected_offer_id::text, '') AS selected_offer_id,
-			COALESCE(c.compared_offer_id::text, '') AS compared_offer_id,
+			COALESCE(n.selected_offer_id::text, '') AS selected_offer_id,
+			o.offer_id::text AS compared_offer_id,
 			COALESCE(o.offer_reference_id, '') AS offer_reference_id,
-			COALESCE(c.compared_rate_request_id::text, '') AS compared_rate_request_id,
-			COALESCE(rn.rate_request_ref, '') AS compared_rate_request_ref,
-			COALESCE(c.bank_id, '') AS bank_id,
-			COALESCE(c.bank_name, '') AS bank_name,
-			COALESCE(c.is_selected, false) AS is_selected,
-			CASE WHEN COALESCE(c.is_selected, false) THEN 'Selected' ELSE 'Not selected' END AS selection_label,
-			COALESCE(c.created_by, '') AS created_by,
-			c.created_at,
-			COALESCE(c.offered_interest_rate, 0) AS offered_interest_rate,
-			COALESCE(c.effective_yield, c.offered_interest_rate, 0) AS effective_yield,
-			COALESCE(sel.offered_interest_rate - c.offered_interest_rate, 0) AS rate_gap_vs_selected,
-			COALESCE(COALESCE(sel.effective_yield, sel.offered_interest_rate) - COALESCE(c.effective_yield, c.offered_interest_rate), 0) AS yield_gap_vs_selected,
+			o.rate_request_id::text AS compared_rate_request_id,
+			COALESCE(n.rate_request_ref, '') AS compared_rate_request_ref,
+			COALESCE(o.bank_id, '') AS bank_id,
+			COALESCE(o.bank_name, '') AS bank_name,
+			COALESCE(n.selected_offer_id = o.offer_id, false) AS is_selected,
+			CASE
+				WHEN n.selected_offer_id = o.offer_id THEN 'Selected'
+				WHEN n.selected_offer_id IS NULL THEN 'Captured'
+				ELSE 'Not selected'
+			END AS selection_label,
+			COALESCE(o.created_by, '') AS created_by,
+			o.created_at,
+			COALESCE(o.offered_interest_rate, 0) AS offered_interest_rate,
+			COALESCE(o.effective_yield, 0) AS effective_yield,
+			COALESCE(sel.offered_interest_rate - o.offered_interest_rate, 0) AS rate_gap_vs_selected,
+			COALESCE(sel.effective_yield - o.effective_yield, 0) AS yield_gap_vs_selected,
 			1 AS comparison_count
-		FROM investment.fd_rate_selection_comparison c
-		JOIN investment.fd_rate_negotiation n ON n.rate_request_id = c.selection_rate_request_id
-		LEFT JOIN investment.fd_rate_negotiation rn ON rn.rate_request_id = c.compared_rate_request_id
-		LEFT JOIN investment.fd_rate_offer o ON o.offer_id = c.compared_offer_id
-		LEFT JOIN LATERAL (
-			SELECT s.offered_interest_rate, s.effective_yield
-			FROM investment.fd_rate_selection_comparison s
-			WHERE s.selection_rate_request_id = c.selection_rate_request_id
-			  AND s.is_selected = true
-			ORDER BY s.created_at DESC
+		FROM investment.fd_rate_offer o
+		JOIN investment.fd_rate_negotiation n ON n.rate_request_id = o.rate_request_id
+		JOIN LATERAL (
+			SELECT COALESCE(a.processing_status, '') AS processing_status
+			FROM investment.fd_rate_offer_audit a
+			WHERE a.offer_id = o.offer_id
+			ORDER BY a.requested_at DESC
 			LIMIT 1
-		) sel ON true
-		WHERE COALESCE(n.is_deleted, false) = false
-			AND c.created_at = (
-				SELECT MAX(s2.created_at)
-				FROM investment.fd_rate_selection_comparison s2
-				WHERE s2.selection_rate_request_id = c.selection_rate_request_id
-			) %s %s %s
-		ORDER BY n.request_date DESC NULLS LAST, c.selection_rate_request_id, c.is_selected DESC, c.offered_interest_rate DESC NULLS LAST
+		) la ON true
+		LEFT JOIN investment.fd_rate_offer sel ON sel.offer_id = n.selected_offer_id
+		WHERE COALESCE(o.is_deleted, false) = false
+			AND COALESCE(n.is_deleted, false) = false
+			AND UPPER(la.processing_status) = 'APPROVED'
+			AND UPPER(COALESCE(o.offer_status, '')) NOT IN ('REJECTED', 'EXPIRED', 'INACTIVE', 'DELETED') %s %s %s
+		ORDER BY n.request_date DESC NULLS LAST, o.rate_request_id, (n.selected_offer_id = o.offer_id) DESC NULLS LAST, o.offered_interest_rate DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
 
