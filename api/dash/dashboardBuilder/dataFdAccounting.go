@@ -183,7 +183,7 @@ func queryFDGlMapping(ctx context.Context, pool *pgxpool.Pool, entityIDs []strin
 			COALESCE(m.mapping_id, '') || ' v' || COALESCE(m.mapping_version, 0)::text AS mapping_key,
 			COALESCE(m.entity_id, '') AS entity_id,
 			COALESCE(m.entity_name, '') AS entity_name,
-			COALESCE(m.bank_id, '') AS bank_id,
+			COALESCE(NULLIF(m.bank_id, ''), 'All banks') AS bank_id,
 			COALESCE(NULLIF(m.bank_name, ''), 'All banks') AS bank_name,
 			COALESCE(m.event_type, '') AS event_type,
 			COALESCE(m.status, '') AS mapping_status,

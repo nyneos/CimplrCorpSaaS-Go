@@ -1102,9 +1102,9 @@ func queryFDRateComparison(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 			COALESCE(c.created_by, '') AS created_by,
 			c.created_at,
 			COALESCE(c.offered_interest_rate, 0) AS offered_interest_rate,
-			COALESCE(c.effective_yield, 0) AS effective_yield,
+			COALESCE(c.effective_yield, c.offered_interest_rate, 0) AS effective_yield,
 			COALESCE(sel.offered_interest_rate - c.offered_interest_rate, 0) AS rate_gap_vs_selected,
-			COALESCE(sel.effective_yield - c.effective_yield, 0) AS yield_gap_vs_selected,
+			COALESCE(COALESCE(sel.effective_yield, sel.offered_interest_rate) - COALESCE(c.effective_yield, c.offered_interest_rate), 0) AS yield_gap_vs_selected,
 			1 AS comparison_count
 		FROM investment.fd_rate_selection_comparison c
 		JOIN investment.fd_rate_negotiation n ON n.rate_request_id = c.selection_rate_request_id
@@ -1118,7 +1118,12 @@ func queryFDRateComparison(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 			ORDER BY s.created_at DESC
 			LIMIT 1
 		) sel ON true
-		WHERE COALESCE(n.is_deleted, false) = false %s %s %s
+		WHERE COALESCE(n.is_deleted, false) = false
+			AND c.created_at = (
+				SELECT MAX(s2.created_at)
+				FROM investment.fd_rate_selection_comparison s2
+				WHERE s2.selection_rate_request_id = c.selection_rate_request_id
+			) %s %s %s
 		ORDER BY n.request_date DESC NULLS LAST, c.selection_rate_request_id, c.is_selected DESC, c.offered_interest_rate DESC NULLS LAST
 		LIMIT NULLIF($1, 0) OFFSET $2
 	`, ef, bf, df)
