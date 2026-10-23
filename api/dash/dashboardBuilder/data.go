@@ -189,7 +189,7 @@ var dataSources = map[string]dataSourceFn{
 		return queryFDClosingVarianceExceptions(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
 	},
 	"fdClosingAccountingSteps": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
-		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"TDS_VALIDATED", "ACCOUNTING_CONSOLIDATED"}, false)
+		return queryFDClosingChecklist(ctx, pool, req.EntityIDs, req.Limit, req.Offset, []string{"TDS_VALIDATED"}, false)
 	},
 	"fdClosingLockRequest": func(ctx context.Context, pool *pgxpool.Pool, req DataRequest) ([]map[string]any, error) {
 		return queryFDClosingLockRequest(ctx, pool, req.EntityIDs, req.Limit, req.Offset)
