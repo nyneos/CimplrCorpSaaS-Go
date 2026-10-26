@@ -194,10 +194,6 @@ func queryFDClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityIDs 
 	if liveExceptions {
 		exceptionExpr = "COALESCE(oe.open_exceptions, 0)"
 	}
-	if !liveExceptions && len(stepCodes) == 0 {
-		exceptionExpr = `CASE WHEN ROW_NUMBER() OVER (PARTITION BY i.cycle_id, i.fd_id ORDER BY COALESCE(i.step_code = 'RECEIPTS_RECONCILED', false) DESC, i.sequence, i.item_id) = 1
-				THEN COALESCE(oe.open_exceptions, 0) ELSE 0 END`
-	}
 	args, ef := withEntityFilter(limitOffsetArgs(limit, offset), entityIDs, "c")
 	bf, bfArgs := bankIDFilter(ctx, "fm", len(args)+1)
 	args = append(args, bfArgs...)
