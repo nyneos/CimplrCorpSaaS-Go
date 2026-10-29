@@ -88,6 +88,9 @@ func requireDeletable(ctx context.Context, tx pgx.Tx, templateID, actor string) 
 	if processingStatus == "PENDING_DELETE_APPROVAL" {
 		return fmt.Errorf("template is already awaiting delete approval")
 	}
+	if err := requireNotLinkedToActiveRule(ctx, tx, templateID); err != nil {
+		return err
+	}
 	if !common.IsPendingStatus(processingStatus) {
 		return nil
 	}
@@ -107,6 +110,24 @@ func requireDeletable(ctx context.Context, tx pgx.Tx, templateID, actor string) 
 		WHERE template_id = $2::uuid AND processing_status = ANY($3::text[])`,
 		actor, templateID, common.PendingProcessingStatuses)
 	return err
+}
+
+func requireNotLinkedToActiveRule(ctx context.Context, tx pgx.Tx, templateID string) error {
+	var linked bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM dms_svc.generation_rule r
+			JOIN dms_svc.generation_rule_attachment a ON a.version_id = r.current_version_id
+			WHERE a.document_template_id = $1::uuid
+				AND r.is_deleted = false AND r.status = 'Active'
+		)`, templateID,
+	).Scan(&linked); err != nil {
+		return err
+	}
+	if linked {
+		return errLinkedToActiveRule
+	}
+	return nil
 }
 
 func pendingAmendableAudit(ctx context.Context, tx pgx.Tx, templateID string) (*templateAuditRow, error) {

@@ -100,6 +100,12 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 					"only APPROVED templates can be paused/resumed via status", "DMS_TEMPLATE_STATUS_LOCKED")
 				return
 			}
+			if req.Status == "Inactive" {
+				if err := requireNotLinkedToActiveRule(r.Context(), tx, req.TemplateID); err != nil {
+					api.RespondEnvelopeError(w, http.StatusConflict, err.Error(), "DMS_TEMPLATE_LINKED_TO_RULE")
+					return
+				}
+			}
 			if _, err := tx.Exec(r.Context(), `
 				UPDATE dms_svc.template
 				SET status = $1, last_modified_by = $2, last_modified_at = now()
@@ -156,6 +162,12 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 		newStatus := oldStatus
 		if req.Status != "" {
 			newStatus = req.Status
+		}
+		if newStatus == "Inactive" && oldStatus != "Inactive" {
+			if err := requireNotLinkedToActiveRule(r.Context(), tx, req.TemplateID); err != nil {
+				api.RespondEnvelopeError(w, http.StatusConflict, err.Error(), "DMS_TEMPLATE_LINKED_TO_RULE")
+				return
+			}
 		}
 
 		if _, err := tx.Exec(r.Context(), `

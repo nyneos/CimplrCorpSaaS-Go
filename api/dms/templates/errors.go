@@ -3,6 +3,7 @@ package templates
 import "errors"
 
 var (
-	errNoVersionOnAudit  = errors.New("pending audit row is missing its version_id")
-	errUnknownActionType = errors.New("unknown pending audit action_type")
+	errNoVersionOnAudit   = errors.New("pending audit row is missing its version_id")
+	errUnknownActionType  = errors.New("unknown pending audit action_type")
+	errLinkedToActiveRule = errors.New("This template is linked to an active rule")
 )

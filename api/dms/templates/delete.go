@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -53,6 +54,10 @@ func HandleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if err := requireDeletable(r.Context(), tx, id, actor); err != nil {
+				if errors.Is(err, errLinkedToActiveRule) {
+					api.RespondEnvelopeError(w, http.StatusConflict, err.Error(), "DMS_TEMPLATE_LINKED_TO_RULE")
+					return
+				}
 				skipped = append(skipped, id)
 				continue
 			}
