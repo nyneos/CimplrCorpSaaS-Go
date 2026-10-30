@@ -42,6 +42,12 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 			countArgs = append(countArgs, outcome)
 		}
 
+		if !api.IsAdminOverride(ctx) {
+			argN := len(countArgs) + 1
+			where += ` AND (COALESCE(entity_code, '') = '' OR entity_code = ANY($` + strconv.Itoa(argN) + `::text[]) OR entity_code = ANY($` + strconv.Itoa(argN+1) + `::text[]))`
+			countArgs = append(countArgs, api.GetEntityIDsFromCtx(ctx), api.GetEntityNamesFromCtx(ctx))
+		}
+
 		// Legacy execution_log rows remain accessible as one-row synthetic runs.
 		// New rows always have run_id and are represented only by execution_run.
 		baseQ := `

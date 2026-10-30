@@ -53,6 +53,9 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
 			return
 		}
+		if !common.RequireRecordsEntityAccess(w, r, pool, common.RuleEntityQuery, []string{req.RuleID}) {
+			return
+		}
 		req.RuleID = strings.TrimSpace(req.RuleID)
 		req.TimeWindowType = strings.TrimSpace(strings.ToUpper(req.TimeWindowType))
 		req.ScheduleType = strings.TrimSpace(strings.ToUpper(req.ScheduleType))
@@ -103,7 +106,8 @@ func HandleCreateVersion(pool *pgxpool.Pool) http.HandlerFunc {
 
 		amend, err := pendingAmendableAudit(r.Context(), tx, req.RuleID)
 		if err != nil {
-			api.RespondEnvelopeError(w, http.StatusConflict, err.Error(), "DMS_RULE_PENDING_EXISTS")
+			api.LogErrorForResponse(w, "dms rule version pending: %v", err)
+			api.RespondEnvelopeError(w, http.StatusConflict, "a change is already pending", "DMS_RULE_PENDING_EXISTS")
 			return
 		}
 
@@ -261,6 +265,9 @@ func HandleListVersions(pool *pgxpool.Pool) http.HandlerFunc {
 		var req listVersionsReq
 		if err := common.DecodeJSON(r, &req); err != nil {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		if !common.RequireRecordsEntityAccess(w, r, pool, common.RuleEntityQuery, []string{req.RuleID}) {
 			return
 		}
 		req.RuleID = strings.TrimSpace(req.RuleID)

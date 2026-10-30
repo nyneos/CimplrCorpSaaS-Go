@@ -3,6 +3,7 @@ package approvalMatrix
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -100,7 +101,7 @@ func CreatePolicyEngineMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := validateUserIDsExist(ctx, pgxPool, allUserIDs); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 

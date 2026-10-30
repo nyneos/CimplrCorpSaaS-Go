@@ -437,6 +437,9 @@ var dataSources = map[string]dataSourceFn{
 // scoping unless req.EntityIDs is set explicitly, which is the expected mode
 // for a DMS rule (its own generation_rule_filter rows carry whatever scoping
 // it needs — see the filter band below).
+// noEntityScope never matches a real entity id or name.
+const noEntityScope = "__no_entity_scope__"
+
 func FetchSourceData(ctx context.Context, pool *pgxpool.Pool, req DataRequest) (rows []map[string]any, hasMore bool, err error) {
 	var reqEntityNames []string
 	ctxEntityIDs := api.CtxEntityIDs(ctx)
@@ -447,18 +450,33 @@ func FetchSourceData(ctx context.Context, pool *pgxpool.Pool, req DataRequest) (
 		}
 	}
 
+	sessionScoped := api.GetUserIDFromCtx(ctx) != ""
 	if len(req.EntityIDs) == 0 {
 		req.EntityIDs = ctxEntityIDs
 		reqEntityNames = ctxNames
 	} else {
+		var allowedIDs []string
 		for _, reqID := range req.EntityIDs {
 			for i, ctxID := range ctxEntityIDs {
-				if reqID == ctxID && i < len(ctxNames) {
-					reqEntityNames = append(reqEntityNames, ctxNames[i])
+				if reqID == ctxID {
+					allowedIDs = append(allowedIDs, reqID)
+					if i < len(ctxNames) {
+						reqEntityNames = append(reqEntityNames, ctxNames[i])
+					}
 					break
 				}
 			}
 		}
+		if sessionScoped {
+			req.EntityIDs = allowedIDs
+		}
+	}
+	// A session with nothing in scope must match no rows, not every row.
+	if sessionScoped && len(req.EntityIDs) == 0 {
+		req.EntityIDs = []string{noEntityScope}
+	}
+	if sessionScoped && len(reqEntityNames) == 0 {
+		reqEntityNames = []string{noEntityScope}
 	}
 
 	if req.Limit < 0 {

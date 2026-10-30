@@ -62,22 +62,21 @@ func ResolveLocalStoragePath(keyOrPath string) (string, error) {
 	if raw == "." || raw == "" || strings.HasPrefix(raw, "..") {
 		return "", fmt.Errorf("invalid local DMS path")
 	}
-	if filepath.IsAbs(raw) {
-		return raw, nil
-	}
-	abs, err := filepath.Abs(raw)
-	if err != nil {
-		return "", err
+	abs := raw
+	if !filepath.IsAbs(abs) {
+		var err error
+		if abs, err = filepath.Abs(raw); err != nil {
+			return "", err
+		}
 	}
 	rootAbs, err := filepath.Abs(LocalOutputRoot())
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasPrefix(abs, rootAbs+string(os.PathSeparator)) && abs != rootAbs {
-		// Allow paths that already include the root as a relative prefix from cwd.
-		if !strings.Contains(filepath.ToSlash(abs), filepath.ToSlash(rootAbs)) {
-			return "", fmt.Errorf("local DMS path outside output root")
-		}
+	// Absolute or relative, the resolved file must sit inside the output root.
+	rel, err := filepath.Rel(rootAbs, abs)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("local DMS path outside output root")
 	}
 	return abs, nil
 }

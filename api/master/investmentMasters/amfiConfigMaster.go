@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	amfiinvest "CimplrCorpSaas/internal/investment"
 	"net/http"
 
@@ -31,7 +32,7 @@ func GetAMFISchemeMasterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -79,7 +80,7 @@ func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -125,7 +126,7 @@ func GetDistinctAMCNamesFromAMFI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch AMC names: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch AMC names: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -167,7 +168,7 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, amcQuery)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch AMCs: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch AMCs: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -195,7 +196,7 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		schemeAMCNames, err := amfiinvest.ResolveManyToSchemeAMCNames(ctx, pgxPool, amcNames)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve AMC names: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve AMC names: "+errtext.Detail(w, err))
 			return
 		}
 		if len(schemeAMCNames) == 0 {
@@ -234,7 +235,7 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		schemeRows, err := pgxPool.Query(ctx, schemeQuery, schemeAMCNames)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch schemes: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch schemes: "+errtext.Detail(w, err))
 			return
 		}
 		defer schemeRows.Close()
@@ -266,7 +267,7 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if schemeRows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Scheme scan error: "+schemeRows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Scheme scan error: "+errtext.Detail(w, schemeRows.Err()))
 			return
 		}
 

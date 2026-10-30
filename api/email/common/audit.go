@@ -76,7 +76,8 @@ func HandleMessageAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY created_at DESC
 		`, req.MessageID)
 		if err != nil {
-			RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email message audit log query failed: %v", err)
+			RespondInternal(w, "database operation failed")
 			return
 		}
 		defer rows.Close()
@@ -94,7 +95,8 @@ func HandleMessageAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 			var rawDetail []byte
 			var createdAt time.Time
 			if err := rows.Scan(&row.LogID, &row.Step, &row.Status, &rawDetail, &createdAt); err != nil {
-				RespondInternal(w, err.Error())
+				api.LogErrorForResponse(w, "email message audit log scan failed: %v", err)
+				RespondInternal(w, "database operation failed")
 				return
 			}
 			row.CreatedAt = api.FormatAuditTimestampIST(createdAt)

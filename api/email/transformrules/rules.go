@@ -1,12 +1,15 @@
 package transformrules
 
 import (
+	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	emailcommon "CimplrCorpSaas/api/email/common"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -304,19 +307,22 @@ func handleCreate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
+	if u := api.GetUserIDFromCtx(r.Context()); u != "" {
+		req.UserID = u
+	}
 	if req.InboxID == "" || req.RuleName == "" || req.ConditionType == "" || req.MappingID == "" {
 		emailcommon.RespondBadRequest(w, "Missing required fields")
 		return
 	}
 	mode, modeErr := normalizeMatchMode(req.ConditionType, req.MatchMode)
 	if modeErr != nil {
-		emailcommon.RespondBadRequest(w, modeErr.Error())
+		emailcommon.RespondBadRequest(w, errtext.Detail(w, modeErr))
 		return
 	}
 	req.MatchMode = mode
 	dests, destErr := resolveDestinations(&req)
 	if destErr != nil {
-		emailcommon.RespondBadRequest(w, destErr.Error())
+		emailcommon.RespondBadRequest(w, errtext.Detail(w, destErr))
 		return
 	}
 	applyPrimaryMirror(&req, dests)
@@ -342,15 +348,17 @@ func handleCreate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 
 	if err != nil {
 		if strings.Contains(err.Error(), "unique_active_rule") {
-			emailcommon.RespondBadRequest(w, "An active rule with this condition and mapping already exists for this inbox.")
+			emailcommon.RespondBadRequest(w, "rule already exists")
 		} else {
-			emailcommon.RespondInternal(w, "Failed to create rule: "+err.Error())
+			api.LogErrorForResponse(w, "transform rule create failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 		}
 		return
 	}
 
 	if written, werr := replaceDestinations(r.Context(), pool, req.RuleID, req.UserID, dests); werr != nil {
-		emailcommon.RespondInternal(w, "Failed to save destinations: "+werr.Error())
+		api.LogErrorForResponse(w, "transform rule destinations save failed rule=%s: %v", req.RuleID, werr)
+		emailcommon.RespondInternal(w, "database operation failed")
 		return
 	} else {
 		req.Destinations = written
@@ -371,6 +379,9 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
+	}
+	if u := api.GetUserIDFromCtx(r.Context()); u != "" {
+		req.UserID = u
 	}
 	if req.RuleID == "" {
 		emailcommon.RespondBadRequest(w, errRuleIDRequired)
@@ -396,13 +407,13 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 
 	mode, modeErr := normalizeMatchMode(req.ConditionType, req.MatchMode)
 	if modeErr != nil {
-		emailcommon.RespondBadRequest(w, modeErr.Error())
+		emailcommon.RespondBadRequest(w, errtext.Detail(w, modeErr))
 		return
 	}
 	req.MatchMode = mode
 	dests, destErr := resolveDestinations(&req)
 	if destErr != nil {
-		emailcommon.RespondBadRequest(w, destErr.Error())
+		emailcommon.RespondBadRequest(w, errtext.Detail(w, destErr))
 		return
 	}
 	applyPrimaryMirror(&req, dests)
@@ -446,6 +457,9 @@ func handleDelete(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
+	}
+	if u := api.GetUserIDFromCtx(r.Context()); u != "" {
+		req.UserID = u
 	}
 	if req.RuleID == "" {
 		emailcommon.RespondBadRequest(w, errRuleIDRequired)
@@ -491,8 +505,14 @@ func handleApprove(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
+	if u := api.GetUserIDFromCtx(r.Context()); u != "" {
+		req.UserID = u
+	}
 	if req.RuleID == "" {
 		emailcommon.RespondBadRequest(w, errRuleIDRequired)
+		return
+	}
+	if !ruleDecisionAllowed(w, r, pool, req.RuleID, req.UserID) {
 		return
 	}
 
@@ -524,7 +544,7 @@ func handleApprove(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		editMode, _ := normalizeMatchMode(edits.ConditionType, edits.MatchMode)
 		editDests, editDestErr := resolveDestinations(&edits)
 		if editDestErr != nil {
-			emailcommon.RespondBadRequest(w, editDestErr.Error())
+			emailcommon.RespondBadRequest(w, errtext.Detail(w, editDestErr))
 			return
 		}
 		applyPrimaryMirror(&edits, editDests)
@@ -605,8 +625,14 @@ func handleReject(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
+	if u := api.GetUserIDFromCtx(r.Context()); u != "" {
+		req.UserID = u
+	}
 	if req.RuleID == "" {
 		emailcommon.RespondBadRequest(w, errRuleIDRequired)
+		return
+	}
+	if !ruleDecisionAllowed(w, r, pool, req.RuleID, req.UserID) {
 		return
 	}
 
@@ -746,4 +772,30 @@ func handleAuditLog(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 	}
 
 	emailcommon.RespondList(w, "transform-rules/audit-log", items, len(items))
+}
+
+// ruleDecisionAllowed checks that the rule is waiting for a decision, that the
+// checker is not its submitter and that the checker can manage its inbox.
+func ruleDecisionAllowed(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, ruleID, checker string) bool {
+	var submittedBy, status, inboxID string
+	err := pool.QueryRow(r.Context(), `
+		SELECT COALESCE(submitted_by, ''), COALESCE(processing_status, ''), COALESCE(inbox_id::text, '')
+		FROM email_svc.transformation_rules WHERE rule_id = $1`, ruleID).Scan(&submittedBy, &status, &inboxID)
+	if err != nil {
+		emailcommon.RespondBadRequest(w, "rule not found")
+		return false
+	}
+	if !strings.HasPrefix(strings.ToUpper(status), "PENDING") {
+		emailcommon.RespondBadRequest(w, "rule is not pending approval")
+		return false
+	}
+	if governance.IsSelfApprovalCtx(r.Context(), submittedBy) || governance.IsSelfApproval(checker, submittedBy) {
+		emailcommon.RespondForbidden(w, governance.ErrSelfApproval.Error())
+		return false
+	}
+	if inboxID != "" && !emailcommon.CanManageInbox(r.Context(), pool, inboxID, checker) {
+		emailcommon.RespondForbidden(w, "inbox not accessible")
+		return false
+	}
+	return true
 }

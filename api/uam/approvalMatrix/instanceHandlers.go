@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	approvalengine "CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -42,7 +43,7 @@ func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment       string `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body: "+errtext.Detail(w, err))
 			return
 		}
 		if req.UserID == "" {
@@ -124,7 +125,7 @@ func GetMyPendingApprovals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		summaries, err := approvalengine.GetPendingForUser(ctx, pgxPool, userID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch pending approvals: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch pending approvals: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -157,7 +158,7 @@ func GetMySubmissions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		summaries, err := approvalengine.GetMySubmissions(ctx, pgxPool, userID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch submissions: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch submissions: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -226,11 +227,11 @@ func GetInstanceDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if ensured := approvalengine.EnsureInstanceForRecord(ctx, pgxPool, moduleCode, recordID); ensured != "" {
 						instanceID = ensured
 					} else {
-						api.RespondWithError(w, http.StatusNotFound, lookupErr.Error())
+						api.RespondWithError(w, http.StatusNotFound, errtext.Detail(w, lookupErr))
 						return
 					}
 				} else {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve instance: "+lookupErr.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve instance: "+errtext.Detail(w, lookupErr))
 					return
 				}
 			} else {
@@ -241,10 +242,10 @@ func GetInstanceDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		detail, err := approvalengine.GetRichInstanceDetail(ctx, pgxPool, instanceID, viewerUserID)
 		if err != nil {
 			if strings.Contains(err.Error(), substrNotFound) {
-				api.RespondWithError(w, http.StatusNotFound, err.Error())
+				api.RespondWithError(w, http.StatusNotFound, errtext.Detail(w, err))
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch instance: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch instance: "+errtext.Detail(w, err))
 			return
 		}
 

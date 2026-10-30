@@ -26,6 +26,7 @@ package fdMaster
 // stays thin and does not duplicate logic.
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -233,7 +234,7 @@ func GetHolidayListHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			req.To = r.URL.Query().Get("to")
 		} else {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -318,7 +319,7 @@ func GetHolidayListHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		holidays, err := GetHolidayListForRange(ctx, conn, req.CalendarCode, from, to)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -427,7 +428,7 @@ func MaturityDateHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req MaturityDateRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -452,6 +453,10 @@ func MaturityDateHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			tenorDays = int(rawMaturity.Sub(startDate).Hours() / 24)
 		default:
 			api.RespondWithError(w, http.StatusBadRequest, "provide one of tenor_days, tenor_months, or tenor_years (> 0)")
+			return
+		}
+		if tenorDays > maxSimulationTenorDays {
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("tenor cannot exceed %d days", maxSimulationTenorDays))
 			return
 		}
 
@@ -759,6 +764,10 @@ type simulationResult struct {
 	CompoundingDates *json.RawMessage // CAPITALIZATION boundary dates
 }
 
+// maxSimulationTenorDays bounds simulator and maturity-date tenors (50 years) so a request
+// cannot drive the per-day date and schedule loops without limit.
+const maxSimulationTenorDays = 50 * 366
+
 // runSimulationForRequest validates the request, loads all required DB masters,
 // runs generateCashflowSchedule and returns a fully populated simulationResult.
 // It does NOT write any HTTP response; that is left to the caller.
@@ -818,6 +827,9 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 
 	if tenorDays <= 0 {
 		return nil, fmt.Errorf("cannot determine tenor: maturity_date must be after start_date")
+	}
+	if tenorDays > maxSimulationTenorDays {
+		return nil, fmt.Errorf("tenor cannot exceed %d days", maxSimulationTenorDays)
 	}
 	_ = tenorFromMonthsOrYears // holiday adjustment applied below after cfg+cal are loaded
 
@@ -1040,7 +1052,7 @@ func SimulateCashflowHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req SimulateCashflowRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -1054,7 +1066,7 @@ func SimulateCashflowHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		result, err := runSimulationForRequest(ctx, conn, req)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -2203,7 +2215,7 @@ func SimulateDiffHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req SimulateDiffRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -2218,14 +2230,14 @@ func SimulateDiffHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		// ── Run booking simulation ────────────────────────────────────────
 		bookingResult, err := runSimulationForRequest(ctx, conn, req.Booking)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "booking simulation error: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "booking simulation error: "+errtext.Detail(w, err))
 			return
 		}
 
 		// ── Run confirmation simulation ───────────────────────────────────
 		confirmResult, err := runSimulationForRequest(ctx, conn, req.Confirmation)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation simulation error: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "confirmation simulation error: "+errtext.Detail(w, err))
 			return
 		}
 

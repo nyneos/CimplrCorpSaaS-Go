@@ -76,7 +76,7 @@ func GetUncategorizedTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 				COALESCE(mc.category_name, 'Uncategorized') as category_name
 			FROM cimplrcorpsaas.bank_statement_transactions t
 			JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
-			LEFT JOIN public.masterbankaccount mba ON t.account_number = mba.account_number
+			LEFT JOIN public.masterbankaccount mba ON t.account_number = mba.account_number AND mba.entity_id::text = bs.entity_id::text AND mba.is_deleted = false
 			LEFT JOIN public.mastercashflowcategory mc ON t.category_id = mc.category_id
 			WHERE (t.category_id IS NULL OR t.category_id = '')
 			  AND COALESCE(bs.is_deleted, false) = false

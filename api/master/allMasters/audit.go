@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -94,12 +95,12 @@ func runAuditHistory(
 
 	rows, err := pgxPool.Query(ctx, q, args...)
 	if err != nil {
-		api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+		api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 		return
 	}
 	payload, err := scanAuditRows(rows)
 	if err != nil {
-		api.RespondWithError(w, http.StatusInternalServerError, "failed to read audit history: "+err.Error())
+		api.RespondWithError(w, http.StatusInternalServerError, "failed to read audit history: "+errtext.Detail(w, err))
 		return
 	}
 	respondAuditData(w, payload)
@@ -177,12 +178,12 @@ func GetBankMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		payload, err := scanAuditRows(rows)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to read audit history: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read audit history: "+errtext.Detail(w, err))
 			return
 		}
 		respondAuditData(w, payload)

@@ -1,6 +1,7 @@
 package fdAccounting
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -65,7 +66,7 @@ func actOnJournals(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			})
 			if err != nil {
 				api.LogError("[FDAccounting] ActOnPendingOrDiagnose %s failed for %s: %v", action, entryID, err)
-				errs = append(errs, entryID+": "+err.Error())
+				errs = append(errs, entryID+": "+errtext.Text(err))
 				continue
 			}
 			if res.Acted {
@@ -74,7 +75,7 @@ func actOnJournals(pool *pgxpool.Pool, action string) http.HandlerFunc {
 				errs = append(errs, entryID+": "+res.Reason)
 				continue
 			} else if err := directStampAudit(ctx, pool, entryID, action, actor.Email, req.Comment); err != nil {
-				errs = append(errs, entryID+": "+err.Error())
+				errs = append(errs, entryID+": "+errtext.Text(err))
 				continue
 			} else {
 				directActed++

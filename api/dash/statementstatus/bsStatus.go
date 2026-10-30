@@ -330,7 +330,7 @@ JOIN (
 		SELECT DISTINCT ON (bank_id) bank_id, processing_status
 		FROM public.auditactionbank
 		ORDER BY bank_id, requested_at DESC
-) ab ON ab.bank_id = mba.bank_id AND ab.processing_status = 'APPROVED'
+) ab ON ab.bank_id = mba.bank_id AND UPPER(TRIM(ab.processing_status)) = 'APPROVED'
 LEFT JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
 LEFT JOIN public.masterentitycash me ON mba.entity_id = me.entity_id
 -- latest APPROVED bank_statement per account in the horizon window, ordered by statement_period_end
@@ -338,7 +338,7 @@ LEFT JOIN LATERAL (
 	SELECT bs2.*
 	FROM cimplrcorpsaas.bank_statements bs2
 	WHERE bs2.is_deleted = false
-	  AND bs2.current_status = 'APPROVED'
+	  AND UPPER(TRIM(bs2.current_status)) = 'APPROVED'
 	  AND COALESCE(NULLIF(ltrim(trim(bs2.account_number), '0'), ''), trim(bs2.account_number))
 	      = COALESCE(NULLIF(ltrim(trim(mba.account_number), '0'), ''), trim(mba.account_number))
 		AND bs2.statement_period_start <= $6::date
@@ -381,7 +381,7 @@ LEFT JOIN LATERAL (
 		WHERE tx.bank_statement_id = bs3.bank_statement_id
 	) txn ON true
 	WHERE bs3.is_deleted = false
-	  AND bs3.current_status = 'APPROVED'
+	  AND UPPER(TRIM(bs3.current_status)) = 'APPROVED'
 	  AND COALESCE(NULLIF(ltrim(trim(bs3.account_number), '0'), ''), trim(bs3.account_number))
 	      = COALESCE(NULLIF(ltrim(trim(mba.account_number), '0'), ''), trim(mba.account_number))
 		AND bs3.statement_period_start <= $6::date
@@ -419,7 +419,8 @@ WHERE mba.is_deleted = false
 			var uploadedAt *time.Time
 			var stmtsJSON []byte
 			if err := rows.Scan(&entityName, &bankName, &currency, &accountNumber, &status, &uploadedAt, &stmtsJSON); err != nil {
-				continue
+				http.Error(w, "error scanning accounts: "+err.Error(), http.StatusInternalServerError)
+				return
 			}
 			ar := AccountRow{
 				Entity:   entityName,
@@ -439,6 +440,10 @@ WHERE mba.is_deleted = false
 			}
 			accounts = append(accounts, ar)
 		}
+		if err := rows.Err(); err != nil {
+			http.Error(w, "error reading accounts: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		// 2) Bank-wise compliance: only approved banks are included (join ab)
 		bankSQL := `
@@ -457,13 +462,13 @@ JOIN (
 		SELECT DISTINCT ON (bank_id) bank_id, processing_status
 		FROM public.auditactionbank
 		ORDER BY bank_id, requested_at DESC
-) ab ON ab.bank_id = mba.bank_id AND ab.processing_status = 'APPROVED'
+) ab ON ab.bank_id = mba.bank_id AND UPPER(TRIM(ab.processing_status)) = 'APPROVED'
 LEFT JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
 LEFT JOIN LATERAL (
 	SELECT bs2.bank_statement_id
 	FROM cimplrcorpsaas.bank_statements bs2
 	WHERE bs2.is_deleted = false
-	  AND bs2.current_status = 'APPROVED'
+	  AND UPPER(TRIM(bs2.current_status)) = 'APPROVED'
 	  AND COALESCE(NULLIF(ltrim(trim(bs2.account_number), '0'), ''), trim(bs2.account_number))
 	      = COALESCE(NULLIF(ltrim(trim(mba.account_number), '0'), ''), trim(mba.account_number))
 		AND bs2.statement_period_start <= $6::date
@@ -495,9 +500,14 @@ ORDER BY percent DESC;
 		for bankRows.Next() {
 			var b BankComplianceItem
 			if err := bankRows.Scan(&b.Bank, &b.Total, &b.Completed, &b.Percent); err != nil {
-				continue
+				http.Error(w, "error scanning bank compliance: "+err.Error(), http.StatusInternalServerError)
+				return
 			}
 			bankCompliance = append(bankCompliance, b)
+		}
+		if err := bankRows.Err(); err != nil {
+			http.Error(w, "error reading bank compliance: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 
 		// 3) Entity completeness: entities are evaluated only over accounts whose bank is APPROVED
@@ -517,14 +527,14 @@ JOIN (
 		SELECT DISTINCT ON (bank_id) bank_id, processing_status
 		FROM public.auditactionbank
 		ORDER BY bank_id, requested_at DESC
-) ab ON ab.bank_id = mba.bank_id AND ab.processing_status = 'APPROVED'
+) ab ON ab.bank_id = mba.bank_id AND UPPER(TRIM(ab.processing_status)) = 'APPROVED'
 LEFT JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
 LEFT JOIN public.masterentitycash me ON mba.entity_id = me.entity_id
 LEFT JOIN LATERAL (
 	SELECT bs2.bank_statement_id
 	FROM cimplrcorpsaas.bank_statements bs2
 	WHERE bs2.is_deleted = false
-	  AND bs2.current_status = 'APPROVED'
+	  AND UPPER(TRIM(bs2.current_status)) = 'APPROVED'
 	  AND COALESCE(NULLIF(ltrim(trim(bs2.account_number), '0'), ''), trim(bs2.account_number))
 	      = COALESCE(NULLIF(ltrim(trim(mba.account_number), '0'), ''), trim(mba.account_number))
 		AND bs2.statement_period_start <= $6::date
@@ -559,12 +569,17 @@ ORDER BY percent DESC;
 			var completed int64
 			var percent float64
 			if err := entityRows.Scan(&name, &total, &completed, &percent); err != nil {
-				continue
+				http.Error(w, "error scanning entity completeness: "+err.Error(), http.StatusInternalServerError)
+				return
 			}
 			entityCompleteness = append(entityCompleteness, EntityCompletenessItem{
 				Entity:  name,
 				Percent: percent,
 			})
+		}
+		if err := entityRows.Err(); err != nil {
+			http.Error(w, "error reading entity completeness: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 
 		resp := StatementStatusResponse{

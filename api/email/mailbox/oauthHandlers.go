@@ -1,17 +1,20 @@
 package emailmailbox
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	emailjobs "CimplrCorpSaas/internal/jobs/email"
@@ -106,20 +109,20 @@ func oauthFrontendRedirectBase() string {
 	return strings.TrimRight(strings.TrimSpace(os.Getenv("FRONTEND_URL")), "/")
 }
 
-func oauthCallbackRedirectURI(r *http.Request) string {
+// oauthCallbackRedirectURI is the provider callback URL. It comes from
+// configuration only. Request Host and X-Forwarded-Host are never used.
+func oauthCallbackRedirectURI() (string, error) {
 	if u := strings.TrimSpace(os.Getenv("MAIL_OAUTH_REDIRECT_URI")); u != "" {
-		return u
+		return u, nil
 	}
-	scheme := "http"
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-		scheme = "https"
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("OAUTH_REDIRECT_BASE_URL")), "/")
+	if base == "" {
+		return "", fmt.Errorf("oauth redirect base is not configured")
 	}
-	host := r.Host
-	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
-		host = fwd
-	}
-	return fmt.Sprintf("%s://%s/email/oauth/callback", scheme, host)
+	return base + "/email/oauth/callback", nil
 }
+
+const oauthStateInboxSep = "~"
 
 func randomOAuthState() (string, error) {
 	b := make([]byte, 24)
@@ -171,7 +174,7 @@ func HandleOAuthStart(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		provider, err := normalizeOAuthProvider(req.Provider)
 		if err != nil {
-			emailcommon.RespondBadRequest(w, err.Error())
+			emailcommon.RespondBadRequest(w, errtext.Detail(w, err))
 			return
 		}
 		transport := normalizeOAuthTransport(req.Transport)
@@ -187,25 +190,39 @@ func HandleOAuthStart(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		inboxID := strings.TrimSpace(req.InboxID)
+		if inboxID != "" && !emailcommon.CanManageInbox(r.Context(), pool, inboxID, userID) {
+			emailcommon.RespondForbidden(w, "inbox not accessible")
+			return
+		}
 		state, err := randomOAuthState()
 		if err != nil {
 			emailcommon.RespondInternal(w, "failed to generate state")
 			return
 		}
-		redirectURI := oauthCallbackRedirectURI(r)
+		if inboxID != "" {
+			state += oauthStateInboxSep + inboxID
+		}
+		redirectURI, err := oauthCallbackRedirectURI()
+		if err != nil {
+			http.Error(w, errtext.Detail(w, err), http.StatusBadRequest)
+			return
+		}
 		expires := time.Now().UTC().Add(15 * time.Minute)
 		_, err = pool.Exec(r.Context(), `
 			INSERT INTO email_svc.oauth_connect_state (state, provider, transport, user_id, mailbox_hint, redirect_uri, expires_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
 		`, state, provider, transport, userID, strings.TrimSpace(req.MailboxHint), redirectURI, expires)
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email oauth start state insert: %v", err)
+			emailcommon.RespondInternal(w, "failed to start oauth")
 			return
 		}
 
 		authURL, err := rt.OAuthAuthorizeURL(r.Context(), provider, transport, redirectURI, state)
 		if err != nil {
-			emailcommon.RespondFailPayload(w, constants.RouteOAuthStart, err.Error(), map[string]interface{}{"ok": false})
+			api.LogErrorForResponse(w, "email oauth start authorize url: %v", err)
+			emailcommon.RespondFailPayload(w, constants.RouteOAuthStart, "failed to start oauth", map[string]interface{}{"ok": false})
 			return
 		}
 
@@ -238,7 +255,7 @@ func HandleOAuthCallback(pool *pgxpool.Pool) http.HandlerFunc {
 		redirectOK := func(email, provider, inboxID string) {
 			if frontend == "" {
 				w.Header().Set("Content-Type", "text/html")
-				fmt.Fprintf(w, "<html><body><p>OAuth connected for %s (%s). You may close this window.</p></body></html>", email, provider)
+				fmt.Fprintf(w, "<html><body><p>OAuth connected for %s (%s). You may close this window.</p></body></html>", html.EscapeString(email), html.EscapeString(provider))
 				return
 			}
 			q := fmt.Sprintf("oauth=success&provider=%s&email=%s", urlQueryEscape(provider), urlQueryEscape(email))
@@ -282,11 +299,13 @@ func HandleOAuthCallback(pool *pgxpool.Pool) http.HandlerFunc {
 
 		exchanged, err := rt.OAuthExchange(r.Context(), provider, transport, code, redirectURI)
 		if err != nil {
-			redirectFail(err.Error())
+			api.LogErrorForResponse(w, "email oauth callback exchange: %v", err)
+			redirectFail("oauth token exchange failed")
 			return
 		}
 		if err := rt.VerifyOAuth(r.Context(), provider, exchanged.AccessToken); err != nil {
-			redirectFail(err.Error())
+			api.LogErrorForResponse(w, "email oauth callback verify: %v", err)
+			redirectFail("oauth verification failed")
 			return
 		}
 
@@ -304,7 +323,10 @@ func HandleOAuthCallback(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		expires := time.Now().UTC().Add(time.Duration(exchanged.ExpiresIn) * time.Second)
-		inboxID := strings.TrimSpace(r.URL.Query().Get("inbox_id"))
+		inboxID := ""
+		if i := strings.Index(state, oauthStateInboxSep); i >= 0 {
+			inboxID = strings.TrimSpace(state[i+len(oauthStateInboxSep):])
+		}
 
 		// Persist tokens on matching pending inbox or create a draft pending inbox.
 		if inboxID == "" {
@@ -312,8 +334,9 @@ func HandleOAuthCallback(pool *pgxpool.Pool) http.HandlerFunc {
 				SELECT inbox_id::text FROM email_svc.inbox_config
 				WHERE mailbox_address = $1 AND is_deleted = false
 				  AND processing_status IN ('PENDING_APPROVAL','APPROVED')
+				  AND (COALESCE(owner_user_id,'') = $2 OR COALESCE(submitted_by,'') = $2)
 				ORDER BY created_at DESC LIMIT 1
-			`, email).Scan(&inboxID)
+			`, email, userID).Scan(&inboxID)
 		}
 
 		if inboxID != "" {
@@ -369,6 +392,10 @@ func HandleOAuthStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
+		if !emailcommon.CanManageInbox(r.Context(), pool, req.InboxID, api.GetUserIDFromCtx(r.Context())) {
+			emailcommon.RespondForbidden(w, "inbox not accessible")
+			return
+		}
 		fields, err := LoadMailboxOAuthFields(r.Context(), pool, strings.TrimSpace(req.InboxID))
 		if err != nil {
 			emailcommon.RespondBadRequest(w, "inbox not found")
@@ -408,6 +435,10 @@ func HandleOAuthTest(pool *pgxpool.Pool) http.HandlerFunc {
 		var mailbox string
 		var imapFields MailboxIMAPFields
 		if inboxID := strings.TrimSpace(req.InboxID); inboxID != "" {
+			if !emailcommon.CanManageInbox(r.Context(), pool, inboxID, api.GetUserIDFromCtx(r.Context())) {
+				emailcommon.RespondForbidden(w, "inbox not accessible")
+				return
+			}
 			fields, err := LoadMailboxOAuthFields(r.Context(), pool, inboxID)
 			if err != nil {
 				emailcommon.RespondBadRequest(w, "inbox not found")
@@ -420,7 +451,8 @@ func HandleOAuthTest(pool *pgxpool.Pool) http.HandlerFunc {
 			if accessToken == "" {
 				refreshed, rErr := rt.OAuthRefresh(r.Context(), fields.OAuthProvider, fields.OAuthMailTransport, fields.OAuthRefreshToken)
 				if rErr != nil {
-					emailcommon.RespondFailPayload(w, constants.RouteOAuthTest, rErr.Error(), map[string]interface{}{"ok": false})
+					api.LogErrorForResponse(w, "email oauth test refresh: %v", rErr)
+					emailcommon.RespondFailPayload(w, constants.RouteOAuthTest, "failed to refresh oauth token", map[string]interface{}{"ok": false})
 					return
 				}
 				accessToken = refreshed.AccessToken
@@ -433,7 +465,7 @@ func HandleOAuthTest(pool *pgxpool.Pool) http.HandlerFunc {
 				var loadErr error
 				mailbox, imapFields, loadErr = LoadMailboxIMAPFields(r.Context(), pool, inboxID)
 				if loadErr != nil {
-					emailcommon.RespondBadRequest(w, loadErr.Error())
+					emailcommon.RespondBadRequest(w, errtext.Detail(w, loadErr))
 					return
 				}
 			}
@@ -447,12 +479,14 @@ func HandleOAuthTest(pool *pgxpool.Pool) http.HandlerFunc {
 			imapPayload.AuthMode = "oauth"
 			imapPayload.AccessToken = accessToken
 			if err := rt.VerifyIMAP(r.Context(), mailbox, imapPayload); err != nil {
-				emailcommon.RespondFailPayload(w, constants.RouteOAuthTest, err.Error(), map[string]interface{}{"ok": false})
+				api.LogErrorForResponse(w, "email oauth test imap: %v", err)
+				emailcommon.RespondFailPayload(w, constants.RouteOAuthTest, "oauth connection failed", map[string]interface{}{"ok": false})
 				return
 			}
 		} else {
 			if err := rt.VerifyOAuth(r.Context(), provider, accessToken); err != nil {
-				emailcommon.RespondFailPayload(w, constants.RouteOAuthTest, err.Error(), map[string]interface{}{"ok": false})
+				api.LogErrorForResponse(w, "email oauth test verify: %v", err)
+				emailcommon.RespondFailPayload(w, constants.RouteOAuthTest, "oauth connection failed", map[string]interface{}{"ok": false})
 				return
 			}
 		}

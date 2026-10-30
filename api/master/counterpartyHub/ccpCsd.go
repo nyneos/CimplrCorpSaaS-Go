@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
@@ -84,7 +85,7 @@ func CreateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := validateCcpCsdInput(req.CcpCsdInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -134,22 +135,32 @@ func CreateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(id, uID, uEmail string) {
-			defer func() { recover() }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
-			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "CCP_CSD_CREATE",
 				RecordID: id, RecordTable: "apibox.ccp_csd_master",
 				AuditTable: "apibox.audit_ccp_csd", AuditIDColumn: "ccp_csd_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 				RequirePinnedMatrix: true,
 				AutoApplyIfUnpinned: true,
-			})
+			}); err != nil {
+				logger.LogError("[CounterpartyHub] approval instance creation failed: %v", err)
+			}
 		}(ccpID, req.UserID, userEmail)
 
 		go func(id, uEmail string) {
-			defer func() { recover() }()
-			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 				"/master/counterparty-hub/ccp-csd/create", id,
 				map[string]interface{}{"record_id": id, "event": "CCP_CSD_CREATED", "actor_email": uEmail},
 			)
@@ -191,7 +202,7 @@ func CreateCcpCsdBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for i, row := range req.Rows {
 			if err := validateCcpCsdInput(row); err != nil {
-				errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 				continue
 			}
 			id, err := insertCcpCsdInTx(ctx, pgxPool, row, userEmail)
@@ -299,7 +310,7 @@ func UpdateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if k == "clearing_acct_kms_ref" {
 				if s, ok := v.(string); ok {
 					if err := validateKMSPath("clearing_acct_kms_ref", s); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 						return
 					}
 				}
@@ -421,8 +432,8 @@ func BulkApproveCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					logger.LogError("approveCcpCsd: delete ccp_csd_master exec failed: %v", err)
 				}
 			}
-			if _, err := tx.Exec(ctx, `UPDATE apibox.audit_ccp_csd SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE audit_id=$3`, userEmail, req.Comment, a.AuditID); err != nil {
-				errList = append(errList, map[string]interface{}{"ccp_csd_id": a.ID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			if _, err := tx.Exec(ctx, `UPDATE apibox.audit_ccp_csd SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (audit_id=$3) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`, userEmail, req.Comment, a.AuditID); err != nil {
+				errList = append(errList, map[string]interface{}{"ccp_csd_id": a.ID, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 				continue
 			}
 			success = append(success, map[string]interface{}{constants.ValueSuccess: true, "ccp_csd_id": a.ID})
@@ -472,7 +483,7 @@ func BulkRejectCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		res, err := tx.Exec(ctx, `
 			UPDATE apibox.audit_ccp_csd SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE ccp_csd_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'`,
+			WHERE (ccp_csd_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`,
 			userEmail, req.Comment, req.CcpCsdIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")
@@ -659,7 +670,7 @@ func GetCcpCsdAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -737,7 +748,7 @@ func GetCcpCsdDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusNotFound, "CCP/CSD record not found")
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{

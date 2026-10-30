@@ -2,6 +2,7 @@ package redemption
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/governance"
 	approvalengine "CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/uploadutil"
@@ -555,6 +556,11 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		})
 
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
 			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, []string{confirmID}, constants.AuditActionCreate, userEmail)
 			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/create", confirmID, payload.ToMap())
 			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION_CONF", "POST_CREATE", []string{confirmID}, userEmail)
@@ -754,6 +760,11 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(createdConfirmIDs) > 0 {
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
 				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, createdConfirmIDs, constants.AuditActionCreate, userEmail)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/create-bulk", createdConfirmIDs[0], payload.ToMap())
 			}()
@@ -888,6 +899,11 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
 			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, []string{req.RedemptionConfirmID}, "UPDATE", userEmail)
 			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/update", req.RedemptionConfirmID, payload.ToMap())
 		}()
@@ -1046,6 +1062,11 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(updatedConfirmIDs) > 0 {
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
 				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, updatedConfirmIDs, "UPDATE", userEmail)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/update-bulk", updatedConfirmIDs[0], payload.ToMap())
 			}()
@@ -1142,6 +1163,11 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
 			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, req.RedemptionConfirmIDs, "DELETE_REQUEST", requestedBy)
 			corID := ""
 			if len(req.RedemptionConfirmIDs) > 0 {
@@ -1198,7 +1224,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		defer tx.Rollback(ctx)
 
 		sel := `
-			SELECT DISTINCT ON (redemption_confirm_id) action_id, redemption_confirm_id, actiontype, processing_status
+			SELECT DISTINCT ON (redemption_confirm_id) action_id, redemption_confirm_id, actiontype, processing_status, COALESCE(requested_by, '')
 			FROM investment.auditactionredemptionconfirmation
 			WHERE redemption_confirm_id = ANY($1)
 			  AND UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
@@ -1218,8 +1244,11 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		var deleteMasterIDs []string
 
 		for rows.Next() {
-			var aid, cid, atype, pstatus string
-			if err := rows.Scan(&aid, &cid, &atype, &pstatus); err != nil {
+			var aid, cid, atype, pstatus, maker string
+			if err := rows.Scan(&aid, &cid, &atype, &pstatus, &maker); err != nil {
+				continue
+			}
+			if governance.IsSelfApprovalCtx(ctx, maker) {
 				continue
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
@@ -1481,6 +1510,11 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 				editSet[id] = struct{}{}
 			}
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
 				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, ids, constants.AuditActionApprove, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, redemptionConfirmationApprovePath, ids[0], payload.ToMap())
 				for _, id := range ids {
@@ -1494,6 +1528,11 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		}
 		if len(deleteMasterIDs) > 0 {
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
 				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, deleteMasterIDs, constants.AuditActionDelete, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, redemptionConfirmationApprovePath, deleteMasterIDs[0], payload.ToMap())
 				for _, id := range deleteMasterIDs {
@@ -1632,6 +1671,11 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 
 		if len(req.RedemptionConfirmIDs) > 0 {
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
 				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, req.RedemptionConfirmIDs, constants.AuditActionReject, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/reject", req.RedemptionConfirmIDs[0], payload.ToMap())
 				for _, id := range req.RedemptionConfirmIDs {
@@ -1801,7 +1845,7 @@ func fetchRedemptionConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool,
 		LEFT JOIN resolved_folio rf ON rf.redemption_id = i.redemption_id
 		LEFT JOIN resolved_demat rd ON rd.redemption_id = i.redemption_id
 		LEFT JOIN LATERAL (
-			SELECT ai.* FROM uam.approval_instance ai
+			SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 			WHERE ai.record_id = m.redemption_confirm_id::text
 			  AND ai.module_code = 'INVESTMENT_MF'
 			  AND ai.status = 'PENDING'
@@ -1810,7 +1854,7 @@ func fetchRedemptionConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool,
 			LIMIT 1
 		) ai ON true
 		LEFT JOIN LATERAL (
-			SELECT aie.* FROM uam.approval_instance_eye aie
+			SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 			WHERE aie.instance_id = ai.instance_id
 			  AND aie.status = 'ACTIVE'
 			ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -2379,6 +2423,11 @@ func ConfirmRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
 			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, req.RedemptionConfirmationIDs, "CONFIRM", confirmedBy)
 			corID := ""
 			if len(req.RedemptionConfirmationIDs) > 0 {

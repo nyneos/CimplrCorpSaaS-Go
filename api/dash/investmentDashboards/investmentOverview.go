@@ -1,6 +1,7 @@
 package investmentdashboards
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/portfolio"
@@ -237,7 +238,6 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-
 // fetchAUMDetails returns detailed breakdown of current AUM by entity, AMC, scheme
 // using the same live holdings engine as Total AUM KPI.
 func fetchAUMDetails(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter string, allowedEntities []string) []InvestmentDetail {
@@ -340,7 +340,8 @@ func enrichInvestmentDetailsWithRisk(ctx context.Context, pgxPool *pgxpool.Pool,
 		var schemeID, risk, category, subCategory, schemeType string
 		var score int
 		if err := rows.Scan(&schemeID, &risk, &score, &category, &subCategory, &schemeType); err != nil {
-			continue
+			logger.LogError("[investmentOverview] enrichInvestmentDetailsWithRisk scan error: %v", err)
+			return
 		}
 		meta[schemeID] = InvestmentDetail{
 			RiskRating:        risk,
@@ -399,6 +400,7 @@ func overlayLiveAUMByAMCOnMonth(
 		}
 	}
 }
+
 // mapPortfolioTxRowsToDetails converts unified portfolio transaction rows for dashboard drill-downs.
 func mapPortfolioTxRowsToDetails(rows []portfolio.PortfolioTxRow) []TransactionDetail {
 	transactions := make([]TransactionDetail, 0, len(rows))
@@ -660,57 +662,70 @@ func getFinancialYearStart(t time.Time) time.Time {
 	return fy
 }
 
+const (
+	mfapiMaxSchemesPerRequest = 500
+	mfapiMaxBodyBytes         = 2 << 20 // 2MB
+	mfapiFetchConcurrency     = 4
+)
+
 // MFAPI cache to reduce external HTTP requests
 type mfapiCacheEntry struct {
 	Name      string
 	NAV       float64
 	PrevNAV   float64
+	NAVDate   string
+	PrevDate  string
 	FetchedAt time.Time
 }
 
+type mfSchemeMeta struct {
+	SchemeID string
+	ISIN     string
+	Name     string
+}
+
 var (
-	mfapiCacheMu  sync.RWMutex
-	mfapiCache    = make(map[string]mfapiCacheEntry)
-	mfapiCacheTTL = 90 * time.Second
+	mfapiCacheMu    sync.RWMutex
+	mfapiCache      = make(map[string]mfapiCacheEntry)
+	mfapiCacheTTL   = 90 * time.Second
+	mfapiHTTPClient = &http.Client{Timeout: 15 * time.Second}
 )
 
-// shared HTTP client with timeout
-var httpClient = &http.Client{Timeout: 5 * time.Second}
-
-// getMFAPIData fetches latest and previous NAV from MFAPI with caching.
-// Returns scheme name (if available), nav and prevNav (0 if not found).
 // getMFAPIData fetches latest and previous NAV from MFAPI with caching and returns
-// (schemeName, latestNav, prevNav, latestDate, prevDate)
-func getMFAPIData(code string) (string, float64, float64, string, string) {
-	if code == "" {
+// (schemeName, latestNav, prevNav, latestDate, prevDate). Dates are the raw payload
+// values; callers must parse them and skip a point whose date does not parse.
+func getMFAPIData(ctx context.Context, code string) (string, float64, float64, string, string) {
+	if ctx == nil || code == "" {
 		return "", 0, 0, "", ""
 	}
 
-	// Check cache
 	mfapiCacheMu.RLock()
 	entry, ok := mfapiCache[code]
 	mfapiCacheMu.RUnlock()
 	if ok && time.Since(entry.FetchedAt) < mfapiCacheTTL {
-		return entry.Name, entry.NAV, entry.PrevNAV, "", ""
+		return entry.Name, entry.NAV, entry.PrevNAV, entry.NAVDate, entry.PrevDate
 	}
+
 	apiURL := fmt.Sprintf("https://api.mfapi.in/mf/%s", code)
 	var body []byte
 	var respErr error
-	// simple retry(1)
-	for i := 0; i < 2; i++ {
-		resp, err := httpClient.Get(apiURL)
-		if err != nil || resp == nil {
-			respErr = err
-			if resp != nil {
-				resp.Body.Close()
-			}
-			time.Sleep(200 * time.Millisecond)
-			continue
+	for attempt := 0; attempt < 2; attempt++ {
+		if ctx.Err() != nil {
+			return "", 0, 0, "", ""
 		}
-		body, _ = io.ReadAll(resp.Body)
-		resp.Body.Close()
-		respErr = nil
-		break
+		body, respErr = readMFAPIBody(ctx, apiURL)
+		if respErr == nil {
+			break
+		}
+		if attempt == 0 {
+			timer := time.NewTimer(200 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return "", 0, 0, "", ""
+			case <-timer.C:
+			}
+		}
 	}
 	if respErr != nil {
 		return "", 0, 0, "", ""
@@ -733,12 +748,10 @@ func getMFAPIData(code string) (string, float64, float64, string, string) {
 	var navDate, prevDate string
 	if json.Unmarshal(body, &apiResp) == nil && len(apiResp.Data) > 0 {
 		name = apiResp.Meta.SchemeName
-		// parse latest
 		if val, err := strconv.ParseFloat(strings.ReplaceAll(apiResp.Data[0].NAV, ",", ""), 64); err == nil {
 			nav = val
 			navDate = apiResp.Data[0].Date
 		}
-		// parse previous (if present)
 		if len(apiResp.Data) > 1 {
 			if val, err := strconv.ParseFloat(strings.ReplaceAll(apiResp.Data[1].NAV, ",", ""), 64); err == nil {
 				prev = val
@@ -747,12 +760,87 @@ func getMFAPIData(code string) (string, float64, float64, string, string) {
 		}
 	}
 
-	// Store in cache
 	mfapiCacheMu.Lock()
-	mfapiCache[code] = mfapiCacheEntry{Name: name, NAV: nav, PrevNAV: prev, FetchedAt: time.Now()}
+	mfapiCache[code] = mfapiCacheEntry{
+		Name: name, NAV: nav, PrevNAV: prev, NAVDate: navDate, PrevDate: prevDate, FetchedAt: time.Now(),
+	}
 	mfapiCacheMu.Unlock()
 
 	return name, nav, prev, navDate, prevDate
+}
+
+func readMFAPIBody(ctx context.Context, apiURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := mfapiHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, mfapiMaxBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > mfapiMaxBodyBytes {
+		return nil, fmt.Errorf("mfapi response exceeds %d bytes", mfapiMaxBodyBytes)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mfapi status %d", resp.StatusCode)
+	}
+	return body, nil
+}
+
+// parseMFAPIDate parses an mfapi.in NAV date. It returns false when the payload
+// date is missing or not a known layout so callers skip that point.
+func parseMFAPIDate(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{constants.DateFormatAlt, constants.DateFormat, constants.DateFormatDash, "02-Jan-06"} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// lookupMFSchemeMeta loads scheme display fields in one query before any mfapi calls.
+func lookupMFSchemeMeta(ctx context.Context, pgxPool *pgxpool.Pool, codes []string) map[string]mfSchemeMeta {
+	out := make(map[string]mfSchemeMeta, len(codes))
+	if len(codes) == 0 {
+		return out
+	}
+	rows, err := pgxPool.Query(ctx, `
+		SELECT DISTINCT ON (amfi_scheme_code::text)
+			amfi_scheme_code::text,
+			COALESCE(scheme_id::text, ''),
+			COALESCE(isin, ''),
+			COALESCE(scheme_name, '')
+		FROM investment.masterscheme
+		WHERE amfi_scheme_code::text = ANY($1::text[])
+		ORDER BY amfi_scheme_code::text`, codes)
+	if err != nil {
+		logger.LogErrorCtx(ctx, "[investmentOverview] masterscheme lookup for mfapi ticker failed: %v", err)
+		return out
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var code, schemeID, isin, name string
+		if err := rows.Scan(&code, &schemeID, &isin, &name); err != nil {
+			logger.LogErrorCtx(ctx, "[investmentOverview] masterscheme scan for mfapi ticker failed: %v", err)
+			return out
+		}
+		out[code] = mfSchemeMeta{SchemeID: schemeID, ISIN: isin, Name: name}
+	}
+	if err := rows.Err(); err != nil {
+		logger.LogErrorCtx(ctx, "[investmentOverview] masterscheme rows for mfapi ticker failed: %v", err)
+	}
+	return out
 }
 
 // CashFlow used for XIRR
@@ -898,9 +986,15 @@ func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var name string
 			var ytd float64
 			if err := rows.Scan(&name, &ytd); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			out = append(out, EntityPerformanceRow{Label: name, YTD: ytd})
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		// RAW TABULAR DATA: Portfolio snapshot rows that create the performance numbers
@@ -1079,11 +1173,17 @@ func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var r rowOut
 			if err := rows.Scan(&r.AMCName, &r.StartValue, &r.EndValue, &r.Delta, &r.OpeningTotal, &r.ClosingTotal); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			openingTotal = r.OpeningTotal
 			closingTotal = r.ClosingTotal
 			amcRows = append(amcRows, r)
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		// If opening total is zero (no snapshots before period start), fallback to holdings-based AUM
@@ -1215,7 +1315,9 @@ func GetAMCPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 
 			if err := rows.Scan(&name, &startVal, &currVal, &pnl, &pct); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			if pct.Valid {
 				v := pct.Float64
@@ -1226,6 +1328,10 @@ func GetAMCPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			out = append(out, AMCPerfRow{AMCName: name, StartValue: startVal, CurrentValue: currVal, PnL: pnl, PnLPercent: pctPtr})
 			totalCurrentValue += currVal
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		// RAW TABULAR DATA: Portfolio snapshot rows that create AMC performance numbers
@@ -1474,12 +1580,18 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var amcName string
 			var aumValue float64
 			if err := rows.Scan(&monthIdx, &amcName, &aumValue); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			if _, ok := resultMap[monthIdx]; ok {
 				resultMap[monthIdx][amcName] = aumValue
 			}
 			amcSet[amcName] = true
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		if len(months) > 0 {
@@ -1794,10 +1906,16 @@ func GetAUMBreakdown(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var item AUMBreakdownItem
 			if err := rows.Scan(&item.Label, &item.Amount); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			breakdown = append(breakdown, item)
 			total += item.Amount
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		// Calculate percentages
@@ -1950,9 +2068,15 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for catRows.Next() {
 			var cd CategoryData
 			if err := catRows.Scan(&cd.Category, &cd.CurrentValue, &cd.InvestedAmount, &cd.WeightPct, &cd.CategoryReturn); err != nil {
-				continue
+				catRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			categories = append(categories, cd)
+		}
+		if err := catRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		// 3) Calculate Benchmark Return from live NSE/BSE index (indexed, base 100 at FY start)
@@ -2269,8 +2393,8 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"series": points, "benchmark_name": result.BenchmarkName,
-			"benchmark_provider": result.Provider,
-			"benchmark_source":   result.DataSource,
+			"benchmark_provider":   result.Provider,
+			"benchmark_source":     result.DataSource,
 			"benchmark_index_type": result.IndexType,
 			"methodology": map[string]string{
 				"portfolio": "Time-weighted: month-end AUM from all holdings × MFAPI NAV, chain-linked after stripping monthly net flows",
@@ -2416,7 +2540,9 @@ func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var row MutualFundTickerRow
 			if err := rows.Scan(&row.SchemeName, &row.AMC, &row.AMFICode, &row.InternalCode, &row.ISIN,
 				&row.NAV, &row.PrevNAV, &row.Change1D, &row.MTM, &row.Units, &row.Value); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			// Round values
@@ -2435,6 +2561,10 @@ func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else if row.Change1D < 0 {
 				losers++
 			}
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -2547,7 +2677,13 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		}
 
-		rows, err := pgxPool.Query(ctx, query, req.Limit)
+		queryLimit := req.Limit
+		if req.AllSchemes && queryLimit > mfapiMaxSchemesPerRequest {
+			// Read one past the cap so a full page means more schemes exist.
+			queryLimit = mfapiMaxSchemesPerRequest + 1
+		}
+
+		rows, err := pgxPool.Query(ctx, query, queryLimit)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -2557,59 +2693,94 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		out := make([]MarketRateTickerLiteRow, 0)
 
 		if req.AllSchemes {
-			// Collect AMFI codes from rows
 			codes := make([]string, 0)
 			for rows.Next() {
 				var code string
 				if err := rows.Scan(&code); err != nil {
+					rows.Close()
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+					return
+				}
+				if code == "" {
 					continue
 				}
 				codes = append(codes, code)
 			}
+			if err := rows.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			rows.Close()
+			if len(codes) > mfapiMaxSchemesPerRequest {
+				logger.LogInfoCtx(ctx, "[investmentOverview] mfapi scheme cap hit: request limit %d returned %d codes, fetching %d", req.Limit, len(codes), mfapiMaxSchemesPerRequest)
+				codes = codes[:mfapiMaxSchemesPerRequest]
+			}
 
-			type mfRes struct {
+			// One lookup, then release the connection before any outbound calls.
+			metaByCode := lookupMFSchemeMeta(ctx, pgxPool, codes)
+
+			type mfFetched struct {
 				Code     string
 				Name     string
 				NAV      float64
 				Prev     float64
+				NAVDate  string
 				SchemeID string
 				ISIN     string
 			}
 
-			resCh := make(chan mfRes, len(codes))
+			jobs := make(chan string)
+			fetched := make(chan mfFetched, len(codes))
 			var wg sync.WaitGroup
-			sem := make(chan struct{}, 16) // concurrency limit
-
-			for _, c := range codes {
-				wg.Add(1)
-				go func(code string) {
-					defer wg.Done()
-					sem <- struct{}{}
-					name, nav, prev, _, _ := getMFAPIData(code)
-					<-sem
-					// try to enrich from masterscheme: scheme_id, isin, scheme_name
-					var schemeID, isin, msName sql.NullString
-					q := `SELECT scheme_id, isin, scheme_name FROM investment.masterscheme WHERE amfi_scheme_code::text = $1 LIMIT 1`
-					qCtx, qCancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer qCancel()
-					_ = pgxPool.QueryRow(qCtx, q, code).Scan(&schemeID, &isin, &msName)
-					if name == "" && msName.Valid {
-						name = msName.String
-					}
-					resCh <- mfRes{Code: code, Name: name, NAV: nav, Prev: prev, SchemeID: schemeID.String, ISIN: isin.String}
-				}(c)
+			workers := mfapiFetchConcurrency
+			if len(codes) < workers {
+				workers = len(codes)
 			}
-
+			for i := 0; i < workers; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for code := range jobs {
+						if ctx.Err() != nil {
+							continue
+						}
+						name, nav, prev, navDate, _ := getMFAPIData(ctx, code)
+						meta := metaByCode[code]
+						if name == "" {
+							name = meta.Name
+						}
+						fetched <- mfFetched{
+							Code:     code,
+							Name:     name,
+							NAV:      nav,
+							Prev:     prev,
+							NAVDate:  navDate,
+							SchemeID: meta.SchemeID,
+							ISIN:     meta.ISIN,
+						}
+					}
+				}()
+			}
+		enqueue:
+			for _, code := range codes {
+				select {
+				case <-ctx.Done():
+					break enqueue
+				case jobs <- code:
+				}
+			}
+			close(jobs)
 			wg.Wait()
-			close(resCh)
+			close(fetched)
 
-			var stagingHits, mfapiHits, mfapiMisses int
-			for r := range resCh {
-				nav := r.NAV
-				prevNav := r.Prev
+			upsertQ := `INSERT INTO investment.amfi_nav_staging (scheme_code, scheme_name, nav_value, nav_date, file_date, created_at)
+				VALUES ($1, $2, $3::numeric(18,4), $4::date, $4::date, now())
+				ON CONFLICT (scheme_code, nav_date) DO UPDATE SET nav_value = EXCLUDED.nav_value, scheme_name = COALESCE(amfi_nav_staging.scheme_name, EXCLUDED.scheme_name)`
+
+			for item := range fetched {
+				nav := item.NAV
+				prevNav := item.Prev
 				change := nav - prevNav
-				// Round to 4 decimals
 				nav = math.Round(nav*10000) / 10000
 				prevNav = math.Round(prevNav*10000) / 10000
 				change = math.Round(change*10000) / 10000
@@ -2620,16 +2791,13 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				source := "mfapi"
 				if nav == 0 && prevNav == 0 {
 					source = "none"
-					mfapiMisses++
-				} else {
-					mfapiHits++
 				}
 
 				out = append(out, MarketRateTickerLiteRow{
-					SchemeName: r.Name,
-					SchemeID:   r.SchemeID,
-					AMFICode:   r.Code,
-					ISIN:       r.ISIN,
+					SchemeName: item.Name,
+					SchemeID:   item.SchemeID,
+					AMFICode:   item.Code,
+					ISIN:       item.ISIN,
 					NAV:        nav,
 					PrevNAV:    prevNav,
 					Change:     change,
@@ -2637,34 +2805,31 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					NavSource:  source,
 				})
 
-				// Persist MFapi latest nav into staging for subsequent fast reads
-				if source == "mfapi" && nav > 0 {
-					// parse code to bigint
-					if sc, err := strconv.ParseInt(r.Code, 10, 64); err == nil {
-						// parse nav date (if available) from MFAPI (we don't have date here in this path)
-						// Insert with today's file_date and created_at
-						upsertQ := `INSERT INTO investment.amfi_nav_staging (scheme_code, scheme_name, nav_value, nav_date, file_date, created_at)
-							VALUES ($1, $2, $3::numeric(18,4), CURRENT_DATE, CURRENT_DATE, now())
-							ON CONFLICT (scheme_code, nav_date) DO UPDATE SET nav_value = EXCLUDED.nav_value, scheme_name = COALESCE(amfi_nav_staging.scheme_name, EXCLUDED.scheme_name)`
-						go func(codeInt int64, name string, navVal float64) {
-							// run in goroutine to avoid blocking
-							uCtx, uCancel := context.WithTimeout(context.Background(), 10*time.Second)
-							defer uCancel()
-							_, _ = pgxPool.Exec(uCtx, upsertQ, codeInt, nullIfEmpty(name), navVal)
-						}(sc, r.Name, nav)
-					}
+				// Persist on this request only. Skip when the payload date cannot be parsed.
+				if source != "mfapi" || nav <= 0 || ctx.Err() != nil {
+					continue
+				}
+				navDay, ok := parseMFAPIDate(item.NAVDate)
+				if !ok {
+					continue
+				}
+				schemeCode, err := strconv.ParseInt(item.Code, 10, 64)
+				if err != nil {
+					continue
+				}
+				if _, err := pgxPool.Exec(ctx, upsertQ, schemeCode, nullIfEmpty(item.Name), nav, navDay.Format(constants.DateFormat)); err != nil {
+					api.LogErrorForResponse(w, "[investmentOverview] mfapi nav staging upsert failed for %s: %v", item.Code, err)
 				}
 			}
-			_ = stagingHits
-			_ = mfapiHits
-			_ = mfapiMisses
 		} else {
 			var stagingHits int
 			for rows.Next() {
 				var rname, sid, amfi, isin string
 				var nav, prevNav float64
 				if err := rows.Scan(&rname, &sid, &amfi, &isin, &nav, &prevNav); err != nil {
-					continue
+					rows.Close()
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+					return
 				}
 
 				source := "staging"
@@ -2700,6 +2865,10 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					ChangePct:  pct,
 					NavSource:  source,
 				})
+			}
+			if err := rows.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 		}
 		api.RespondWithPayload(w, true, "", out)

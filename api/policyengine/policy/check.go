@@ -59,6 +59,13 @@ func HandleCheck(pool *pgxpool.Pool) http.HandlerFunc {
 				"VALIDATION_ERROR")
 			return
 		}
+		req.ActorUserID = api.GetUserIDFromCtx(r.Context())
+		req.HandlerName = "HandleCheck"
+		req.APIPath = "/policy-engine/policies/check"
+		if strings.TrimSpace(req.EntityCode) != "" && !api.EntityInScope(r.Context(), req.EntityCode) {
+			api.RespondEntityOutOfScope(w)
+			return
+		}
 		if req.Variables == nil {
 			req.Variables = map[string]string{}
 		}

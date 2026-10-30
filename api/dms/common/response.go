@@ -2,6 +2,8 @@ package common
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -13,9 +15,18 @@ func RespondMethodNotAllowed(w http.ResponseWriter) {
 	api.RespondEnvelopeError(w, http.StatusMethodNotAllowed, "method not allowed — use POST", "METHOD_NOT_ALLOWED")
 }
 
+const maxDMSJSONBytes = 8 << 20
+
 func DecodeJSON(r *http.Request, dst interface{}) error {
 	defer r.Body.Close()
-	return json.NewDecoder(r.Body).Decode(dst)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxDMSJSONBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(body) > maxDMSJSONBytes {
+		return fmt.Errorf("request body exceeds %d bytes", maxDMSJSONBytes)
+	}
+	return json.Unmarshal(body, dst)
 }
 
 func RequirePOST(w http.ResponseWriter, r *http.Request) bool {

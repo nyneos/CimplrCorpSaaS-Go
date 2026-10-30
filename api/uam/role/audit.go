@@ -3,6 +3,7 @@ package role
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -57,7 +58,7 @@ func GetRoleAuditHistory(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(r.Context(), q, filter)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()

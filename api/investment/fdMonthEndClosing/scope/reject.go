@@ -1,6 +1,7 @@
 package scope
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -36,6 +37,9 @@ func RejectScope(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ids := mergeIDs(req.ScopeID, req.ScopeIDs)
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `SELECT c.entity_id::text FROM investment.fd_closing_cycle c JOIN investment.fd_closing_cycle_fd_scope x ON x.cycle_id = c.cycle_id WHERE x.scope_id::text = ANY($1)`, ids) {
+			return
+		}
 		if len(ids) == 0 {
 			fdclosingcommon.RespondError(w, http.StatusBadRequest, "scope_id or scope_ids is required")
 			return
@@ -60,7 +64,7 @@ func RejectScope(pool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[FDClosingScope] ActOnPendingOrDiagnose reject failed for %s: %v", scopeID, actionErr)
-				errs = append(errs, scopeID+": "+actionErr.Error())
+				errs = append(errs, scopeID+": "+errtext.Text(actionErr))
 				continue
 			}
 
@@ -75,7 +79,7 @@ func RejectScope(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := directRejectScope(ctx, pool, scopeID, actor.Email, req.Comment); err != nil {
-				errs = append(errs, scopeID+": "+err.Error())
+				errs = append(errs, scopeID+": "+errtext.Text(err))
 				continue
 			}
 			directActed++

@@ -13,13 +13,17 @@ import (
 	"time"
 )
 
+var mfapiHTTP = &http.Client{Timeout: 20 * time.Second}
+
+const mfapiMaxBody = 2 << 20
+
 type mfapiHistoryCacheEntry struct {
 	navByDate map[string]float64
 	expiry    time.Time
 }
 
 var (
-	mfapiHistoryCache   sync.Map
+	mfapiHistoryCache    sync.Map
 	mfapiHistoryCacheTTL = 6 * time.Hour
 )
 
@@ -49,14 +53,17 @@ func FetchMFAPINAVHistory(ctx context.Context, schemeCode string, from, to time.
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := mfapiHTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, mfapiMaxBody+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > mfapiMaxBody {
+		return nil, fmt.Errorf("mfapi response exceeds %d bytes", mfapiMaxBody)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("mfapi status %d", resp.StatusCode)

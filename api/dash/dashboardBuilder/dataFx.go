@@ -13,8 +13,9 @@ import (
 // (no line-item JOIN), entity scope, pending approval_instance status overlay.
 //
 // Dashboard-only enrichments (still one row per header, safe to SUM):
-//   hedged_amount / unhedged_amount from exposure_hedge_links
-//   line_item_amount / line_item_count rolled up from exposure_line_items
+//
+//	hedged_amount / unhedged_amount from exposure_hedge_links
+//	line_item_amount / line_item_count rolled up from exposure_line_items
 func queryFXExposureHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	_ = entityIDs
 	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "h", "entity")
@@ -96,7 +97,7 @@ func queryFXExposureHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, en
 			ORDER BY inst.submitted_at DESC NULLS LAST, inst.instance_id DESC
 			LIMIT 1
 		) i ON true
-		WHERE h.exposure_creation_status = 'Approved'
+		WHERE UPPER(TRIM(h.exposure_creation_status)) = 'APPROVED'
 		  AND h.is_deleted IS NOT TRUE %s
 		ORDER BY h.created_at DESC NULLS LAST, h.exposure_header_id
 		LIMIT NULLIF($1, 0) OFFSET $2
@@ -148,7 +149,7 @@ func queryFXExposureBucketing(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		FROM public.exposure_headers h
 		JOIN public.exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
 		LEFT JOIN public.exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id
-		WHERE (h.approval_status = 'approved' OR h.approval_status = 'Approved')
+		WHERE LOWER(TRIM(COALESCE(h.approval_status, ''))) = 'approved'
 		  AND COALESCE(h.is_deleted, false) = false %s
 		ORDER BY h.document_id, l.line_number NULLS FIRST
 		LIMIT NULLIF($1, 0) OFFSET $2

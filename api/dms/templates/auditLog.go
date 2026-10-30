@@ -24,6 +24,9 @@ func HandleAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid JSON body", "BAD_REQUEST")
 			return
 		}
+		if !common.RequireRecordsEntityAccess(w, r, pool, common.TemplateEntityQuery, []string{req.TemplateID}) {
+			return
+		}
 		templateID := strings.TrimSpace(req.TemplateID)
 		if templateID == "" {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "template_id is required", "BAD_REQUEST")

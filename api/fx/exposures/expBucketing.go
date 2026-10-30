@@ -3,7 +3,9 @@ package exposures
 // expBucketing.go: Handles exposure bucketing logic and APIs.
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -121,25 +123,15 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 			return
 		}
 
-		// // Middleware: Validate session
-		// activeSessions := auth.GetActiveSessions()
-		// found := false
-		// for _, session := range activeSessions {
-		// 	if session.UserID == req.UserID {
-		// 		found = true
-		// 		break
-		// 	}
-		// }
-		// if !found {
-		// 	respondWithError(w, http.StatusUnauthorized, "Unauthorized: invalid session")
-		// 	return
-		// }
-
-		// Middleware: Get business units from context
-		// if !ok {
-		// 	respondWithError(w, http.StatusInternalServerError, "Business units not found in context")
-		// 	return
-		// }
+		req.UserID = api.GetUserIDFromCtx(ctx)
+		if req.UserID == "" {
+			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+		if !api.EntityInScope(ctx, exposureEntityForHeader(ctx, pool, req.ExposureHeaderID)) {
+			api.RespondEntityOutOfScope(w)
+			return
+		}
 
 		updated := map[string]interface{}{}
 
@@ -148,12 +140,23 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 			req.BucketingFields = req.Fields
 		}
 
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		defer tx.Rollback(context.Background())
+
 		// Ensure exposure_bucketing row exists
 		if len(req.BucketingFields) > 0 {
 			var exists int
-			err := pool.QueryRow(ctx, "SELECT 1 FROM exposure_bucketing WHERE exposure_header_id = $1", req.ExposureHeaderID).Scan(&exists)
+			err := tx.QueryRow(ctx, "SELECT 1 FROM exposure_bucketing WHERE exposure_header_id = $1", req.ExposureHeaderID).Scan(&exists)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
 			if errors.Is(err, pgx.ErrNoRows) {
-				_, err := pool.Exec(ctx, "INSERT INTO exposure_bucketing (exposure_header_id) VALUES ($1)", req.ExposureHeaderID)
+				_, err := tx.Exec(ctx, "INSERT INTO exposure_bucketing (exposure_header_id) VALUES ($1)", req.ExposureHeaderID)
 				if err != nil {
 					respondWithError(w, http.StatusInternalServerError, "Failed to create exposure_bucketing row")
 					return
@@ -164,9 +167,13 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 		// Ensure hedging_proposal row exists
 		if len(req.HedgingFields) > 0 {
 			var exists int
-			err := pool.QueryRow(ctx, "SELECT 1 FROM hedging_proposal WHERE exposure_header_id = $1", req.ExposureHeaderID).Scan(&exists)
+			err := tx.QueryRow(ctx, "SELECT 1 FROM hedging_proposal WHERE exposure_header_id = $1", req.ExposureHeaderID).Scan(&exists)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
 			if errors.Is(err, pgx.ErrNoRows) {
-				_, err := pool.Exec(ctx, "INSERT INTO hedging_proposal (exposure_header_id) VALUES ($1)", req.ExposureHeaderID)
+				_, err := tx.Exec(ctx, "INSERT INTO hedging_proposal (exposure_header_id) VALUES ($1)", req.ExposureHeaderID)
 				if err != nil {
 					respondWithError(w, http.StatusInternalServerError, "Failed to create hedging_proposal row")
 					return
@@ -187,7 +194,7 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 		if len(req.HeaderFields) > 0 {
 			safeHeaderFields, err := filterColumns(req.HeaderFields, allowedExposureHeaderCols)
 			if err != nil {
-				respondWithError(w, http.StatusBadRequest, "headerFields: "+err.Error())
+				respondWithError(w, http.StatusBadRequest, "headerFields: "+errtext.Detail(w, err))
 				return
 			}
 			req.HeaderFields = safeHeaderFields
@@ -201,8 +208,12 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 			}
 			values = append(values, req.ExposureHeaderID)
 			query := fmt.Sprintf("UPDATE exposure_headers SET %s WHERE exposure_header_id = $%d RETURNING *", strings.Join(setParts, ", "), len(values))
-			rows, err := pool.Query(ctx, query, values...)
-			if err == nil {
+			rows, err := tx.Query(ctx, query, values...)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			{
 				cols := pgxColumnNames(rows)
 				for rows.Next() {
 					vals := make([]interface{}, len(cols))
@@ -211,7 +222,9 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 						valPtrs[i] = &vals[i]
 					}
 					if err := rows.Scan(valPtrs...); err != nil {
-						logger.LogError("update exposure_headers: scan failed: %v", err)
+						rows.Close()
+						respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+						return
 					}
 					rowMap := map[string]interface{}{}
 					for i, col := range cols {
@@ -220,8 +233,13 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 					updated["header"] = rowMap
 				}
 				rows.Close()
-				if _, err := pool.Exec(ctx, "UPDATE exposure_bucketing SET status_bucketing = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
-					logger.LogError("update exposure_bucketing status after header update: exec failed: %v", err)
+				if err := rows.Err(); err != nil {
+					respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
+				}
+				if _, err := tx.Exec(ctx, "UPDATE exposure_bucketing SET status_bucketing = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
+					respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
 				}
 			}
 		}
@@ -230,7 +248,7 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 		if len(req.LineItemFields) > 0 {
 			safeLineItemFields, err := filterColumns(req.LineItemFields, allowedExposureLineItemCols)
 			if err != nil {
-				respondWithError(w, http.StatusBadRequest, "lineItemFields: "+err.Error())
+				respondWithError(w, http.StatusBadRequest, "lineItemFields: "+errtext.Detail(w, err))
 				return
 			}
 			req.LineItemFields = safeLineItemFields
@@ -244,8 +262,12 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 			}
 			values = append(values, req.ExposureHeaderID)
 			query := fmt.Sprintf("UPDATE exposure_line_items SET %s WHERE exposure_header_id = $%d RETURNING *", strings.Join(setParts, ", "), len(values))
-			rows, err := pool.Query(ctx, query, values...)
-			if err == nil {
+			rows, err := tx.Query(ctx, query, values...)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			{
 				cols := pgxColumnNames(rows)
 				lineItems := []map[string]interface{}{}
 				for rows.Next() {
@@ -255,7 +277,9 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 						valPtrs[i] = &vals[i]
 					}
 					if err := rows.Scan(valPtrs...); err != nil {
-						logger.LogError("update exposure_line_items: scan failed: %v", err)
+						rows.Close()
+						respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+						return
 					}
 					rowMap := map[string]interface{}{}
 					for i, col := range cols {
@@ -265,8 +289,13 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 				}
 				updated["lineItems"] = lineItems
 				rows.Close()
-				if _, err := pool.Exec(ctx, "UPDATE exposure_bucketing SET status_bucketing = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
-					logger.LogError("update exposure_bucketing status after line items update: exec failed: %v", err)
+				if err := rows.Err(); err != nil {
+					respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
+				}
+				if _, err := tx.Exec(ctx, "UPDATE exposure_bucketing SET status_bucketing = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
+					respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
 				}
 			}
 		}
@@ -275,15 +304,15 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 		if len(req.BucketingFields) > 0 {
 			safeBucketingFields, err := filterColumns(req.BucketingFields, allowedExposureBucketingCols)
 			if err != nil {
-				respondWithError(w, http.StatusBadRequest, "bucketingFields: "+err.Error())
+				respondWithError(w, http.StatusBadRequest, "bucketingFields: "+errtext.Detail(w, err))
 				return
 			}
 			req.BucketingFields = safeBucketingFields
 			req.BucketingFields["status_bucketing"] = constants.StatusPendingEditApproval
 
-			bucketingRow, err := loadExposureBucketingRow(ctx, pool, req.ExposureHeaderID)
+			bucketingRow, err := loadExposureBucketingRow(ctx, tx, req.ExposureHeaderID)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+err.Error())
+				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+errtext.Detail(w, err))
 				return
 			}
 			bucketingRow = applyExposureBucketingEdits(bucketingRow, req.BucketingFields)
@@ -314,8 +343,12 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 			}
 			values = append(values, req.ExposureHeaderID)
 			query := fmt.Sprintf("UPDATE exposure_bucketing SET %s WHERE exposure_header_id = $%d RETURNING *", strings.Join(setParts, ", "), len(values))
-			rows, err := pool.Query(ctx, query, values...)
-			if err == nil {
+			rows, err := tx.Query(ctx, query, values...)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			{
 				cols := pgxColumnNames(rows)
 				bucketing := []map[string]interface{}{}
 				for rows.Next() {
@@ -325,7 +358,9 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 						valPtrs[i] = &vals[i]
 					}
 					if err := rows.Scan(valPtrs...); err != nil {
-						logger.LogError("update exposure_bucketing: scan failed: %v", err)
+						rows.Close()
+						respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+						return
 					}
 					rowMap := map[string]interface{}{}
 					for i, col := range cols {
@@ -335,6 +370,10 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 				}
 				updated["bucketing"] = bucketing
 				rows.Close()
+				if err := rows.Err(); err != nil {
+					respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
+				}
 			}
 		}
 
@@ -342,7 +381,7 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 		if len(req.HedgingFields) > 0 {
 			safeHedgingFields, err := mapColumns(req.HedgingFields, allowedHedgingProposalCols)
 			if err != nil {
-				respondWithError(w, http.StatusBadRequest, "hedgingFields: "+err.Error())
+				respondWithError(w, http.StatusBadRequest, "hedgingFields: "+errtext.Detail(w, err))
 				return
 			}
 			req.HedgingFields = safeHedgingFields
@@ -356,8 +395,12 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 			}
 			values = append(values, req.ExposureHeaderID)
 			query := fmt.Sprintf("UPDATE hedging_proposal SET %s WHERE exposure_header_id = $%d RETURNING *", strings.Join(setParts, ", "), len(values))
-			rows, err := pool.Query(ctx, query, values...)
-			if err == nil {
+			rows, err := tx.Query(ctx, query, values...)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			{
 				cols := pgxColumnNames(rows)
 				hedging := []map[string]interface{}{}
 				for rows.Next() {
@@ -367,7 +410,9 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 						valPtrs[i] = &vals[i]
 					}
 					if err := rows.Scan(valPtrs...); err != nil {
-						logger.LogError("update hedging_proposal: scan failed: %v", err)
+						rows.Close()
+						respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+						return
 					}
 					rowMap := map[string]interface{}{}
 					for i, col := range cols {
@@ -377,10 +422,20 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 				}
 				updated["hedging"] = hedging
 				rows.Close()
-				if _, err := pool.Exec(ctx, "UPDATE hedging_proposal SET status_hedging = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
-					logger.LogError("update hedging_proposal status: exec failed: %v", err)
+				if err := rows.Err(); err != nil {
+					respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
+				}
+				if _, err := tx.Exec(ctx, "UPDATE hedging_proposal SET status_hedging = 'pending' WHERE exposure_header_id = $1", req.ExposureHeaderID); err != nil {
+					respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
 				}
 			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
 		}
 
 		if len(updated) == 0 {
@@ -424,6 +479,11 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 		}
 
 		go func(tID string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("goroutine panic: %v", rec)
+				}
+			}()
 			_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
 				ModuleCode:          "FX",
 				TransactionType:     "FX_BUCKETING_EDIT",
@@ -485,7 +545,7 @@ func getExposureHeadersLineItemsBucketingHandler(pool *pgxpool.Pool, pendingOnly
 		}
 
 		// Ensure all exposure_header_id are present in exposure_bucketing
-		_, _ = pool.Exec(ctx, `INSERT INTO exposure_bucketing (exposure_header_id)
+		if _, err := pool.Exec(ctx, `INSERT INTO exposure_bucketing (exposure_header_id)
 			SELECT exposure_header_id
 			FROM exposure_headers
 			WHERE entity = ANY($1)
@@ -493,7 +553,9 @@ func getExposureHeadersLineItemsBucketingHandler(pool *pgxpool.Pool, pendingOnly
 			  AND COALESCE(is_deleted, false) = false
 			  AND exposure_header_id NOT IN (
 				SELECT exposure_header_id FROM exposure_bucketing
-			  )`, buNames)
+			  )`, buNames); err != nil {
+			logger.LogError("seed exposure_bucketing rows failed: %v", err)
+		}
 
 		pendingFilter := ""
 		if pendingOnly {
@@ -514,7 +576,7 @@ func getExposureHeadersLineItemsBucketingHandler(pool *pgxpool.Pool, pendingOnly
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
 			LEFT JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id
 			LEFT JOIN LATERAL (
-				SELECT ai.* FROM uam.approval_instance ai
+				SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 				WHERE ai.record_id = h.exposure_header_id::text
 				  AND ai.module_code = 'FX'
 				  AND ai.transaction_type = 'FX_BUCKETING_EDIT'
@@ -524,7 +586,7 @@ func getExposureHeadersLineItemsBucketingHandler(pool *pgxpool.Pool, pendingOnly
 				LIMIT 1
 			) ai ON true
 			LEFT JOIN LATERAL (
-				SELECT aie.* FROM uam.approval_instance_eye aie
+				SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 				WHERE aie.instance_id = ai.instance_id
 				  AND aie.status = 'ACTIVE'
 				ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -647,7 +709,7 @@ func DeleteBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ExposureHeaderIds {
 			bucketingRow, err := loadExposureBucketingRow(ctx, pool, id)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+err.Error())
+				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+errtext.Detail(w, err))
 				return
 			}
 			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
@@ -691,7 +753,7 @@ func DeleteBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			deleteComment,
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -737,6 +799,11 @@ func DeleteBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(ids []string, email string, matrices map[string]string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("goroutine panic: %v", rec)
+				}
+			}()
 			bgCtx := context.Background()
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
@@ -783,7 +850,7 @@ func ApproveBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -795,7 +862,7 @@ func ApproveBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			req.ExposureHeaderIds,
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		toDelete := []string{}
@@ -819,7 +886,7 @@ func ApproveBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ExposureHeaderIds {
 			bucketingRow, err := loadExposureBucketingRow(ctx, pool, id)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+err.Error())
+				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+errtext.Detail(w, err))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
@@ -848,7 +915,7 @@ func ApproveBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 				toApprove, updatedBy, req.Comments,
 			)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			cols := pgxColumnNames(rows)
@@ -883,7 +950,7 @@ func ApproveBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 				toDelete, updatedBy,
 			)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			for delRows.Next() {
@@ -901,14 +968,14 @@ func ApproveBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 					 WHERE exposure_header_id = ANY($1::uuid[])`,
 					deleted, updatedBy, req.Comments,
 				); err != nil {
-					respondWithError(w, http.StatusInternalServerError, err.Error())
+					respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 					return
 				}
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -990,7 +1057,7 @@ func RejectBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ExposureHeaderIds {
 			bucketingRow, err := loadExposureBucketingRow(ctx, pool, id)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+err.Error())
+				respondWithError(w, http.StatusInternalServerError, errLoadExposureBucketingRowForPolicyCheck+errtext.Detail(w, err))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
@@ -1018,7 +1085,7 @@ func RejectBucketingStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			req.ExposureHeaderIds, updatedBy, req.Comments,
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()

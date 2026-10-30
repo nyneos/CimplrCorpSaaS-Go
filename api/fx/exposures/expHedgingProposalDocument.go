@@ -1,6 +1,8 @@
 package exposures
 
 import (
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"errors"
@@ -350,6 +352,11 @@ func SaveHedgingProposalDocument(pool *pgxpool.Pool) http.HandlerFunc {
 				txnType = "FX_HEDGE_PROPOSAL_CREATE"
 			}
 			go func(id, email, tType, tID string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("goroutine panic: %v", rec)
+					}
+				}()
 				bgCtx := context.Background()
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
@@ -769,7 +776,7 @@ func ApproveHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ProposalIDs {
 			policyRow, loadErr := LoadHedgingProposalPolicyRow(ctx, pool, id)
 			if loadErr != nil {
-				respondWithError(w, http.StatusInternalServerError, loadErr.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, loadErr))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
@@ -792,7 +799,7 @@ func ApproveHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			Comments: strings.TrimSpace(req.Comments), ActionType: "CONFIRM",
 		})
 		if err != nil {
-			respondWithError(w, http.StatusUnprocessableEntity, err.Error())
+			respondWithError(w, http.StatusUnprocessableEntity, errtext.Detail(w, err))
 			return
 		}
 		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d proposal(s) approved", n), map[string]any{"count": n})
@@ -820,7 +827,7 @@ func RejectHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ProposalIDs {
 			policyRow, loadErr := LoadHedgingProposalPolicyRow(ctx, pool, id)
 			if loadErr != nil {
-				respondWithError(w, http.StatusInternalServerError, loadErr.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, loadErr))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
@@ -843,7 +850,7 @@ func RejectHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			Comments: strings.TrimSpace(req.Comments), ActionType: "REJECT",
 		})
 		if err != nil {
-			respondWithError(w, http.StatusUnprocessableEntity, err.Error())
+			respondWithError(w, http.StatusUnprocessableEntity, errtext.Detail(w, err))
 			return
 		}
 		respondWithSuccess(w, http.StatusOK, fmt.Sprintf("%d proposal(s) rejected", n), map[string]any{"count": n})
@@ -872,7 +879,7 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ProposalIDs {
 			policyRow, loadErr := LoadHedgingProposalPolicyRow(ctx, pool, id)
 			if loadErr != nil {
-				respondWithError(w, http.StatusInternalServerError, loadErr.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, loadErr))
 				return
 			}
 			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
@@ -908,6 +915,11 @@ func DeleteHedgingProposalDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		go func(ids []string, email string, matrices map[string]string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("goroutine panic: %v", rec)
+				}
+			}()
 			bgCtx := context.Background()
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)

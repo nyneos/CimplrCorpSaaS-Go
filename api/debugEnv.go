@@ -2,6 +2,7 @@ package api
 
 import (
 	"CimplrCorpSaas/api/constants"
+	usersession "CimplrCorpSaas/internal/session"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -62,14 +63,24 @@ var debugEnvProcessKeys = []string{
 }
 
 func isDebugEnvAllowed() bool {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("DEVEL_MODE")), "true") {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("DEVEL_MODE")), "true")
+}
+
+func isDebugEnvSensitive(key string) bool {
+	if debugEnvSensitiveKeys[key] {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("ENV")), "uat")
+	k := strings.ToUpper(key)
+	for _, marker := range []string{"SECRET", "PASSWORD", "TOKEN", "PRIVATE", "_KEY", "ACCESS_KEYS", "ADMIN_USER_IDS", "DB_USER", "DB_HOST"} {
+		if strings.Contains(k, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func maskDebugEnvValue(key, value string) (display, hexOut, urlOut string) {
-	if debugEnvSensitiveKeys[key] {
+	if isDebugEnvSensitive(key) {
 		if strings.TrimSpace(value) != "" {
 			return "[set]", "", ""
 		}
@@ -154,6 +165,10 @@ func DebugEnvHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
+	if s, _ := usersession.HeaderSession(r); s == nil {
+		RespondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, "")
+		return
+	}
 
 	var req struct {
 		Keys []string `json:"keys"`
@@ -188,11 +203,9 @@ func DebugEnvHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	RespondEnvelopeSuccessCompat(w, "debug env snapshot", map[string]interface{}{
-		"file_path":       chosen,
-		"file_contents":   fileStr,
-		"file_urlencoded": url.QueryEscape(fileStr),
-		"entries":         fileEntries,
-		"env":             buildDebugEnvProcessEntries(filterOrNil(filter)),
+		"file_path": chosen,
+		"entries":   fileEntries,
+		"env":       buildDebugEnvProcessEntries(filterOrNil(filter)),
 	})
 }
 

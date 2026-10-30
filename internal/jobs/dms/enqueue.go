@@ -2,6 +2,7 @@ package dmsjobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -116,35 +117,93 @@ func StartGenerationQueueWorker(ctx context.Context, pool *pgxpool.Pool) {
 				api.LogError("[DMS-QUEUE] claim: %v", err)
 				continue
 			}
-			for _, job := range jobs {
-				executeClaimedJob(ctx, pool, job)
+			if len(jobs) == 0 {
+				continue
 			}
+			runClaimedGenerationBatch(ctx, pool, owner, jobs)
 		}
 	}
 }
 
-func executeClaimedJob(ctx context.Context, pool *pgxpool.Pool, job generationJob) {
+func runClaimedGenerationBatch(ctx context.Context, pool *pgxpool.Pool, owner string, jobs []generationJob) {
+	for _, job := range jobs {
+		trackActiveGenerationLease(job.JobID)
+	}
+	stopHeartbeat := startGenerationLeaseHeartbeat(ctx, pool, owner)
+	defer func() {
+		for _, job := range jobs {
+			untrackActiveGenerationLease(job.JobID)
+		}
+	}()
+	defer stopHeartbeat()
+	for _, job := range jobs {
+		executeClaimedJob(ctx, pool, owner, job)
+		untrackActiveGenerationLease(job.JobID)
+	}
+}
+
+func executeClaimedJob(ctx context.Context, pool *pgxpool.Pool, owner string, job generationJob) {
+	if !generationLeaseTracked(job.JobID) {
+		api.LogError("[DMS-QUEUE] job=%s dropped before run — lease lost while waiting", job.JobID)
+		return
+	}
+	owned, err := renewGenerationLease(ctx, pool, job.JobID, owner)
+	if err != nil {
+		api.LogError("[DMS-QUEUE] job=%s lease renew before run: %v", job.JobID, err)
+	} else if !owned {
+		api.LogError("[DMS-QUEUE] job=%s lease lost before run — not executing", job.JobID)
+		untrackActiveGenerationLease(job.JobID)
+		return
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	setActiveGenerationLeaseCancel(job.JobID, cancel)
+	defer clearActiveGenerationLeaseCancel(job.JobID)
+
 	api.LogInfo("[DMS-QUEUE] executing job=%s kind=%s rule=%s", job.JobID, job.JobKind, job.RuleID)
 
 	var runID string
 	var runErr error
+	// Schedulers store run_id on the job before the long render. Reuse that row
+	// so this worker does not insert a second generation_run for the same tick.
+	claimedRunID := strings.TrimSpace(job.RunID)
 	switch strings.ToUpper(job.JobKind) {
 	case "RULE_SOURCE_IDS":
-		runID, runErr = RunGenerationForSourceIDs(ctx, pool, job.RuleID, job.TriggerType, job.TriggeredBy, job.SourceIDField, job.SourceIDs)
+		runID, runErr = runGeneration(runCtx, pool, job.RuleID, job.TriggerType, job.TriggeredBy, job.SourceIDField, job.SourceIDs, claimedRunID)
 	case "ADHOC":
 		runErr = fmt.Errorf("ADHOC queue execute not wired yet — use sync adhoc path")
 	default:
-		runID, runErr = RunGeneration(ctx, pool, job.RuleID, job.TriggerType, job.TriggeredBy)
+		runID, runErr = runGeneration(runCtx, pool, job.RuleID, job.TriggerType, job.TriggeredBy, "", nil, claimedRunID)
 	}
 
+	// Drop the cancel hook before finish so a heartbeat that races the status
+	// update does not abort a run that already completed.
+	clearActiveGenerationLeaseCancel(job.JobID)
+
 	if runErr != nil {
+		var dispatchMiss *dispatchAfterGenerationError
+		if errors.As(runErr, &dispatchMiss) {
+			// Documents and the run row already exist. Mark the job done so the
+			// queue does not start another generation. StartDispatchWorker retries
+			// documents left GENERATED.
+			api.LogError("[DMS-QUEUE] job=%s run=%s generation done, dispatch failed — not requeueing generation: %v", job.JobID, runID, runErr)
+			if err := finishGenerationJob(ctx, pool, job.JobID, owner, job.AttemptCount, true, runID, runErr.Error(), false); err != nil {
+				api.LogError("[DMS-QUEUE] finish job=%s after dispatch failure: %v", job.JobID, err)
+				return
+			}
+			api.LogInfo("[DMS-QUEUE] job=%s done run=%s (dispatch pending retry)", job.JobID, runID)
+			return
+		}
 		api.LogError("[DMS-QUEUE] job=%s failed: %v", job.JobID, runErr)
-		_ = finishGenerationJob(ctx, pool, job.JobID, false, runID, runErr.Error(), job.AttemptCount < job.MaxAttempts)
+		if err := finishGenerationJob(ctx, pool, job.JobID, owner, job.AttemptCount, false, runID, runErr.Error(), job.AttemptCount < job.MaxAttempts); err != nil {
+			api.LogError("[DMS-QUEUE] finish job=%s: %v", job.JobID, err)
+		}
 		return
 	}
-	// Quota increment + DispatchRun already happen inside RunGeneration*.
-	if err := finishGenerationJob(ctx, pool, job.JobID, true, runID, "", false); err != nil {
+	if err := finishGenerationJob(ctx, pool, job.JobID, owner, job.AttemptCount, true, runID, "", false); err != nil {
 		api.LogError("[DMS-QUEUE] finish job=%s: %v", job.JobID, err)
+		return
 	}
 	api.LogInfo("[DMS-QUEUE] job=%s done run=%s", job.JobID, runID)
 }

@@ -3,6 +3,7 @@ package fdInterestAndTdsWorkbench
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -98,7 +99,7 @@ func GetTDSReceiptAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_tds_receipt_audit a
 			LEFT JOIN investment.fd_tds_receipt t ON t.tds_id = a.tds_id
 			LEFT JOIN LATERAL (
-				SELECT ai.* FROM uam.approval_instance ai
+				SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 				WHERE ai.record_id = a.tds_id
 				  AND ai.module_code = 'FIXED_DEPOSIT'
 				  AND ai.status = 'PENDING'
@@ -107,7 +108,7 @@ func GetTDSReceiptAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) ai ON true
 			LEFT JOIN LATERAL (
-				SELECT aie.* FROM uam.approval_instance_eye aie
+				SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 				WHERE aie.instance_id = ai.instance_id
 				  AND aie.status = 'ACTIVE'
 				ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -132,7 +133,7 @@ func GetTDSReceiptAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, baseQuery, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 

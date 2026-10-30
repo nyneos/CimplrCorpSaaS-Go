@@ -241,21 +241,21 @@ func PortfolioDashboardHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Wait for all goroutines to finish.
 		wg.Wait()
 
+		for _, sub := range results {
+			if sub.err != nil {
+				api.LogErrorForResponse(w, "investment dashboard query failed: %v", sub.err)
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDB)
+				return
+			}
+		}
+
 		// ── Build response ─────────────────────────────────────────────────────
-		// On partial errors we still return whatever succeeded; each key carries an
-		// optional "error" field so the UI can surface degraded sub-sections.
 		resp := map[string]interface{}{
 			"success":      true,
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
 		}
 		for key, res := range results {
-			if res.err != nil {
-				resp[key] = map[string]interface{}{
-					"error": res.err.Error(),
-				}
-			} else {
-				resp[key] = res.data
-			}
+			resp[key] = res.data
 		}
 
 		api.RespondWithPayload(w, true, "", resp)
@@ -324,12 +324,15 @@ func computeEntityPerformance(ctx context.Context, pgxPool *pgxpool.Pool, entity
 		var name, amc string
 		var ytd float64
 		if err := rows.Scan(&name, &ytd, &amc); err != nil {
-			continue
+			return nil, err
 		}
 		out = append(out, EntityPerformanceRow{Label: name, YTD: ytd})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return map[string]interface{}{
-		"rows": out,
+		"rows":         out,
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
@@ -365,14 +368,17 @@ func computeAMCPerformance(ctx context.Context, pgxPool *pgxpool.Pool, entityFil
 		var r AMCPerfRow
 		var pctRaw float64
 		if err := rows.Scan(&r.AMCName, &r.StartValue, &r.CurrentValue, &r.PnL, &pctRaw); err != nil {
-			continue
+			return nil, err
 		}
 		pct := pctRaw
 		r.PnLPercent = &pct
 		out = append(out, r)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return map[string]interface{}{
-		"rows": out,
+		"rows":         out,
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
@@ -430,11 +436,14 @@ func computeAMCWaterfall(ctx context.Context, pgxPool *pgxpool.Pool, entityFilte
 	for rows.Next() {
 		var rr rowOut
 		if err := rows.Scan(&rr.AMCName, &rr.sv, &rr.ev, &rr.delta, &rr.ot, &rr.ct); err != nil {
-			continue
+			return nil, err
 		}
 		openingTotal = rr.ot
 		closingTotal = rr.ct
 		amcRows = append(amcRows, rr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	if openingTotal == 0 {
 		if t, err2 := time.Parse(constants.DateFormat, periodStart); err2 == nil {
@@ -524,7 +533,7 @@ func computeAUMMovement(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter
 	return map[string]interface{}{
 		"opening": openingAUM, "inflows": inflows, "market_gains_losses": marketGainsLosses,
 		"income": income, "outflows": outflows, "closing": closingAUM,
-		"waterfall": waterfall,
+		"waterfall":    waterfall,
 		"period_start": periodStart, "period_end": periodEnd,
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}, nil
@@ -576,10 +585,13 @@ func computeAUMBreakdown(ctx context.Context, pgxPool *pgxpool.Pool, entityFilte
 	for rows.Next() {
 		var item AUMBreakdownItem
 		if err := rows.Scan(&item.Label, &item.Amount); err != nil {
-			continue
+			return nil, err
 		}
 		breakdown = append(breakdown, item)
 		total += item.Amount
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	out := make([]map[string]interface{}, 0, len(breakdown))
 	for _, item := range breakdown {
@@ -605,7 +617,9 @@ func computePerformanceAttribution(ctx context.Context, pgxPool *pgxpool.Pool, e
 
 	// Portfolio return via XIRR
 	var terminalValue float64
-	_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(SUM(current_value),0) FROM investment.portfolio_snapshot WHERE ($1::text IS NULL OR entity_name=$1) AND ($2::text[] IS NULL OR entity_name=ANY($2))`, nullIfEmpty(entityFilter), allowedEntities).Scan(&terminalValue)
+	if err := pgxPool.QueryRow(ctx, `SELECT COALESCE(SUM(current_value),0) FROM investment.portfolio_snapshot WHERE ($1::text IS NULL OR entity_name=$1) AND ($2::text[] IS NULL OR entity_name=ANY($2))`, nullIfEmpty(entityFilter), allowedEntities).Scan(&terminalValue); err != nil {
+		return nil, err
+	}
 	portfolioXIRR := calculatePortfolioXIRR(ctx, pgxPool, entityFilter, allowedEntities, terminalValue, fyEnd)
 	portfolioReturn := clampXIRRPercent(portfolioXIRR)
 
@@ -640,7 +654,7 @@ func computePerformanceAttribution(ctx context.Context, pgxPool *pgxpool.Pool, e
 		"benchmark_return": benchmarkReturn, "portfolio_return": portfolioReturn,
 		"excess_return":     math.Round((portfolioReturn-benchmarkReturn)*100) / 100,
 		"allocation_effect": allocationEffect, "selection_effect": selectionEffect,
-		"other_effects": otherEffects,
+		"other_effects":  otherEffects,
 		"financial_year": fmt.Sprintf(constants.FormatFiscalYear, year, year+1),
 		"period_start":   fyStart.Format(constants.DateFormat), "period_end": fyEnd.Format(constants.DateFormat),
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
@@ -784,7 +798,7 @@ func computeMarketTicker(ctx context.Context, pgxPool *pgxpool.Pool, entityFilte
 		var row MutualFundTickerRow
 		if err := rows.Scan(&row.SchemeName, &row.AMC, &row.AMFICode, &row.InternalCode, &row.ISIN,
 			&row.NAV, &row.PrevNAV, &row.Change1D, &row.MTM, &row.Units, &row.Value); err != nil {
-			continue
+			return nil, err
 		}
 		row.NAV = math.Round(row.NAV*100) / 100
 		row.PrevNAV = math.Round(row.PrevNAV*100) / 100
@@ -799,6 +813,9 @@ func computeMarketTicker(ctx context.Context, pgxPool *pgxpool.Pool, entityFilte
 		} else if row.Change1D < 0 {
 			losers++
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return map[string]interface{}{
 		"mutual_funds": ticker,
@@ -844,7 +861,7 @@ func computeTopPerforming(ctx context.Context, pgxPool *pgxpool.Pool, entityFilt
 		var startV, endV float64
 		var pctRaw *float64
 		if err := rows.Scan(&name, &amc, &startV, &endV, &pctRaw); err != nil {
-			continue
+			return nil, err
 		}
 		pctStr := "0%"
 		if pctRaw != nil {
@@ -852,8 +869,11 @@ func computeTopPerforming(ctx context.Context, pgxPool *pgxpool.Pool, entityFilt
 		}
 		out = append(out, TopAssetRow{Title: name, Subtitle: amc, Pct: pctStr, Value: endV})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return map[string]interface{}{
-		"rows": out,
+		"rows":         out,
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
@@ -958,12 +978,15 @@ func computeAUMCompositionTrend(ctx context.Context, pgxPool *pgxpool.Pool, enti
 		var amcName string
 		var aumValue float64
 		if err := rows.Scan(&monthIdx, &amcName, &aumValue); err != nil {
-			continue
+			return nil, err
 		}
 		if _, ok := resultMap[monthIdx]; ok {
 			resultMap[monthIdx][amcName] = aumValue
 		}
 		amcSet[amcName] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	if len(months) > 0 {
 		overlayLiveAUMByAMCOnMonth(ctx, pgxPool, entityFilter, allowedEntities, resultMap, months[len(months)-1].MonthIdx, amcSet)
@@ -988,10 +1011,10 @@ func computeAUMCompositionTrend(ctx context.Context, pgxPool *pgxpool.Pool, enti
 	}
 	return map[string]interface{}{
 		"rows": map[string]interface{}{
-			"amc_names":        amcNames,
-			"fy_label":         fmt.Sprintf(constants.FormatFiscalYear, year, (year+1)%100),
-			"generated_at":     time.Now().UTC().Format(time.RFC3339),
-			"rows":             outRows,
+			"amc_names":    amcNames,
+			"fy_label":     fmt.Sprintf(constants.FormatFiscalYear, year, (year+1)%100),
+			"generated_at": time.Now().UTC().Format(time.RFC3339),
+			"rows":         outRows,
 		},
 		"success": true,
 	}, nil
@@ -1096,10 +1119,13 @@ func computeCombinedOverview(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 		if err := rows.Scan(&h.EntityName, &h.AmcName, &h.SchemeName, &h.SchemeID, &h.Units, &h.Nav, &h.CurrentValue, &h.AmfiNav,
 			&h.AmfiSchemeCode, &h.FolioNumber, &h.GainLoss, &h.GainLossPct, &h.RiskRating, &h.InternalRiskScore,
 			&h.InvestedAmount, &h.Isin, &h.PurchaseNav, &h.SchemeCategory, &h.SchemeSubCategory, &h.SchemeType); err != nil {
-			continue
+			return nil, err
 		}
 		portfolio = append(portfolio, h)
 		totalAUM += h.CurrentValue
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	riskBuckets := map[int]float64{1: 15, 2: 50, 3: 85}

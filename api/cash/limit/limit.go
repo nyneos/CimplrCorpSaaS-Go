@@ -564,6 +564,9 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.bank_limit WHERE limit_id::text = $1`, req.LimitID) {
+			return
+		}
 
 		if req.UserID == "" || req.LimitID == "" {
 			api.RespondWithResult(w, false, "user_id and limit_id required")
@@ -841,6 +844,9 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.bank_limit WHERE limit_id::text = ANY($1)`, req.LimitIDs) {
 			return
 		}
 
@@ -1199,6 +1205,9 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.bank_limit WHERE limit_id::text = ANY($1)`, req.LimitIDs) {
+			return
+		}
 
 		checkerBy := ""
 		for _, s := range auth.GetActiveSessions() {
@@ -1345,15 +1354,24 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(legacyDeleteIDs) > 0 {
 			delUpd := `UPDATE cimplrcorpsaas.bank_limit SET is_deleted=true WHERE limit_id = ANY($1) RETURNING limit_id`
 			drows, derr := tx.Query(ctx, delUpd, legacyDeleteIDs)
-			if derr == nil {
-				defer drows.Close()
-				for drows.Next() {
-					var id string
-					if err := drows.Scan(&id); err != nil {
-						logger.LogError("[BulkApproveBankLimits] deleted limit_id scan failed: %v", err)
-					}
-					deleted = append(deleted, id)
+			if derr != nil {
+				api.RespondWithResult(w, false, "failed to delete approved limits: "+derr.Error())
+				return
+			}
+			for drows.Next() {
+				var id string
+				if err := drows.Scan(&id); err != nil {
+					drows.Close()
+					logger.LogError("[BulkApproveBankLimits] deleted limit_id scan failed: %v", err)
+					api.RespondWithResult(w, false, "failed to read deleted limits")
+					return
 				}
+				deleted = append(deleted, id)
+			}
+			drows.Close()
+			if err := drows.Err(); err != nil {
+				api.RespondWithResult(w, false, "failed to delete approved limits: "+err.Error())
+				return
 			}
 		}
 
@@ -1405,6 +1423,9 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.LimitIDs) == 0 {
 			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.bank_limit WHERE limit_id::text = ANY($1)`, req.LimitIDs) {
 			return
 		}
 

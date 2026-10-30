@@ -108,7 +108,7 @@ func computeKPIs(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter string
 		JOIN masterbankaccount mba ON bs.account_number = mba.account_number
 		LEFT JOIN masterentity me ON mba.entity_id = me.entity_id
 		CROSS JOIN params p
-		WHERE bs.status = 'Approved' AND %s
+		WHERE UPPER(TRIM(bs.status)) = 'APPROVED' AND %s
 	),
 	manual_balances AS (
 		SELECT 0::float8 AS total_manual

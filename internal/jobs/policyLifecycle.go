@@ -161,7 +161,7 @@ func RunPolicyLifecycleSweeper(db *pgxpool.Pool) error {
 		return fmt.Errorf("invalid timezone for policy lifecycle sweeper: %w", err)
 	}
 
-	c := cron.New(cron.WithLocation(loc))
+	c := cron.New(cron.WithLocation(loc), cron.WithChain(cron.Recover(cron.DefaultLogger), cron.SkipIfStillRunning(cron.DefaultLogger)))
 	_, err = c.AddFunc(policyLifecycleCronSpec, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()

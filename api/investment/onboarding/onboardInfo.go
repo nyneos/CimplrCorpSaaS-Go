@@ -140,7 +140,7 @@ type PortfolioSnapshot struct {
 
 func filterBatchInfoByScope(ctx context.Context, info *BatchInfo) {
 	scope := ctxutil.FromContext(ctx)
-	if scope.IsAdminOverride || len(scope.EntityNames) == 0 || info == nil {
+	if scope.IsAdminOverride || info == nil {
 		return
 	}
 	demats := info.Entities.Demat[:0]

@@ -2,8 +2,10 @@ package auth
 
 import (
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/logger"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -103,8 +105,8 @@ func enqueueResetEmail(ctx context.Context, pool *pgxpool.Pool, userID, email, n
 		subject, body,
 	)
 	if err != nil {
-		// Best-effort — log but don't fail the request
-		LogSecurityEvent(ctx, pool, "", "reset_email_enqueue_failed", err.Error(), "")
+		logger.LogError("[auth] reset email enqueue failed for user %s: %v", userID, err)
+		LogSecurityEvent(ctx, pool, userID, "reset_email_enqueue_failed", "", "")
 	}
 }
 
@@ -200,10 +202,10 @@ func ForgotPasswordHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		// Invalidate any existing unused tokens for this user
 		_, _ = pool.Exec(r.Context(), `UPDATE password_reset_tokens SET used = true WHERE user_id = $1 AND used = false`, userID)
 
-		// Insert new token
+		// Insert new token (only its hash is stored)
 		_, err = pool.Exec(r.Context(),
 			`INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)`,
-			userID, token, expiresAt,
+			userID, hashResetToken(token), expiresAt,
 		)
 		if err != nil {
 			writeResetJSON(w, http.StatusInternalServerError, false, "Failed to create reset token")
@@ -223,16 +225,6 @@ func ForgotPasswordHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		// Uses context.Background(), not r.Context() — this goroutine outlives the
 		// request and must not be cancelled when the HTTP response finishes.
 		go enqueueResetEmail(context.Background(), pool, userID, email, employeeName, resetLink)
-
-		// In dev mode, also include token + link in response for testing
-		if strings.EqualFold(os.Getenv("DEVEL_MODE"), "true") {
-			authEnvelopeSuccessCompat(w, "Reset token generated (dev mode — email also enqueued)", map[string]interface{}{
-				"token":      token,
-				"reset_link": resetLink,
-				"expires_at": expiresAt.Format(time.RFC3339),
-			})
-			return
-		}
 
 		writeResetJSON(w, http.StatusOK, true, "If the email is registered, a reset link has been sent.")
 	}
@@ -271,32 +263,6 @@ func ResetPasswordHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Look up and consume token atomically
-		var userID string
-		var expiresAt time.Time
-		var used bool
-		err := pool.QueryRow(r.Context(),
-			`SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token = $1`,
-			token,
-		).Scan(&userID, &expiresAt, &used)
-		if err != nil {
-			LogSecurityEvent(r.Context(), pool, "", "reset_password_invalid_token", "", clientIP)
-			writeResetJSON(w, http.StatusBadRequest, false, "Invalid or expired reset token")
-			return
-		}
-
-		if used {
-			LogSecurityEvent(r.Context(), pool, userID, "reset_password_reused_token", "", clientIP)
-			writeResetJSON(w, http.StatusBadRequest, false, "This reset token has already been used")
-			return
-		}
-
-		if time.Now().After(expiresAt) {
-			LogSecurityEvent(r.Context(), pool, userID, "reset_password_expired_token", "", clientIP)
-			writeResetJSON(w, http.StatusBadRequest, false, "Reset token has expired")
-			return
-		}
-
 		// Hash new password
 		hashed, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 		if err != nil {
@@ -304,7 +270,6 @@ func ResetPasswordHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Update password + mark token used in one transaction
 		tx, err := pool.Begin(r.Context())
 		if err != nil {
 			writeResetJSON(w, http.StatusInternalServerError, false, "Internal error")
@@ -312,18 +277,27 @@ func ResetPasswordHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(r.Context())
 
-		if _, err := tx.Exec(r.Context(), `UPDATE users SET password = $1 WHERE id = $2`, string(hashed), userID); err != nil {
-			writeResetJSON(w, http.StatusInternalServerError, false, "Failed to update password")
+		// Consume the token atomically: only one request can flip it to used.
+		var userID string
+		err = tx.QueryRow(r.Context(), `
+			UPDATE password_reset_tokens SET used = true
+			WHERE token = $1 AND used = false AND expires_at > NOW()
+			RETURNING user_id`, hashResetToken(token)).Scan(&userID)
+		if err != nil {
+			LogSecurityEvent(r.Context(), pool, "", "reset_password_invalid_token", "", clientIP)
+			writeResetJSON(w, http.StatusBadRequest, false, "Invalid or expired reset token")
 			return
 		}
-		if _, err := tx.Exec(r.Context(), `UPDATE password_reset_tokens SET used = true WHERE token = $1`, token); err != nil {
-			writeResetJSON(w, http.StatusInternalServerError, false, "Failed to invalidate token")
+
+		if _, err := tx.Exec(r.Context(), `UPDATE users SET password = $1 WHERE id = $2`, string(hashed), userID); err != nil {
+			writeResetJSON(w, http.StatusInternalServerError, false, "Failed to update password")
 			return
 		}
 		if err := tx.Commit(r.Context()); err != nil {
 			writeResetJSON(w, http.StatusInternalServerError, false, "Internal error")
 			return
 		}
+		RevokeUserSessions(userID)
 
 		LogSecurityEvent(r.Context(), pool, userID, "reset_password_success", "", clientIP)
 
@@ -353,7 +327,7 @@ func ValidateResetTokenHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		var used bool
 		err := pool.QueryRow(r.Context(),
 			`SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token = $1`,
-			strings.TrimSpace(req.Token),
+			hashResetToken(strings.TrimSpace(req.Token)),
 		).Scan(&userID, &expiresAt, &used)
 		if err != nil {
 			writeResetJSON(w, http.StatusBadRequest, false, "Invalid reset token")
@@ -383,6 +357,11 @@ func ValidateResetTokenHandler(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+func hashResetToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
 
 func generateResetToken() (string, error) {
 	b := make([]byte, resetTokenBytes)

@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxexposures "CimplrCorpSaas/api/fx/exposures"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
@@ -229,8 +230,8 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseMultipartForm(1024 << 20); err != nil {
-			httpError(w, http.StatusBadRequest, "multipart parse error: "+err.Error())
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			httpError(w, http.StatusBadRequest, "multipart parse error: "+errtext.Detail(w, err))
 			return
 		}
 		if !policyruntime.Enforce(r.Context(), w, r, pool, policyruntime.EnforceInput{
@@ -249,7 +250,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		results, elapsed, policySummary, status, err := processBatchUploadStagingData(r.Context(), pool, r)
 		if err != nil {
-			httpError(w, status, err.Error())
+			httpError(w, status, errtext.Detail(w, err))
 			return
 		}
 		if line := strings.TrimSpace(policySummary); line != "" {
@@ -589,10 +590,18 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		stagingCh := make(chan []any, 4096)
 		stagingSrc := &chanCopySource{ch: stagingCh}
 		var stagingErr error
+		copyDone := make(chan struct{})
 		wgCopy := sync.WaitGroup{}
 		wgCopy.Add(1)
 		go func() {
 			defer wgCopy.Done()
+			defer close(copyDone)
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("staging copy panic: %v", rec)
+					stagingErr = fmt.Errorf("staging copy failed")
+				}
+			}()
 			_, stagingErr = tx.CopyFrom(ctx,
 				pgx.Identifier{"public", "staging_exposures"},
 				[]string{"staging_id", "batch_id", "exposure_source", "raw_payload", "mapped_payload", "ingestion_timestamp", constants.KeyStatus},
@@ -603,7 +612,10 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		totalRows := 0
 		dn := newDateNormalizer()
 
-		// process rows
+		// process rows; stop producing as soon as the copy consumer has exited or the
+		// request is cancelled, otherwise a full channel would block this send forever.
+		copyStopped := false
+	rowLoop:
 		for rowIdx := 1; rowIdx < len(allRows); rowIdx++ {
 			rec := allRows[rowIdx]
 			totalRows++
@@ -641,31 +653,30 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			stagingRow := []any{uuid.New(), batchID, src, rawB, mappedB, time.Now(), "pending"}
 			select {
 			case stagingCh <- stagingRow:
-			default:
-				stagingCh <- stagingRow
+			case <-copyDone:
+				copyStopped = true
+				break rowLoop
+			case <-ctx.Done():
+				copyStopped = true
+				break rowLoop
 			}
 
 			c, _ := mapObjectToCanonical(mapped, src, currencyAliases)
 
-			// parse amount into both decimal and float
-			if s := fmt.Sprintf("%v", mapped["AmountDoc"]); strings.TrimSpace(s) != "" {
-				s = strings.ReplaceAll(s, ",", "")
-				if f, err := strconv.ParseFloat(s, 64); err == nil {
-					c.AmountFloat = f
-					c.AmountDoc = decimal.NewFromFloat(f)
-				} else {
-					if d, derr := decimal.NewFromString(s); derr == nil {
+			// parse the amount exactly as decimal; an amount that is present but not a
+			// number is flagged non-qualified instead of silently becoming zero
+			c.AmountDoc = decimal.Zero
+			c.AmountFloat = 0.0
+			if raw, present := mapped["AmountDoc"]; present && raw != nil {
+				if amtText := strings.ReplaceAll(strings.TrimSpace(fmt.Sprintf("%v", raw)), ",", ""); amtText != "" {
+					if d, derr := decimal.NewFromString(amtText); derr == nil {
 						c.AmountDoc = d
-						f2, _ := d.Float64()
-						c.AmountFloat = f2
+						c.AmountFloat, _ = d.Float64()
 					} else {
-						c.AmountDoc = decimal.Zero
-						c.AmountFloat = 0.0
+						c.IsNonQualified = true
+						c.NonQualifiedReason = fmt.Sprintf("Document amount %q is not a valid number", amtText)
 					}
 				}
-			} else {
-				c.AmountDoc = decimal.Zero
-				c.AmountFloat = 0.0
 			}
 
 			// normalized date caching
@@ -681,8 +692,6 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 			c._raw = mapped
 
-			_, _ = validateSingleExposure(c) // keep old behavior (we don't stop on single issues here)
-
 			canonicals = append(canonicals, c)
 		}
 
@@ -691,6 +700,12 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		wgCopy.Wait()
 		if stagingErr != nil {
 			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("copy staging_exposures: %w", stagingErr)
+		}
+		if copyStopped {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, 0, "", http.StatusRequestTimeout, fmt.Errorf("upload cancelled: %w", ctxErr)
+			}
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("copy staging_exposures stopped before all rows were sent")
 		}
 
 		if _, err := tx.Exec(ctx, `UPDATE public.staging_batches_exposures SET total_records=$1 WHERE batch_id=$2`, totalRows, batchID); err != nil {
@@ -1077,7 +1092,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				pgx.Identifier{"public", "exposure_line_items"},
 				lineItemCols,
 				pgx.CopyFromRows(liRows)); err != nil {
-				fileErrors = append(fileErrors, "copy line items: "+err.Error())
+				fileErrors = append(fileErrors, "copy line items: "+errtext.Text(err))
 				logger.LogError("copy line items: %v", err)
 				tx.Rollback(ctx)
 				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("copy line items failed: %w", err)
@@ -1229,7 +1244,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				pgx.Identifier{"public", "exposure_allocations"},
 				allocCols,
 				pgx.CopyFromRows(allocRows)); err != nil {
-				fileErrors = append(fileErrors, "copy allocations: "+err.Error())
+				fileErrors = append(fileErrors, "copy allocations: "+errtext.Text(err))
 				logger.LogError("copy allocations: %v", err)
 				tx.Rollback(ctx)
 				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("copy allocations failed: %w", err)
@@ -1283,7 +1298,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				pgx.Identifier{"public", "exposure_unallocated"},
 				unallocCols,
 				pgx.CopyFromRows(unallocRows)); err != nil {
-				fileErrors = append(fileErrors, "copy unallocated: "+err.Error())
+				fileErrors = append(fileErrors, "copy unallocated: "+errtext.Text(err))
 				logger.LogError("copy unallocated: %v", err)
 				tx.Rollback(ctx)
 				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("copy unallocated failed: %w", err)
@@ -1328,7 +1343,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				pgx.Identifier{"public", "exposure_unqualified"},
 				unqualCols,
 				pgx.CopyFromRows(unqualRows)); err != nil {
-				fileErrors = append(fileErrors, "copy unqualified: "+err.Error())
+				fileErrors = append(fileErrors, "copy unqualified: "+errtext.Text(err))
 				logger.LogError("copy unqualified: %v", err)
 				tx.Rollback(ctx)
 				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("copy unqualified failed: %w", err)
@@ -1980,23 +1995,6 @@ func NormalizeDate(dateStr string) (string, error) {
 	return "", fmt.Errorf("unparseable date: %s", dateStr)
 }
 
-func validateSingleExposure(it CanonicalRow) (CanonicalRow, []string) {
-	issues := make([]string, 0, 4)
-	if strings.TrimSpace(it.CompanyCode) == "" {
-		issues = append(issues, "CompanyCode missing")
-	}
-	if strings.TrimSpace(it.Party) == "" {
-		issues = append(issues, "Party missing")
-	}
-	if strings.TrimSpace(it.DocumentCurrency) == "" {
-		issues = append(issues, "Currency missing")
-	}
-	if it.AmountDoc.Equal(decimal.Zero) {
-		issues = append(issues, "Amount invalid or zero")
-	}
-	return it, issues
-}
-
 func validateExposures(inputs []CanonicalRow) ([]CanonicalRow, []NonQualified) {
 	ok := make([]CanonicalRow, 0)
 	bad := make([]NonQualified, 0)
@@ -2550,7 +2548,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		var req EditAllocationRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			httpError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			httpError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -2592,14 +2590,14 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		conn, err := pool.Acquire(ctx)
 		if err != nil {
-			httpError(w, 500, constants.ErrDBAcquire+err.Error())
+			httpError(w, 500, constants.ErrDBAcquire+errtext.Detail(w, err))
 			return
 		}
 		defer conn.Release()
 
 		tx, err := conn.Begin(ctx)
 		if err != nil {
-			httpError(w, 500, constants.ErrTxBegin+err.Error())
+			httpError(w, 500, constants.ErrTxBegin+errtext.Detail(w, err))
 			return
 		}
 		committed := false
@@ -2616,7 +2614,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				httpError(w, 404, constants.ErrBatchNotFound)
 				return
 			}
-			httpError(w, 500, "batch lookup: "+err.Error())
+			httpError(w, 500, "batch lookup: "+errtext.Detail(w, err))
 			return
 		}
 		if strings.ToLower(batchStatus) != "completed" {
@@ -2673,7 +2671,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			_ = tx.Rollback(ctx)
 			previewRes, statusCode, err := buildPreviewForBatch(pool, ctx, batchUUID, overrideSource)
 			if err != nil {
-				httpError(w, 500, constants.ErrPreviewBuild+err.Error())
+				httpError(w, 500, constants.ErrPreviewBuild+errtext.Detail(w, err))
 				return
 			}
 			previewRes.Errors = append(previewRes.Errors, "no allocations supplied")
@@ -2690,7 +2688,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			_ = tx.Rollback(ctx)
 			previewRes, _, err := buildPreviewForBatch(pool, ctx, batchUUID, overrideSource)
 			if err != nil {
-				httpError(w, 500, constants.ErrPreviewBuild+err.Error())
+				httpError(w, 500, constants.ErrPreviewBuild+errtext.Detail(w, err))
 				return
 			}
 			previewRes.Errors = append(previewRes.Errors, errorsList...)
@@ -2814,7 +2812,7 @@ GROUP BY
 `, batchUUID)
 
 		if err != nil {
-			httpError(w, 500, "fetch base docs: "+err.Error())
+			httpError(w, 500, "fetch base docs: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2890,7 +2888,7 @@ GROUP BY
 			_ = tx.Rollback(ctx)
 			previewRes, _, err := buildPreviewForBatch(pool, ctx, batchUUID, overrideSource)
 			if err != nil {
-				httpError(w, 500, constants.ErrPreviewBuild+err.Error())
+				httpError(w, 500, constants.ErrPreviewBuild+errtext.Detail(w, err))
 				return
 			}
 			previewRes.Errors = append(previewRes.Errors, errorsList...)
@@ -2951,7 +2949,10 @@ GROUP BY
 		}
 
 		if len(baseDocsArr) > 0 {
-			_, _ = tx.Exec(ctx, `DELETE FROM public.exposure_allocations WHERE batch_id=$1 AND base_document_id=ANY($2::text[])`, batchUUID, baseDocsArr)
+			if _, execErr := tx.Exec(ctx, `DELETE FROM public.exposure_allocations WHERE batch_id=$1 AND base_document_id=ANY($2::text[])`, batchUUID, baseDocsArr); execErr != nil {
+				httpError(w, 500, "clear previous allocations: "+errtext.Detail(w, execErr))
+				return
+			}
 		}
 
 		// stmt := `
@@ -3068,7 +3069,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now(),now(),$16,$17)
 			)
 			if err != nil {
 				_ = tx.Rollback(ctx)
-				httpError(w, 500, "insert alloc: "+err.Error())
+				httpError(w, 500, "insert alloc: "+errtext.Detail(w, err))
 				return
 			}
 			insertedCount++
@@ -3084,12 +3085,15 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now(),now(),$16,$17)
 				"currency":          a.Group.Currency,
 				"group":             fmt.Sprintf("%s|%s|%s|%s", a.Group.Source, a.Group.CompanyCode, a.Group.Party, a.Group.Currency),
 			})
-			_, _ = tx.Exec(ctx, `
+			if _, execErr := tx.Exec(ctx, `
 				INSERT INTO public.exposure_adjustments
 				(batch_id, file_hash, reference_document_number, adjustment_type,
 				adjustment_json, adjustment_amount, created_by, remarks)
 				VALUES ($1,$2,$3,'manual_allocation',$4,$5,$6,$7)
-			`, batchUUID, fileHash.String, a.BaseDoc, adjustmentJSON, a.AbsAmt.StringFixed(4), userName, "manual-edit")
+			`, batchUUID, fileHash.String, a.BaseDoc, adjustmentJSON, a.AbsAmt.StringFixed(4), userName, "manual-edit"); execErr != nil {
+				httpError(w, 500, "insert allocation adjustment: "+errtext.Detail(w, execErr))
+				return
+			}
 		}
 
 		// Recompute remaining from ORIGINAL (remaining+old allocs), not by subtracting again
@@ -3109,19 +3113,25 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now(),now(),$16,$17)
 					status = "partially_allocated"
 				}
 			}
-			_, _ = tx.Exec(ctx, `
+			if _, execErr := tx.Exec(ctx, `
 				UPDATE public.exposure_unallocated
 				   SET amount_signed = $3::numeric,
 				       amount = $4::numeric,
 				       allocation_status = $5
 				 WHERE batch_id = $1 AND document_number = $2
-			`, batchUUID, baseDoc, newSigned.StringFixed(4), newAbs.StringFixed(4), status)
+			`, batchUUID, baseDoc, newSigned.StringFixed(4), newAbs.StringFixed(4), status); execErr != nil {
+				httpError(w, 500, "update unallocated amount: "+errtext.Detail(w, execErr))
+				return
+			}
 
-			_, _ = tx.Exec(ctx, `
+			if _, execErr := tx.Exec(ctx, `
 				UPDATE public.exposure_headers
 				   SET total_open_amount = $3::numeric
 				 WHERE batch_id = $1 AND document_id = $2
-			`, batchUUID, baseDoc, newAbs.StringFixed(4))
+			`, batchUUID, baseDoc, newAbs.StringFixed(4)); execErr != nil {
+				httpError(w, 500, "update exposure open amount: "+errtext.Detail(w, execErr))
+				return
+			}
 		}
 
 		// One consolidated EDIT audit for the upload with allocation before/after diff.
@@ -3188,7 +3198,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now(),now(),$16,$17)
 			newValuesJSON, _ := json.Marshal(newAllocMap)
 			changeSummaryJSON, _ := json.Marshal(changeSummary)
 
-			_, _ = tx.Exec(ctx, `
+			if _, execErr := tx.Exec(ctx, `
 				INSERT INTO public.auditactionexposure
 					(exposure_header_id, actiontype, processing_status, reason,
 					 requested_by, requested_at, requested_ip, old_values,
@@ -3206,7 +3216,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now(),now(),$16,$17)
 					$7::jsonb
 				)
 			`, batchUUID.String(), constants.StatusPendingEditApproval, userName,
-				api.ClientIPFromContext(ctx), string(oldValuesJSON), string(newValuesJSON), string(changeSummaryJSON))
+				api.ClientIPFromContext(ctx), string(oldValuesJSON), string(newValuesJSON), string(changeSummaryJSON)); execErr != nil {
+				httpError(w, 500, "insert allocation audit: "+errtext.Detail(w, execErr))
+				return
+			}
 
 			adjustmentBatchJSON, _ := json.Marshal(map[string]interface{}{
 				"batch_id":          batchUUID.String(),
@@ -3214,24 +3227,27 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now(),now(),$16,$17)
 				"allocations_count": insertedCount,
 				"base_documents":    baseDocsArr,
 			})
-			_, _ = tx.Exec(ctx, `
+			if _, execErr := tx.Exec(ctx, `
 				INSERT INTO public.exposure_adjustments
 				(batch_id, file_hash, reference_document_number, adjustment_type,
 				adjustment_json, adjustment_amount, created_by, remarks)
 				VALUES ($1,$2,$3,'manual_allocation_batch',$4,$5,$6,$7)
 			`, batchUUID, fileHash.String, batchUUID.String(), adjustmentBatchJSON,
-				fmt.Sprintf("%d", insertedCount), userName, "manual-edit-apply")
+				fmt.Sprintf("%d", insertedCount), userName, "manual-edit-apply"); execErr != nil {
+				httpError(w, 500, "insert allocation batch adjustment: "+errtext.Detail(w, execErr))
+				return
+			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			httpError(w, 500, constants.ErrCommitFailed+err.Error())
+			httpError(w, 500, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 		committed = true
 
 		previewRes, _, err := buildPreviewForBatch(pool, ctx, batchUUID, overrideSource)
 		if err != nil {
-			httpError(w, 500, constants.ErrPreviewBuild+err.Error())
+			httpError(w, 500, constants.ErrPreviewBuild+errtext.Detail(w, err))
 			return
 		}
 		previewRes.Info = append(previewRes.Info,
@@ -4202,7 +4218,7 @@ func GetBatchDetailV91(pool *pgxpool.Pool) http.HandlerFunc {
 				respondEnvelopeError(w, http.StatusNotFound, constants.ErrBatchNotFound, v91ErrorCode(http.StatusNotFound))
 				return
 			}
-			respondEnvelopeError(w, http.StatusInternalServerError, "batch lookup: "+err.Error(), v91ErrorCode(http.StatusInternalServerError))
+			respondEnvelopeError(w, http.StatusInternalServerError, "batch lookup: "+errtext.Detail(w, err), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		if uploadedBy.Valid {
@@ -4214,7 +4230,7 @@ func GetBatchDetailV91(pool *pgxpool.Pool) http.HandlerFunc {
 
 		preview, _, err := buildPreviewForBatch(pool, ctx, batchUUID, nil)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrPreviewBuild+err.Error(), v91ErrorCode(http.StatusInternalServerError))
+			respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrPreviewBuild+errtext.Detail(w, err), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 
@@ -4405,7 +4421,7 @@ func GetBatchExposureAuditV91(pool *pgxpool.Pool) http.HandlerFunc {
 			 ORDER BY a.requested_at DESC NULLS LAST, a.action_id DESC
 		`, batchIDStr)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, "failed to fetch batch audit: "+err.Error(), v91ErrorCode(http.StatusInternalServerError))
+			respondEnvelopeError(w, http.StatusInternalServerError, "failed to fetch batch audit: "+errtext.Detail(w, err), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		defer rows.Close()
@@ -4454,7 +4470,7 @@ func GetBatchExposureAuditV91(pool *pgxpool.Pool) http.HandlerFunc {
 			logs = append(logs, entry)
 		}
 		if err := rows.Err(); err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, "batch audit scan: "+err.Error(), v91ErrorCode(http.StatusInternalServerError))
+			respondEnvelopeError(w, http.StatusInternalServerError, "batch audit scan: "+errtext.Detail(w, err), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 

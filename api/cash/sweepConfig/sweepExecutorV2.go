@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -1073,8 +1074,15 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			overridden_amount, overridden_execution_time
 		) VALUES ($1, $2, now(), $3, $4) RETURNING initiation_id`
 
+		initTx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
+			return
+		}
+		defer initTx.Rollback(ctx)
+
 		var initiationID string
-		err = pgxPool.QueryRow(ctx, ins,
+		err = initTx.QueryRow(ctx, ins,
 			req.SweepID,
 			requestedBy,
 			nullifyFloat(req.OverriddenAmount),
@@ -1092,9 +1100,13 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip
 		) VALUES ($1, $2, 'CREATE', 'APPROVED', $3, now(), $4, $5, now(), $6)`
 
-		_, err = pgxPool.Exec(ctx, insAudit, initiationID, req.SweepID, requestedBy, nullifyEmpty(api.ClientIPFromRequest(r)), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
+		_, err = initTx.Exec(ctx, insAudit, initiationID, req.SweepID, requestedBy, nullifyEmpty(api.ClientIPFromRequest(r)), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to auto-approve manual initiation: "+err.Error())
+			return
+		}
+		if err := initTx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to create manual initiation: "+err.Error())
 			return
 		}
 
@@ -1113,6 +1125,10 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		result, err := executeSweepV2WithInitiation(ctx, pgxPool, params)
 
+		if errors.Is(err, cashjobs.ErrSweepInitiationBusy) {
+			api.RespondWithResult(w, false, "Sweep is already being executed for this initiation")
+			return
+		}
 		if err != nil {
 			// Execution failure is already logged in sweep_execution_log by executeSweepV2WithInitiation
 			api.RespondWithResult(w, false, "Sweep execution failed: "+err.Error())
@@ -1136,279 +1152,28 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// executeSweepV2WithInitiation executes a V2 sweep with initiation context
+// executeSweepV2WithInitiation executes a V2 sweep with initiation context through the shared
+// transactional executor, so manual and scheduled runs lock, validate and log identically.
 func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, params cashjobs.SweepExecParams) (map[string]interface{}, error) {
-
-	sweepID := params.SweepID
-	initiationID := params.InitiationID
-	sourceAccount := params.FromAccount
-	targetAccount := params.ToAccount
-	sweepType := params.SweepType
-	bufferAmount := params.BufferAmount
-	sweepAmount := params.SweepAmount
-	overriddenAmount := params.OverriddenAmount
-	requestedBy := params.RequestedBy
-	requestedIP := params.RequestedIP
-
-	// Get current balance for source account
-	var balanceID string
-	var currentBalance float64
-
-	err := pgxPool.QueryRow(ctx, `
-		SELECT balance_id, COALESCE(closing_balance, 0)
-		FROM bank_balances_manual
-		WHERE account_no = $1
-		ORDER BY as_of_date DESC, as_of_time DESC
-		LIMIT 1
-	`, sourceAccount).Scan(&balanceID, &currentBalance)
-
+	res, err := cashjobs.ExecuteSweepInitiation(ctx, pgxPool, params, cashjobs.SweepAuditOptions{
+		AuditStatus: constants.StatusApproved,
+		RequestedBy: params.RequestedBy,
+		RequestedIP: params.RequestedIP,
+	})
 	if err != nil {
-		// Log failure to execution log
-		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-			initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-		) VALUES (NULLIF($1,''),$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-			initiationID, sweepID, nil, sourceAccount, targetAccount, fmt.Sprintf("failed to fetch source account balance: %v", err), nil, nil)
-		return nil, fmt.Errorf("failed to fetch source account balance: %w", err)
+		return nil, err
 	}
-
-	// Calculate sweep amount based on sweep type and overrides
-	var finalSweepAmount float64
-	buffer := 0.0
-	if bufferAmount != nil {
-		buffer = *bufferAmount
-	}
-
-	// If overridden_amount is provided, use it directly (ignores sweep logic)
-	if overriddenAmount != nil && *overriddenAmount > 0 {
-		finalSweepAmount = *overriddenAmount
-
-		// For ZBA with override, allow sweeping to zero
-		sweepTypeUpper := strings.ToUpper(strings.TrimSpace(sweepType))
-		if sweepTypeUpper != "ZBA" {
-			// For CONCENTRATION and TARGET_BALANCE, validate override doesn't violate buffer
-			if (currentBalance - finalSweepAmount) < buffer {
-				// log failure
-				_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-						initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-					) VALUES (NULLIF($1,''),$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-					initiationID, sweepID, finalSweepAmount, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: Override amount (%.2f) would leave balance below buffer (%.2f)", finalSweepAmount, buffer), currentBalance, nil)
-				return nil, fmt.Errorf("BLOCKED: Override amount (%.2f) would leave balance below buffer (%.2f)", finalSweepAmount, buffer)
-			}
-		}
-	} else {
-		// Normal sweep logic based on sweep_type
-		sweepTypeUpper := strings.ToUpper(strings.TrimSpace(sweepType))
-
-		switch sweepTypeUpper {
-		case "ZBA": // Zero Balance Account - sweep EVERYTHING to leave source at ZERO
-			// Only execute if current balance exceeds buffer threshold
-			if currentBalance <= buffer {
-				_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-						initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-					) VALUES (NULLIF($1,''),$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-					initiationID, sweepID, nil, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: ZBA sweep - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer), currentBalance, nil)
-				return nil, fmt.Errorf("BLOCKED: ZBA sweep - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer)
-			}
-			// Sweep entire balance to make source account zero
-			finalSweepAmount = currentBalance
-
-		case "CONCENTRATION": // Concentration - fixed amount sweep maintaining buffer
-			if sweepAmount == nil || *sweepAmount <= 0 {
-				_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-						initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-					) VALUES (NULLIF($1,''),$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-					initiationID, sweepID, nil, sourceAccount, targetAccount, "BLOCKED: CONCENTRATION requires fixed sweep_amount", currentBalance, nil)
-				return nil, fmt.Errorf("BLOCKED: CONCENTRATION requires fixed sweep_amount")
-			}
-
-			// Only sweep if current balance exceeds buffer
-			if currentBalance <= buffer {
-				_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-						initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-					) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-					initiationID, sweepID, nil, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: CONCENTRATION - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer), currentBalance, nil)
-				return nil, fmt.Errorf("BLOCKED: CONCENTRATION - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer)
-			}
-
-			finalSweepAmount = *sweepAmount
-
-			// Maintain buffer - ensure sweep doesn't violate buffer requirement
-			if (currentBalance - finalSweepAmount) < buffer {
-				_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-						initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-					) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-					initiationID, sweepID, finalSweepAmount, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: CONCENTRATION - Sweeping %.2f would leave balance below buffer (%.2f)", finalSweepAmount, buffer), currentBalance, nil)
-				return nil, fmt.Errorf("BLOCKED: CONCENTRATION - Sweeping %.2f would leave balance below buffer (%.2f)", finalSweepAmount, buffer)
-			}
-
-		case "TARGET_BALANCE": // Target Balance - sweep excess above buffer
-			if currentBalance <= buffer {
-				_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-						initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-					) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-					initiationID, sweepID, nil, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: TARGET_BALANCE - Balance (%.2f) is at or below target (%.2f)", currentBalance, buffer), currentBalance, nil)
-				return nil, fmt.Errorf("BLOCKED: TARGET_BALANCE - Balance (%.2f) is at or below target (%.2f)", currentBalance, buffer)
-			}
-			// Sweep only the excess above buffer, leaving buffer amount in source
-			finalSweepAmount = currentBalance - buffer
-
-		default:
-			return nil, fmt.Errorf("unknown sweep type: %s", sweepType)
-		}
-	}
-
-	if finalSweepAmount <= 0 {
-		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-				initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-			) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-			initiationID, sweepID, finalSweepAmount, sourceAccount, targetAccount, fmt.Sprintf("no amount to sweep (calculated: %.2f)", finalSweepAmount), currentBalance, nil)
-		return nil, fmt.Errorf("no amount to sweep (calculated: %.2f)", finalSweepAmount)
-	}
-
-	// Begin transaction
-	tx, err := pgxPool.Begin(ctx)
-	if err != nil {
-		// Log failure
-		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-			initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-		) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-			initiationID, sweepID, finalSweepAmountOrNil(finalSweepAmount), sourceAccount, targetAccount, fmt.Sprintf("failed to begin transaction: %v", err), currentBalance, nil)
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	// Update source account
-	newBalance := currentBalance - finalSweepAmount
-
-	_, err = tx.Exec(ctx, `
-		UPDATE bank_balances_manual
-		SET old_opening_balance = opening_balance,
-			old_closing_balance = closing_balance,
-			old_balance_amount = balance_amount,
-			old_total_debits = total_debits,
-			opening_balance = closing_balance,
-			closing_balance = $1,
-			balance_amount = $1,
-			total_debits = total_debits + $2
-		WHERE balance_id = $3
-	`, newBalance, finalSweepAmount, balanceID)
-
-	if err != nil {
-		// Log failure with balances
-		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-			initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-		) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-			initiationID, sweepID, finalSweepAmountOrNil(finalSweepAmount), sourceAccount, targetAccount, fmt.Sprintf("failed to update source account: %v", err), currentBalance, newBalance)
-		return nil, fmt.Errorf("failed to update source account: %w", err)
-	}
-
-	// Create audit for source (APPROVED by system)
-	_, err = tx.Exec(ctx, `
-		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
-		) VALUES ($1, 'EDIT', 'APPROVED', $2, $3, NOW(), $4)
-	`, balanceID, fmt.Sprintf("Sweep V2 execution (initiation: %s): %s", initiationID, sweepID), requestedBy, nullifyEmpty(requestedIP))
-
-	if err != nil {
-		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-			initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-		) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-			initiationID, sweepID, finalSweepAmountOrNil(finalSweepAmount), sourceAccount, targetAccount, fmt.Sprintf("failed to create audit for source: %v", err), currentBalance, newBalance)
-		return nil, fmt.Errorf("failed to create audit for source: %w", err)
-	}
-
-	// Get target account
-	var targetBalanceID string
-	var targetBalance float64
-
-	err = tx.QueryRow(ctx, `
-		SELECT balance_id, COALESCE(closing_balance, 0)
-		FROM bank_balances_manual
-		WHERE account_no = $1
-		ORDER BY as_of_date DESC, as_of_time DESC
-		LIMIT 1
-	`, targetAccount).Scan(&targetBalanceID, &targetBalance)
-
-	if err != nil {
-		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-			initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-		) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-			initiationID, sweepID, finalSweepAmountOrNil(finalSweepAmount), sourceAccount, targetAccount, fmt.Sprintf("target account '%s' not found in bank_balances_manual: %v", targetAccount, err), currentBalance, nil)
-		return nil, fmt.Errorf("target account '%s' not found in bank_balances_manual: %w", targetAccount, err)
-	}
-
-	// Update target account
-	targetNewBalance := targetBalance + finalSweepAmount
-
-	_, err = tx.Exec(ctx, `
-		UPDATE bank_balances_manual
-		SET old_opening_balance = opening_balance,
-			old_closing_balance = closing_balance,
-			old_balance_amount = balance_amount,
-			old_total_credits = total_credits,
-			opening_balance = closing_balance,
-			closing_balance = $1,
-			balance_amount = $1,
-			total_credits = total_credits + $2
-		WHERE balance_id = $3
-	`, targetNewBalance, finalSweepAmount, targetBalanceID)
-
-	if err != nil {
-		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-			initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-		) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-			initiationID, sweepID, finalSweepAmountOrNil(finalSweepAmount), sourceAccount, targetAccount, fmt.Sprintf("failed to update target account: %v", err), currentBalance, targetNewBalance)
-		return nil, fmt.Errorf("failed to update target account: %w", err)
-	}
-
-	// Create audit for target (APPROVED by system)
-	_, err = tx.Exec(ctx, `
-		INSERT INTO auditactionbankbalances (
-			balance_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip
-		) VALUES ($1, 'EDIT', 'APPROVED', $2, $3, NOW(), $4)
-	`, targetBalanceID, fmt.Sprintf("Sweep V2 receipt (initiation: %s): %s", initiationID, sweepID), requestedBy, nullifyEmpty(requestedIP))
-
-	if err != nil {
-		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-			initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-		) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-			initiationID, sweepID, finalSweepAmountOrNil(finalSweepAmount), sourceAccount, targetAccount, fmt.Sprintf("failed to create audit for target: %v", err), currentBalance, targetNewBalance)
-		return nil, fmt.Errorf("failed to create audit for target: %w", err)
-	}
-
-	// Log execution with initiation_id
-	_, err = tx.Exec(ctx, `
-		INSERT INTO cimplrcorpsaas.sweep_execution_log (
-			initiation_id, sweep_id, amount_swept, from_account, to_account, status,
-			balance_before, balance_after, error_message
-		) VALUES ($1, $2, $3, $4, $5, 'SUCCESS', $6, $7, NULL)
-	`, initiationID, sweepID, finalSweepAmount, sourceAccount, targetAccount, currentBalance, newBalance)
-
-	if err != nil {
-		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-			initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-		) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-			initiationID, sweepID, finalSweepAmountOrNil(finalSweepAmount), sourceAccount, targetAccount, fmt.Sprintf("failed to log execution: %v", err), currentBalance, newBalance)
-		return nil, fmt.Errorf("failed to log execution: %w", err)
-	}
-
-	// Commit
-	if err := tx.Commit(ctx); err != nil {
-		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
-			initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
-		) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-			initiationID, sweepID, finalSweepAmountOrNil(finalSweepAmount), sourceAccount, targetAccount, fmt.Sprintf("failed to commit: %v", err), currentBalance, newBalance)
-		return nil, fmt.Errorf("failed to commit: %w", err)
-	}
-
+	amount, _ := res.Amount.Float64()
+	before, _ := res.BalanceBefore.Float64()
+	after, _ := res.BalanceAfter.Float64()
 	return map[string]interface{}{
-		"initiation_id":  initiationID,
-		"sweep_id":       sweepID,
-		"amount_swept":   finalSweepAmount,
-		"from_account":   sourceAccount,
-		"to_account":     targetAccount,
-		"balance_before": currentBalance,
-		"balance_after":  newBalance,
+		"initiation_id":  params.InitiationID,
+		"sweep_id":       params.SweepID,
+		"amount_swept":   amount,
+		"from_account":   params.FromAccount,
+		"to_account":     params.ToAccount,
+		"balance_before": before,
+		"balance_after":  after,
 	}, nil
 }
 
@@ -1482,19 +1247,6 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 			return
 		}
 
-		// Start transaction
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
-			return
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
-
 		type ResultItem struct {
 			SweepID      string `json:"sweep_id"`
 			InitiationID string `json:"initiation_id"`
@@ -1507,6 +1259,15 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 
 		for i, sweep := range req.Sweeps {
 			result := ResultItem{Status: "success"}
+
+			// Each sweep gets its own transaction so one failure cannot poison the rest.
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				result.Status = "failed"
+				result.Error = fmt.Sprintf("sweep[%d]: %s%s", i, constants.ErrFailedToBeginTransaction, err.Error())
+				results = append(results, result)
+				continue
+			}
 
 			// Determine if we need to create new sweep or use existing
 			sweepID := strings.TrimSpace(sweep.SweepID)

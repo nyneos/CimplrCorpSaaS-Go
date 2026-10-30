@@ -23,6 +23,9 @@ func RegisterUAMRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool.
 	midUAM := func(h http.Handler) http.Handler {
 		return middlewares.SessionMiddleware(pgxPool)(h)
 	}
+	perm := func(page, action string, h http.Handler) http.Handler {
+		return midUAM(middlewares.RequirePermission(pgxPool, page, action)(h))
+	}
 
 	/*Approval Matrix*/
 	mux.Handle("/uam/approval-matrix/create", midUAM(approvalMatrix.CreateApprovalMatrix(pgxPool)))
@@ -47,31 +50,31 @@ func RegisterUAMRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool.
 	mux.Handle("/uam/instance/submissions", midUAM(approvalMatrix.GetMySubmissions(pgxPool)))
 	mux.Handle("/uam/instance/detail", midUAM(approvalMatrix.GetInstanceDetail(pgxPool)))
 	/*users*/
-	mux.Handle("/uam/users/create-user", midUAM(http.HandlerFunc(user.CreateUser(pgxPool))))
+	mux.Handle("/uam/users/create-user", perm("user-creation", middlewares.PermCreate, http.HandlerFunc(user.CreateUser(pgxPool))))
 	mux.Handle("/uam/users/get-users", midUAM(http.HandlerFunc(user.GetUsers(pgxPool))))
 	mux.Handle("/uam/users/get-approved-user", midUAM(http.HandlerFunc(user.GetApprovedUser(pgxPool))))
 	mux.Handle("/uam/users/get-user-by-id", midUAM(http.HandlerFunc(user.GetUserById(pgxPool))))
-	mux.Handle("/uam/users/update-user", midUAM(http.HandlerFunc(user.UpdateUser(pgxPool))))
-	mux.Handle("/uam/users/delete-user", midUAM(http.HandlerFunc(user.DeleteUser(pgxPool))))
-	mux.Handle("/uam/users/approve-multiple-users", midUAM(http.HandlerFunc(user.ApproveMultipleUsers(pgxPool))))
-	mux.Handle("/uam/users/reject-multiple-users", midUAM(http.HandlerFunc(user.RejectMultipleUsers(pgxPool))))
+	mux.Handle("/uam/users/update-user", perm("user-creation", middlewares.PermEdit, http.HandlerFunc(user.UpdateUser(pgxPool))))
+	mux.Handle("/uam/users/delete-user", perm("user-creation", middlewares.PermDelete, http.HandlerFunc(user.DeleteUser(pgxPool))))
+	mux.Handle("/uam/users/approve-multiple-users", perm("user-creation", middlewares.PermApprove, http.HandlerFunc(user.ApproveMultipleUsers(pgxPool))))
+	mux.Handle("/uam/users/reject-multiple-users", perm("user-creation", middlewares.PermReject, http.HandlerFunc(user.RejectMultipleUsers(pgxPool))))
 	mux.Handle("/uam/users/audit-history", midUAM(http.HandlerFunc(user.GetUserAuditHistory(pgxPool))))
 	/*roles*/
-	mux.Handle("/uam/roles/create-role", midUAM(http.HandlerFunc(role.CreateRole(pgxPool))))
+	mux.Handle("/uam/roles/create-role", perm("roles", middlewares.PermCreate, http.HandlerFunc(role.CreateRole(pgxPool))))
 	mux.Handle("/uam/roles/page-data", midUAM(http.HandlerFunc(role.GetRolesPageData(pgxPool))))
-	mux.Handle("/uam/roles/approve-multiple-roles", midUAM(http.HandlerFunc(role.ApproveMultipleRoles(pgxPool))))
-	mux.Handle("/uam/roles/delete-role", midUAM(http.HandlerFunc(role.DeleteRole(pgxPool))))
-	mux.Handle("/uam/roles/reject-multiple-roles", midUAM(http.HandlerFunc(role.RejectMultipleRoles(pgxPool))))
-	mux.Handle("/uam/roles/update-role", midUAM(http.HandlerFunc(role.UpdateRole(pgxPool))))
+	mux.Handle("/uam/roles/approve-multiple-roles", perm("roles", middlewares.PermApprove, http.HandlerFunc(role.ApproveMultipleRoles(pgxPool))))
+	mux.Handle("/uam/roles/delete-role", perm("roles", middlewares.PermDelete, http.HandlerFunc(role.DeleteRole(pgxPool))))
+	mux.Handle("/uam/roles/reject-multiple-roles", perm("roles", middlewares.PermReject, http.HandlerFunc(role.RejectMultipleRoles(pgxPool))))
+	mux.Handle("/uam/roles/update-role", perm("roles", middlewares.PermEdit, http.HandlerFunc(role.UpdateRole(pgxPool))))
 	mux.Handle("/uam/roles/get-just-roles", midUAM(http.HandlerFunc(role.GetJustRoles(pgxPool))))
 	mux.Handle("/uam/roles/get-roles-for-dropdown", midUAM(http.HandlerFunc(role.GetRolesForDropdown(pgxPool))))
 	mux.Handle("/uam/roles/get-user-roles", midUAM(http.HandlerFunc(role.GetJustRolesPERMISSIONapproved(pgxPool))))
 	mux.Handle("/uam/roles/get-pending-roles", midUAM(http.HandlerFunc(role.GetPendingRoles(pgxPool))))
 	mux.Handle("/uam/roles/audit-history", midUAM(http.HandlerFunc(role.GetRoleAuditHistory(pgxPool))))
 	/*Permissions*/
-	mux.Handle("/uam/permissions/upsert-role-permissions", midUAM(http.HandlerFunc(permissions.UpsertRolePermissions(pgxPool))))
+	mux.Handle("/uam/permissions/upsert-role-permissions", perm("permissions", middlewares.PermEdit, http.HandlerFunc(permissions.UpsertRolePermissions(pgxPool))))
 	mux.Handle("/uam/permissions/permissions-json", midUAM(http.HandlerFunc(permissions.GetRolePermissionsJson(pgxPool))))
-	mux.Handle("/uam/permissions/status", midUAM(http.HandlerFunc(permissions.UpdateRolePermissionsStatusByName(pgxPool))))
+	mux.Handle("/uam/permissions/status", perm("permissions", middlewares.PermApprove, http.HandlerFunc(permissions.UpdateRolePermissionsStatusByName(pgxPool))))
 	mux.Handle("/uam/permissions/approve-reject", midUAM(http.HandlerFunc(permissions.GetRolesStatus(pgxPool))))
 	mux.Handle("/uam/permissions/get-role-permissions", midUAM(http.HandlerFunc(permissions.GetRolePermissionsJsonByRoleName(pgxPool))))
 	mux.Handle("/uam/permissions/sidebar", midUAM(http.HandlerFunc(permissions.GetSidebarPermissions(pgxPool))))

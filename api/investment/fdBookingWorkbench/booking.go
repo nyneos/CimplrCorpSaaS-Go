@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -190,7 +191,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.RespondWithError(w, http.StatusBadRequest, "rate_request_id not found")
 					return
 				}
-				api.RespondWithError(w, http.StatusInternalServerError, "Validate rate_request_id failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Validate rate_request_id failed: "+errtext.Detail(w, err))
 				return
 			}
 			if selectedOfferID == nil || strings.TrimSpace(*selectedOfferID) == "" {
@@ -212,7 +213,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						SELECT 1 FROM investment.fd_booking_request
 						WHERE booking_id = $1 AND COALESCE(is_deleted,false)=false
 					)`, linkedID).Scan(&linkedExists); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Validate existing FD link failed: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "Validate existing FD link failed: "+errtext.Detail(w, err))
 					return
 				}
 				if linkedExists {
@@ -368,7 +369,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err = convertRateNegotiationOnBookingCreate(
 				ctx, tx, rateRequestID, bookingID, userEmail, api.ClientIPFromContext(ctx),
 			); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 				return
 			}
 		}
@@ -591,7 +592,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"row_index": i, "entity_id": row.EntityID,
-					constants.ValueSuccess: false, constants.ValueError: "tx begin: " + err.Error(),
+					constants.ValueSuccess: false, constants.ValueError: "tx begin: " + errtext.Text(err),
 				})
 				continue
 			}
@@ -1252,7 +1253,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var bm bookingMeta
 			if err := rows.Scan(&bm.id, &bm.entity, &bm.amount); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+errtext.Detail(w, err))
 				return
 			}
 			if _, blocked := blockedSet[bm.id]; blocked {
@@ -1261,7 +1262,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			validBookings = append(validBookings, bm)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, err))
 			return
 		}
 		rows.Close()
@@ -1376,6 +1377,33 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// applyApprovedBookingStatus moves a fully approved booking to SENT_TO_BANK and applies an
+// approved DELETE, in one transaction.
+func applyApprovedBookingStatus(ctx context.Context, pool *pgxpool.Pool, bookingID string) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		`UPDATE investment.fd_booking_request
+		 SET booking_status = 'SENT_TO_BANK'
+		 WHERE booking_id = $1 AND booking_status NOT IN ('SENT_TO_BANK')`, bookingID,
+	); err != nil {
+		return fmt.Errorf("booking_status SENT_TO_BANK: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE investment.fd_booking_request SET is_deleted = true
+		 WHERE booking_id IN (
+			 SELECT DISTINCT a.booking_id FROM investment.fd_audit_booking_request a
+			 WHERE a.booking_id = $1 AND a.action_type = 'DELETE' AND a.processing_status = 'APPROVED'
+		 )`, bookingID,
+	); err != nil {
+		return fmt.Errorf("is_deleted flip: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 // ─── BulkApproveBooking ──────────────────────────────────────────────────────
 // Engine-first: if an approval instance is PENDING for this booking and the
 // user is an eligible approver, calls RecordAction (which respects eye
@@ -1454,7 +1482,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // 					Comment:       req.Comment,
 // 				}); err != nil {
 // 					api.LogError("[FDBooking] RecordAction approve failed for booking %s: %v", bID, err)
-// 					errors = append(errors, bID+": "+err.Error())
+// 					errors = append(errors, bID+": "+errtext.Text(err))
 // 					continue
 // 				}
 
@@ -1603,6 +1631,9 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_id::text FROM investment.fd_booking_request WHERE booking_id::text = ANY($1)`, req.BookingIDs) {
+			return
+		}
 		if len(req.BookingIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrBookingIDsRequired)
 			return
@@ -1616,6 +1647,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		userID := api.GetUserIDFromCtx(r.Context())
 
 		ctx := r.Context()
+		var approvedIDs []string
 		engineActed := 0
 		directActed := 0
 		var errors []string
@@ -1623,7 +1655,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, bID := range req.BookingIDs {
 			fields, entityID, loadErr := loadFDBookingCDMFields(ctx, pgxPool, bID)
 			if loadErr != nil {
-				errors = append(errors, bID+": "+loadErr.Error())
+				errors = append(errors, bID+": "+errtext.Text(loadErr))
 				continue
 			}
 			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, enforceCtx{
@@ -1641,7 +1673,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: bID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDBooking] RecordAction approve failed for booking %s: %v", bID, actionErr)
-				errors = append(errors, bID+": "+actionErr.Error())
+				errors = append(errors, bID+": "+errtext.Text(actionErr))
 				continue
 			}
 			if actionRes.Acted {
@@ -1649,23 +1681,12 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				engineActed++
 				// If the engine fully approved (last eye done), flip booking status.
 				if actionRes.InstanceStatus == constants.StatusApproved {
-					if _, execErr := pgxPool.Exec(ctx,
-						`UPDATE investment.fd_booking_request
-						 SET booking_status = 'SENT_TO_BANK'
-						 WHERE booking_id = $1 AND booking_status NOT IN ('SENT_TO_BANK')`, bID,
-					); execErr != nil {
-						api.LogError("[FDBooking] booking_status→SENT_TO_BANK failed for %s: %v", bID, execErr)
+					if flipErr := applyApprovedBookingStatus(ctx, pgxPool, bID); flipErr != nil {
+						api.LogError("[FDBooking] post-approval status update failed for %s: %v", bID, flipErr)
+						errors = append(errors, bID+": approved, but booking status update failed — retry the approval")
+						continue
 					}
-					if _, execErr := pgxPool.Exec(ctx,
-						`UPDATE investment.fd_booking_request SET is_deleted = true
-						 WHERE booking_id IN (
-							 SELECT DISTINCT a.booking_id FROM investment.fd_audit_booking_request a
-							 WHERE a.booking_id = $1 AND a.action_type = 'DELETE' AND a.processing_status = 'APPROVED'
-						 )`, bID,
-					); execErr != nil {
-						api.LogError("[FDBooking] is_deleted flip failed for %s: %v", bID, execErr)
-					}
-
+					approvedIDs = append(approvedIDs, bID)
 				}
 			} else {
 				if actionRes.CancelledStale {
@@ -1706,6 +1727,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				directActed++
+				approvedIDs = append(approvedIDs, bID)
 			}
 		}
 
@@ -1719,14 +1741,18 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
-		for _, bID := range req.BookingIDs {
-			go func(id, uEmail, uID string) {
-				defer func() {
-					if rec := recover(); rec != nil {
-						api.LogError("[FDBooking] approve notification goroutine panic for booking %s: %v", id, rec)
-					}
-				}()
-				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/approve", id, map[string]interface{}{
+		// Notify only bookings that were actually fully approved, from one bounded
+		// goroutine instead of one per requested id.
+		go func(ids []string, uEmail, uID string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] approve notification goroutine panic: %v", rec)
+				}
+			}()
+			notifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			for _, id := range ids {
+				notifcatalog.TriggerNotification(notifyCtx, pgxPool, "/investment/fd/booking/approve", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_BOOKING_APPROVED",
 					"user_id":     uID,
@@ -1734,7 +1760,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 				trigger := "POST_APPROVE"
 				var actionType string
-				if qerr := pgxPool.QueryRow(context.Background(), `
+				if qerr := pgxPool.QueryRow(notifyCtx, `
 					SELECT COALESCE(action_type,'')
 					FROM investment.fd_audit_booking_request
 					WHERE booking_id=$1 AND processing_status IN ('APPROVED','DELETED')
@@ -1748,8 +1774,8 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_BOOKING", trigger, []string{id}, uEmail)
-			}(bID, userEmail, userID)
-		}
+			}
+		}(approvedIDs, userEmail, userID)
 		api.LogInfo("[FDBooking] BulkApproveBooking: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)
 	}
@@ -1766,6 +1792,9 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_id::text FROM investment.fd_booking_request WHERE booking_id::text = ANY($1)`, req.BookingIDs) {
 			return
 		}
 		if len(req.BookingIDs) == 0 {
@@ -1788,7 +1817,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, bID := range req.BookingIDs {
 			fields, entityID, loadErr := loadFDBookingCDMFields(ctx, pgxPool, bID)
 			if loadErr != nil {
-				errors = append(errors, bID+": "+loadErr.Error())
+				errors = append(errors, bID+": "+errtext.Text(loadErr))
 				continue
 			}
 			if ok, pmsg, _ := enforceFDBookingPolicyInline(ctx, r, pgxPool, enforceCtx{
@@ -1806,7 +1835,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: bID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDBooking] RecordAction reject failed for booking %s: %v", bID, actionErr)
-				errors = append(errors, bID+": "+actionErr.Error())
+				errors = append(errors, bID+": "+errtext.Text(actionErr))
 				continue
 			}
 			if actionRes.Acted {
@@ -2059,7 +2088,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l    ON l.booking_id = m.booking_id
 			LEFT JOIN history h         ON h.booking_id = m.booking_id
 			LEFT JOIN LATERAL (
-				SELECT ai.* FROM uam.approval_instance ai
+				SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 				WHERE ai.record_id = m.booking_id
 				  AND ai.module_code = 'FIXED_DEPOSIT'
 				  AND ai.status = 'PENDING'
@@ -2068,7 +2097,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) ai ON true
 			LEFT JOIN LATERAL (
-				SELECT aie.* FROM uam.approval_instance_eye aie
+				SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 				WHERE aie.instance_id = ai.instance_id
 				  AND aie.status = 'ACTIVE'
 				ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -2083,7 +2112,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, scopeArgs...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2104,7 +2133,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -2226,7 +2255,7 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`,
 			bookingID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer auditRows.Close()
@@ -2246,7 +2275,7 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			auditHistory = append(auditHistory, row)
 		}
 		if err := auditRows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit row error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Audit row error: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -2406,7 +2435,7 @@ func GetBookingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2426,7 +2455,7 @@ func GetBookingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, err))
 			return
 		}
 
@@ -2605,7 +2634,7 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2627,7 +2656,7 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, err))
 			return
 		}
 
@@ -2646,6 +2675,9 @@ func MarkAsSentToBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_id::text FROM investment.fd_booking_request WHERE booking_id::text = ANY($1)`, req.BookingIDs) {
 			return
 		}
 		if len(req.BookingIDs) == 0 {

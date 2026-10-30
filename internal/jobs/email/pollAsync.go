@@ -10,11 +10,11 @@ import (
 )
 
 var (
-	inboundPollMu          sync.Mutex
-	graphPollMu            sync.Mutex
-	googleWorkspacePollMu  sync.Mutex
-	imapPollMu             sync.Mutex
-	oauthPollMu            sync.Mutex
+	inboundPollMu         sync.Mutex
+	graphPollMu           sync.Mutex
+	googleWorkspacePollMu sync.Mutex
+	imapPollMu            sync.Mutex
+	oauthPollMu           sync.Mutex
 )
 
 // StartInboundPollAsync runs one S3 poll cycle in the background. Returns false if already running.
@@ -24,7 +24,9 @@ func StartInboundPollAsync(pool *pgxpool.Pool) bool {
 	}
 	go func() {
 		defer inboundPollMu.Unlock()
-		if err := TriggerInboundPoll(context.Background(), pool); err != nil {
+		if err := runPollCycle(context.Background(), pool, "email-inbound-poll", func(ctx context.Context) error {
+			return TriggerInboundPoll(ctx, pool)
+		}); err != nil {
 			logger.LogError("[email-poller] manual trigger: %v", err)
 		}
 	}()
@@ -38,7 +40,9 @@ func StartGraphPollAsync(pool *pgxpool.Pool) bool {
 	}
 	go func() {
 		defer graphPollMu.Unlock()
-		if err := TriggerGraphPoll(context.Background(), pool); err != nil {
+		if err := runPollCycle(context.Background(), pool, "email-graph-poll", func(ctx context.Context) error {
+			return TriggerGraphPoll(ctx, pool)
+		}); err != nil {
 			logger.LogError("[graph-poller] manual trigger: %v", err)
 		}
 	}()
@@ -52,7 +56,9 @@ func StartGoogleWorkspacePollAsync(pool *pgxpool.Pool) bool {
 	}
 	go func() {
 		defer googleWorkspacePollMu.Unlock()
-		if err := TriggerGoogleWorkspacePoll(context.Background(), pool); err != nil {
+		if err := runPollCycle(context.Background(), pool, "email-google-workspace-poll", func(ctx context.Context) error {
+			return TriggerGoogleWorkspacePoll(ctx, pool)
+		}); err != nil {
 			logger.LogError("[google-workspace-poller] manual trigger: %v", err)
 		}
 	}()
@@ -66,7 +72,9 @@ func StartIMAPPollAsync(pool *pgxpool.Pool) bool {
 	}
 	go func() {
 		defer imapPollMu.Unlock()
-		if err := TriggerIMAPPoll(context.Background(), pool); err != nil {
+		if err := runPollCycle(context.Background(), pool, "email-imap-poll", func(ctx context.Context) error {
+			return TriggerIMAPPoll(ctx, pool)
+		}); err != nil {
 			logger.LogError("[imap-poller] manual trigger: %v", err)
 		}
 	}()
@@ -80,7 +88,9 @@ func StartOAuthPollAsync(pool *pgxpool.Pool) bool {
 	}
 	go func() {
 		defer oauthPollMu.Unlock()
-		if err := TriggerOAuthPoll(context.Background(), pool); err != nil {
+		if err := runPollCycle(context.Background(), pool, "email-oauth-poll", func(ctx context.Context) error {
+			return TriggerOAuthPoll(ctx, pool)
+		}); err != nil {
 			logger.LogError("[oauth-poller] manual trigger: %v", err)
 		}
 	}()

@@ -1,6 +1,7 @@
 package checklist
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -28,6 +29,9 @@ func ApproveChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ids := mergeItemIDs(req.ItemID, req.ItemIDs)
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `SELECT c.entity_id::text FROM investment.fd_closing_cycle c JOIN investment.fd_closing_checklist_item x ON x.cycle_id = c.cycle_id WHERE x.item_id::text = ANY($1)`, ids) {
+			return
+		}
 		if len(ids) == 0 {
 			fdclosingcommon.RespondError(w, http.StatusBadRequest, "item_id or item_ids is required")
 			return
@@ -52,7 +56,7 @@ func ApproveChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[FDClosingChecklist] ActOnPendingOrDiagnose approve failed for %s: %v", itemID, actionErr)
-				errs = append(errs, itemID+": "+actionErr.Error())
+				errs = append(errs, itemID+": "+errtext.Text(actionErr))
 				continue
 			}
 			if actionRes.Acted {
@@ -64,7 +68,7 @@ func ApproveChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if err := directApproveChecklist(ctx, pool, itemID, actor.Email, req.Comment); err != nil {
-				errs = append(errs, itemID+": "+err.Error())
+				errs = append(errs, itemID+": "+errtext.Text(err))
 				continue
 			}
 			directActed++

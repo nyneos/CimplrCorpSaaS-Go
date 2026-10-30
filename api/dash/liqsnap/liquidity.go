@@ -1,6 +1,7 @@
 package liqsnap
 
 import (
+	"CimplrCorpSaas/api/dash/fxrates"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,9 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 )
+
+// maxDashboardHorizonDays bounds client-supplied horizons that drive per-day loops.
+const maxDashboardHorizonDays = 3650
 
 type liquidityScope struct {
 	Entities   []string
@@ -179,7 +183,7 @@ func TotalCashBalanceByEntity(ctx context.Context, pgxPool *pgxpool.Pool, scope 
 	JOIN masterentity m ON bs.entityid = m.entity_id
 	JOIN masterbankaccount mba ON bs.account_no = mba.account_no
 	JOIN masterbank mb ON mba.bank_id = mb.bank_id
-	WHERE bs.status = 'Approved'
+	WHERE UPPER(TRIM(bs.status)) = 'APPROVED'
 	  AND bs.account_no = ANY($1)
 	  AND m.entity_name = ANY($2)
 	  AND UPPER(TRIM(COALESCE(bs.currency_code, ''))) = ANY($3)
@@ -204,6 +208,9 @@ func TotalCashBalanceByEntity(ctx context.Context, pgxPool *pgxpool.Pool, scope 
 			entityMap[entity][bank] = make(map[string]float64)
 		}
 		entityMap[entity][bank][currency] += balance
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	// Convert to response struct
 	var response []EntityBankBalance
@@ -357,6 +364,9 @@ func KpiCardsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 14
 		}
+		if req.Horizon > maxDashboardHorizonDays {
+			req.Horizon = maxDashboardHorizonDays
+		}
 		scope, msg := resolveLiquidityScope(r.Context(), req.EntityName, req.Currency)
 		if msg != "" {
 			http.Error(w, msg, http.StatusForbidden)
@@ -391,6 +401,9 @@ func DetailedDailyCashFlowHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 14
 		}
+		if req.Horizon > maxDashboardHorizonDays {
+			req.Horizon = maxDashboardHorizonDays
+		}
 		scope, msg := resolveLiquidityScope(r.Context(), req.EntityName, req.Currency)
 		if msg != "" {
 			http.Error(w, msg, http.StatusForbidden)
@@ -406,24 +419,12 @@ func DetailedDailyCashFlowHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // GetKpiCards computes KPI cards for the given horizon (days) from today.
-var rates = map[string]float64{
-	"USD": 1.0,
-	"AUD": 0.68,
-	"CAD": 0.75,
-	"CHF": 1.1,
-	"CNY": 0.14,
-	"RMB": 0.14,
-	"EUR": 1.09,
-	"GBP": 1.28,
-	"JPY": 0.0067,
-	"SEK": 0.095,
-	"INR": 0.0117,
-}
+var rates = fxrates.USDPerUnit()
 
 func GetKpiCards(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope liquidityScope) (KPICards, error) {
 	var k KPICards
 	// 1) Total cash balance: sum of latest balance_amount per account as of today
-	today := time.Now().UTC()
+	today := time.Now().UTC().Truncate(24 * time.Hour)
 	dateToday := today.Format(constants.DateFormat)
 
 	// Use DISTINCT ON to pick latest record per account identifier and sum balance_amount
@@ -449,10 +450,10 @@ func GetKpiCards(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope 
 			return k, err
 		}
 		rate := rates[currencyCode]
-		if rate == 0 {
-			rate = 1.0
-		}
 		totalUSD += amt * rate
+	}
+	if err := fetchRows.Err(); err != nil {
+		return KPICards{}, err
 	}
 	k.TotalCashBalance = totalUSD
 
@@ -464,7 +465,7 @@ func GetKpiCards(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope 
 
 	// Apply optional filters to inflow/outflow queries
 	inflowQuery := `SELECT COALESCE(SUM(invoice_amount),0)::float8, COALESCE(currency_code,'USD') FROM tr_receivables r
-		JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND a.processing_status='APPROVED'
+		JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND UPPER(TRIM(a.processing_status)) = 'APPROVED'
 		WHERE r.due_date BETWEEN $1 AND $2`
 	inflowArgs := []interface{}{startDate, endDate}
 	inflowQuery += " AND r.entity_name = ANY($3)"
@@ -487,16 +488,16 @@ func GetKpiCards(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope 
 			return k, err
 		}
 		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
 		inflowsUSD += amt * rate
+	}
+	if err := inflowRows2.Err(); err != nil {
+		return KPICards{}, err
 	}
 	inflowRows2.Close()
 	inflows = inflowsUSD
 
 	outflowQuery := `SELECT COALESCE(SUM(amount),0)::float8, COALESCE(currency_code,'USD') FROM tr_payables p
-		JOIN auditactionpayable a ON a.payable_id = p.payable_id AND a.processing_status='APPROVED'
+		JOIN auditactionpayable a ON a.payable_id = p.payable_id AND UPPER(TRIM(a.processing_status)) = 'APPROVED'
 		WHERE p.due_date BETWEEN $1 AND $2`
 	outflowArgs := []interface{}{startDate, endDate}
 	outflowQuery += " AND p.entity_name = ANY($3)"
@@ -518,10 +519,10 @@ func GetKpiCards(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope 
 			return k, err
 		}
 		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
 		outflowsUSD += amt * rate
+	}
+	if err := outflowRows2.Err(); err != nil {
+		return KPICards{}, err
 	}
 	outflowRows2.Close()
 	outflows = outflowsUSD
@@ -566,7 +567,7 @@ func GetKpiCards(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope 
 // Implementation: fetch opening (latest closing) balance as of today, fetch aggregated inflows/outflows per date
 // over the range in two queries, then iterate days and compute net/closing balances in Go (single pass).
 func DetailedDailyCashFlowRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope liquidityScope) ([]DetailedDailyCashFlowRow, error) {
-	today := time.Now().UTC()
+	today := time.Now().UTC().Truncate(24 * time.Hour)
 	start := today
 	end := today.AddDate(0, 0, horizon-1)
 	startDate := start.Format(constants.DateFormat)
@@ -594,16 +595,16 @@ func DetailedDailyCashFlowRows(ctx context.Context, pgxPool *pgxpool.Pool, horiz
 			return nil, err
 		}
 		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
 		openingBalance += amt * rate
+	}
+	if err := openingRows.Err(); err != nil {
+		return nil, err
 	}
 
 	// Aggregated inflows per date (receivables due_date)
 	inflowsQ := `SELECT r.due_date::date, COALESCE(SUM(r.invoice_amount),0)::float8, COALESCE(r.currency_code,'USD')
 		FROM tr_receivables r
-		JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND a.processing_status='APPROVED'
+		JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND UPPER(TRIM(a.processing_status)) = 'APPROVED'
 		WHERE r.due_date BETWEEN $1 AND $2`
 	inflowArgs := []interface{}{startDate, endDate}
 	inflowsQ += " AND r.entity_name = ANY($3)"
@@ -625,16 +626,16 @@ func DetailedDailyCashFlowRows(ctx context.Context, pgxPool *pgxpool.Pool, horiz
 			return nil, err
 		}
 		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
 		inflowsMap[d.Format(constants.DateFormat)] += amt * rate
+	}
+	if err := inflowRows.Err(); err != nil {
+		return nil, err
 	}
 
 	// Aggregated outflows per date (payables due_date)
 	outflowsQ := `SELECT p.due_date::date, COALESCE(SUM(p.amount),0)::float8, COALESCE(p.currency_code,'USD')
 		FROM tr_payables p
-		JOIN auditactionpayable a ON a.payable_id = p.payable_id AND a.processing_status='APPROVED'
+		JOIN auditactionpayable a ON a.payable_id = p.payable_id AND UPPER(TRIM(a.processing_status)) = 'APPROVED'
 		WHERE p.due_date BETWEEN $1 AND $2`
 	outflowArgs := []interface{}{startDate, endDate}
 	outflowsQ += " AND p.entity_name = ANY($3)"
@@ -656,10 +657,10 @@ func DetailedDailyCashFlowRows(ctx context.Context, pgxPool *pgxpool.Pool, horiz
 			return nil, err
 		}
 		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
 		outflowsMap[d.Format(constants.DateFormat)] += amt * rate
+	}
+	if err := outflowRows.Err(); err != nil {
+		return nil, err
 	}
 
 	// Iterate dates and compute rows

@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
@@ -228,7 +229,7 @@ var rateCardFieldPairs = map[string]int{
 func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(10 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -240,13 +241,13 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		file, handler, err := r.FormFile("file")
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to get file: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to get file: "+errtext.Detail(w, err))
 			return
 		}
 		fileBytes, err := io.ReadAll(file)
 		file.Close()
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -270,7 +271,7 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			data, err = parseXLSXFile(newBytesMultipartFile(fileBytes))
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -454,7 +455,7 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			exists, err := rateCardExists(ctx, pgxPool, input)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+errtext.Detail(w, err))
 				return
 			}
 			if exists {
@@ -476,7 +477,7 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			storedFileName = s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -487,7 +488,7 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if s3Key != "" {
 				_ = s3storage.DeleteFromS3(ctx, s3Key)
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		committed := false
@@ -592,7 +593,7 @@ func CreateBankRateCardSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := validateRateCardFields(req.BankRateCardInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -613,7 +614,7 @@ func CreateBankRateCardSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Check uniqueness before attempting insert to provide a friendly error
 		if exists, err := rateCardExists(ctx, tx, req.BankRateCardInput); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+errtext.Detail(w, err))
 			return
 		} else if exists {
 			api.RespondWithPayload(w, false, "Rate card create aborted: a matching active rate card already exists", nil)
@@ -701,7 +702,7 @@ func CreateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errResults = append(errResults, map[string]interface{}{
 					"row_index":            i,
 					constants.ValueSuccess: false,
-					constants.ValueError:   err.Error(),
+					constants.ValueError:   errtext.Text(err),
 				})
 			} else {
 				validRows = append(validRows, row)
@@ -716,7 +717,7 @@ func CreateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -728,7 +729,7 @@ func CreateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			origIdx := validRowIndices[idx]
 			exists, err := rateCardExists(ctx, tx, input)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+errtext.Detail(w, err))
 				return
 			}
 			if exists {
@@ -760,7 +761,7 @@ func CreateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				input.EffectiveFrom, input.EffectiveTo, input.RateSource, input.SpecialOffer, input.OfferDetails, input.IsActive,
 			).Scan(&id)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+errtext.Detail(w, err))
 				return
 			}
 			insertedIDs = append(insertedIDs, id)
@@ -1004,7 +1005,7 @@ func UpdateBankRateCardBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1048,7 +1049,7 @@ func UpdateBankRateCardBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&v5, &v6, &v7, &v8, &v9,
 				&v10, &v11, &v12, &v13, &v14, &v15,
 			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+errtext.Detail(w, err))
 				return
 			}
 			rec.vals = [16]interface{}{v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15}
@@ -1093,7 +1094,7 @@ func UpdateBankRateCardBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errResults = append(errResults, map[string]interface{}{
 						"rate_card_id":         update.RateCardID,
 						constants.ValueSuccess: false,
-						constants.ValueError:   constants.ErrUpdateFailed + err.Error(),
+						constants.ValueError:   constants.ErrUpdateFailed + errtext.Text(err),
 					})
 					continue
 				}
@@ -1119,7 +1120,7 @@ func UpdateBankRateCardBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errResults = append(errResults, map[string]interface{}{
 					"rate_card_id":         update.RateCardID,
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Audit failed: " + err.Error(),
+					constants.ValueError:   "Audit failed: " + errtext.Text(err),
 				})
 				continue
 			}
@@ -1168,7 +1169,7 @@ func DeleteBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1188,7 +1189,7 @@ func DeleteBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for verifyRows.Next() {
 			var id string
 			if err := verifyRows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+errtext.Detail(w, err))
 				return
 			}
 			validIDs = append(validIDs, id)
@@ -1289,7 +1290,7 @@ func BulkApproveBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_bank_rate_card
 			SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE rate_card_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+			WHERE (rate_card_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, userEmail, req.Comment, req.RateCardIDs)
 		if err != nil {
 			msg, status := getUserFriendlyRateCardError(err, "Approval failed")
@@ -1366,7 +1367,7 @@ func BulkRejectBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_bank_rate_card
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE rate_card_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+			WHERE (rate_card_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, userEmail, req.Comment, req.RateCardIDs)
 		if err != nil {
 			msg, status := getUserFriendlyRateCardError(err, "Rejection failed")
@@ -1440,7 +1441,7 @@ func GetBankRateCardsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&effectiveFrom, &effectiveTo,
 				&rateSource, &specialOffer, &offerDetails, &isActive,
 			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1600,7 +1601,7 @@ func GetBankRateCardsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			vals, err := rows.Values()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Row value error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Row value error: "+errtext.Detail(w, err))
 				return
 			}
 			row := make(map[string]interface{}, len(fields))
@@ -1615,7 +1616,7 @@ func GetBankRateCardsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+errtext.Detail(w, rows.Err()))
 			return
 		}
 

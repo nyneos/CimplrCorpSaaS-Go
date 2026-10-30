@@ -7,6 +7,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/dms/common"
+	"CimplrCorpSaas/api/governance"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,6 +32,9 @@ func HandleApprove(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
 			return
 		}
+		if !common.RequireRecordsEntityAccess(w, r, pool, common.TemplateEntityQuery, req.IDs) {
+			return
+		}
 		if len(req.IDs) == 0 {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "ids is required", "VALIDATION_ERROR")
 			return
@@ -52,8 +56,9 @@ func HandleApprove(pool *pgxpool.Pool) http.HandlerFunc {
 			if id == "" {
 				continue
 			}
-			if err := applyApproval(r.Context(), tx, id, actor, ip, req.CheckerComment); err != nil {
-				errs = append(errs, id+": "+err.Error())
+			if err := common.RunInSavepoint(r.Context(), tx, func(sp pgx.Tx) error { return applyApproval(r.Context(), sp, id, actor, ip, req.CheckerComment) }); err != nil {
+				api.LogErrorForResponse(w, "dms template approve %s: %v", id, err)
+				errs = append(errs, id+": failed to approve template")
 				continue
 			}
 			approved = append(approved, id)
@@ -75,6 +80,13 @@ func applyApproval(ctx context.Context, tx pgx.Tx, templateID, actor, ip, checke
 	pa, err := findPendingAudit(ctx, tx, templateID)
 	if err != nil {
 		return err
+	}
+	maker, err := common.AuditMaker(ctx, tx, "dms_svc.template_audit", pa.AuditID)
+	if err != nil {
+		return err
+	}
+	if governance.IsSelfApprovalCtx(ctx, maker) || governance.IsSelfApproval(actor, maker) {
+		return governance.ErrSelfApproval
 	}
 
 	switch pa.ActionType {

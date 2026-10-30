@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -432,7 +433,7 @@ func bankConfigRowPlaceholder(base int) string {
 func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(10 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -444,13 +445,13 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		file, handler, err := r.FormFile("file")
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to get file: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to get file: "+errtext.Detail(w, err))
 			return
 		}
 		fileBytes, err := io.ReadAll(file)
 		file.Close()
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -474,7 +475,7 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			data, err = parseXLSXFile(newBytesMultipartFile(fileBytes))
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+errtext.Detail(w, err))
 			return
 		}
 		if len(data) < 2 {
@@ -669,7 +670,7 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			seenKeysInFile[key] = i + 2
 
 			if exists, existingID, err := bankConfigExists(ctx, pgxPool, input); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+errtext.Detail(w, err))
 				return
 			} else if exists {
 				cols := "bank_code, product_type, minimum_amount, maximum_amount, day_count_code, capitalization_schedule_type, capitalization_date_adjustment, accrual_start_convention, accrual_end_convention, period_boundary_definition, holiday_calendar_code, broken_period_method, broken_period_location, rounding_method, rounding_frequency, tds_deduction_timing, effective_from, effective_to"
@@ -691,7 +692,7 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			storedFileName = s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -701,7 +702,7 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if s3Key != "" {
 				_ = s3storage.DeleteFromS3(ctx, s3Key)
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		committed := false
@@ -740,7 +741,7 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for insertRows.Next() {
 			var id string
 			if err := insertRows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Insert scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Insert scan failed: "+errtext.Detail(w, err))
 				return
 			}
 			insertedIDs = append(insertedIDs, id)
@@ -817,7 +818,7 @@ func CreateBankConfigSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.IsActive = &t
 		}
 		if err := validateBankConfigFields(req.BankConfigInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -922,7 +923,7 @@ func CreateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errResults = append(errResults, map[string]interface{}{
 					"row_index":            i,
 					constants.ValueSuccess: false,
-					constants.ValueError:   err.Error(),
+					constants.ValueError:   errtext.Text(err),
 				})
 			} else {
 				validRows = append(validRows, row)
@@ -936,7 +937,7 @@ func CreateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -967,7 +968,7 @@ func CreateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for insertRows.Next() {
 			var id string
 			if err := insertRows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+errtext.Detail(w, err))
 				return
 			}
 			insertedIDs = append(insertedIDs, id)
@@ -1101,7 +1102,7 @@ func UpdateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := validateBankConfigFieldsMap(req.Fields); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -1243,7 +1244,7 @@ func UpdateBankConfigBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1306,7 +1307,7 @@ func UpdateBankConfigBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&v10, &v11, &v12, &v13, &v14, &v15, &v16, &v17,
 				&v18, &v19, &v20, &v21, &v22, &v23, &v24, &v25, &v26,
 			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+errtext.Detail(w, err))
 				return
 			}
 			rec.vals = [27]interface{}{
@@ -1443,7 +1444,7 @@ func DeleteBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1463,7 +1464,7 @@ func DeleteBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for verifyRows.Next() {
 			var id string
 			if err := verifyRows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+errtext.Detail(w, err))
 				return
 			}
 			validIDs = append(validIDs, id)
@@ -1567,7 +1568,7 @@ func BulkApproveBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_bank_config
 			SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE config_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+			WHERE (config_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, userEmail, req.Comment, req.ConfigIDs)
 		if err != nil {
 			msg, status := getUserFriendlyBankConfigError(err, "Approval failed")
@@ -1592,7 +1593,10 @@ func BulkApproveBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, id := range deleteApprovedIDs {
 				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_bank_config_master", id)
 				if len(blockers) > 0 {
-					_, _ = tx.Exec(ctx, `UPDATE investment.fd_audit_bank_config SET processing_status='PENDING_DELETE_APPROVAL', checker_by=NULL, checker_at=NULL, checker_comment=NULL WHERE config_id=$1 AND action_type='DELETE' AND processing_status='APPROVED'`, id)
+					if _, err := tx.Exec(ctx, `UPDATE investment.fd_audit_bank_config SET processing_status='PENDING_DELETE_APPROVAL', checker_by=NULL, checker_at=NULL, checker_comment=NULL WHERE config_id=$1 AND action_type='DELETE' AND processing_status='APPROVED'`, id); err != nil {
+						api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+						return
+					}
 					blockedItems = append(blockedItems, map[string]interface{}{"config_id": id, "blocked_by": dependency.BlockersSummary(blockers)})
 				}
 			}
@@ -1670,7 +1674,7 @@ func BulkRejectBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_bank_config
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE config_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+			WHERE (config_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, userEmail, req.Comment, req.ConfigIDs)
 		if err != nil {
 			msg, status := getUserFriendlyBankConfigError(err, "Rejection failed")
@@ -1763,7 +1767,7 @@ func GetBankConfigsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&effectiveFrom, &effectiveTo,
 				&configNotes, &isActive,
 			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1969,7 +1973,7 @@ func GetBankConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			vals, err := rows.Values()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Row value error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Row value error: "+errtext.Detail(w, err))
 				return
 			}
 			row := make(map[string]interface{}, len(fields))
@@ -1984,7 +1988,7 @@ func GetBankConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+errtext.Detail(w, rows.Err()))
 			return
 		}
 

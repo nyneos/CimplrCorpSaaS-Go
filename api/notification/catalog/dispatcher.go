@@ -233,13 +233,13 @@ type outboxRow struct {
 // context (which field matched, the resolved user ID/email/name) without extra
 // DB round-trips later in the pipeline.
 type actorResolution struct {
-	UserID    string // public.users.id  (e.g. CIMPLR00D93E14F91E0B)
-	Email     string // public.users.email
-	Name      string // public.users.employee_name
-	Entity    string // first entity_name from user_entity_mappings (empty = no restriction)
+	UserID    string   // public.users.id  (e.g. CIMPLR00D93E14F91E0B)
+	Email     string   // public.users.email
+	Name      string   // public.users.employee_name
+	Entity    string   // first entity_name from user_entity_mappings (empty = no restriction)
 	Entities  []string // every entity_name mapped to the user (empty = no restriction)
-	MatchedBy string // which identifier tier resolved this actor: "id","email","username","mobile","name"
-	Ambiguous bool   // true when name matched >1 row (entity still returned but flagged)
+	MatchedBy string   // which identifier tier resolved this actor: "id","email","username","mobile","name"
+	Ambiguous bool     // true when name matched >1 row (entity still returned but flagged)
 }
 
 // resolveActorEntity maps any caller-supplied actor identifier to the user's
@@ -742,13 +742,25 @@ func dispatchForEvent(ctx context.Context, pool *pgxpool.Pool, params dispatchFo
 
 	payloadJSON, _ := json.Marshal(payload)
 
+	// Bound recipient x template rendering so a large role list cannot spawn
+	// one goroutine per recipient.
+	const notificationRenderLimit = 8
+	renderSlots := make(chan struct{}, notificationRenderLimit)
+
 	for _, tw := range work {
 		tw := tw // capture
 		for _, recip := range tw.recipients {
 			recip := recip // capture
 			wg.Add(1)
+			renderSlots <- struct{}{}
 			go func() {
 				defer wg.Done()
+				defer func() { <-renderSlots }()
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[NOTIF] template render panic: %v", rec)
+					}
+				}()
 
 				// Merge per-recipient fields into payload copy so templates can
 				// reference RecipientName, RecipientEmail etc.

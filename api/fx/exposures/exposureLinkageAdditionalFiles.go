@@ -79,14 +79,14 @@ func recordExposureLinkageMainUploadAudit(pool *pgxpool.Pool) func(context.Conte
 		if err != nil {
 			return err
 		}
-		_, _ = pool.Exec(ctx, `
+		_, err = pool.Exec(ctx, `
 			INSERT INTO public.auditactionhedgelink
 				(exposure_header_id, booking_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
 			SELECT l.exposure_header_id::text, l.booking_id::text, 'UPLOAD_FILE', $2, $3, $4, now(), $5
 			FROM public.exposure_hedge_links l
 			WHERE l.link_id::text = $1
 		`, strings.TrimSpace(parentID), constants.StatusApproved, reason, strings.TrimSpace(payload.UploadedBy), nullIfBlankLinkageIP(payload.RequestedIP))
-		return nil
+		return err
 	}
 }
 

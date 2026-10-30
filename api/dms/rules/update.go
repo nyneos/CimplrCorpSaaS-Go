@@ -36,6 +36,9 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
 			return
 		}
+		if !common.RequireRecordsEntityAccess(w, r, pool, common.RuleEntityQuery, []string{req.RuleID}) {
+			return
+		}
 		req.RuleID = strings.TrimSpace(req.RuleID)
 		req.Name = strings.TrimSpace(req.Name)
 		req.ModuleCode = strings.TrimSpace(req.ModuleCode)
@@ -70,7 +73,8 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := requirePendingFree(r.Context(), tx, req.RuleID); err != nil {
-			api.RespondEnvelopeError(w, http.StatusConflict, err.Error(), "DMS_RULE_PENDING_EXISTS")
+			api.LogErrorForResponse(w, "dms rule update pending: %v", err)
+			api.RespondEnvelopeError(w, http.StatusConflict, "a change is already pending", "DMS_RULE_PENDING_EXISTS")
 			return
 		}
 

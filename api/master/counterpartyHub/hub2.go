@@ -19,9 +19,11 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/internal/dependency"
+	"CimplrCorpSaas/internal/logger"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -293,7 +295,7 @@ func CreateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := validateHubCreateRequest(req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -385,11 +387,15 @@ func CreateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── Post-commit: approval engine + notification ───────────────────────
 		go func(cpID, uID, uEmail, cpType, matrixID string) {
-			defer func() { recover() }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
-			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:          "COUNTERPARTY_HUB",
 				TransactionType:     "COUNTERPARTY_CREATE",
 				RecordID:            cpID,
@@ -402,12 +408,18 @@ func CreateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				MatrixID:            matrixID,
 				RequirePinnedMatrix: true,
 				AutoApplyIfUnpinned: true,
-			})
+			}); err != nil {
+				logger.LogError("[CounterpartyHub] approval instance creation failed: %v", err)
+			}
 		}(counterpartyID, req.UserID, userEmail, req.CounterpartyType, createMatrixID)
 
 		go func(cpID, uEmail, cpType string) {
-			defer func() { recover() }()
-			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 				"/master/v2/counterparty-hub/create", cpID,
 				map[string]interface{}{
 					"record_id":         cpID,
@@ -503,7 +515,7 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "COUNTERPARTY_HUB", RecordID: cpID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
-				errs = append(errs, cpID+": "+actionErr.Error())
+				errs = append(errs, cpID+": "+errtext.Text(actionErr))
 				continue
 			}
 			if actionRes.Acted {
@@ -511,7 +523,10 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				// Check if instance is now fully APPROVED → flip status
 				if actionRes.InstanceStatus == constants.StatusApproved {
-					activateCounterparty(ctx, pgxPool, cpID, cpType, userEmail, req.Comment)
+					if err := activateCounterparty(ctx, pgxPool, cpID, cpType, userEmail, req.Comment); err != nil {
+						api.LogError("[CounterpartyHub] activate counterparty %s failed: %v", cpID, err)
+						errs = append(errs, cpID+": approved but activation failed; retry the approval")
+					}
 				}
 			} else {
 				if actionRes.CancelledStale {
@@ -531,7 +546,7 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tag, err1 := tx.Exec(ctx, `
 				UPDATE apibox_svc.audit_counterparty
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE counterparty_id=$3 AND processing_status LIKE 'PENDING%'`,
+				WHERE (counterparty_id=$3 AND processing_status LIKE 'PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`,
 					userEmail, req.Comment, cpID)
 
 				_, err2 := tx.Exec(ctx, `
@@ -548,8 +563,8 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					_, err3 = tx.Exec(ctx, fmt.Sprintf(`
 						UPDATE %s
 						SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-						WHERE %s = (SELECT %s FROM %s WHERE counterparty_id=$3)
-						AND processing_status LIKE 'PENDING%%'`,
+						WHERE (%s = (SELECT %s FROM %s WHERE counterparty_id=$3)
+						AND processing_status LIKE 'PENDING%%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%%'`,
 						auditTbl, idCol, idCol, masterTbl),
 						userEmail, req.Comment, cpID)
 				}
@@ -572,8 +587,12 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			go func(id, uEmail, cpT string) {
-				defer func() { recover() }()
-				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				defer func() {
+					if rec := recover(); rec != nil {
+						logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 					"/master/v2/counterparty-hub/bulk-approve", id,
 					map[string]interface{}{
 						"record_id":         id,
@@ -597,38 +616,34 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // activateCounterparty flips counterparty.status = ACTIVE and stamps the typed audit
 // as APPROVED. Called when the approval engine signals a fully approved instance.
 func activateCounterparty(ctx context.Context, pool *pgxpool.Pool,
-	cpID, cpType, userEmail, comment string) {
-	tx, txErr := pool.Begin(ctx)
-	if txErr != nil {
-		return
+	cpID, cpType, userEmail, comment string) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
 	}
-	txOk := false
-	defer func() {
-		if !txOk {
-			tx.Rollback(ctx) //nolint:errcheck
-		}
-	}()
+	defer tx.Rollback(context.Background()) //nolint:errcheck
 
-	_, _ = tx.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 		UPDATE apibox_svc.counterparty SET status='ACTIVE', updated_by=$1, updated_at=now()
-		WHERE counterparty_id=$2`, userEmail, cpID)
+		WHERE counterparty_id=$2`, userEmail, cpID); err != nil {
+		return err
+	}
 
 	auditTbl := typedAuditTable(cpType)
 	idCol := typedIDColumn(cpType)
 	masterTbl := typedMasterTable(cpType)
 	if auditTbl != "" && idCol != "" && masterTbl != "" {
-		_, _ = tx.Exec(ctx, fmt.Sprintf(`
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`
 			UPDATE %s
 			SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE %s = (SELECT %s FROM %s WHERE counterparty_id=$3)
-			AND processing_status LIKE 'PENDING%%'`,
+			WHERE (%s = (SELECT %s FROM %s WHERE counterparty_id=$3)
+			AND processing_status LIKE 'PENDING%%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%%'`,
 			auditTbl, idCol, idCol, masterTbl),
-			userEmail, comment, cpID)
+			userEmail, comment, cpID); err != nil {
+			return err
+		}
 	}
-
-	if err := tx.Commit(ctx); err == nil {
-		txOk = true
-	}
+	return tx.Commit(ctx)
 }
 
 // ── GetCounterpartyAll ────────────────────────────────────────────────────────
@@ -722,7 +737,7 @@ func GetCounterpartyAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "row scan error: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "row scan error: "+errtext.Detail(w, rows.Err()))
 			return
 		}
 		api.RespondWithPayload(w, true, "", out)
@@ -930,7 +945,7 @@ func CreateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			row.UserID = req.UserID
 			if err := validateHubCreateRequest(row); err != nil {
 				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": err.Error(),
+					"row_index": i, "success": false, "error": errtext.Text(err),
 					"counterparty_code": row.CounterpartyCode,
 				})
 				continue
@@ -1014,7 +1029,7 @@ func CreateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if err := tx.Commit(ctx); err != nil {
 				errList = append(errList, map[string]interface{}{
-					"row_index": i, "success": false, "error": constants.ErrCommitFailed + err.Error(),
+					"row_index": i, "success": false, "error": constants.ErrCommitFailed + errtext.Text(err),
 				})
 				continue
 			}
@@ -1026,11 +1041,15 @@ func CreateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 
 			go func(id, uID, uEmail, cpType, matrixID string) {
-				defer func() { recover() }()
+				defer func() {
+					if rec := recover(); rec != nil {
+						logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+					}
+				}()
 				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer bgCancel()
 				_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", id, uEmail)
-				_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+				if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_CREATE",
 					RecordID: id, RecordTable: constants.ErrCounterpartyServiceTable,
 					AuditTable: constants.ErrAuditCounterpartyServiceTable, AuditIDColumn: "counterparty_id",
@@ -1038,7 +1057,9 @@ func CreateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					MatrixID:            matrixID,
 					RequirePinnedMatrix: true,
 					AutoApplyIfUnpinned: true,
-				})
+				}); err != nil {
+					logger.LogError("[CounterpartyHub] approval instance creation failed: %v", err)
+				}
 			}(cpID, req.UserID, userEmail, row.CounterpartyType, bulkMatrixID)
 		}
 
@@ -1253,11 +1274,15 @@ func UpdateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(cpID, uID, uEmail, matrixID string) {
-			defer func() { recover() }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
-			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_EDIT",
 				RecordID: cpID, RecordTable: constants.ErrCounterpartyServiceTable,
 				AuditTable: constants.ErrAuditCounterpartyServiceTable, AuditIDColumn: "counterparty_id",
@@ -1265,12 +1290,18 @@ func UpdateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				MatrixID:            matrixID,
 				RequirePinnedMatrix: true,
 				AutoApplyIfUnpinned: true,
-			})
+			}); err != nil {
+				logger.LogError("[CounterpartyHub] approval instance creation failed: %v", err)
+			}
 		}(req.CounterpartyID, req.UserID, userEmail, editMatrixID)
 
 		go func(cpID, uEmail string) {
-			defer func() { recover() }()
-			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 				"/master/v2/counterparty-hub/update", cpID,
 				map[string]interface{}{
 					"record_id": cpID, "event": "COUNTERPARTY_UPDATED", "actor_email": uEmail,
@@ -1331,7 +1362,7 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "COUNTERPARTY_HUB", RecordID: cpID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				errList = append(errList, map[string]interface{}{
-					"counterparty_id": cpID, "success": false, "error": actionErr.Error(),
+					"counterparty_id": cpID, "success": false, "error": errtext.Text(actionErr),
 				})
 				continue
 			}
@@ -1365,7 +1396,7 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tag, err1 := tx.Exec(ctx, `
 				UPDATE apibox_svc.audit_counterparty
 				SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE counterparty_id=$3 AND processing_status LIKE 'PENDING%'`,
+				WHERE (counterparty_id=$3 AND processing_status LIKE 'PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`,
 				userEmail, req.Comment, cpID)
 
 			// Also stamp typed audit
@@ -1376,8 +1407,8 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				_, err2 = tx.Exec(ctx, fmt.Sprintf(`
 					UPDATE %s
 					SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-					WHERE %s = (SELECT %s FROM %s WHERE counterparty_id=$3)
-					AND processing_status LIKE 'PENDING%%'`,
+					WHERE (%s = (SELECT %s FROM %s WHERE counterparty_id=$3)
+					AND processing_status LIKE 'PENDING%%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%%'`,
 					auditTbl, idCol, idCol, masterTbl),
 					userEmail, req.Comment, cpID)
 			}
@@ -1398,7 +1429,7 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if err := tx.Commit(ctx); err != nil {
 				errList = append(errList, map[string]interface{}{
-					"counterparty_id": cpID, "success": false, "error": constants.ErrCommitFailed + err.Error(),
+					"counterparty_id": cpID, "success": false, "error": constants.ErrCommitFailed + errtext.Text(err),
 				})
 				continue
 			}
@@ -1407,8 +1438,12 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 
 			go func(id, uEmail string) {
-				defer func() { recover() }()
-				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				defer func() {
+					if rec := recover(); rec != nil {
+						logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 					"/master/v2/counterparty-hub/bulk-reject", id,
 					map[string]interface{}{
 						"record_id": id, "event": "COUNTERPARTY_REJECTED", "actor_email": uEmail,
@@ -1528,7 +1563,7 @@ func BulkDeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if err := tx.Commit(ctx); err != nil {
 				errList = append(errList, map[string]interface{}{
-					"counterparty_id": cpID, "success": false, "error": constants.ErrCommitFailed + err.Error(),
+					"counterparty_id": cpID, "success": false, "error": constants.ErrCommitFailed + errtext.Text(err),
 				})
 				continue
 			}
@@ -1537,8 +1572,12 @@ func BulkDeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 
 			go func(id, uEmail string) {
-				defer func() { recover() }()
-				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				defer func() {
+					if rec := recover(); rec != nil {
+						logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 					"/master/v2/counterparty-hub/bulk-delete", id,
 					map[string]interface{}{
 						"record_id": id, "event": "COUNTERPARTY_DELETE_REQUESTED", "actor_email": uEmail,

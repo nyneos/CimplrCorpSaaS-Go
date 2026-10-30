@@ -69,7 +69,14 @@ func GetExposureSummary(db *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		expRows, err := db.Query(r.Context(), `SELECT exposure_header_id, company_code, entity, entity1, entity2, entity3, exposure_type, document_id, document_date, counterparty_name, currency, total_original_amount, total_open_amount, value_date FROM exposure_headers WHERE entity = ANY($1)`, buNames)
+		expRows, err := db.Query(r.Context(), `
+			SELECT exposure_header_id::text, COALESCE(company_code, ''), COALESCE(entity, ''), entity1, entity2, entity3,
+			       COALESCE(exposure_type, ''), COALESCE(document_id, ''), COALESCE(document_date::text, ''),
+			       COALESCE(counterparty_name, ''), COALESCE(currency, ''),
+			       COALESCE(total_original_amount, 0)::float8, COALESCE(total_open_amount, 0)::float8,
+			       COALESCE(value_date::text, '')
+			FROM exposure_headers
+			WHERE entity = ANY($1) AND COALESCE(is_deleted, false) = false`, buNames)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to fetch exposures", "")
 			return
@@ -79,30 +86,51 @@ func GetExposureSummary(db *pgxpool.Pool) http.HandlerFunc {
 		var exposureIds []string
 		for expRows.Next() {
 			var e Exposure
-			err := expRows.Scan(&e.ExposureHeaderID, &e.CompanyCode, &e.Entity, &e.Entity1, &e.Entity2, &e.Entity3, &e.ExposureType, &e.DocumentID, &e.DocumentDate, &e.CounterpartyName, &e.Currency, &e.TotalOriginalAmount, &e.TotalOpenAmount, &e.ValueDate)
-			if err == nil {
-				// Skip exposures whose currency is not approved by PreValidation
-				if !api.CtxHasApprovedCurrency(r.Context(), e.Currency) {
-					continue
-				}
-				exposures = append(exposures, e)
-				exposureIds = append(exposureIds, e.ExposureHeaderID)
+			if err := expRows.Scan(&e.ExposureHeaderID, &e.CompanyCode, &e.Entity, &e.Entity1, &e.Entity2, &e.Entity3, &e.ExposureType, &e.DocumentID, &e.DocumentDate, &e.CounterpartyName, &e.Currency, &e.TotalOriginalAmount, &e.TotalOpenAmount, &e.ValueDate); err != nil {
+				expRows.Close()
+				api.LogErrorForResponse(w, "exposure summary scan: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to read exposures", "")
+				return
 			}
+			// Skip exposures whose currency is not approved by PreValidation
+			if !api.CtxHasApprovedCurrency(r.Context(), e.Currency) {
+				continue
+			}
+			exposures = append(exposures, e)
+			exposureIds = append(exposureIds, e.ExposureHeaderID)
 		}
 		expRows.Close()
+		if err := expRows.Err(); err != nil {
+			api.LogErrorForResponse(w, "exposure summary rows: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to read exposures", "")
+			return
+		}
 		// 4. Fetch all hedged values in one query
 		hedgeMap := make(map[string]float64)
 		if len(exposureIds) > 0 {
-			hedgeRows, err := db.Query(r.Context(), `SELECT exposure_header_id, COALESCE(SUM(hedged_amount), 0) AS hedged_value FROM exposure_hedge_links WHERE exposure_header_id = ANY($1) GROUP BY exposure_header_id`, exposureIds)
-			if err == nil {
-				for hedgeRows.Next() {
-					var eid string
-					var hedgedValue float64
-					if err := hedgeRows.Scan(&eid, &hedgedValue); err == nil {
-						hedgeMap[eid] = hedgedValue
-					}
+			// A failed hedge lookup must not silently report every exposure as unhedged.
+			hedgeRows, err := db.Query(r.Context(), `SELECT exposure_header_id::text, COALESCE(SUM(hedged_amount), 0)::float8 AS hedged_value FROM exposure_hedge_links WHERE exposure_header_id::text = ANY($1) AND COALESCE(is_active, true) = true GROUP BY exposure_header_id`, exposureIds)
+			if err != nil {
+				api.LogErrorForResponse(w, "exposure summary hedges: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to read hedge links", "")
+				return
+			}
+			for hedgeRows.Next() {
+				var eid string
+				var hedgedValue float64
+				if err := hedgeRows.Scan(&eid, &hedgedValue); err != nil {
+					hedgeRows.Close()
+					api.LogErrorForResponse(w, "exposure summary hedge scan: %v", err)
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to read hedge links", "")
+					return
 				}
-				hedgeRows.Close()
+				hedgeMap[eid] = hedgedValue
+			}
+			hedgeRows.Close()
+			if err := hedgeRows.Err(); err != nil {
+				api.LogErrorForResponse(w, "exposure summary hedge rows: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to read hedge links", "")
+				return
 			}
 		}
 		// 5. Build summary
@@ -112,10 +140,14 @@ func GetExposureSummary(db *pgxpool.Pool) http.HandlerFunc {
 			hedgedValue := hedgeMap[exp.ExposureHeaderID]
 			unhedgedValue := exp.TotalOpenAmount - hedgedValue
 			maturityMonth := ""
-			if exp.DocumentDate != "" {
-				// Format MM-YY
-				// Assume DocumentDate is YYYY-MM-DD
-				parts := strings.Split(exp.DocumentDate, "-")
+			// Maturity is the value date; fall back to the document date when it is missing.
+			maturityDate := exp.ValueDate
+			if maturityDate == "" {
+				maturityDate = exp.DocumentDate
+			}
+			if maturityDate != "" {
+				// Format MM-YY from YYYY-MM-DD
+				parts := strings.Split(maturityDate, "-")
 				if len(parts) >= 2 {
 					mm := parts[1]
 					yy := ""
@@ -276,6 +308,9 @@ func fetchForwardBookings(ctx context.Context, db *pgxpool.Pool, buNames []strin
 		}
 		list = append(list, fb)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return list, nil
 }
 
@@ -306,6 +341,9 @@ func fetchForwardRollovers(ctx context.Context, db *pgxpool.Pool, buNames []stri
 		}
 		list = append(list, fr)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return list, nil
 }
 
@@ -335,6 +373,9 @@ func fetchForwardCancellations(ctx context.Context, db *pgxpool.Pool, buNames []
 			return nil, err
 		}
 		list = append(list, fc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return list, nil
 }

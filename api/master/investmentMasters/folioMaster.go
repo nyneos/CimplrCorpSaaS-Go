@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -203,7 +204,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -409,7 +410,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -1264,7 +1265,7 @@ func CreateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, row := range req.Rows {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailedCapitalized + errtext.Text(err)})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -1293,7 +1294,7 @@ func CreateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				VALUES ($1,$2,$3,$4,$5,$6,$7,'Manual')
 				RETURNING folio_id
 			`, row.EntityName, row.AMCName, row.FolioNumber, row.FirstHolderName, row.DefaultSubscriptionAcct, row.DefaultRedemptionAcct, defaultIfEmpty(row.Status, "Active")).Scan(&folioID); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "insert failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "insert failed: " + errtext.Text(err)})
 				continue
 			}
 
@@ -1321,7 +1322,7 @@ func CreateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						if len(mappingRows) > 0 {
 							if _, err := tx.CopyFrom(ctx, pgx.Identifier{"investment", "folioschememapping"},
 								[]string{"folio_id", "scheme_id", constants.KeyStatus, "old_status"}, pgx.CopyFromRows(mappingRows)); err != nil {
-								results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "mapping insert failed: " + err.Error()})
+								results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "mapping insert failed: " + errtext.Text(err)})
 								continue
 							}
 						}
@@ -1334,12 +1335,12 @@ func CreateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at)
 				VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 			`, folioID, userEmail); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + errtext.Text(err)})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + errtext.Text(err)})
 				continue
 			}
 			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "folio_id": folioID})
@@ -1510,7 +1511,7 @@ func UpdateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "folio_id": row.FolioID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "folio_id": row.FolioID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + errtext.Text(err)})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -1521,7 +1522,7 @@ func UpdateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				       default_subscription_account, default_redemption_account, status
 				FROM investment.masterfolio WHERE folio_id=$1 FOR UPDATE
 			`, row.FolioID).Scan(&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4], &oldVals[5], &oldVals[6]); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "folio_id": row.FolioID, constants.ValueError: "fetch failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "folio_id": row.FolioID, constants.ValueError: "fetch failed: " + errtext.Text(err)})
 				continue
 			}
 
@@ -1567,18 +1568,18 @@ func UpdateFolioBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			q := fmt.Sprintf("UPDATE investment.masterfolio SET %s WHERE folio_id=$%d", strings.Join(sets, ", "), pos)
 			args = append(args, row.FolioID)
 			if _, err := tx.Exec(ctx, q, args...); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "folio_id": row.FolioID, constants.ValueError: constants.ErrUpdateFailed + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "folio_id": row.FolioID, constants.ValueError: constants.ErrUpdateFailed + errtext.Text(err)})
 				continue
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
 			`, row.FolioID, row.Reason, userEmail); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "folio_id": row.FolioID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "folio_id": row.FolioID, constants.ValueError: constants.ErrAuditInsertFailed + errtext.Text(err)})
 				continue
 			}
 			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "folio_id": row.FolioID, constants.ValueError: constants.ErrCommitFailed + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "folio_id": row.FolioID, constants.ValueError: constants.ErrCommitFailed + errtext.Text(err)})
 				continue
 			}
 			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "folio_id": row.FolioID})
@@ -1753,7 +1754,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.auditactionfolio
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id = ANY($3)
+				WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 			`, checkerBy, req.Comment, toApprove); err != nil {
 				msg, status := getUserFriendlyFolioError(err, "approve update")
 				api.RespondWithError(w, status, msg)
@@ -1879,7 +1880,7 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err := tx.Exec(ctx, `
 			UPDATE investment.auditactionfolio
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE action_id = ANY($3)
+			WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, checkerBy, req.Comment, actionIDs); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "update")
 			api.RespondWithError(w, status, msg)
@@ -2042,7 +2043,7 @@ func GetSingleFolioWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+errtext.Detail(w, rows.Err()))
 			return
 		}
 
@@ -2204,7 +2205,7 @@ func GetSchemesByApprovedFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsError+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsError+errtext.Detail(w, rows.Err()))
 			return
 		}
 

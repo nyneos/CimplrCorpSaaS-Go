@@ -28,12 +28,15 @@ func LoadAMFISchemeAMCNames(ctx context.Context, db *pgxpool.Pool) (map[string]s
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			continue
+			return nil, fmt.Errorf("scan AMFI AMC name: %w", err)
 		}
 		key := normalizeAMCKey(name)
 		if key != "" {
 			out[key] = strings.TrimSpace(name)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read AMFI AMC names: %w", err)
 	}
 	return out, nil
 }
@@ -74,34 +77,19 @@ func ResolveToSchemeAMCName(ctx context.Context, db *pgxpool.Pool, name string) 
 	if err != nil {
 		return "", err
 	}
-	if canonical, ok := names[normalizeAMCKey(name)]; ok {
-		return canonical, nil
-	}
-
-	// NAV-file variant: "Foo Mutual Fund" -> scheme name with prefix "Foo"
-	lower := strings.ToLower(name)
-	if strings.HasSuffix(lower, " mutual fund") {
-		prefix := strings.TrimSpace(name[:len(name)-len(" Mutual Fund")])
-		prefixKey := normalizeAMCKey(prefix)
-		for key, canonical := range names {
-			if strings.HasPrefix(key, prefixKey) || strings.Contains(key, prefixKey) {
-				return canonical, nil
-			}
-		}
-	}
-
-	return "", nil
+	return resolveLoadedAMCName(names, name), nil
 }
 
 // ResolveManyToSchemeAMCNames resolves a list of master AMC names to distinct scheme-file names.
 func ResolveManyToSchemeAMCNames(ctx context.Context, db *pgxpool.Pool, names []string) ([]string, error) {
+	loaded, err := LoadAMFISchemeAMCNames(ctx, db)
+	if err != nil {
+		return nil, err
+	}
 	seen := make(map[string]bool)
 	var out []string
 	for _, n := range names {
-		resolved, err := ResolveToSchemeAMCName(ctx, db, n)
-		if err != nil {
-			return nil, err
-		}
+		resolved := resolveLoadedAMCName(loaded, n)
 		if resolved == "" {
 			continue
 		}
@@ -112,4 +100,41 @@ func ResolveManyToSchemeAMCNames(ctx context.Context, db *pgxpool.Pool, names []
 		}
 	}
 	return out, nil
+}
+
+// resolveLoadedAMCName maps one name onto the already-loaded canonical set.
+// A "Foo Mutual Fund" NAV label matches the shortest canonical name that equals
+// "foo" or starts with "foo ". The choice is sorted, so the same input always
+// resolves to the same AMC.
+func resolveLoadedAMCName(names map[string]string, name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if canonical, ok := names[normalizeAMCKey(name)]; ok {
+		return canonical
+	}
+
+	lower := strings.ToLower(name)
+	const mutualFundSuffix = " mutual fund"
+	if !strings.HasSuffix(lower, mutualFundSuffix) {
+		return ""
+	}
+	prefixKey := normalizeAMCKey(name[:len(name)-len(mutualFundSuffix)])
+	if prefixKey == "" {
+		return ""
+	}
+
+	bestKey := ""
+	bestCanonical := ""
+	for key, canonical := range names {
+		if key != prefixKey && !strings.HasPrefix(key, prefixKey+" ") {
+			continue
+		}
+		if bestKey == "" || len(key) < len(bestKey) || (len(key) == len(bestKey) && key < bestKey) {
+			bestKey = key
+			bestCanonical = canonical
+		}
+	}
+	return bestCanonical
 }

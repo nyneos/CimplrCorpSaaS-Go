@@ -90,7 +90,7 @@ type ruleAttachment struct {
 // that succeeds). Returns the run_id even on failure, so the caller can point
 // the user at the run's error_detail.
 func RunGeneration(ctx context.Context, pool *pgxpool.Pool, ruleID, triggerType, triggeredBy string) (runID string, err error) {
-	return runGeneration(ctx, pool, ruleID, triggerType, triggeredBy, "", nil)
+	return runGeneration(ctx, pool, ruleID, triggerType, triggeredBy, "", nil, "")
 }
 
 // RunGenerationForSourceIDs executes an approved rule for explicit source rows
@@ -101,7 +101,7 @@ func RunGenerationForSourceIDs(
 	ruleID, triggerType, triggeredBy, sourceIDField string,
 	sourceIDs []string,
 ) (runID string, err error) {
-	return runGeneration(ctx, pool, ruleID, triggerType, triggeredBy, sourceIDField, sourceIDs)
+	return runGeneration(ctx, pool, ruleID, triggerType, triggeredBy, sourceIDField, sourceIDs, "")
 }
 
 func runGeneration(
@@ -109,50 +109,83 @@ func runGeneration(
 	pool *pgxpool.Pool,
 	ruleID, triggerType, triggeredBy, sourceIDField string,
 	sourceIDs []string,
+	claimedRunID string,
 ) (runID string, err error) {
+	claimedRunID = strings.TrimSpace(claimedRunID)
+	if claimedRunID != "" {
+		// Schedulers insert the run before quota/render so another replica's
+		// dedupe sees it. A queue retry must not render that run a second time.
+		done, guardErr := claimedRunAlreadyFinished(ctx, pool, claimedRunID)
+		if guardErr != nil {
+			return claimedRunID, guardErr
+		}
+		if done {
+			return claimedRunID, nil
+		}
+	}
+	failClaimed := func(cause error) (string, error) {
+		if claimedRunID == "" {
+			return "", cause
+		}
+		return claimedRunID, finishRunFailed(ctx, pool, claimedRunID, cause)
+	}
+
 	// Master switch: DMS_ENABLED off blocks every generation path, not just the UI.
 	if !dmscommon.IsDMSEnabled() {
-		return "", fmt.Errorf("DMS_DISABLED: DMS is disabled at application level")
+		return failClaimed(fmt.Errorf("DMS_DISABLED: DMS is disabled at application level"))
 	}
 
 	// Document-Service gate: hard-stop + durable quota (client cannot bypass).
 	if q, qErr := docsvc.NewFromEnv().QuotaCheck(ctx); qErr != nil {
-		return "", fmt.Errorf("document-service unavailable (generation blocked): %w", qErr)
+		return failClaimed(fmt.Errorf("document-service unavailable (generation blocked): %w", qErr))
 	} else if !q.Allowed {
 		code := q.ErrorCode
 		if code == "" {
 			code = "DMS_GENERATION_QUOTA_EXCEEDED"
 		}
-		return "", fmt.Errorf("%s: %s", code, q.Message)
+		return failClaimed(fmt.Errorf("%s: %s", code, q.Message))
 	}
 
 	rule, err := loadRuleHeader(ctx, pool, ruleID)
 	if err != nil {
-		return "", fmt.Errorf("load rule: %w", err)
+		return failClaimed(fmt.Errorf("load rule: %w", err))
 	}
 	if rule.ProcessingStatus != "APPROVED" || rule.Status != "Active" || rule.CurrentVersionID == "" {
-		return "", fmt.Errorf("rule %s is not an approved, active rule with a live version", ruleID)
+		return failClaimed(fmt.Errorf("rule %s is not an approved, active rule with a live version", ruleID))
 	}
 
 	version, err := loadRuleVersion(ctx, pool, rule.CurrentVersionID)
 	if err != nil {
-		return "", fmt.Errorf("load rule version: %w", err)
+		return failClaimed(fmt.Errorf("load rule version: %w", err))
 	}
 	windowStart, windowEnd, err := computeWindow(version)
 	if err != nil {
-		return "", fmt.Errorf("compute time window: %w", err)
+		return failClaimed(fmt.Errorf("compute time window: %w", err))
 	}
 
-	runID, err = insertRun(ctx, pool, runInsert{
-		RuleID:      rule.RuleID,
-		VersionID:   version.VersionID,
-		TriggerType: triggerType,
-		TriggeredBy: triggeredBy,
-		WindowStart: windowStart,
-		WindowEnd:   windowEnd,
-	})
-	if err != nil {
-		return "", fmt.Errorf("insert generation_run: %w", err)
+	if claimedRunID == "" {
+		runID, err = insertRun(ctx, pool, runInsert{
+			RuleID:      rule.RuleID,
+			VersionID:   version.VersionID,
+			TriggerType: triggerType,
+			TriggeredBy: triggeredBy,
+			WindowStart: windowStart,
+			WindowEnd:   windowEnd,
+		})
+		if err != nil {
+			return "", fmt.Errorf("insert generation_run: %w", err)
+		}
+	} else {
+		runID = claimedRunID
+		if _, err = pool.Exec(ctx, `
+			UPDATE dms_svc.generation_run
+			SET version_id = $2::uuid,
+			    window_start = $3::date,
+			    window_end = $4::date
+			WHERE run_id = $1::uuid`,
+			runID, version.VersionID, windowStart, windowEnd); err != nil {
+			return runID, finishRunFailed(ctx, pool, runID, fmt.Errorf("update claimed generation_run: %w", err))
+		}
 	}
 	for i, sourceID := range sourceIDs {
 		sourceID = strings.TrimSpace(sourceID)
@@ -350,15 +383,41 @@ func runGeneration(
 	if status == "FAILED" {
 		return runID, fmt.Errorf("all attachments failed: %s", strings.Join(errDetails, "; "))
 	}
+	// Documents exist. Count them once even when the email handoff fails, so a
+	// later dispatch retry does not have to generate a second run to record quota.
+	incrementDocSvcQuotaForRun(ctx, pool, runID, triggeredBy)
 	// Phase 4 — queue emails for GENERATED docs (notification after successful storage).
 	if err := DispatchRun(ctx, pool, runID); err != nil {
-		// Leave docs as GENERATED so StartDispatchWorker can retry.
+		// Leave docs as GENERATED so StartDispatchWorker can retry. This is not a
+		// generation failure: the queue must not requeue the whole run.
 		api.LogError("[DMS] DispatchRun after generation run=%s: %v", runID, err)
-		return runID, fmt.Errorf("generation succeeded (run_id=%s) but dispatch failed: %w", runID, err)
+		return runID, &dispatchAfterGenerationError{RunID: runID, Err: err}
 	}
 
-	incrementDocSvcQuotaForRun(ctx, pool, runID, triggeredBy)
 	return runID, nil
+}
+
+// dispatchAfterGenerationError means the run's documents were generated and
+// generation_run is already SUCCESS or PARTIAL, but DispatchRun failed.
+// StartDispatchWorker retries documents left GENERATED. The generation queue
+// must finish the job instead of starting another attempt.
+type dispatchAfterGenerationError struct {
+	RunID string
+	Err   error
+}
+
+func (e *dispatchAfterGenerationError) Error() string {
+	if e == nil {
+		return "generation succeeded but dispatch failed"
+	}
+	return fmt.Sprintf("generation succeeded (run_id=%s) but dispatch failed: %v", e.RunID, e.Err)
+}
+
+func (e *dispatchAfterGenerationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 // normalizeDmsFilterOp preserves rules created by the original editor (eq/gte)
@@ -1473,6 +1532,26 @@ type runInsert struct {
 	TriggeredBy string
 	WindowStart *string
 	WindowEnd   *string
+}
+
+// claimedRunAlreadyFinished reports whether a scheduler-inserted run already
+// has documents or a terminal status. Queue retries must not render it again.
+func claimedRunAlreadyFinished(ctx context.Context, pool *pgxpool.Pool, runID string) (bool, error) {
+	var status string
+	var docs int
+	err := pool.QueryRow(ctx, `
+		SELECT gr.status,
+		       (SELECT COUNT(*)::int FROM dms_svc.generated_document d WHERE d.run_id = gr.run_id)
+		FROM dms_svc.generation_run gr
+		WHERE gr.run_id = $1::uuid`, runID).Scan(&status, &docs)
+	if err != nil {
+		return false, fmt.Errorf("load claimed generation_run: %w", err)
+	}
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "SUCCESS", "PARTIAL", "CANCELLED", "REJECTED":
+		return true, nil
+	}
+	return docs > 0, nil
 }
 
 func insertRun(ctx context.Context, pool *pgxpool.Pool, r runInsert) (string, error) {

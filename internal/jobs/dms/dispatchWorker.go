@@ -30,6 +30,10 @@ const errFragDoesNotExist = "does not exist"
 // successful/partial run, attaching the S3 objects, writing
 // generated_document_dispatch rows, and flipping docs to DISPATCHED once
 // outbox rows exist. Idempotent: docs already DISPATCHED are skipped.
+//
+// A per-run advisory lock stops the inline generation caller and the 30s
+// poller (and a second replica) from dispatching the same run together.
+// If the lock is already held, this call skips the run.
 func DispatchRun(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 	if pool == nil || strings.TrimSpace(runID) == "" {
 		return fmt.Errorf("pool and run_id required")
@@ -38,6 +42,61 @@ func DispatchRun(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 		return fmt.Errorf("DMS_DISABLED: DMS is disabled at application level")
 	}
 
+	ran, err := withDispatchRunLock(ctx, pool, runID, func() error {
+		return dispatchRunLocked(ctx, pool, runID)
+	})
+	if err != nil {
+		return err
+	}
+	if !ran {
+		api.LogInfo("[DMS-DISPATCH] run=%s already dispatching elsewhere — skip", runID)
+		return nil
+	}
+	return nil
+}
+
+// withDispatchRunLock runs fn only when this process holds a transaction-scoped
+// advisory lock named for the run. Package dmsjobs cannot import internal/jobs:
+// scheduler.go already imports this package, so WithAdvisoryLock would cycle.
+// The lock matches that helper: pg_try_advisory_xact_lock(hashtext($1)) on a
+// checked-out connection, released when the transaction rolls back. fn uses
+// other pool connections; this connection stays checked out until fn returns.
+// ran is false when another caller already holds the lock.
+func withDispatchRunLock(ctx context.Context, pool *pgxpool.Pool, runID string, fn func() error) (ran bool, err error) {
+	lockName := "dms-dispatch-run:" + strings.TrimSpace(runID)
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return false, fmt.Errorf("dispatch lock acquire: %w", err)
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		conn.Release()
+		return false, fmt.Errorf("dispatch lock begin: %w", err)
+	}
+	var acquired bool
+	if err := tx.QueryRow(ctx,
+		`SELECT pg_try_advisory_xact_lock(hashtext($1))`, lockName,
+	).Scan(&acquired); err != nil {
+		_ = tx.Rollback(ctx)
+		conn.Release()
+		return false, fmt.Errorf("dispatch lock: %w", err)
+	}
+	if !acquired {
+		_ = tx.Rollback(ctx)
+		conn.Release()
+		return false, nil
+	}
+	defer func() {
+		_ = tx.Rollback(ctx) // ends the transaction and releases the advisory lock
+		conn.Release()
+	}()
+	if err := fn(); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func dispatchRunLocked(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 	var ruleID, versionID, ruleName, moduleCode, subModuleCode, runStatus, triggeredBy string
 	var emailSubject, emailBody *string
 	err := pool.QueryRow(ctx, `
@@ -281,6 +340,13 @@ func dispatchOneEmailDestination(ctx context.Context, pool *pgxpool.Pool, p emai
 	}
 	enrichDispatchPayload(ctx, pool, p.RunID, payload)
 
+	// Catalog insert is already idempotent: INSERT ... ON CONFLICT
+	// (correlation_id, channel, audit_id, recipient_user_id) against
+	// uq_outbox_idempotency, and it does not rewrite subject/body once a row
+	// has left PENDING. Skip that insert when this destination already has
+	// EMAIL rows so a later destination failure cannot queue destinations
+	// 1..N-1 again. DispatchRun holds the per-run advisory lock across this
+	// check and the insert, so two callers cannot both observe an empty outbox.
 	outboxes, err := loadOutboxByCorrelation(ctx, pool, corr)
 	if err != nil {
 		return nil, fmt.Errorf("load outbox for correlation %s: %w", corr, err)
@@ -298,25 +364,29 @@ func dispatchOneEmailDestination(ctx context.Context, pool *pgxpool.Pool, p emai
 		return nil, fmt.Errorf("no outbox rows created for EMAIL destination %s", p.DestinationID)
 	}
 
+	// Cc and cover land only on rows still PENDING. The outbox worker may
+	// already have claimed a row (PROCESSING/SENT); those are left as sent.
 	if len(ccEmails) > 0 {
-		if _, err := pool.Exec(ctx, `
+		if err := updatePendingOutbox(ctx, pool, corr, "apply Cc recipients", `
 			UPDATE notification_svc.outbox
 			SET cc_emails = $2
 			WHERE correlation_id = $1
-			  AND processing_status IN ('PENDING', 'QUEUED', 'PROCESSING')`,
+			  AND channel = 'EMAIL'
+			  AND processing_status = 'PENDING'`,
 			corr, strings.Join(ccEmails, ", ")); err != nil {
-			return nil, fmt.Errorf("apply Cc recipients: %w", err)
+			return nil, err
 		}
 	}
 	if p.EmailSubject != nil && strings.TrimSpace(*p.EmailSubject) != "" &&
 		p.EmailBody != nil && strings.TrimSpace(*p.EmailBody) != "" {
-		if _, err := pool.Exec(ctx, `
+		if err := updatePendingOutbox(ctx, pool, corr, "apply DMS email cover", `
 			UPDATE notification_svc.outbox
 			SET rendered_subject = $2, rendered_body = $3
 			WHERE correlation_id = $1
-			  AND processing_status IN ('PENDING', 'QUEUED', 'PROCESSING')`,
+			  AND channel = 'EMAIL'
+			  AND processing_status = 'PENDING'`,
 			corr, strings.TrimSpace(*p.EmailSubject), *p.EmailBody); err != nil {
-			return nil, fmt.Errorf("apply DMS email cover: %w", err)
+			return nil, err
 		}
 	}
 	if len(p.Attachments) > 0 {
@@ -686,6 +756,35 @@ func recordChannelDeliveries(
 			}
 		}
 	}
+	return nil
+}
+
+// updatePendingOutbox applies a cc/cover write only to EMAIL rows still PENDING.
+// Exec errors are returned. Rows already PROCESSING or SENT are not updated.
+// A zero-row update is success when nothing is PENDING anymore (the worker
+// already claimed them): the caller must not insert that destination again.
+// It is an error when PENDING rows are still present but none were updated.
+func updatePendingOutbox(ctx context.Context, pool *pgxpool.Pool, corr, action, sql string, args ...interface{}) error {
+	tag, err := pool.Exec(ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("%s: %w", action, err)
+	}
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+	var pending int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM notification_svc.outbox
+		WHERE correlation_id = $1
+		  AND channel = 'EMAIL'
+		  AND processing_status = 'PENDING'`, corr).Scan(&pending); err != nil {
+		return fmt.Errorf("%s: count pending outbox rows: %w", action, err)
+	}
+	if pending > 0 {
+		return fmt.Errorf("%s: %d PENDING outbox row(s) for %s were not updated", action, pending, corr)
+	}
+	api.LogInfo("[DMS-DISPATCH] %s skipped for %s — outbox rows already left PENDING", action, corr)
 	return nil
 }
 

@@ -25,22 +25,22 @@ type executionLogReq struct {
 }
 
 type executionLogItem struct {
-	RunID         string  `json:"run_id"`
-	RuleID        string  `json:"rule_id"`
-	RuleName      string  `json:"rule_name"`
-	VersionID     string  `json:"version_id"`
-	TriggerType   string  `json:"trigger_type"`
-	TriggeredBy   string  `json:"triggered_by"`
-	StartedAt     string  `json:"started_at"`
-	FinishedAt    *string `json:"finished_at"`
-	Status        string  `json:"status"`
-	ErrorDetail   string  `json:"error_detail"`
-	WindowStart   *string `json:"window_start"`
-	WindowEnd     *string `json:"window_end"`
-	DocCount      int     `json:"doc_count"`
-	DispatchSent  int     `json:"dispatch_sent"`
-	DispatchFail  int     `json:"dispatch_failed"`
-	DispatchPend  int     `json:"dispatch_pending"`
+	RunID        string  `json:"run_id"`
+	RuleID       string  `json:"rule_id"`
+	RuleName     string  `json:"rule_name"`
+	VersionID    string  `json:"version_id"`
+	TriggerType  string  `json:"trigger_type"`
+	TriggeredBy  string  `json:"triggered_by"`
+	StartedAt    string  `json:"started_at"`
+	FinishedAt   *string `json:"finished_at"`
+	Status       string  `json:"status"`
+	ErrorDetail  string  `json:"error_detail"`
+	WindowStart  *string `json:"window_start"`
+	WindowEnd    *string `json:"window_end"`
+	DocCount     int     `json:"doc_count"`
+	DispatchSent int     `json:"dispatch_sent"`
+	DispatchFail int     `json:"dispatch_failed"`
+	DispatchPend int     `json:"dispatch_pending"`
 }
 
 // HandleListExecutionLog lists generation_run rows (Transformation-style execution log).
@@ -53,6 +53,9 @@ func HandleListExecutionLog(pool *pgxpool.Pool) http.HandlerFunc {
 		if r.ContentLength != 0 {
 			if err := common.DecodeJSON(r, &req); err != nil {
 				api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+				return
+			}
+			if !common.RequireRecordsEntityAccess(w, r, pool, common.RuleEntityQuery, []string{req.RuleID}) {
 				return
 			}
 		}

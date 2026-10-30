@@ -3,6 +3,7 @@ package fdAccrual
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -85,7 +86,7 @@ func GetAccrualRunAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(aie.is_escalated,false)                                    AS is_escalated
 			FROM investment.fd_accrual_run_audit a
 			LEFT JOIN LATERAL (
-				SELECT ai.* FROM uam.approval_instance ai
+				SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 				WHERE ai.record_id = a.run_id
 				  AND ai.module_code = 'FIXED_DEPOSIT'
 				  AND ai.status = 'PENDING'
@@ -94,7 +95,7 @@ func GetAccrualRunAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) ai ON true
 			LEFT JOIN LATERAL (
-				SELECT aie.* FROM uam.approval_instance_eye aie
+				SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 				WHERE aie.instance_id = ai.instance_id
 				  AND aie.status = 'ACTIVE'
 				ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -104,7 +105,7 @@ func GetAccrualRunAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY a.requested_at DESC
 		`, req.RunID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -134,7 +135,7 @@ func GetAccrualRunAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND a.parent_record_id = $1
 			ORDER BY a.requested_at DESC`, req.RunID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		uploadPayload, err := collectAccrualPgxRows(uploadRows)
@@ -236,7 +237,7 @@ func GetAccrualLedgerAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, baseQuery, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -277,7 +278,7 @@ func GetAccrualLedgerAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND a.parent_record_id = ANY($1::text[])
 				ORDER BY a.requested_at DESC`, ledgerIDs)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 				return
 			}
 			uploadPayload, err := collectAccrualPgxRows(uploadRows)
@@ -318,7 +319,7 @@ func GetScheduleConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		if _, ok, err := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+errtext.Detail(w, err))
 			return
 		} else if !ok {
 			api.RespondWithError(w, http.StatusForbidden, "Schedule config is not within your authorized entity scope.")
@@ -352,7 +353,7 @@ func GetScheduleConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY requested_at DESC
 		`, req.ConfigID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -382,7 +383,7 @@ func GetScheduleConfigAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND a.parent_record_id = $1
 			ORDER BY a.requested_at DESC`, req.ConfigID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		uploadPayload, err := collectAccrualPgxRows(uploadRows)

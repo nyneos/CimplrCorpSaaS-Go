@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -233,7 +234,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		approvedBankAccounts, _ := ctx.Value(api.ApprovedBankAccountsKey).([]map[string]string)
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+errtext.Detail(w, err))
 			return
 		}
 		files := r.MultipartForm.File["file"]
@@ -265,7 +266,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -420,7 +421,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -458,7 +459,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+errtext.Detail(w, err))
 				return
 			}
 			committed := false
@@ -504,7 +505,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 				return
 			}
 			committed = true
@@ -602,7 +603,7 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -641,7 +642,7 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 
@@ -743,7 +744,7 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + errtext.Text(err)})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -782,7 +783,7 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": dematID, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": dematID, constants.ValueError: constants.ErrCommitFailedCapitalized + errtext.Text(err)})
 				continue
 			}
 
@@ -824,7 +825,7 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -916,7 +917,7 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -968,7 +969,7 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + errtext.Text(err)})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -1056,7 +1057,7 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: constants.ErrCommitFailed + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: constants.ErrCommitFailed + errtext.Text(err)})
 				continue
 			}
 
@@ -1102,7 +1103,7 @@ func DeleteDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1119,7 +1120,7 @@ func DeleteDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.DematIDs})
@@ -1169,7 +1170,7 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1233,7 +1234,7 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.auditactiondemat
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id = ANY($3)
+				WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 			`, checkerBy, req.Comment, toApprove); err != nil {
 				msg, status := getUserFriendlyDematError(err, "approving actions")
 				api.RespondWithError(w, status, msg)
@@ -1263,7 +1264,7 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -1301,7 +1302,7 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1363,7 +1364,7 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err := tx.Exec(ctx, `
 			UPDATE investment.auditactiondemat
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE action_id = ANY($3)
+			WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, checkerBy, req.Comment, actionIDs); err != nil {
 			msg, status := getUserFriendlyDematError(err, "rejecting actions")
 			api.RespondWithError(w, status, msg)
@@ -1392,7 +1393,7 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -1542,7 +1543,7 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+errtext.Detail(w, rows.Err()))
 			return
 		}
 

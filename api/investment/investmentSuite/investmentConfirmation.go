@@ -2,6 +2,7 @@ package investmentsuite
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/governance"
 	approvalengine "CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/investment/uploadutil"
 	"CimplrCorpSaas/api/notification/catalog"
@@ -448,9 +449,16 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		go func(cID, uID, uEmail string) {
-			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, []string{cID}, constants.AuditActionCreate, uEmail)
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
+			pl := BuildConfirmationNotifPayload(bgCtx, pgxPool, []string{cID}, constants.AuditActionCreate, uEmail)
 			catalog.TriggerNotification(
-				context.Background(), pgxPool,
+				bgCtx, pgxPool,
 				"/investment/confirmation/create",
 				fmt.Sprintf("INVESTMENT_CONFIRMATION_CREATE/%s/%d", uID, time.Now().UnixMilli()),
 				pl.ToMap(),
@@ -669,9 +677,16 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := userEmail
 			go func() {
-				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionCreate, uEmail)
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer bgCancel()
+				pl := BuildConfirmationNotifPayload(bgCtx, pgxPool, ids, constants.AuditActionCreate, uEmail)
 				catalog.TriggerNotification(
-					context.Background(), pgxPool,
+					bgCtx, pgxPool,
 					"/investment/confirmation/bulk-create",
 					fmt.Sprintf("INVESTMENT_CONFIRMATION_BULK_CREATE/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
@@ -814,9 +829,16 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(cID, uID, uEmail string) {
-			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, []string{cID}, "UPDATE", uEmail)
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
+			pl := BuildConfirmationNotifPayload(bgCtx, pgxPool, []string{cID}, "UPDATE", uEmail)
 			catalog.TriggerNotification(
-				context.Background(), pgxPool,
+				bgCtx, pgxPool,
 				"/investment/confirmation/update",
 				fmt.Sprintf("INVESTMENT_CONFIRMATION_UPDATE/%s/%d", uID, time.Now().UnixMilli()),
 				pl.ToMap(),
@@ -979,9 +1001,16 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := userEmail
 			go func() {
-				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "UPDATE", uEmail)
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer bgCancel()
+				pl := BuildConfirmationNotifPayload(bgCtx, pgxPool, ids, "UPDATE", uEmail)
 				catalog.TriggerNotification(
-					context.Background(), pgxPool,
+					bgCtx, pgxPool,
 					"/investment/confirmation/bulk-update",
 					fmt.Sprintf("INVESTMENT_CONFIRMATION_BULK_UPDATE/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
@@ -1082,9 +1111,16 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(ids []string, uID, uEmail string) {
-			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "DELETE_REQUEST", uEmail)
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
+			pl := BuildConfirmationNotifPayload(bgCtx, pgxPool, ids, "DELETE_REQUEST", uEmail)
 			catalog.TriggerNotification(
-				context.Background(), pgxPool,
+				bgCtx, pgxPool,
 				"/investment/confirmation/delete-request",
 				fmt.Sprintf("INVESTMENT_CONFIRMATION_DELETE_REQUEST/%s/%d", uID, time.Now().UnixMilli()),
 				pl.ToMap(),
@@ -1144,7 +1180,7 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		sel := `
-			SELECT DISTINCT ON (confirmation_id) action_id, confirmation_id, actiontype, processing_status
+			SELECT DISTINCT ON (confirmation_id) action_id, confirmation_id, actiontype, processing_status, COALESCE(requested_by, '')
 			FROM investment.auditactioninvestmentconfirmation
 			WHERE confirmation_id = ANY($1)
 			  AND UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
@@ -1164,8 +1200,11 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var deleteMasterIDs []string
 
 		for rows.Next() {
-			var aid, cid, atype, pstatus string
-			if err := rows.Scan(&aid, &cid, &atype, &pstatus); err != nil {
+			var aid, cid, atype, pstatus, maker string
+			if err := rows.Scan(&aid, &cid, &atype, &pstatus, &maker); err != nil {
+				continue
+			}
+			if governance.IsSelfApprovalCtx(ctx, maker) {
 				continue
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
@@ -1314,9 +1353,16 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := checkerBy
 			go func() {
-				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionApprove, uEmail)
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer bgCancel()
+				pl := BuildConfirmationNotifPayload(bgCtx, pgxPool, ids, constants.AuditActionApprove, uEmail)
 				catalog.TriggerNotification(
-					context.Background(), pgxPool,
+					bgCtx, pgxPool,
 					"/investment/confirmation/approve",
 					fmt.Sprintf("INVESTMENT_CONFIRMATION_APPROVE/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
@@ -1335,9 +1381,16 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := checkerBy
 			go func() {
-				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionDelete, uEmail)
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer bgCancel()
+				pl := BuildConfirmationNotifPayload(bgCtx, pgxPool, ids, constants.AuditActionDelete, uEmail)
 				catalog.TriggerNotification(
-					context.Background(), pgxPool,
+					bgCtx, pgxPool,
 					"/investment/confirmation/delete",
 					fmt.Sprintf("INVESTMENT_CONFIRMATION_DELETE/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
@@ -1491,9 +1544,16 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(ids []string, uID, uEmail string) {
-			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionReject, uEmail)
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
+			pl := BuildConfirmationNotifPayload(bgCtx, pgxPool, ids, constants.AuditActionReject, uEmail)
 			catalog.TriggerNotification(
-				context.Background(), pgxPool,
+				bgCtx, pgxPool,
 				"/investment/confirmation/reject",
 				fmt.Sprintf("INVESTMENT_CONFIRMATION_REJECT/%s/%d", uID, time.Now().UnixMilli()),
 				pl.ToMap(),
@@ -1641,7 +1701,7 @@ func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []str
 			d.demat_account_number = i.demat_id
 		)
 		LEFT JOIN LATERAL (
-			SELECT ai.* FROM uam.approval_instance ai
+			SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 			WHERE ai.record_id = m.confirmation_id::text
 			  AND ai.module_code = 'INVESTMENT_MF'
 			  AND ai.status = 'PENDING'
@@ -1650,7 +1710,7 @@ func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []str
 			LIMIT 1
 		) ai ON true
 		LEFT JOIN LATERAL (
-			SELECT aie.* FROM uam.approval_instance_eye aie
+			SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 			WHERE aie.instance_id = ai.instance_id
 			  AND aie.status = 'ACTIVE'
 			ORDER BY aie.position ASC, aie.instance_eye_id ASC

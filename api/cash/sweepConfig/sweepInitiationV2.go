@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
@@ -192,7 +193,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			OverriddenTargetBankAccount *string  `json:"overridden_target_bank_account,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 		if req.UserID == "" {
@@ -291,7 +292,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Begin transaction
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
+				api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+errtext.Detail(w, err))
 				return
 			}
 			defer tx.Rollback(ctx)
@@ -312,7 +313,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				nullifyFloat(req.BufferAmount), nullifyFloat(req.SweepAmount))
 
 			if err != nil {
-				api.RespondWithResult(w, false, "failed to auto-create sweep: "+err.Error())
+				api.RespondWithResult(w, false, "failed to auto-create sweep: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -331,7 +332,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				nullifyEmpty(api.ClientIPFromRequest(r)))
 
 			if err != nil {
-				api.RespondWithResult(w, false, "failed to auto-approve sweep: "+err.Error())
+				api.RespondWithResult(w, false, "failed to auto-approve sweep: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -366,7 +367,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			isDup, dErr := isDuplicateInitiation(ctx, pgxPool, ik)
 			if dErr != nil {
 				tx.Rollback(ctx)
-				api.RespondWithResult(w, false, constants.ErrFailedToValidateDuplicateInitiation+dErr.Error())
+				api.RespondWithResult(w, false, constants.ErrFailedToValidateDuplicateInitiation+errtext.Detail(w, dErr))
 				return
 			}
 			if isDup {
@@ -386,7 +387,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			).Scan(&initiationID)
 
 			if err != nil {
-				api.RespondWithResult(w, false, "failed to create initiation: "+err.Error())
+				api.RespondWithResult(w, false, "failed to create initiation: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -397,13 +398,13 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			_, err = tx.Exec(ctx, auditIns, initiationID, sweepID, initiatedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
 			if err != nil {
-				api.RespondWithResult(w, false, "failed to create audit entry: "+err.Error())
+				api.RespondWithResult(w, false, "failed to create audit entry: "+errtext.Detail(w, err))
 				return
 			}
 
 			// Commit transaction
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
+				api.RespondWithResult(w, false, constants.ErrTxCommitFailed+errtext.Detail(w, err))
 				return
 			}
 
@@ -439,7 +440,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, sweepID).Scan(&entityName, &sourceBank, &sourceAccount, &targetBank, &targetAccount)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "Sweep configuration not found: "+err.Error())
+			api.RespondWithResult(w, false, "Sweep configuration not found: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -487,7 +488,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE sweep_id = $1 AND is_deleted = false
 		`, sweepID).Scan(&sweepType, &frequency, &cfgEffectiveDate, &executionTime, &cfgBufferAmount, &cfgSweepAmount)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to read sweep configuration: "+err.Error())
+			api.RespondWithResult(w, false, "failed to read sweep configuration: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -559,7 +560,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		isDup, dErr := isDuplicateInitiation(ctx, pgxPool, ik)
 		if dErr != nil {
-			api.RespondWithResult(w, false, constants.ErrFailedToValidateDuplicateInitiation+dErr.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToValidateDuplicateInitiation+errtext.Detail(w, dErr))
 			return
 		}
 		if isDup {
@@ -578,7 +579,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&initiationID)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to create sweep initiation: "+err.Error())
+			api.RespondWithResult(w, false, "failed to create sweep initiation: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -589,7 +590,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		_, err = pgxPool.Exec(ctx, auditIns, initiationID, req.SweepID, initiatedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to create audit entry: "+err.Error())
+			api.RespondWithResult(w, false, "failed to create audit entry: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -621,7 +622,7 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -697,7 +698,7 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) a ON true
 			LEFT JOIN LATERAL (
-				SELECT ai.* FROM uam.approval_instance ai
+				SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 				WHERE ai.record_id = i.initiation_id::text
 				  AND ai.module_code = 'CASH'
 				  AND ai.status = 'PENDING'
@@ -706,7 +707,7 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) ai ON true
 			LEFT JOIN LATERAL (
-				SELECT aie.* FROM uam.approval_instance_eye aie
+				SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 				WHERE aie.instance_id = ai.instance_id
 				  AND aie.status = 'ACTIVE'
 				ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -742,7 +743,7 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -822,7 +823,7 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithResult(w, false, "DB rows error: "+rows.Err().Error())
+			api.RespondWithResult(w, false, "DB rows error: "+errtext.Detail(w, rows.Err()))
 			return
 		}
 
@@ -845,7 +846,7 @@ func UpdateSweepInitiationStatus(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -890,7 +891,7 @@ func UpdateSweepInitiationStatus(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var sweepID string
 		err := pgxPool.QueryRow(ctx, upd, statusUpper, req.InitiationID).Scan(&sweepID)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to update initiation status: "+err.Error())
+			api.RespondWithResult(w, false, "failed to update initiation status: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -914,7 +915,7 @@ func CancelSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -951,7 +952,7 @@ func CancelSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var sweepID, oldStatus string
 		err := pgxPool.QueryRow(ctx, upd, req.InitiationID).Scan(&sweepID, &oldStatus)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to cancel initiation (may already be completed/failed/cancelled): "+err.Error())
+			api.RespondWithResult(w, false, "failed to cancel initiation (may already be completed/failed/cancelled): "+errtext.Detail(w, err))
 			return
 		}
 
@@ -976,7 +977,7 @@ func GetApprovedActiveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -1073,7 +1074,7 @@ func GetApprovedActiveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1095,7 +1096,7 @@ func GetApprovedActiveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&entityName, &sourceBank, &sourceAccount, &targetBank, &targetAccount, &sweepType,
 			)
 			if err != nil {
-				api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+				api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 
@@ -1121,7 +1122,7 @@ func GetApprovedActiveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+rows.Err().Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, rows.Err()))
 			return
 		}
 
@@ -1204,7 +1205,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -1235,7 +1236,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, initiationID := range req.InitiationIDs {
 			policyRow, perr := loadSweepInitiationRow(ctx, pgxPool, initiationID)
 			if perr != nil {
-				api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+perr.Error())
+				api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+errtext.Detail(w, perr))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -1291,7 +1292,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(legacyIDs) > 0 {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
+				api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+errtext.Detail(w, err))
 				return
 			}
 			committed := false
@@ -1310,7 +1311,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY initiation_id, requested_at DESC, action_id DESC
 			`, legacyIDs)
 			if err != nil {
-				api.RespondWithResult(w, false, "failed to fetch latest initiation audits: "+err.Error())
+				api.RespondWithResult(w, false, "failed to fetch latest initiation audits: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1320,7 +1321,7 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var actionID, id, actionType, status string
 				if err := rows.Scan(&actionID, &id, &actionType, &status); err != nil {
 					rows.Close()
-					api.RespondWithResult(w, false, "failed to read latest initiation audits: "+err.Error())
+					api.RespondWithResult(w, false, "failed to read latest initiation audits: "+errtext.Detail(w, err))
 					return
 				}
 				found[id] = true
@@ -1350,17 +1351,17 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						checker_ip = $3
 					WHERE action_id = ANY($4)`
 			if _, err := tx.Exec(ctx, upd, checkerName, nullifyEmpty(comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
-				api.RespondWithResult(w, false, "failed to approve initiations: "+err.Error())
+				api.RespondWithResult(w, false, "failed to approve initiations: "+errtext.Detail(w, err))
 				return
 			}
 			if len(deleteIDs) > 0 {
 				if _, err := tx.Exec(ctx, `UPDATE cimplrcorpsaas.sweep_initiation SET is_deleted = TRUE WHERE initiation_id = ANY($1)`, deleteIDs); err != nil {
-					api.RespondWithResult(w, false, "failed to soft delete initiations: "+err.Error())
+					api.RespondWithResult(w, false, "failed to soft delete initiations: "+errtext.Detail(w, err))
 					return
 				}
 			}
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithResult(w, false, "failed to commit approve: "+err.Error())
+				api.RespondWithResult(w, false, "failed to commit approve: "+errtext.Detail(w, err))
 				return
 			}
 			committed = true
@@ -1413,7 +1414,7 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -1444,7 +1445,7 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, initiationID := range req.InitiationIDs {
 			policyRow, perr := loadSweepInitiationRow(ctx, pgxPool, initiationID)
 			if perr != nil {
-				api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+perr.Error())
+				api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+errtext.Detail(w, perr))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pgxPool, runtime.EnforceInput{
@@ -1498,7 +1499,7 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(legacyIDs) > 0 {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
+				api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+errtext.Detail(w, err))
 				return
 			}
 			committed := false
@@ -1517,7 +1518,7 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY initiation_id, requested_at DESC, action_id DESC
 			`, legacyIDs)
 			if err != nil {
-				api.RespondWithResult(w, false, "failed to fetch latest initiation audits: "+err.Error())
+				api.RespondWithResult(w, false, "failed to fetch latest initiation audits: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1527,7 +1528,7 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var actionID, id, status string
 				if err := rows.Scan(&actionID, &id, &status); err != nil {
 					rows.Close()
-					api.RespondWithResult(w, false, "failed to read latest initiation audits: "+err.Error())
+					api.RespondWithResult(w, false, "failed to read latest initiation audits: "+errtext.Detail(w, err))
 					return
 				}
 				found[id] = true
@@ -1554,11 +1555,11 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						checker_ip = $3
 					WHERE action_id = ANY($4)`
 			if _, err := tx.Exec(ctx, upd, checkerName, nullifyEmpty(comment), nullifyEmpty(api.ClientIPFromRequest(r)), actionIDs); err != nil {
-				api.RespondWithResult(w, false, "failed to reject initiations: "+err.Error())
+				api.RespondWithResult(w, false, "failed to reject initiations: "+errtext.Detail(w, err))
 				return
 			}
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithResult(w, false, "failed to commit reject: "+err.Error())
+				api.RespondWithResult(w, false, "failed to commit reject: "+errtext.Detail(w, err))
 				return
 			}
 			committed = true
@@ -1607,7 +1608,7 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -1633,7 +1634,7 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, initiationID := range req.InitiationIDs {
 			policyRow, perr := loadSweepInitiationRow(ctx, pgxPool, initiationID)
 			if perr != nil {
-				api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+perr.Error())
+				api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+errtext.Detail(w, perr))
 				return
 			}
 			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pgxPool, runtime.EnforceInput{
@@ -1656,7 +1657,7 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+errtext.Detail(w, err))
 			return
 		}
 		committed := false
@@ -1700,7 +1701,7 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					(initiation_id, sweep_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip)
 				VALUES ($1, $2, 'DELETE', 'PENDING_DELETE_APPROVAL', $3, $4, now(), $5)
 			`, id, sweepID, nullifyEmpty(req.Reason), requestedBy, nullifyEmpty(api.ClientIPFromRequest(r))); err != nil {
-				api.RespondWithResult(w, false, "failed to create delete request: "+err.Error())
+				api.RespondWithResult(w, false, "failed to create delete request: "+errtext.Detail(w, err))
 				return
 			}
 			var ovr, swp, buf *float64
@@ -1723,7 +1724,7 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit delete request: "+err.Error())
+			api.RespondWithResult(w, false, "failed to commit delete request: "+errtext.Detail(w, err))
 			return
 		}
 		committed = true
@@ -1731,6 +1732,11 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		requestedByEmail := api.GetUserEmailFromCtx(ctx)
 		for _, c := range candidates {
 			go func(c deleteCandidate) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("goroutine panic: %v", rec)
+					}
+				}()
 				bgCtx := context.Background()
 				if cerr := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "CASH", c.initiationID, requestedByEmail); cerr != nil {
 					api.LogError("[SweepInitiation] CancelPendingInstances failed for %s: %v", c.initiationID, cerr)
@@ -1807,7 +1813,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Initiations []InitiationRequest `json:"initiations"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 		if req.UserID == "" || len(req.Initiations) == 0 {
@@ -1896,7 +1902,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Begin transaction
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1972,7 +1978,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				if err != nil {
 					tx.Rollback(ctx)
-					api.RespondWithResult(w, false, "failed to auto-create sweep: "+err.Error())
+					api.RespondWithResult(w, false, "failed to auto-create sweep: "+errtext.Detail(w, err))
 					return
 				}
 
@@ -1992,7 +1998,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				if err != nil {
 					tx.Rollback(ctx)
-					api.RespondWithResult(w, false, "failed to auto-approve sweep: "+err.Error())
+					api.RespondWithResult(w, false, "failed to auto-approve sweep: "+errtext.Detail(w, err))
 					return
 				}
 
@@ -2127,7 +2133,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			isDup, dErr := isDuplicateInitiation(ctx, pgxPool, ik)
 			if dErr != nil {
 				tx.Rollback(ctx)
-				api.RespondWithResult(w, false, constants.ErrFailedToValidateDuplicateInitiation+dErr.Error())
+				api.RespondWithResult(w, false, constants.ErrFailedToValidateDuplicateInitiation+errtext.Detail(w, dErr))
 				return
 			}
 			if isDup {
@@ -2157,7 +2163,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithResult(w, false, "failed to create initiation: "+err.Error())
+				api.RespondWithResult(w, false, "failed to create initiation: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -2169,7 +2175,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, err = tx.Exec(ctx, insInitAudit, initiationID, sweepID, initiatedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithResult(w, false, "failed to create initiation audit: "+err.Error())
+				api.RespondWithResult(w, false, "failed to create initiation audit: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -2183,7 +2189,7 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Commit transaction
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -2246,7 +2252,7 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Status   string   `json:"status,omitempty"` // PENDING_APPROVAL, APPROVED, REJECTED
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 		if req.UserID == "" {
@@ -2338,7 +2344,7 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) sca ON true
 			LEFT JOIN LATERAL (
-				SELECT ai.* FROM uam.approval_instance ai
+				SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 				WHERE ai.record_id = i.initiation_id::text
 				  AND ai.module_code = 'CASH'
 				  AND ai.status = 'PENDING'
@@ -2347,7 +2353,7 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) ai ON true
 			LEFT JOIN LATERAL (
-				SELECT aie.* FROM uam.approval_instance_eye aie
+				SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 				WHERE aie.instance_id = ai.instance_id
 				  AND aie.status = 'ACTIVE'
 				ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -2382,7 +2388,7 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2421,7 +2427,7 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&approvalsRequired, &approvalsReceived, &slaDeadline, &isEscalated,
 			)
 			if err != nil {
-				api.RespondWithResult(w, false, "scan error: "+err.Error())
+				api.RespondWithResult(w, false, "scan error: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -2538,7 +2544,7 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 		if req.UserID == "" {
@@ -2607,14 +2613,14 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 			approvedQuery += ` ORDER BY sc.sweep_id, a.requested_at DESC`
 			approvedRows, err = pgxPool.Query(ctx, approvedQuery, normEntities)
 			if err != nil {
-				api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+				api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 		} else {
 			approvedQuery += ` ORDER BY sc.sweep_id, a.requested_at DESC`
 			approvedRows, err = pgxPool.Query(ctx, approvedQuery)
 			if err != nil {
-				api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+				api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -2638,7 +2644,7 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 				&bufferAmount, &sweepAmount,
 				&createdAt,
 			); err != nil {
-				api.RespondWithResult(w, false, "scan error: "+err.Error())
+				api.RespondWithResult(w, false, "scan error: "+errtext.Detail(w, err))
 				return
 			}
 			if msg := validateSweepConfigV2Scope(ctx, entityName, sourceBank, sourceAccount, targetBank, targetAccount); msg != "" {
@@ -2748,14 +2754,14 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 			potentialQuery += ` ORDER BY entity_name, source_bank_name, source_account`
 			potentialRows, err = pgxPool.Query(ctx, potentialQuery, normEntities)
 			if err != nil {
-				api.RespondWithResult(w, false, "potential sweeps query error: "+err.Error())
+				api.RespondWithResult(w, false, "potential sweeps query error: "+errtext.Detail(w, err))
 				return
 			}
 		} else {
 			potentialQuery += ` ORDER BY entity_name, source_bank_name, source_account`
 			potentialRows, err = pgxPool.Query(ctx, potentialQuery)
 			if err != nil {
-				api.RespondWithResult(w, false, "potential sweeps query error: "+err.Error())
+				api.RespondWithResult(w, false, "potential sweeps query error: "+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -2772,7 +2778,7 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 				&targetBank, &targetAccount, &currency,
 				&sourceBalance, &targetBalance,
 			); err != nil {
-				api.RespondWithResult(w, false, "potential sweep scan error: "+err.Error())
+				api.RespondWithResult(w, false, "potential sweep scan error: "+errtext.Detail(w, err))
 				return
 			}
 			// filter: require source balance > 0 and not same account
@@ -2861,7 +2867,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason        string   `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 		if req.UserID == "" || req.InitiationID == "" {
@@ -2889,7 +2895,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		currentRow, perr := loadSweepInitiationRow(ctx, pgxPool, req.InitiationID)
 		if perr != nil {
-			api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+perr.Error())
+			api.RespondWithResult(w, false, errFailedToFetchSweepInitiationForPolicyCheck+errtext.Detail(w, perr))
 			return
 		}
 		// Build an edits map from whatever the caller actually set. Note:
@@ -2940,7 +2946,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Begin transaction
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -2953,7 +2959,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, req.InitiationID).Scan(&sweepID)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "initiation not found: "+err.Error())
+			api.RespondWithResult(w, false, "initiation not found: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -2994,7 +3000,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				_, err = tx.Exec(ctx, updateInit, args...)
 				if err != nil {
-					api.RespondWithResult(w, false, "failed to update initiation: "+err.Error())
+					api.RespondWithResult(w, false, "failed to update initiation: "+errtext.Detail(w, err))
 					return
 				}
 
@@ -3005,7 +3011,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				_, err = tx.Exec(ctx, insInitAudit, req.InitiationID, sweepID, requestedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
 				if err != nil {
-					api.RespondWithResult(w, false, "failed to create initiation audit: "+err.Error())
+					api.RespondWithResult(w, false, "failed to create initiation audit: "+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -3063,7 +3069,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				_, err = tx.Exec(ctx, updateConfig, args...)
 				if err != nil {
-					api.RespondWithResult(w, false, "failed to update sweep config: "+err.Error())
+					api.RespondWithResult(w, false, "failed to update sweep config: "+errtext.Detail(w, err))
 					return
 				}
 
@@ -3093,7 +3099,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				_, err = tx.Exec(ctx, insConfigAudit, sweepID, currentStatus, reason, requestedBy, nullifyEmpty(api.ClientIPFromRequest(r)))
 				if err != nil {
-					api.RespondWithResult(w, false, "failed to create config audit: "+err.Error())
+					api.RespondWithResult(w, false, "failed to create config audit: "+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -3101,7 +3107,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Commit transaction
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+errtext.Detail(w, err))
 			return
 		}
 

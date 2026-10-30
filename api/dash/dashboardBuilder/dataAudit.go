@@ -3,6 +3,10 @@ package dashboardbuilder
 import (
 	"context"
 	"fmt"
+	"strings"
+
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/internal/schemacache"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -55,6 +59,13 @@ func auditQueryInner(
 	if cfg.ExtraCols != "" {
 		extra = ", " + cfg.ExtraCols
 	}
+
+	scopeFilter, scopeArgs, allowed := auditScopeFilter(ctx, pool, cfg, len(args)+1)
+	if !allowed {
+		return []map[string]any{}, nil
+	}
+	parentFilter += scopeFilter
+	args = append(args, scopeArgs...)
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -267,6 +278,10 @@ func queryInvestmentOnboardBatchInfo(ctx context.Context, pool *pgxpool.Pool, en
 	} else {
 		parentFilter = "WHERE 1=1"
 	}
+	if !api.IsAdminOverride(ctx) && api.GetUserIDFromCtx(ctx) != "" {
+		parentFilter += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM investment.onboard_transaction ot WHERE ot.batch_id::text = ob.batch_id::text AND ot.entity_name = ANY($%d::text[]))`, len(args)+1)
+		args = append(args, api.GetEntityNamesFromCtx(ctx))
+	}
 
 	q := fmt.Sprintf(`
 		SELECT
@@ -292,4 +307,79 @@ func queryInvestmentOnboardBatchInfo(ctx context.Context, pool *pgxpool.Pool, en
 	`, parentFilter)
 
 	return runSourceQuery(ctx, pool, q, args)
+}
+
+type auditParent struct {
+	table string
+	col   string
+}
+
+// auditParents maps each audit table to the business table its parent id points at.
+var auditParents = map[string]auditParent{
+	"cimplr.fd_closure_confirm_audit":              {"cimplr.fd_closure_confirm", "closure_confirm_id"},
+	"cimplr.fd_closure_initiate_audit":             {"cimplr.fd_closure_initiate", "closure_initiate_id"},
+	"cimplrcorpsaas.auditactionbankstatement":      {"cimplrcorpsaas.bank_statements", "bank_statement_id"},
+	"investment.auditactioninitiation":             {"investment.investment_initiation", "initiation_id"},
+	"investment.auditactioninvestmentconfirmation": {"investment.investment_confirmation", "confirmation_id"},
+	"investment.auditactionproposal":               {"investment.investment_proposal", "proposal_id"},
+	"investment.auditactionredemption":             {"investment.redemption_initiation", "redemption_id"},
+	"investment.auditactionredemptionconfirmation": {"investment.redemption_confirmation", "redemption_confirm_id"},
+	"investment.fd_audit_booking_request":          {"investment.fd_booking_request", "booking_id"},
+	"investment.fd_audit_master":                   {"investment.fd_master", "fd_id"},
+	"investment.fd_interest_receipt_audit":         {"investment.fd_interest_receipt", "receipt_id"},
+	"investment.fd_tds_receipt_audit":              {"investment.fd_tds_receipt", "tds_id"},
+	"public.auditactionexposure":                   {"public.exposure_headers", "exposure_header_id"},
+	"public.auditactionforwardbooking":             {"public.forward_bookings", "system_transaction_id"},
+}
+
+// auditScopeFilter limits an audit query to parents in the caller's entity scope.
+// Audit tables whose parent has no known entity column are shown to admins only.
+func auditScopeFilter(ctx context.Context, pool *pgxpool.Pool, cfg auditTableConfig, argN int) (string, []any, bool) {
+	if api.IsAdminOverride(ctx) || api.GetUserIDFromCtx(ctx) == "" {
+		return "", nil, true
+	}
+	p, ok := auditParents[cfg.Table]
+	if !ok {
+		return "", nil, false
+	}
+	cols, err := parentColumns(ctx, pool, p.table)
+	if err != nil || !cols[p.col] {
+		return "", nil, false
+	}
+	entityCol := ""
+	for _, c := range []string{"entity_id", "entity_name", "entity", "entity_level_0"} {
+		if cols[c] {
+			entityCol = c
+			break
+		}
+	}
+	if entityCol == "" {
+		return "", nil, false
+	}
+	filter := fmt.Sprintf(` AND %s::text IN (SELECT %s::text FROM %s WHERE %s::text = ANY($%d::text[]) OR %s::text = ANY($%d::text[]))`,
+		cfg.ParentCol, p.col, p.table, entityCol, argN, entityCol, argN+1)
+	return filter, []any{api.GetEntityIDsFromCtx(ctx), api.GetEntityNamesFromCtx(ctx)}, true
+}
+
+func parentColumns(ctx context.Context, pool *pgxpool.Pool, table string) (map[string]bool, error) {
+	parts := strings.SplitN(table, ".", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("unqualified table %s", table)
+	}
+	return schemacache.Columns("dashaudit:"+table, func() (map[string]bool, error) {
+		rows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`, parts[0], parts[1])
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := map[string]bool{}
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				return nil, err
+			}
+			out[c] = true
+		}
+		return out, rows.Err()
+	})
 }

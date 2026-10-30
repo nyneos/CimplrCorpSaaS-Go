@@ -1,10 +1,12 @@
 package emailmailbox
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"encoding/json"
 	"net/http"
 	"strings"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/internal/services/mailruntime"
@@ -35,14 +37,14 @@ func HandleGraphTest(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			merged, mergeErr := MergeGraphFields(stored, fields)
 			if mergeErr != nil {
-				emailcommon.RespondBadRequest(w, mergeErr.Error())
+				emailcommon.RespondBadRequest(w, errtext.Detail(w, mergeErr))
 				return
 			}
 			fields = merged
 		}
 		payload, err := ResolveGraphForMailbox(r.Context(), pool, fields)
 		if err != nil {
-			emailcommon.RespondBadRequest(w, err.Error())
+			emailcommon.RespondBadRequest(w, errtext.Detail(w, err))
 			return
 		}
 		rt := mailruntime.NewRuntime()
@@ -51,7 +53,8 @@ func HandleGraphTest(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := rt.VerifyGraph(r.Context(), payload); err != nil {
-			emailcommon.RespondFailPayload(w, constants.RouteGraphTest, err.Error(), map[string]interface{}{"ok": false})
+			api.LogErrorForResponse(w, "email graph test failed: %v", err)
+			emailcommon.RespondFailPayload(w, constants.RouteGraphTest, "request failed", map[string]interface{}{"ok": false})
 			return
 		}
 		label := strings.TrimSpace(payload.TenantLabel)

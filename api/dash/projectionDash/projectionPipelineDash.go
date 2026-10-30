@@ -1,6 +1,7 @@
 package projectiondash
 
 import (
+	"CimplrCorpSaas/api/dash/fxrates"
 	"context"
 	"encoding/json"
 	"math"
@@ -69,17 +70,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var resp KPIResponse
 
 		// spot rates for conversion to USD (fallbacks)
-		spotRates := map[string]float64{
-			"USD": 1.0,
-			"INR": 0.0117,
-			"EUR": 1.09,
-			"GBP": 1.28,
-			"AUD": 0.68,
-			"CAD": 0.75,
-			"CHF": 1.1,
-			"CNY": 0.14,
-			"JPY": 0.0067,
-		}
+		spotRates := fxrates.USDPerUnit()
 
 		// 1) Total proposals
 		if err := pgxPool.QueryRow(ctx, `
@@ -130,13 +121,18 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var currency string
 			var amt float64
 			if err := rows.Scan(&currency, &amt); err != nil {
-				continue
+				api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+				return
 			}
 			rate := 1.0
 			if r, ok := spotRates[currency]; ok && r > 0 {
 				rate = r
 			}
 			total += math.Abs(amt) * rate
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			return
 		}
 		resp.ValuePendingNet = total
 
@@ -146,7 +142,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := pgxPool.QueryRow(ctx, `
 			SELECT COUNT(DISTINCT proposal_id)
 			FROM audit_action_cashflow_proposal
-			WHERE processing_status = 'APPROVED'
+			WHERE UPPER(TRIM(processing_status)) = 'APPROVED'
 			  AND checker_at IS NOT NULL
 			  AND EXTRACT(YEAR FROM checker_at) = $1
 			  AND EXTRACT(MONTH FROM checker_at) = $2
@@ -182,19 +178,7 @@ type DetailedPipeline struct {
 // Method: GET
 func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	// simple spot rates to convert native currency -> USD
-	spotRates := map[string]float64{
-		"USD": 1.0,
-		"AUD": 0.68,
-		"CAD": 0.75,
-		"CHF": 1.1,
-		"CNY": 0.14,
-		"RMB": 0.14,
-		"EUR": 1.09,
-		"GBP": 1.28,
-		"JPY": 0.0067,
-		"SEK": 0.095,
-		"INR": 0.0117,
-	}
+	spotRates := fxrates.USDPerUnit()
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -250,7 +234,8 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var processingStatus *string
 
 			if err := rows.Scan(&proposalID, &itemID, &entityName, &departmentID, &expectedAmount, &currencyCode, &requestedBy, &requestedAt, &processingStatus); err != nil {
-				continue
+				api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+				return
 			}
 
 			// build id as proposal:item
@@ -286,6 +271,10 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Status:      status,
 			})
 		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			return
+		}
 
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
 	}
@@ -309,17 +298,7 @@ type EntityBucket struct {
 
 // GetProjectionByEntity aggregates expected amounts (abs) converted to USD grouped by entity->department->processing_status
 func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	spotRates := map[string]float64{
-		"USD": 1.0,
-		"INR": 0.0117,
-		"EUR": 1.09,
-		"GBP": 1.28,
-		"AUD": 0.68,
-		"CAD": 0.75,
-		"CHF": 1.1,
-		"CNY": 0.14,
-		"JPY": 0.0067,
-	}
+	spotRates := fxrates.USDPerUnit()
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -367,7 +346,8 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var entity, dept, currency, status *string
 			var amt float64
 			if err := rows.Scan(&entity, &dept, &amt, &currency, &status); err != nil {
-				continue
+				api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+				return
 			}
 			e := ""
 			if entity != nil {
@@ -399,6 +379,10 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				data[e][d] = map[string]float64{}
 			}
 			data[e][d][s] += converted
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			return
 		}
 
 		// build output

@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"net/http"
 	"strings"
 	"time"
@@ -95,7 +96,7 @@ func BulkApproveHolidayActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := tx.Query(ctx, sel, selArg)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, 500, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -136,10 +137,10 @@ func BulkApproveHolidayActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, err := tx.Exec(ctx, `
 				UPDATE investment.auditactionmasterholiday
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id = ANY($3)
+				WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 			`, checkerBy, req.Comment, toApprove)
 			if err != nil {
-				api.RespondWithError(w, 500, "approve update failed: "+err.Error())
+				api.RespondWithError(w, 500, "approve update failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -151,7 +152,7 @@ func BulkApproveHolidayActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toDeleteActionIDs)
 			if err != nil {
-				api.RespondWithError(w, 500, "mark deleted failed: "+err.Error())
+				api.RespondWithError(w, 500, "mark deleted failed: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -161,13 +162,13 @@ func BulkApproveHolidayActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE holiday_id = ANY($1)
 			`, deleteHolidayIDs)
 			if err != nil {
-				api.RespondWithError(w, 500, "holiday soft-delete failed: "+err.Error())
+				api.RespondWithError(w, 500, "holiday soft-delete failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, 500, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, 500, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -242,7 +243,7 @@ func BulkRejectHolidayActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := tx.Query(ctx, sel, selArg)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, 500, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -271,10 +272,10 @@ func BulkRejectHolidayActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.auditactionmasterholiday
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE action_id = ANY($3)
+			WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, checkerBy, req.Comment, actionIDs)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrUpdateFailed+err.Error())
+			api.RespondWithError(w, 500, constants.ErrUpdateFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -379,7 +380,7 @@ ORDER BY GREATEST(COALESCE(l.requested_at,'1970-01-01'::timestamptz), COALESCE(l
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, 500, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -402,7 +403,7 @@ ORDER BY GREATEST(COALESCE(l.requested_at,'1970-01-01'::timestamptz), COALESCE(l
 			out = append(out, rec)
 		}
 		if rows.Err() != nil {
-			api.RespondWithError(w, 500, constants.ErrScanFailedPrefix+rows.Err().Error())
+			api.RespondWithError(w, 500, constants.ErrScanFailedPrefix+errtext.Detail(w, rows.Err()))
 			return
 		}
 
@@ -459,7 +460,7 @@ ORDER BY mh.holiday_date, mh.holiday_name`
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, 500, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, 500, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -479,7 +480,7 @@ ORDER BY mh.holiday_date, mh.holiday_name`
 			out = append(out, rec)
 		}
 		if rows.Err() != nil {
-			api.RespondWithError(w, 500, constants.ErrScanFailedPrefix+rows.Err().Error())
+			api.RespondWithError(w, 500, constants.ErrScanFailedPrefix+errtext.Detail(w, rows.Err()))
 			return
 		}
 

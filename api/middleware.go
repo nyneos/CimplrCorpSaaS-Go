@@ -1,9 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -12,6 +12,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"CimplrCorpSaas/internal/logger"
+	usersession "CimplrCorpSaas/internal/session"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -346,60 +347,29 @@ func IsCashFlowCategoryAllowed(ctx context.Context, categoryName string) bool {
 func BusinessUnitMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var userID string
 			ct := r.Header.Get(constants.ContentTypeText)
-
-			// Debug: log every request hitting the middleware so we can trace timing.
-			logger.LogInfo("[BUMiddleware] %s %s ct=%q", r.Method, r.URL.Path, ct)
-
+			var body []byte
 			if strings.HasPrefix(ct, constants.ContentTypeJSON) && (r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" || r.Method == "PATCH") {
-				var bodyMap map[string]interface{}
-				if decErr := json.NewDecoder(r.Body).Decode(&bodyMap); decErr != nil {
-					logger.LogError("[BUMiddleware] body decode error for %s %s: %v", r.Method, r.URL.Path, decErr)
+				b, readErr := io.ReadAll(r.Body)
+				if readErr != nil {
+					RespondEnvelopeError(w, http.StatusBadRequest, "Failed to read request body", "")
+					return
 				}
-				if uid, ok := bodyMap[constants.KeyUserID].(string); ok {
-					userID = uid
-				} else if uid, ok := bodyMap[constants.KeyUserID]; ok {
-					// handle numeric user_id encoded as float64 by JSON decoder
-					userID = fmt.Sprintf("%v", uid)
+				body = b
+			}
+			matchedSession, body, idErr := usersession.Identify(r, body)
+			if body != nil {
+				r.Body = io.NopCloser(bytes.NewReader(body))
+			}
+			if idErr != nil {
+				if errors.Is(idErr, usersession.ErrUserIDRequired) {
+					RespondEnvelopeError(w, http.StatusUnauthorized, constants.ErrMissingUserID, "")
+					return
 				}
-				// Re-marshal and reset body for downstream handlers
-				bodyBytes, _ := json.Marshal(bodyMap)
-				r.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))
-			} else if strings.HasPrefix(ct, constants.ContentTypeMultipart) && (r.Method == "POST" || r.Method == "PUT") {
-				// Parse multipart form to get user_id
-				err := r.ParseMultipartForm(32 << 20) // 32MB
-				if err == nil {
-					userID = r.FormValue(constants.KeyUserID)
-				}
-			} else if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" || r.Method == "PATCH" {
-				// Content-Type was not JSON — try to read body anyway for user_id
-				logger.LogInfo("[BUMiddleware] WARNING: %s %s missing Content-Type:application/json — will fall back to query param for user_id", r.Method, r.URL.Path)
-			}
-			// For GET/HEAD/OPTIONS or when body didn't contain user_id, fall back to query param
-			if userID == "" {
-				userID = r.URL.Query().Get(constants.KeyUserID)
-			}
-
-			if userID == "" {
-				logger.LogInfo("[BUMiddleware] BLOCKED %s %s — missing user_id (ct=%q)", r.Method, r.URL.Path, ct)
-				RespondEnvelopeError(w, http.StatusUnauthorized, constants.ErrMissingUserID, "")
-				return
-			}
-
-			// Validate session and capture it for context injection
-			var matchedSession *auth.UserSession
-			for _, s := range auth.GetActiveSessions() {
-				if s.UserID == userID {
-					matchedSession = s
-					break
-				}
-			}
-			if matchedSession == nil {
-				logger.LogError("[BUMiddleware] BLOCKED %s %s — invalid session for user_id=%s", r.Method, r.URL.Path, userID)
 				RespondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, "")
 				return
 			}
+			userID := matchedSession.UserID
 
 			// Resolve entity scope.
 			// New model: query user_entity_mappings for all directly-assigned entities.

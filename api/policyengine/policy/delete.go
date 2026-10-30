@@ -68,21 +68,34 @@ func HandleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			if _, err := tx.Exec(r.Context(), `
+			sp, err := tx.Begin(r.Context())
+			if err != nil {
+				errs = append(errs, id+": failed to request delete")
+				break
+			}
+			if _, err := sp.Exec(r.Context(), `
 				UPDATE policyengine_svc.policy_master
 				SET processing_status = 'PENDING_DELETE_APPROVAL',
 				    last_modified_by = $1, last_modified_at = now()
 				WHERE policy_id = $2::uuid`, actor, id); err != nil {
-				errs = append(errs, id+": "+err.Error())
+				_ = sp.Rollback(r.Context())
+				api.LogError("policy delete %s: %v", id, err)
+				errs = append(errs, id+": failed to request delete")
 				continue
 			}
-			if _, err := tx.Exec(r.Context(), `
+			if _, err := sp.Exec(r.Context(), `
 				INSERT INTO policyengine_svc.policy_master_audit (
 					policy_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip,
 					old_is_deleted, new_is_deleted
 				) VALUES ($1::uuid, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now(), $4, false, true)`,
 				id, common.NullIfEmpty(req.Reason), actor, common.NullIfEmpty(ip)); err != nil {
-				errs = append(errs, id+": "+err.Error())
+				_ = sp.Rollback(r.Context())
+				api.LogError("policy delete %s: %v", id, err)
+				errs = append(errs, id+": failed to request delete")
+				continue
+			}
+			if err := sp.Commit(r.Context()); err != nil {
+				errs = append(errs, id+": failed to request delete")
 				continue
 			}
 			requested = append(requested, id)

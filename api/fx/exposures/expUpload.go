@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -565,6 +566,31 @@ func lookupExposureUploadS3Key(ctx context.Context, pool *pgxpool.Pool, recordID
 	return sql.NullString{}, sql.ErrNoRows
 }
 
+// exposureEditableFields are the exposure fields the exposure request screen lets a
+// user edit (config.ts editableKeys); document_date is mapped to value_date.
+var exposureEditableFields = map[string]bool{
+	"document_id": true, "exposure_type": true, "entity": true, "counterparty_name": true, "currency": true,
+	"total_original_amount": true, "total_open_amount": true, "amount_in_local_currency": true,
+	"value_date": true, "document_date": true,
+}
+
+func publicTableColumns(ctx context.Context, pool *pgxpool.Pool, table string) (map[string]bool, error) {
+	rows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			return nil, err
+		}
+		cols[col] = true
+	}
+	return cols, rows.Err()
+}
+
 // Handler
 func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 	// ...existing code...
@@ -577,7 +603,7 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 			Reason string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "Invalid request: "+err.Error())
+			respondWithError(w, http.StatusBadRequest, "Invalid request: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -599,7 +625,7 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 
 		var exposureHeaderID, entity string
 		if err := joinRow.Scan(&exposureHeaderID, &entity); err != nil {
-			respondWithError(w, http.StatusNotFound, "Row not found: "+err.Error())
+			respondWithError(w, http.StatusNotFound, "Row not found: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -609,46 +635,29 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Get columns for each table
-		headerColsRes, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_headers'`)
+		headerCols, err := publicTableColumns(ctx, pool, "exposure_headers")
 		if err != nil {
 			logger.LogError("failed to query header columns: %v", err)
 			respondWithError(w, http.StatusInternalServerError, "failed to read table metadata")
 			return
 		}
-		defer headerColsRes.Close()
-
-		lineColsRes, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_line_items'`)
+		lineCols, err := publicTableColumns(ctx, pool, "exposure_line_items")
 		if err != nil {
 			logger.LogError("failed to query line columns: %v", err)
 			respondWithError(w, http.StatusInternalServerError, "failed to read table metadata")
 			return
 		}
-		defer lineColsRes.Close()
-
-		var headerCols, lineCols []string
-		for headerColsRes.Next() {
-			var col string
-			if err := headerColsRes.Scan(&col); err != nil {
-				logger.LogError("read header columns metadata: scan failed: %v", err)
-			}
-			headerCols = append(headerCols, col)
-		}
-		for lineColsRes.Next() {
-			var col string
-			if err := lineColsRes.Scan(&col); err != nil {
-				logger.LogError("read line columns metadata: scan failed: %v", err)
-			}
-			lineCols = append(lineCols, col)
-		}
 
 		headerFields := make(map[string]interface{})
 		lineFields := make(map[string]interface{})
 		for k, v := range req.Fields {
-			if contains(headerCols, k) {
+			if !exposureEditableFields[k] {
+				continue
+			}
+			if headerCols[k] || k == "document_date" {
 				headerFields[k] = v
 			}
-			if contains(lineCols, k) {
+			if lineCols[k] {
 				lineFields[k] = v
 			}
 		}
@@ -660,7 +669,7 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 
 		creationRow, loadErr := LoadExposureCreationRow(ctx, pool, exposureHeaderID)
 		if loadErr != nil {
-			respondWithError(w, http.StatusInternalServerError, "Failed to load exposure for policy check: "+loadErr.Error())
+			respondWithError(w, http.StatusInternalServerError, "Failed to load exposure for policy check: "+errtext.Detail(w, loadErr))
 			return
 		}
 		creationRow = ApplyExposureCreationEdits(creationRow, req.Fields)
@@ -684,6 +693,12 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		oldValues := auditutil.FetchRowSnapshotPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", exposureHeaderID)
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Exposure update failed: "+errtext.Detail(w, err))
+			return
+		}
+		defer tx.Rollback(ctx)
 		// Update header if needed
 		if len(headerFields) > 0 {
 			setParts := []string{}
@@ -702,18 +717,18 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 				strings.Join(setParts, ", "),
 				len(values),
 			)
-			if _, err := pool.Exec(ctx, query, values...); err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Header update failed: "+err.Error())
+			if _, err := tx.Exec(ctx, query, values...); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Header update failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
 		if len(headerFields) == 0 && len(lineFields) > 0 {
-			if _, err := pool.Exec(ctx,
+			if _, err := tx.Exec(ctx,
 				`UPDATE exposure_headers SET approval_status = $1 WHERE exposure_header_id = $2`,
 				constants.StatusPendingEditApproval,
 				exposureHeaderID,
 			); err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Header status update failed: "+err.Error())
+				respondWithError(w, http.StatusInternalServerError, "Header status update failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -735,10 +750,14 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 				strings.Join(setParts, ", "),
 				len(values),
 			)
-			if _, err := pool.Exec(ctx, query, values...); err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Line item update failed: "+err.Error())
+			if _, err := tx.Exec(ctx, query, values...); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Line item update failed: "+errtext.Detail(w, err))
 				return
 			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Exposure update failed: "+errtext.Detail(w, err))
+			return
 		}
 
 		// Only return the updated fields
@@ -750,7 +769,7 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE h.exposure_header_id = $1
 		`, exposureHeaderID)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "Fetch failed: "+err.Error())
+			respondWithError(w, http.StatusInternalServerError, "Fetch failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -764,7 +783,7 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 				valPtrs[i] = &vals[i]
 			}
 			if err := rows.Scan(valPtrs...); err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Row scan failed: "+err.Error())
+				respondWithError(w, http.StatusInternalServerError, "Row scan failed: "+errtext.Detail(w, err))
 				return
 			}
 			rowMap := map[string]interface{}{}
@@ -811,6 +830,11 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(tID string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("goroutine panic: %v", rec)
+				}
+			}()
 			_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
 				ModuleCode:          "FX",
 				TransactionType:     "FX_EXPOSURE_EDIT",
@@ -987,7 +1011,7 @@ func DeleteExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ExposureHeaderIds {
 			creationRow, err := LoadExposureCreationRow(ctx, pool, id)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
@@ -1020,7 +1044,7 @@ func DeleteExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			req.ExposureHeaderIds,
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		count := res.RowsAffected()
@@ -1041,6 +1065,11 @@ func DeleteExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		go func(ids []string, email string, matrices map[string]string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("goroutine panic: %v", rec)
+				}
+			}()
 			bgCtx := context.Background()
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
@@ -1096,7 +1125,7 @@ func RejectMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ExposureHeaderIds {
 			creationRow, err := LoadExposureCreationRow(ctx, pool, id)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
@@ -1157,7 +1186,7 @@ func RejectMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			actionableIDs,
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1242,7 +1271,7 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.ExposureHeaderIds {
 			creationRow, err := LoadExposureCreationRow(ctx, pool, id)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
@@ -1287,7 +1316,7 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1296,7 +1325,7 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT exposure_header_id, approval_status, exposure_type, status, document_id, total_original_amount, total_open_amount, additional_header_details
 			FROM exposure_headers WHERE exposure_header_id = ANY($1::uuid[])`, req.ExposureHeaderIds)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1442,7 +1471,9 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 						} else if v, ok := h["total_original_amount"].(float64); ok {
 							amt = math.Abs(v)
 						}
-						_, _ = tx.Exec(ctx, `UPDATE exposure_headers SET total_open_amount = total_open_amount + $1, status = 'Open' WHERE exposure_header_id = $2`, amt, parentId)
+						if _, execErr := tx.Exec(ctx, `UPDATE exposure_headers SET total_open_amount = total_open_amount + $1, status = 'Open' WHERE exposure_header_id = $2`, amt, parentId); execErr != nil && approvalErr == nil {
+							approvalErr = execErr
+						}
 					}
 				}
 			}
@@ -1519,9 +1550,15 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 							if v, ok := h["total_original_amount"].(float64); ok {
 								amt = math.Abs(v)
 							}
-							_, _ = tx.Exec(ctx, `UPDATE exposure_headers SET total_open_amount = total_open_amount - $1, status = 'Rolled' WHERE exposure_header_id = $2`, amt, parentId)
-							_, _ = tx.Exec(ctx, `UPDATE exposure_headers SET status = 'Rolled' WHERE exposure_header_id = $1`, h["exposure_header_id"])
-							_, _ = tx.Exec(ctx, `INSERT INTO exposure_rollover_log (parent_header_id, child_header_id, rollover_amount, rollover_date, created_at) VALUES ($1, $2, $3, CURRENT_DATE, NOW())`, parentId, h["exposure_header_id"], amt)
+							if _, execErr := tx.Exec(ctx, `UPDATE exposure_headers SET total_open_amount = total_open_amount - $1, status = 'Rolled' WHERE exposure_header_id = $2`, amt, parentId); execErr != nil && approvalErr == nil {
+								approvalErr = execErr
+							}
+							if _, execErr := tx.Exec(ctx, `UPDATE exposure_headers SET status = 'Rolled' WHERE exposure_header_id = $1`, h["exposure_header_id"]); execErr != nil && approvalErr == nil {
+								approvalErr = execErr
+							}
+							if _, execErr := tx.Exec(ctx, `INSERT INTO exposure_rollover_log (parent_header_id, child_header_id, rollover_amount, rollover_date, created_at) VALUES ($1, $2, $3, CURRENT_DATE, NOW())`, parentId, h["exposure_header_id"], amt); execErr != nil && approvalErr == nil {
+								approvalErr = execErr
+							}
 							if rolled, ok := results["rolled"].([]map[string]interface{}); ok {
 								rolled = append(rolled, h)
 								results["rolled"] = rolled
@@ -1533,7 +1570,7 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if approvalErr != nil {
-			respondWithError(w, http.StatusInternalServerError, approvalErr.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, approvalErr))
 			return
 		}
 
@@ -1548,7 +1585,7 @@ func ApproveMultipleExposureHeaders(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		for _, row := range results["approved"].([]map[string]interface{}) {
@@ -1634,7 +1671,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 		// Parse multipart form
 		err := r.ParseMultipartForm(32 << 20) // 32MB max
 		if err != nil {
-			respondWithError(w, http.StatusBadRequest, "Invalid multipart form: "+err.Error())
+			respondWithError(w, http.StatusBadRequest, "Invalid multipart form: "+errtext.Detail(w, err))
 			return
 		}
 		userID := r.FormValue(constants.KeyUserID)
@@ -1686,7 +1723,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		results, absorptionErrors, policySummary, err := processBatchUploadStagingData(ctx, pool, r, buNames, session)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		if line := strings.TrimSpace(policySummary); line != "" {
@@ -2102,7 +2139,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				}
 				if s3storage.IsS3UploadEnabled() {
 					if err := ensureUniqueExposureUpload(ctx, pool, fileBytes); err != nil {
-						message := err.Error()
+						message := errtext.Text(err)
 						if errors.Is(err, ErrExposureFileAlreadyUploaded) {
 							message = duplicateExposureUploadMessage
 						}
@@ -2113,7 +2150,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 				exposureTypeFolder, err := batchStagingExposureTypeFolder(field.DataType)
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: err.Error()})
+					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: errtext.Text(err)})
 					return
 				}
 				s3Key = s3storage.BuildUploadedS3Key("fx/exposures", exposureTypeFolder, filename, uploadedBy, time.Now().UTC())
@@ -2121,7 +2158,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					filename, field.DataType, s3Key, s3storage.IsS3UploadEnabled())
 				if s3storage.IsS3UploadEnabled() {
 					if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, s3storage.DetectContentType(fileBytes)); err != nil {
-						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to upload file to S3: " + err.Error()})
+						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to upload file to S3: " + errtext.Text(err)})
 						return
 					}
 					uploadedNewObject = true
@@ -2144,7 +2181,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 				tx, err = pool.Begin(ctx)
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to start DB transaction: " + err.Error()})
+					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to start DB transaction: " + errtext.Text(err)})
 					return
 				}
 
@@ -2210,7 +2247,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					}
 					query := fmt.Sprintf(constants.ErrInsertFailed, field.TableName, strings.Join(keys, ", "), strings.Join(placeholders, ", "))
 					if _, err := tx.Exec(ctx, query, vals...); err != nil {
-						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to insert row: " + err.Error()})
+						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to insert row: " + errtext.Text(err)})
 						return
 					}
 					insertedRows++
@@ -2224,7 +2261,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				`, field.DataType)
 				insertedFinalRows := 0
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to fetch mapping rows: " + err.Error()})
+					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to fetch mapping rows: " + errtext.Text(err)})
 					return
 				}
 				var mappings []struct {
@@ -2236,7 +2273,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					var src, tgtTable, tgtField string
 					if err := mappingRows.Scan(&src, &tgtTable, &tgtField); err != nil {
 						mappingRows.Close()
-						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to scan mapping row: " + err.Error()})
+						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to scan mapping row: " + errtext.Text(err)})
 						return
 					}
 					mappings = append(mappings, struct {
@@ -2247,7 +2284,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				}
 				if err := mappingRows.Err(); err != nil {
 					mappingRows.Close()
-					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed while reading mapping rows: " + err.Error()})
+					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed while reading mapping rows: " + errtext.Text(err)})
 					return
 				}
 				mappingRows.Close()
@@ -2286,7 +2323,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 				stagedRows, err := tx.Query(ctx, fmt.Sprintf(`SELECT * FROM %s WHERE upload_batch_id = $1`, field.TableName), uploadBatchId)
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to fetch staged rows: " + err.Error()})
+					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to fetch staged rows: " + errtext.Text(err)})
 					return
 				}
 				stagedCols := pgxColumnNames(stagedRows)
@@ -2299,7 +2336,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					}
 					if err := stagedRows.Scan(stagedPtrs...); err != nil {
 						stagedRows.Close()
-						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to scan staged row: " + err.Error()})
+						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to scan staged row: " + errtext.Text(err)})
 						return
 					}
 					staged := map[string]interface{}{}
@@ -2310,7 +2347,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				}
 				if err := stagedRows.Err(); err != nil {
 					stagedRows.Close()
-					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed while reading staged rows: " + err.Error()})
+					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed while reading staged rows: " + errtext.Text(err)})
 					return
 				}
 				stagedRows.Close()
@@ -2601,7 +2638,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				logger.LogInfo("[FX-STAGING] About to COMMIT transaction...")
 				if err := tx.Commit(ctx); err != nil {
 					logger.LogError("[FX-STAGING] COMMIT FAILED: %v", err)
-					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to commit staged exposure upload: " + err.Error()})
+					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to commit staged exposure upload: " + errtext.Text(err)})
 					return
 				}
 				logger.LogInfo("[FX-STAGING] COMMIT SUCCESS for filename=%s", filename)

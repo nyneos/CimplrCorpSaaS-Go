@@ -2,6 +2,7 @@ package generate
 
 import (
 	"net/http"
+	"os"
 	"strings"
 
 	"CimplrCorpSaas/api"
@@ -54,6 +55,11 @@ func HandleAdhoc(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		actor := common.RequestActor(r, req.ActorID)
+		if bad := recipientsOutsideAllowList(append(append([]string{}, req.EmailTo...), req.EmailCc...)); len(bad) > 0 {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "recipient domain not allowed: "+strings.Join(bad, ", "), "VALIDATION_ERROR")
+			return
+		}
+		requireApproval := true
 		storeS3 := true
 		if req.StoreS3 != nil {
 			storeS3 = *req.StoreS3
@@ -79,11 +85,11 @@ func HandleAdhoc(pool *pgxpool.Pool) http.HandlerFunc {
 			EmailCc:            req.EmailCc,
 			EmailSubject:       req.EmailSubject,
 			EmailBodyHTML:      req.EmailBodyHTML,
-			RequireApproval:    req.RequireApproval,
+			RequireApproval:    &requireApproval,
 		})
 		if err != nil {
 			api.LogErrorForResponse(w, "dms adhoc: %v", err)
-			api.RespondEnvelopeFailureWithData(w, http.StatusUnprocessableEntity, err.Error(), "DMS_ADHOC_FAILED",
+			api.RespondEnvelopeFailureWithData(w, http.StatusUnprocessableEntity, "failed to generate documents", "DMS_ADHOC_FAILED",
 				map[string]interface{}{"run_id": result.RunID, "request_id": result.RequestID})
 			return
 		}
@@ -109,6 +115,33 @@ type adhocDecisionReq struct {
 	ActorID        string `json:"actor_id"`
 }
 
+// recipientsOutsideAllowList returns addresses whose domain is not in
+// DMS_EMAIL_ALLOWED_DOMAINS (comma separated). An unset list allows all.
+func recipientsOutsideAllowList(addrs []string) []string {
+	raw := strings.TrimSpace(os.Getenv("DMS_EMAIL_ALLOWED_DOMAINS"))
+	if raw == "" {
+		return nil
+	}
+	allowed := map[string]bool{}
+	for _, d := range strings.Split(raw, ",") {
+		if d = strings.ToLower(strings.TrimSpace(d)); d != "" {
+			allowed[d] = true
+		}
+	}
+	var bad []string
+	for _, a := range addrs {
+		a = strings.ToLower(strings.TrimSpace(a))
+		if a == "" {
+			continue
+		}
+		at := strings.LastIndex(a, "@")
+		if at < 0 || !allowed[a[at+1:]] {
+			bad = append(bad, a)
+		}
+	}
+	return bad
+}
+
 // HandleAdhocApprove applies pending adhoc dispatch (email and/or archive finalize).
 func HandleAdhocApprove(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +160,7 @@ func HandleAdhocApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		actor := common.RequestActor(r, req.ActorID)
 		if err := dmsjobs.ApproveAdhocDispatch(r.Context(), pool, req.RequestID, actor, req.CheckerComment); err != nil {
 			api.LogErrorForResponse(w, "dms adhoc approve: %v", err)
-			api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, err.Error(), "DMS_ADHOC_APPROVE_FAILED")
+			api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "failed to approve the ad-hoc dispatch", "DMS_ADHOC_APPROVE_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Ad-hoc dispatch approved", map[string]interface{}{
@@ -154,7 +187,7 @@ func HandleAdhocReject(pool *pgxpool.Pool) http.HandlerFunc {
 		actor := common.RequestActor(r, req.ActorID)
 		if err := dmsjobs.RejectAdhocDispatch(r.Context(), pool, req.RequestID, actor, req.CheckerComment); err != nil {
 			api.LogErrorForResponse(w, "dms adhoc reject: %v", err)
-			api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, err.Error(), "DMS_ADHOC_REJECT_FAILED")
+			api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "failed to reject the ad-hoc dispatch", "DMS_ADHOC_REJECT_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Ad-hoc dispatch rejected", map[string]interface{}{

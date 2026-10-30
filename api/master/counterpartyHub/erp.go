@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
@@ -133,7 +134,7 @@ func CreateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := validateERPSystemInput(req.ERPSystemInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -198,22 +199,32 @@ func CreateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(id, uID, uEmail string) {
-			defer func() { recover() }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
-			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "ERP_SYSTEM_CREATE",
 				RecordID: id, RecordTable: "apibox.erp_system_master",
 				AuditTable: "apibox.audit_erp_system", AuditIDColumn: "erp_system_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 				RequirePinnedMatrix: true,
 				AutoApplyIfUnpinned: true,
-			})
+			}); err != nil {
+				logger.LogError("[CounterpartyHub] approval instance creation failed: %v", err)
+			}
 		}(erpID, req.UserID, userEmail)
 
 		go func(id, uEmail string) {
-			defer func() { recover() }()
-			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 				"/master/counterparty-hub/erp-system/create", id,
 				map[string]interface{}{"record_id": id, "event": "ERP_SYSTEM_CREATED", "actor_email": uEmail},
 			)
@@ -255,7 +266,7 @@ func CreateERPSystemBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for i, row := range req.Rows {
 			if err := validateERPSystemInput(row); err != nil {
-				errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 				continue
 			}
 			id, err := insertERPSystemInTx(ctx, pgxPool, row, userEmail)
@@ -410,38 +421,38 @@ func UpdateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if authType == "OAUTH2" {
 				if req.AuthConfig.TokenEndpointKMSRef != "" {
 					if err := validateKMSPath("token_endpoint_kms_ref", req.AuthConfig.TokenEndpointKMSRef); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 						return
 					}
 				}
 				if req.AuthConfig.ClientIDKMSRef != "" {
 					if err := validateKMSPath("client_id_kms_ref", req.AuthConfig.ClientIDKMSRef); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 						return
 					}
 				}
 				if req.AuthConfig.ClientSecretKMSRef != "" {
 					if err := validateKMSPath("client_secret_kms_ref", req.AuthConfig.ClientSecretKMSRef); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 						return
 					}
 				}
 			}
 			if authType == "BASIC_AUTH" && req.AuthConfig.ClientSecretKMSRef != "" {
 				if err := validateKMSPath("client_secret_kms_ref", req.AuthConfig.ClientSecretKMSRef); err != nil {
-					api.RespondWithError(w, http.StatusBadRequest, err.Error())
+					api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 					return
 				}
 			}
 			if authType == "API_KEY" && req.AuthConfig.APIKeyKMSRef != "" {
 				if err := validateKMSPath("api_key_kms_ref", req.AuthConfig.APIKeyKMSRef); err != nil {
-					api.RespondWithError(w, http.StatusBadRequest, err.Error())
+					api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 					return
 				}
 			}
 			if authType == "CERT" && req.AuthConfig.CertKMSRef != "" {
 				if err := validateKMSPath("cert_kms_ref", req.AuthConfig.CertKMSRef); err != nil {
-					api.RespondWithError(w, http.StatusBadRequest, err.Error())
+					api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 					return
 				}
 			}
@@ -570,8 +581,8 @@ func BulkApproveERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					logger.LogError("approveErp: delete erp_system_master exec failed: %v", err)
 				}
 			}
-			if _, err := tx.Exec(ctx, `UPDATE apibox.audit_erp_system SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE audit_id=$3`, userEmail, req.Comment, a.AuditID); err != nil {
-				errList = append(errList, map[string]interface{}{"erp_system_id": a.ID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			if _, err := tx.Exec(ctx, `UPDATE apibox.audit_erp_system SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (audit_id=$3) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`, userEmail, req.Comment, a.AuditID); err != nil {
+				errList = append(errList, map[string]interface{}{"erp_system_id": a.ID, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 				continue
 			}
 			success = append(success, map[string]interface{}{constants.ValueSuccess: true, "erp_system_id": a.ID})
@@ -621,7 +632,7 @@ func BulkRejectERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		res, err := tx.Exec(ctx, `
 			UPDATE apibox.audit_erp_system SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE erp_system_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'`,
+			WHERE (erp_system_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`,
 			userEmail, req.Comment, req.ERPSystemIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")

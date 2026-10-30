@@ -119,7 +119,7 @@ package exposures
 // 		ctx := r.Context()
 
 // 		if err := r.ParseMultipartForm(1024 << 20); err != nil {
-// 			httpError(w, http.StatusBadRequest, "multipart parse error: "+err.Error())
+// 			httpError(w, http.StatusBadRequest, "multipart parse error: "+errtext.Detail(w, err))
 // 			return
 // 		}
 
@@ -249,20 +249,20 @@ package exposures
 
 // 			f, err := fh.Open()
 // 			if err != nil {
-// 				httpError(w, http.StatusBadRequest, "open file: "+err.Error())
+// 				httpError(w, http.StatusBadRequest, "open file: "+errtext.Detail(w, err))
 // 				return
 // 			}
 // 			tmpPath, fileHash, err := saveTempAndHash(f, fh.Filename)
 // 			f.Close()
 // 			if err != nil {
-// 				httpError(w, http.StatusInternalServerError, "temp save: "+err.Error())
+// 				httpError(w, http.StatusInternalServerError, "temp save: "+errtext.Detail(w, err))
 // 				return
 // 			}
 // 			defer os.Remove(tmpPath)
 
 // 			tmpFile, err := os.Open(tmpPath)
 // 			if err != nil {
-// 				httpError(w, http.StatusInternalServerError, "open tmp: "+err.Error())
+// 				httpError(w, http.StatusInternalServerError, "open tmp: "+errtext.Detail(w, err))
 // 				return
 // 			}
 // 			defer tmpFile.Close()
@@ -272,7 +272,7 @@ package exposures
 // 			// Use the helper function to parse both CSV and Excel files
 // 			allRows, err := ubParseUploadFile(tmpFile, fileExt)
 // 			if err != nil {
-// 				httpError(w, http.StatusBadRequest, "file parse error: "+err.Error())
+// 				httpError(w, http.StatusBadRequest, "file parse error: "+errtext.Detail(w, err))
 // 				return
 // 			}
 // 			if len(allRows) == 0 {
@@ -320,13 +320,13 @@ package exposures
 // 			batchID := uuid.New()
 // 			conn, err := pool.Acquire(ctx)
 // 			if err != nil {
-// 				httpError(w, 500, constants.ErrDBAcquire+err.Error())
+// 				httpError(w, 500, constants.ErrDBAcquire+errtext.Detail(w, err))
 // 				return
 // 			}
 // 			tx, err := conn.Begin(ctx)
 // 			if err != nil {
 // 				conn.Release()
-// 				httpError(w, 500, constants.ErrTxBegin+err.Error())
+// 				httpError(w, 500, constants.ErrTxBegin+errtext.Detail(w, err))
 // 				return
 // 			}
 // 			committed := false
@@ -342,7 +342,7 @@ package exposures
 // 				(batch_id, ingestion_source, status, total_records, file_hash, file_name, uploaded_by, mapping_json)
 // 				VALUES ($1,$2,'processing',$3,$4,$5,$6,$7)
 // 			`, batchID, src, 0, fileHash, fh.Filename, userID, string(mappingRaw)); err != nil {
-// 				httpError(w, 500, "insert batch: "+err.Error())
+// 				httpError(w, 500, "insert batch: "+errtext.Detail(w, err))
 // 				return
 // 			}
 
@@ -449,12 +449,12 @@ package exposures
 // 			close(stagingCh)
 // 			wgCopy.Wait()
 // 			if stagingErr != nil {
-// 				httpError(w, http.StatusInternalServerError, "copy staging_exposures: "+stagingErr.Error())
+// 				httpError(w, http.StatusInternalServerError, "copy staging_exposures: "+errtext.Detail(w, stagingErr))
 // 				return
 // 			}
 
 // 			if _, err := tx.Exec(ctx, `UPDATE public.staging_batches_exposures SET total_records=$1 WHERE batch_id=$2`, totalRows, batchID); err != nil {
-// 				httpError(w, 500, "update batch total_records: "+err.Error())
+// 				httpError(w, 500, "update batch total_records: "+errtext.Detail(w, err))
 // 				return
 // 			}
 
@@ -766,7 +766,7 @@ package exposures
 
 // 			logger.LogInfo("[FBUP] about to COPY %d exposure_headers for batch %s file=%s", len(qualified), batchID.String(), fh.Filename)
 // 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"public", "exposure_headers"}, headerCols, headerSrc); err != nil {
-// 				httpError(w, 500, "copy headers: "+err.Error())
+// 				httpError(w, 500, "copy headers: "+errtext.Detail(w, err))
 // 				return
 // 			}
 // 			logger.LogInfo("[FBUP] finished COPY exposure_headers for batch %s file=%s", batchID.String(), fh.Filename)
@@ -871,7 +871,7 @@ package exposures
 // 					if len(finalLookup) > 0 {
 // 						rows2, err := tx.Query(ctx, `SELECT document_id, exposure_header_id::text FROM public.exposure_headers WHERE document_id = ANY($1)`, finalLookup)
 // 						if err != nil {
-// 							httpError(w, 500, "lookup headers for knockoffs: "+err.Error())
+// 							httpError(w, 500, "lookup headers for knockoffs: "+errtext.Detail(w, err))
 // 							return
 // 						}
 // 						for rows2.Next() {
@@ -913,12 +913,12 @@ package exposures
 // 			// update batch processed/failed counts & commit
 // 			logger.LogError("[FBUP] updating staging batch counts processed=%d failed=%d batch=%s file=%s", len(qualified), len(nonQualified), batchID.String(), fh.Filename)
 // 			if _, err := tx.Exec(ctx, `UPDATE public.staging_batches_exposures SET processed_records=$1, failed_records=$2, status='completed' WHERE batch_id=$3`, len(qualified), len(nonQualified), batchID); err != nil {
-// 				httpError(w, 500, "update batch: "+err.Error())
+// 				httpError(w, 500, "update batch: "+errtext.Detail(w, err))
 // 				return
 // 			}
 
 // 			if err := tx.Commit(ctx); err != nil {
-// 				httpError(w, 500, "commit: "+err.Error())
+// 				httpError(w, 500, "commit: "+errtext.Detail(w, err))
 // 				return
 // 			}
 // 			committed = true

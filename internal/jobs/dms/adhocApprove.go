@@ -41,6 +41,9 @@ func ApproveAdhocDispatch(ctx context.Context, pool *pgxpool.Pool, requestID, ch
 	if status != "PENDING_APPROVAL" {
 		return fmt.Errorf("request %s is %s (expected PENDING_APPROVAL)", requestID, status)
 	}
+	if strings.EqualFold(strings.TrimSpace(requestedBy), strings.TrimSpace(checkerBy)) {
+		return fmt.Errorf("request %s: you cannot approve or reject a request you submitted", requestID)
+	}
 
 	if sendEmail {
 		req := AdhocRequest{
@@ -123,6 +126,9 @@ func RejectAdhocDispatch(ctx context.Context, pool *pgxpool.Pool, requestID, che
 	}
 	if status != "PENDING_APPROVAL" {
 		return fmt.Errorf("request %s is %s (expected PENDING_APPROVAL)", requestID, status)
+	}
+	if strings.EqualFold(strings.TrimSpace(requestedBy), strings.TrimSpace(checkerBy)) {
+		return fmt.Errorf("request %s: you cannot approve or reject a request you submitted", requestID)
 	}
 	_, err = pool.Exec(ctx, `
 		UPDATE dms_svc.adhoc_dispatch_request

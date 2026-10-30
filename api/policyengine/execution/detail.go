@@ -57,6 +57,10 @@ func HandleDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, errMsgFetchExecutionRun, "EXECUTION_DETAIL_FAILED")
 			return
 		}
+		if strings.TrimSpace(run.EntityCode) != "" && !api.EntityInScope(ctx, run.EntityCode) {
+			api.RespondEntityOutOfScope(w)
+			return
+		}
 
 		evaluated, err := loadEvaluatedPolicies(ctx, pool, run.RunID, run.IsLegacy)
 		if err != nil {

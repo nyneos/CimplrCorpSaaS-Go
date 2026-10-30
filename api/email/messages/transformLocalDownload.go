@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"CimplrCorpSaas/api"
 	emailcommon "CimplrCorpSaas/api/email/common"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -55,6 +56,9 @@ func HandleTransformResultDownloadLocal(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondBadRequest(w, "Invalid request body")
 			return
 		}
+		if !emailcommon.RequireMessageAccess(w, r, pool, emailcommon.MessageByResultQuery, req.ResultID) {
+			return
+		}
 		resultID := strings.TrimSpace(req.ResultID)
 		if resultID == "" {
 			emailcommon.RespondBadRequest(w, "result_id is required")
@@ -90,7 +94,8 @@ func HandleTransformResultDownloadLocal(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		raw, err := os.ReadFile(location)
 		if err != nil {
-			emailcommon.RespondNotFound(w, "local file not found on server: "+err.Error())
+			api.LogErrorForResponse(w, "email transform local download read failed: %v", err)
+			emailcommon.RespondNotFound(w, "local file not found")
 			return
 		}
 		name := strings.TrimSpace(filename)

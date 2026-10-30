@@ -40,3 +40,27 @@ func TestNormalizeMethodFloorCeil(t *testing.T) {
 		t.Fatal("CEIL mapping")
 	}
 }
+
+func TestRoundByMethodDecimalEdges(t *testing.T) {
+	cases := []struct {
+		v      float64
+		d      int
+		method string
+		want   float64
+	}{
+		{1.15, 2, "TRUNCATE", 1.15},
+		{1.005, 2, "ROUND", 1.01},
+		{100.00000000000001, 2, "ROUND_UP", 100},
+		{114.99999999999999, 2, "TRUNCATE", 115},
+		{100.004, 2, "ROUND_UP", 100.01},
+		{-1.234, 2, "ROUND_UP", -1.24},
+		{-1.236, 2, "ROUND_DOWN", -1.23},
+		{2.345, 2, "BANKERS", 2.34},
+		{2.355, 2, "BANKERS", 2.36},
+	}
+	for _, c := range cases {
+		if got := RoundByMethod(c.v, c.d, c.method); got != c.want {
+			t.Errorf("RoundByMethod(%v, %d, %s) = %v, want %v", c.v, c.d, c.method, got, c.want)
+		}
+	}
+}

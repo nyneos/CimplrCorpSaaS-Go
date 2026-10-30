@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"CimplrCorpSaas/api"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/api/utils/s3storage"
 
@@ -40,6 +41,9 @@ func HandleTransformResultPreviewContent(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			emailcommon.RespondBadRequest(w, "Invalid request body")
+			return
+		}
+		if !emailcommon.RequireMessageAccess(w, r, pool, emailcommon.MessageByResultQuery, req.ResultID) {
 			return
 		}
 		resultID := strings.TrimSpace(req.ResultID)
@@ -128,7 +132,8 @@ func HandleTransformResultPreviewContent(pool *pgxpool.Pool) http.HandlerFunc {
 				s3Key = transformedKey
 				raw, err = s3storage.GetObjectBytes(r.Context(), s3Key)
 				if err != nil {
-					emailcommon.RespondInternal(w, "Failed to read file: "+err.Error())
+					api.LogErrorForResponse(w, "email transform preview read failed: %v", err)
+					emailcommon.RespondInternal(w, "request failed")
 					return
 				}
 			} else if strings.EqualFold(destType, "LOCAL") && strings.TrimSpace(outputLocation) != "" {
@@ -138,7 +143,8 @@ func HandleTransformResultPreviewContent(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				raw, err = os.ReadFile(outputLocation)
 				if err != nil {
-					emailcommon.RespondNotFound(w, "local file not found: "+err.Error())
+					api.LogErrorForResponse(w, "email transform preview local read failed: %v", err)
+					emailcommon.RespondNotFound(w, "local file not found")
 					return
 				}
 			} else {
@@ -153,7 +159,8 @@ func HandleTransformResultPreviewContent(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			raw, err = s3storage.GetObjectBytes(r.Context(), s3Key)
 			if err != nil {
-				emailcommon.RespondInternal(w, "Failed to read file: "+err.Error())
+				api.LogErrorForResponse(w, "email transform preview read failed: %v", err)
+				emailcommon.RespondInternal(w, "request failed")
 				return
 			}
 		}

@@ -34,6 +34,10 @@ func DeleteOnboardBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if !api.RequireRecordsInScope(ctx, w, pgxPool, `SELECT DISTINCT entity_name::text FROM investment.onboard_transaction WHERE batch_id::text = $1`, req.BatchID) {
+			return
+		}
+
 		// Verify batch exists and is still in a deletable state
 		batchRow, err := loadMFOnboardBatchRow(ctx, pgxPool, req.BatchID)
 		if err != nil {

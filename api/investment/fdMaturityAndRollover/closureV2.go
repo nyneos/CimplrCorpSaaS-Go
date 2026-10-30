@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	"CimplrCorpSaas/api/investment/fdMaster"
 	"CimplrCorpSaas/api/investment/fdNotifications"
@@ -447,7 +448,7 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		calc, err := calculateCimplrClosure(ctx, pool, src, req.ClosureType, cimplrDefaultCalcDate(src, req.ClosureType, req.RequestedClosureDate), false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -536,16 +537,16 @@ func CimplrInitiateCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			nullStrOrNil(rolloverNewBankID), nullStrOrNil(rolloverNewBankName), req.TentativeNewTenorDays, req.Remarks,
 		).Scan(&closureInitiateID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "initiate create failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "initiate create failed: "+errtext.Detail(w, err))
 			return
 		}
 
 		if err := insertCimplrCalculation(ctx, tx, closureInitiateID, "", src, calc); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+errtext.Detail(w, err))
 			return
 		}
 		if err := insertCimplrInitiateAudit(ctx, tx, initiateAuditEntry{ID: closureInitiateID, Action: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: req.Reason, RequestedBy: req.UserID, Old: nil}); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "initiate audit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "initiate audit failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -627,7 +628,7 @@ func CimplrInitiateValidate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		calc, err := calculateCimplrClosure(r.Context(), pool, src, req.ClosureType, cimplrDefaultCalcDate(src, req.ClosureType, req.RequestedClosureDate), false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+errtext.Detail(w, err))
 			return
 		}
 		recordID := firstNonEmpty(req.ClosureInitiateID, constants.PreviewPrefix+varianceengine.NewRunID())
@@ -694,7 +695,7 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		calc, err := calculateCimplrClosure(ctx, pool, src, req.ClosureType, cimplrDefaultCalcDate(src, req.ClosureType, req.RequestedClosureDate), false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -765,15 +766,15 @@ func CimplrInitiateEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			req.ClosureInitiateID,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "initiate edit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "initiate edit failed: "+errtext.Detail(w, err))
 			return
 		}
 		if err := insertCimplrCalculation(ctx, tx, req.ClosureInitiateID, "", src, calc); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+errtext.Detail(w, err))
 			return
 		}
 		if err := insertCimplrInitiateAudit(ctx, tx, initiateAuditEntry{ID: req.ClosureInitiateID, Action: constants.AuditActionEdit, Status: constants.StatusPendingEditApproval, Reason: req.Reason, RequestedBy: req.UserID, Old: oldRow}); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "initiate audit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "initiate audit failed: "+errtext.Detail(w, err))
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -805,6 +806,18 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 		var req cimplrClosureIDsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT COALESCE(ci.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_initiate ci
+			LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
+			WHERE ci.closure_initiate_id::text = ANY($1)
+			UNION ALL
+			SELECT COALESCE(cc.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_confirm cc
+			LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
+			WHERE cc.closure_confirm_id::text = ANY($2)`,
+			append(append([]string{}, req.ClosureInitiateIDs...), req.ClosureInitiateID),
+			append(append([]string{}, req.ClosureConfirmIDs...), req.ClosureConfirmID)) {
 			return
 		}
 		userEmail := getUserEmail(r.Context())
@@ -846,7 +859,7 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			policyRow, policyErr := loadFDClosureInitiateRow(r.Context(), pool, id)
 			if policyErr != nil {
 				res["success"] = false
-				res["error"] = policyErr.Error()
+				res["error"] = errtext.Text(policyErr)
 				results = append(results, res)
 				continue
 			}
@@ -860,7 +873,7 @@ func CimplrInitiateDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if err := insertCimplrInitiateAudit(r.Context(), pool, initiateAuditEntry{ID: id, Action: constants.AuditActionDelete, Status: constants.StatusPendingDeleteApproval, Reason: req.Comment, RequestedBy: req.UserID, Old: oldRow}); err != nil {
 				res["success"] = false
-				res["error"] = err.Error()
+				res["error"] = errtext.Text(err)
 				results = append(results, res)
 				continue
 			}
@@ -883,6 +896,18 @@ func CimplrInitiateApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		var req cimplrClosureIDsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT COALESCE(ci.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_initiate ci
+			LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
+			WHERE ci.closure_initiate_id::text = ANY($1)
+			UNION ALL
+			SELECT COALESCE(cc.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_confirm cc
+			LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
+			WHERE cc.closure_confirm_id::text = ANY($2)`,
+			append(append([]string{}, req.ClosureInitiateIDs...), req.ClosureInitiateID),
+			append(append([]string{}, req.ClosureConfirmIDs...), req.ClosureConfirmID)) {
 			return
 		}
 		userEmail := getUserEmail(r.Context())
@@ -950,6 +975,18 @@ func CimplrInitiateReject(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT COALESCE(ci.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_initiate ci
+			LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
+			WHERE ci.closure_initiate_id::text = ANY($1)
+			UNION ALL
+			SELECT COALESCE(cc.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_confirm cc
+			LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
+			WHERE cc.closure_confirm_id::text = ANY($2)`,
+			append(append([]string{}, req.ClosureInitiateIDs...), req.ClosureInitiateID),
+			append(append([]string{}, req.ClosureConfirmIDs...), req.ClosureConfirmID)) {
+			return
+		}
 		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
@@ -994,7 +1031,7 @@ func CimplrInitiateAll(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		rows, total, err := listCimplrRecords(r.Context(), pool, "initiate", req, false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch initiate records: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch initiate records: "+errtext.Detail(w, err))
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"records": rows, "total": total})
@@ -1007,7 +1044,7 @@ func CimplrInitiateApprovedActive(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		rows, total, err := listCimplrRecords(r.Context(), pool, "initiate", req, true)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch approved-active initiate records: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch approved-active initiate records: "+errtext.Detail(w, err))
 			return
 		}
 		rows = enrichCimplrInitiateListFromCalculation(r.Context(), pool, rows, true)
@@ -1058,10 +1095,10 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		calc, err := calculateCimplrClosure(ctx, pool, src, closureType, firstNonEmpty(req.RequestedClosureDate, fmt.Sprint(initiate["requested_closure_date"])), enforceMaturity)
 		if err != nil {
 			if enforceMaturity {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -1154,27 +1191,27 @@ func CimplrConfirmCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			strings.ToUpper(strings.TrimSpace(req.VarianceType)), strings.ToUpper(strings.TrimSpace(req.ResolutionAction)), req.Remarks,
 		).Scan(&closureConfirmID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "confirm create failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "confirm create failed: "+errtext.Detail(w, err))
 			return
 		}
 		if closureType == "PREMATURE" {
 			if err := upsertCimplrPrematureConfirm(ctx, tx, closureConfirmID, src, req, calc); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "premature confirm detail failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "premature confirm detail failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
 		if closureType == "ROLLOVER" {
 			if err := upsertCimplrRolloverConfirm(ctx, tx, closureConfirmID, src, req, calc); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "rollover confirm detail failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "rollover confirm detail failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
 		if err := insertCimplrCalculation(ctx, tx, req.ClosureInitiateID, closureConfirmID, src, calc); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+errtext.Detail(w, err))
 			return
 		}
 		if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: req.ClosureInitiateID, Action: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: req.Reason, RequestedBy: req.UserID, Old: nil}); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "confirm audit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "confirm audit failed: "+errtext.Detail(w, err))
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -1249,7 +1286,7 @@ func CimplrPrematureValidate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		calc, err := calculateCimplrClosure(r.Context(), pool, src, "PREMATURE", req.RequestedClosureDate, false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "premature calculation failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "premature calculation failed: "+errtext.Detail(w, err))
 			return
 		}
 		recordID := firstNonEmpty(req.ClosureConfirmID, constants.PreviewPrefix+varianceengine.NewRunID())
@@ -1300,7 +1337,7 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		calc, err := calculateCimplrClosure(ctx, pool, src, "PREMATURE", req.RequestedClosureDate, false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "premature calculation failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "premature calculation failed: "+errtext.Detail(w, err))
 			return
 		}
 		principalExpected := chooseFloat(req.PrincipalExpected, src.Principal)
@@ -1364,7 +1401,7 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 
 		closureInitiateID, err := ensureCimplrPrematureInitiate(ctx, tx, "", "", src, req, calc)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "premature initiate failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "premature initiate failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -1389,19 +1426,19 @@ func CimplrPrematureCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			strings.ToUpper(strings.TrimSpace(req.VarianceType)), strings.ToUpper(strings.TrimSpace(req.ResolutionAction)), req.Remarks,
 		).Scan(&closureConfirmID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "premature create failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "premature create failed: "+errtext.Detail(w, err))
 			return
 		}
 		if err := upsertCimplrPrematureConfirm(ctx, tx, closureConfirmID, src, req, calc); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "premature detail failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "premature detail failed: "+errtext.Detail(w, err))
 			return
 		}
 		if err := insertCimplrCalculation(ctx, tx, closureInitiateID, closureConfirmID, src, calc); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+errtext.Detail(w, err))
 			return
 		}
 		if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: closureInitiateID, Action: constants.AuditActionCreate, Status: constants.StatusPendingApproval, Reason: req.Reason, RequestedBy: req.UserID, Old: nil}); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "premature audit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "premature audit failed: "+errtext.Detail(w, err))
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -1479,7 +1516,7 @@ func CimplrConfirmValidate(pool *pgxpool.Pool) http.HandlerFunc {
 		calcDate := cimplrDefaultCalcDate(src, closureType, firstNonEmpty(req.RequestedClosureDate, fmt.Sprint(initiate["requested_closure_date"])))
 		calc, err := calculateCimplrClosure(r.Context(), pool, src, closureType, calcDate, false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+errtext.Detail(w, err))
 			return
 		}
 		recordID := firstNonEmpty(req.ClosureConfirmID, constants.PreviewPrefix+varianceengine.NewRunID())
@@ -1536,7 +1573,7 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		closureType := fmt.Sprint(oldRow["closure_type"])
 		calc, err := calculateCimplrClosure(ctx, pool, src, closureType, firstNonEmpty(req.RequestedClosureDate, fmt.Sprint(oldRow["requested_closure_date"])), false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrClosureCalculationFailed+errtext.Detail(w, err))
 			return
 		}
 		// See CimplrConfirmCreate — same baseline branching.
@@ -1614,7 +1651,7 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 		if closureType == "PREMATURE" {
 			closureInitiateID, err = ensureCimplrPrematureInitiate(ctx, tx, closureInitiateID, req.ClosureConfirmID, src, req, calc)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "premature initiate failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "premature initiate failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -1637,27 +1674,27 @@ func CimplrConfirmEdit(pool *pgxpool.Pool) http.HandlerFunc {
 			strings.ToUpper(strings.TrimSpace(req.VarianceType)), strings.ToUpper(strings.TrimSpace(req.ResolutionAction)), req.Remarks, req.ClosureConfirmID,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "confirm edit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "confirm edit failed: "+errtext.Detail(w, err))
 			return
 		}
 		if closureType == "PREMATURE" {
 			if err := upsertCimplrPrematureConfirm(ctx, tx, req.ClosureConfirmID, src, req, calc); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "premature confirm detail failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "premature confirm detail failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
 		if closureType == "ROLLOVER" {
 			if err := upsertCimplrRolloverConfirm(ctx, tx, req.ClosureConfirmID, src, req, calc); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "rollover confirm detail failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "rollover confirm detail failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
 		if err := insertCimplrCalculation(ctx, tx, closureInitiateID, req.ClosureConfirmID, src, calc); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCalculationSnapshotFailed+errtext.Detail(w, err))
 			return
 		}
 		if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: req.ClosureConfirmID, InitiateID: closureInitiateID, Action: constants.AuditActionEdit, Status: constants.StatusPendingEditApproval, Reason: req.Reason, RequestedBy: req.UserID, Old: oldRow}); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "confirm audit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "confirm audit failed: "+errtext.Detail(w, err))
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -1698,6 +1735,18 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT COALESCE(ci.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_initiate ci
+			LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
+			WHERE ci.closure_initiate_id::text = ANY($1)
+			UNION ALL
+			SELECT COALESCE(cc.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_confirm cc
+			LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
+			WHERE cc.closure_confirm_id::text = ANY($2)`,
+			append(append([]string{}, req.ClosureInitiateIDs...), req.ClosureInitiateID),
+			append(append([]string{}, req.ClosureConfirmIDs...), req.ClosureConfirmID)) {
+			return
+		}
 		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
@@ -1730,7 +1779,7 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			policyRow, policyErr := loadFDClosureConfirmRow(r.Context(), pool, id)
 			if policyErr != nil {
 				res["success"] = false
-				res["error"] = policyErr.Error()
+				res["error"] = errtext.Text(policyErr)
 				results = append(results, res)
 				continue
 			}
@@ -1744,7 +1793,7 @@ func CimplrConfirmDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if err := insertCimplrConfirmAudit(r.Context(), pool, confirmAuditEntry{ConfirmID: id, InitiateID: fmt.Sprint(oldRow["closure_initiate_id"]), Action: constants.AuditActionDelete, Status: constants.StatusPendingDeleteApproval, Reason: req.Comment, RequestedBy: req.UserID, Old: oldRow}); err != nil {
 				res["success"] = false
-				res["error"] = err.Error()
+				res["error"] = errtext.Text(err)
 				results = append(results, res)
 				continue
 			}
@@ -1821,6 +1870,18 @@ func CimplrConfirmApprove(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT COALESCE(ci.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_initiate ci
+			LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
+			WHERE ci.closure_initiate_id::text = ANY($1)
+			UNION ALL
+			SELECT COALESCE(cc.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_confirm cc
+			LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
+			WHERE cc.closure_confirm_id::text = ANY($2)`,
+			append(append([]string{}, req.ClosureInitiateIDs...), req.ClosureInitiateID),
+			append(append([]string{}, req.ClosureConfirmIDs...), req.ClosureConfirmID)) {
+			return
+		}
 		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
@@ -1886,6 +1947,18 @@ func CimplrConfirmReject(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT COALESCE(ci.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_initiate ci
+			LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
+			WHERE ci.closure_initiate_id::text = ANY($1)
+			UNION ALL
+			SELECT COALESCE(cc.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_confirm cc
+			LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
+			WHERE cc.closure_confirm_id::text = ANY($2)`,
+			append(append([]string{}, req.ClosureInitiateIDs...), req.ClosureInitiateID),
+			append(append([]string{}, req.ClosureConfirmIDs...), req.ClosureConfirmID)) {
+			return
+		}
 		userEmail := getUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
@@ -1932,7 +2005,7 @@ func CimplrConfirmAll(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		rows, total, err := listCimplrRecords(r.Context(), pool, "confirm", req, false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch confirm records: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch confirm records: "+errtext.Detail(w, err))
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"records": rows, "total": total})
@@ -1946,7 +2019,7 @@ func CimplrPrematureAll(pool *pgxpool.Pool) http.HandlerFunc {
 		req.ClosureType = "PREMATURE"
 		rows, total, err := listCimplrRecords(r.Context(), pool, "confirm", req, false)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch premature records: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch premature records: "+errtext.Detail(w, err))
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"records": rows, "total": total})
@@ -1957,7 +2030,7 @@ func CimplrMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req maturitySummaryRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 		where := []string{"COALESCE(m.is_deleted,false)=false"}
@@ -2087,13 +2160,13 @@ func CimplrMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch cimplr maturity summary: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch cimplr maturity summary: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
 		records, err := pgx.CollectRows(rows, pgx.RowToMap)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to read cimplr maturity summary: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read cimplr maturity summary: "+errtext.Detail(w, err))
 			return
 		}
 		summary := map[string]*statusTotals{}
@@ -2137,7 +2210,7 @@ func CimplrConfirmApprovedActive(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		rows, total, err := listCimplrRecords(r.Context(), pool, "confirm", req, true)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch approved-active confirm records: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch approved-active confirm records: "+errtext.Detail(w, err))
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"records": rows, "total": total})
@@ -2246,10 +2319,20 @@ func CimplrClosureDownload(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT COALESCE(ci.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_initiate ci
+			LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
+			WHERE ci.closure_initiate_id::text = $1
+			UNION ALL
+			SELECT COALESCE(cc.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_confirm cc
+			LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
+			WHERE cc.closure_confirm_id::text = $2`, req.ClosureInitiateID, req.ClosureConfirmID) {
+			return
+		}
 		if isCimplrPrematureClosureRoute(r.URL.Path) {
 			files, err := loadCimplrPrematureMainDownloadFiles(r.Context(), pool, req.ClosureConfirmID, req.UploadS3Key)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "download lookup failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "download lookup failed: "+errtext.Detail(w, err))
 				return
 			}
 			if len(files) == 0 {
@@ -2261,7 +2344,7 @@ func CimplrClosureDownload(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		files, err := loadCimplrDownloadFiles(r.Context(), pool, req.FileID, req.ClosureInitiateID, req.ClosureConfirmID, req.FileType)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "download lookup failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "download lookup failed: "+errtext.Detail(w, err))
 			return
 		}
 		if len(files) == 0 {
@@ -2299,6 +2382,10 @@ func CimplrClosureUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "file_type, stored_file_name and upload_s3_key are required")
 			return
 		}
+		if !cimplrClosureKeyBelongs(req.UploadS3Key, req.ClosureInitiateID, req.ClosureConfirmID) {
+			api.RespondWithError(w, http.StatusBadRequest, "upload_s3_key does not belong to this closure")
+			return
+		}
 		if !requireCimplrClosureParentScope(r.Context(), pool, w, req.ClosureInitiateID, req.ClosureConfirmID) {
 			return
 		}
@@ -2322,7 +2409,7 @@ func CimplrClosureUpload(pool *pgxpool.Pool) http.HandlerFunc {
 				req.UploadS3Key, req.ClosureConfirmID,
 			)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErruploadMetaFail+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErruploadMetaFail+errtext.Detail(w, err))
 				return
 			}
 			if tag.RowsAffected() == 0 {
@@ -2343,7 +2430,7 @@ func CimplrClosureUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			req.ContentType, req.FileSize, req.FileHash, req.UploadS3Key, userEmail,
 		).Scan(&fileID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErruploadMetaFail+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErruploadMetaFail+errtext.Detail(w, err))
 			return
 		}
 		_, _ = pool.Exec(r.Context(), `
@@ -2422,7 +2509,7 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 		contentType = s3storage.DetectContentType(body)
 	}
 	if err := s3storage.PutObjectToS3(r.Context(), s3Key, body, contentType); err != nil {
-		api.RespondWithError(w, http.StatusInternalServerError, "failed to upload file to S3: "+err.Error())
+		api.RespondWithError(w, http.StatusInternalServerError, "failed to upload file to S3: "+errtext.Detail(w, err))
 		return
 	}
 	fileHash := s3storage.ContentHashHex(body)
@@ -2437,7 +2524,7 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 		)
 		if err != nil {
 			_ = s3storage.DeleteFromS3(r.Context(), s3Key)
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErruploadMetaFail+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErruploadMetaFail+errtext.Detail(w, err))
 			return
 		}
 		if tag.RowsAffected() == 0 {
@@ -2464,7 +2551,7 @@ func uploadCimplrClosureMultipart(w http.ResponseWriter, r *http.Request, pool *
 		contentType, int64(len(body)), fileHash, s3Key, userEmail,
 	).Scan(&fileID)
 	if err != nil {
-		api.RespondWithError(w, http.StatusInternalServerError, constants.ErruploadMetaFail+err.Error())
+		api.RespondWithError(w, http.StatusInternalServerError, constants.ErruploadMetaFail+errtext.Detail(w, err))
 		return
 	}
 	_, _ = pool.Exec(r.Context(), `
@@ -2562,7 +2649,7 @@ func cimplrApproveInitiates(ctx context.Context, pool *pgxpool.Pool, ids []strin
 		res := map[string]interface{}{"closure_initiate_id": id}
 		if acted, err := cimplrActOnApproval(ctx, pool, id, userID, userEmail, approvalengine.ActionApproved, firstNonEmpty(comment, "Approved FD closure initiate")); err != nil {
 			res["success"] = false
-			res["error"] = err.Error()
+			res["error"] = errtext.Text(err)
 		} else if acted {
 			res["success"] = true
 			res["approval_engine"] = true
@@ -2570,14 +2657,14 @@ func cimplrApproveInitiates(ctx context.Context, pool *pgxpool.Pool, ids []strin
 			pendingAction, pendingErr := cimplrLatestPendingAuditAction(ctx, pool, constants.QuerryAuditClosureInitiate, "closure_initiate_id", id)
 			if pendingErr != nil {
 				res["success"] = false
-				res["error"] = pendingErr.Error()
+				res["error"] = errtext.Text(pendingErr)
 				results = append(results, res)
 				continue
 			}
 			tx, err := pool.Begin(ctx)
 			if err != nil {
 				res["success"] = false
-				res["error"] = err.Error()
+				res["error"] = errtext.Text(err)
 				results = append(results, res)
 				continue
 			}
@@ -2599,7 +2686,7 @@ func cimplrApproveInitiates(ctx context.Context, pool *pgxpool.Pool, ids []strin
 			if err != nil {
 				_ = tx.Rollback(ctx)
 				res["success"] = false
-				res["error"] = err.Error()
+				res["error"] = errtext.Text(err)
 			} else {
 				res["success"] = true
 				res["approval_engine"] = false
@@ -2616,7 +2703,7 @@ func cimplrRejectInitiates(ctx context.Context, pool *pgxpool.Pool, ids []string
 		res := map[string]interface{}{"closure_initiate_id": id}
 		if acted, err := cimplrActOnApproval(ctx, pool, id, userID, userEmail, approvalengine.ActionRejected, firstNonEmpty(comment, "Rejected FD closure initiate")); err != nil {
 			res["success"] = false
-			res["error"] = err.Error()
+			res["error"] = errtext.Text(err)
 		} else if acted {
 			res["success"] = true
 			res["approval_engine"] = true
@@ -2635,7 +2722,7 @@ func cimplrRejectInitiates(ctx context.Context, pool *pgxpool.Pool, ids []string
 			)
 			if err != nil {
 				res["success"] = false
-				res["error"] = err.Error()
+				res["error"] = errtext.Text(err)
 			} else {
 				res["success"] = true
 				res["approval_engine"] = false
@@ -2691,7 +2778,7 @@ func cimplrApproveConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string
 		res := map[string]interface{}{"closure_confirm_id": id}
 		if err := cimplrAssertConfirmApprovable(ctx, pool, id); err != nil {
 			res["success"] = false
-			res["error"] = err.Error()
+			res["error"] = errtext.Text(err)
 			results = append(results, res)
 			continue
 		}
@@ -2703,14 +2790,14 @@ func cimplrApproveConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string
 		dryActor := firstNonEmpty(userEmail, "approval-precheck@cimplr.system")
 		if dryErr := runFinalizeCimplrConfirmDryRun(ctx, pool, id, dryActor, firstNonEmpty(comment, "approval pre-check")); dryErr != nil {
 			res["success"] = false
-			res["error"] = "cannot approve — posting would fail: " + dryErr.Error()
+			res["error"] = "cannot approve — posting would fail: " + errtext.Text(dryErr)
 			api.LogError("[CimplrFDClosure] approve pre-check rejected confirm_id=%s reason=%v", id, dryErr)
 			results = append(results, res)
 			continue
 		}
 		if acted, err := cimplrActOnApproval(ctx, pool, id, userID, userEmail, approvalengine.ActionApproved, firstNonEmpty(comment, "Approved FD closure confirm")); err != nil {
 			res["success"] = false
-			res["error"] = err.Error()
+			res["error"] = errtext.Text(err)
 		} else if acted {
 			// Post-finalize hook runs async in approval engine; call finalize here too so
 			// journals/posting_status update even if the hook is delayed or fails silently.
@@ -2718,7 +2805,7 @@ func cimplrApproveConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string
 				api.LogError("[CimplrFDClosure] confirm finalize after approval engine failed confirm_id=%s: %v", id, finErr)
 				_, _ = pool.Exec(ctx, `UPDATE cimplr.fd_closure_confirm SET posting_status='FAILED' WHERE closure_confirm_id=$1`, id)
 				res["success"] = false
-				res["error"] = finErr.Error()
+				res["error"] = errtext.Text(finErr)
 			} else {
 				res["success"] = true
 				res["approval_engine"] = true
@@ -2727,7 +2814,7 @@ func cimplrApproveConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string
 			pendingAction, pendingErr := cimplrLatestPendingAuditAction(ctx, pool, constants.QuerryAuditClosureConfirmAudit, "closure_confirm_id", id)
 			if pendingErr != nil {
 				res["success"] = false
-				res["error"] = pendingErr.Error()
+				res["error"] = errtext.Text(pendingErr)
 				results = append(results, res)
 				continue
 			}
@@ -2762,7 +2849,7 @@ func cimplrApproveConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string
 			}
 			if err != nil {
 				res["success"] = false
-				res["error"] = err.Error()
+				res["error"] = errtext.Text(err)
 			} else {
 				res["success"] = true
 				res["approval_engine"] = false
@@ -2779,7 +2866,7 @@ func cimplrRejectConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string,
 		res := map[string]interface{}{"closure_confirm_id": id}
 		if acted, err := cimplrActOnApproval(ctx, pool, id, userID, userEmail, approvalengine.ActionRejected, firstNonEmpty(comment, "Rejected FD closure confirm")); err != nil {
 			res["success"] = false
-			res["error"] = err.Error()
+			res["error"] = errtext.Text(err)
 		} else if acted {
 			res["success"] = true
 			res["approval_engine"] = true
@@ -2798,7 +2885,7 @@ func cimplrRejectConfirms(ctx context.Context, pool *pgxpool.Pool, ids []string,
 			)
 			if err != nil {
 				res["success"] = false
-				res["error"] = err.Error()
+				res["error"] = errtext.Text(err)
 			} else {
 				res["success"] = true
 				res["approval_engine"] = false
@@ -3424,33 +3511,41 @@ func cimplrTDSTill(ctx context.Context, pool *pgxpool.Pool, src cimplrFDSource, 
 	return roundToFour(tds)
 }
 
-func cimplrAccruedInterestTill(ctx context.Context, pool *pgxpool.Pool, src cimplrFDSource, asOf time.Time) (accrued, tds float64) {
+func cimplrAccruedInterestTill(ctx context.Context, pool *pgxpool.Pool, src cimplrFDSource, asOf time.Time) (accrued, tds float64, err error) {
 	if src.FDID == "" || src.StartDate.IsZero() || asOf.Before(src.StartDate) {
-		return 0, 0
+		return 0, 0, nil
 	}
 	periodEnd := asOf
 	if !src.MaturityDate.IsZero() && periodEnd.After(src.MaturityDate) {
 		periodEnd = src.MaturityDate
 	}
-	if interest, _, found := fdMaster.PeriodInterestFromSchedule(ctx, pool, src.FDID, src.StartDate, periodEnd, src.InterestTypeCode); found && interest > 0 {
+	interest, _, found, schedErr := fdMaster.PeriodInterestFromSchedule(ctx, pool, src.FDID, src.StartDate, periodEnd, src.InterestTypeCode)
+	if schedErr != nil {
+		return 0, 0, schedErr
+	}
+	if found && interest > 0 {
 		accrued = roundToFour(interest)
 	}
 	if accrued == 0 {
-		_ = pool.QueryRow(ctx, `
+		if err := pool.QueryRow(ctx, `
 			SELECT COALESCE(SUM(period_interest_accrued),0), COALESCE(SUM(tds_deducted_in_period),0)
 			FROM investment.fd_accrual_ledger
 			WHERE fd_id=$1 AND COALESCE(is_deleted,false)=false
 			  AND period_end <= $2::date`, src.FDID, periodEnd,
-		).Scan(&accrued, &tds)
+		).Scan(&accrued, &tds); err != nil {
+			return 0, 0, fmt.Errorf("sum accrual ledger for fd %s: %w", src.FDID, err)
+		}
 	}
 	if accrued == 0 {
-		_ = pool.QueryRow(ctx, `
+		if err := pool.QueryRow(ctx, `
 			SELECT COALESCE(SUM(interest_accrued),0), COALESCE(SUM(tds_amount),0)
 			FROM investment.fd_cashflow_schedule
 			WHERE fd_id=$1 AND COALESCE(is_deleted,false)=false
 			  AND event_date >= $2::date AND event_date <= $3::date`,
 			src.FDID, src.StartDate, periodEnd,
-		).Scan(&accrued, &tds)
+		).Scan(&accrued, &tds); err != nil {
+			return 0, 0, fmt.Errorf("sum cashflow schedule for fd %s: %w", src.FDID, err)
+		}
 	}
 	if accrued == 0 && src.Principal > 0 && src.InterestRate > 0 {
 		days := int(periodEnd.Sub(src.StartDate).Hours() / 24)
@@ -3468,7 +3563,7 @@ func cimplrAccruedInterestTill(ctx context.Context, pool *pgxpool.Pool, src cimp
 	if tds == 0 {
 		tds = cimplrTDSTill(ctx, pool, src, src.StartDate, periodEnd)
 	}
-	return roundToFour(accrued), roundToFour(tds)
+	return roundToFour(accrued), roundToFour(tds), nil
 }
 
 func cimplrDefaultCalcDate(src cimplrFDSource, closureType, requestedDate string) string {
@@ -3518,7 +3613,10 @@ func calculateCimplrClosure(ctx context.Context, pool *pgxpool.Pool, src cimplrF
 	if accruedDays < 0 {
 		accruedDays = 0
 	}
-	accrued, tds := cimplrAccruedInterestTill(ctx, pool, src, calcDate)
+	accrued, tds, accErr := cimplrAccruedInterestTill(ctx, pool, src, calcDate)
+	if accErr != nil {
+		return cimplrClosureCalc{}, accErr
+	}
 	revisedInterest := accrued
 	calc := cimplrClosureCalc{
 		ClosureType:           closureType,
@@ -4641,24 +4739,49 @@ func isCimplrPrematureClosureRoute(path string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(path)), "/closure/premature/")
 }
 
+// cimplrClosureKeyBelongs reports whether key was issued by the closure upload
+// path for this closure: one of its storage prefixes followed by the parent id.
+func cimplrClosureKeyBelongs(key, initiateID, confirmID string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" || strings.Contains(key, "..") {
+		return false
+	}
+	for _, module := range []string{"fd-closure-additional", "fd-premature-closure-main", "fd-rollover-additional"} {
+		prefix := strings.Trim(strings.TrimSpace(s3storage.GetStoragePrefix(module)), "/")
+		for _, parent := range []string{strings.TrimSpace(confirmID), strings.TrimSpace(initiateID)} {
+			if parent == "" {
+				continue
+			}
+			if strings.HasPrefix(key, prefix+"/"+parent+"/") || (prefix == "" && strings.HasPrefix(key, parent+"/")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func loadCimplrPrematureMainDownloadFiles(ctx context.Context, pool *pgxpool.Pool, confirmID, uploadS3Key string) ([]map[string]interface{}, error) {
 	confirmID = strings.TrimSpace(confirmID)
+	requestedKey := strings.TrimSpace(uploadS3Key)
+	if confirmID == "" {
+		return []map[string]interface{}{}, nil
+	}
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(upload_s3_key,'')
+		FROM cimplr.fd_closure_confirm
+		WHERE closure_confirm_id=$1
+		  AND closure_type='PREMATURE'
+		  AND COALESCE(is_deleted,false)=false
+		LIMIT 1`, confirmID).Scan(&uploadS3Key)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return []map[string]interface{}{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	uploadS3Key = strings.TrimSpace(uploadS3Key)
-	if uploadS3Key == "" && confirmID != "" {
-		err := pool.QueryRow(ctx, `
-			SELECT COALESCE(upload_s3_key,'')
-			FROM cimplr.fd_closure_confirm
-			WHERE closure_confirm_id=$1
-			  AND closure_type='PREMATURE'
-			  AND COALESCE(is_deleted,false)=false
-			LIMIT 1`, confirmID).Scan(&uploadS3Key)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return []map[string]interface{}{}, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		uploadS3Key = strings.TrimSpace(uploadS3Key)
+	if requestedKey != "" && requestedKey != uploadS3Key {
+		return []map[string]interface{}{}, nil
 	}
 	if uploadS3Key == "" {
 		return []map[string]interface{}{}, nil
@@ -5050,7 +5173,7 @@ func CimplrJournalPreview(pool *pgxpool.Pool) http.HandlerFunc {
 			closureType := fmt.Sprint(initiate["closure_type"])
 			calc, err := calculateCimplrClosure(ctx, pool, src, closureType, fmt.Sprint(initiate["requested_closure_date"]), false)
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 				return
 			}
 			bankNum, bankName := "", ""
@@ -5328,13 +5451,13 @@ func CimplrExecutionLogsAll(pool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY l.created_at DESC, l.log_id DESC
 			LIMIT $%d OFFSET $%d`, scopeWhere, argIdx, argIdx+1), args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch execution logs: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch execution logs: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
 		records, err := pgx.CollectRows(rows, pgx.RowToMap)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to read execution logs: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read execution logs: "+errtext.Detail(w, err))
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"records": records, "total": len(records)})
@@ -5347,7 +5470,7 @@ func CimplrAccountingApprovedActive(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		records, err := cimplrAccountingApprovedActiveRecords(r.Context(), pool, req)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch accounting approved-active: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch accounting approved-active: "+errtext.Detail(w, err))
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{

@@ -88,7 +88,14 @@ func StartIMAPPoller(ctx context.Context, pool *pgxpool.Pool) {
 	defer ticker.Stop()
 
 	runOnce := func() {
-		if err := imapPollOnce(ctx, pool, rt); err != nil {
+		if !imapPollMu.TryLock() {
+			logger.LogInfo("[imap-poller] skip tick, already running")
+			return
+		}
+		defer imapPollMu.Unlock()
+		if err := runPollCycle(ctx, pool, "email-imap-poll", func(ctx context.Context) error {
+			return imapPollOnce(ctx, pool, rt)
+		}); err != nil {
 			logger.LogError("[imap-poller] tick error: %v", err)
 		}
 	}
@@ -168,7 +175,7 @@ func imapPollOnce(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Runti
 					UPDATE email_svc.inbox_config
 					SET ses_last_error = $2, updated_at = now()
 					WHERE inbox_id = $1::uuid
-				`, target.inbox.InboxID, "imap: "+err.Error())
+				`, target.inbox.InboxID, "imap poll failed")
 				continue
 			}
 			ingested += n
@@ -340,8 +347,7 @@ func pollIMAPFolder(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Run
 			}
 
 			if err := ingestIMAPMessage(ctx, pool, inboxRow, im.Parsed, im.IMAPMessageKey, folder.direction); err != nil {
-				logger.LogError("[imap-poller] ingest uid=%d err=%v", im.UID, err)
-				continue
+				return totalIngested, err
 			}
 			totalIngested++
 		}

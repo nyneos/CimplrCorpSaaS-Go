@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
 
@@ -130,7 +131,8 @@ func HandleTransformResultsList(pool *pgxpool.Pool) http.HandlerFunc {
 		var totalCount int
 		countQuery := `SELECT COUNT(*) ` + baseFrom
 		if err := pool.QueryRow(r.Context(), countQuery, args...).Scan(&totalCount); err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email transform results count failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 			return
 		}
 
@@ -163,7 +165,8 @@ func HandleTransformResultsList(pool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, limit, offset)
 		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email transform results list failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 			return
 		}
 		defer rows.Close()
@@ -251,7 +254,8 @@ func HandleTransformResultsStats(pool *pgxpool.Pool) http.HandlerFunc {
 		err := pool.QueryRow(r.Context(), query, inboxID, admin, userID, userEmail, dateFrom, dateTo).
 			Scan(&totalResults, &uniqueMessages, &uniqueRules, &uniqueInboxes)
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email transform results stats failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 			return
 		}
 

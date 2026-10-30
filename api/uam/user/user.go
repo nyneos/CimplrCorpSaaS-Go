@@ -2,8 +2,9 @@ package user
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/utils"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -15,7 +16,6 @@ import (
 	"log"
 	"math/big"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -304,19 +304,15 @@ func CreateUser(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// --- Password provisioning -----------------------------------------------
 		cimplr := req.Password
-		if req.PasswordType == "auto" || cimplr == "" {
-			// var genErr error
-			// cimplr, genErr = generateRandomPassword(16)
-			// if genErr != nil {
-			// 	respondWithError(w, http.StatusInternalServerError, "Failed to generate password")
-			// 	return
-			// }cimplr = "changeme"
-			envDefaultPassword := strings.TrimSpace(os.Getenv("UAM_DEFAULT_PASSWORD"))
-			if envDefaultPassword != "" {
-				cimplr = envDefaultPassword
-			} else {
-				cimplr = "changeme"
+		autoPassword := req.PasswordType == "auto" || cimplr == ""
+		if autoPassword {
+			generated, genErr := generateRandomPassword(16)
+			if genErr != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to generate password")
+				return
 			}
+			cimplr = generated
+			req.ForcePasswordChange = true
 		}
 		hashedPassword, hashErr := bcrypt.GenerateFromPassword([]byte(cimplr), bcrypt.DefaultCost)
 		if hashErr != nil {
@@ -400,7 +396,7 @@ func CreateUser(pool *pgxpool.Pool) http.HandlerFunc {
 			`UPDATE user_roles SET is_deleted = true WHERE user_id = $1 AND COALESCE(is_deleted, false) = false`,
 			userId,
 		); err != nil {
-			respondWithError(w, http.StatusBadRequest, err.Error())
+			respondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 		_, err = tx.Exec(ctx,
@@ -477,7 +473,7 @@ func GetUsers(pool *pgxpool.Pool) http.HandlerFunc {
 		// Pagination
 		pagination, err := utils.ExtractPagination(r)
 		if err != nil {
-			respondWithError(w, http.StatusBadRequest, err.Error())
+			respondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -802,39 +798,27 @@ func UpdateUser(pool *pgxpool.Pool) http.HandlerFunc {
 			"email":                   true,
 			"mobile":                  true,
 			"address":                 true,
-			"status":                  true,
-			"approved_by":             true,
-			"approved_at":             true,
-			"rejected_by":             true,
-			"rejected_at":             true,
-			"approval_comment":        true,
-			"password":                true,
 		}
 		fields := map[string]interface{}{}
 		for k, v := range req {
 			if allowed[k] {
-				if k == "password" {
-					if pw, ok := v.(string); ok && pw != "" {
-						hashed, err := auth.HashPassword(pw)
-						if err != nil {
-							respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
-							return
-						}
-						v = hashed
-					}
-				}
 				fields[k] = v
 			}
 		}
 		fields["updated_by"] = updatedBy
 		fields["updated_at"] = time.Now()
-		if _, hasStatus := fields["status"]; !hasStatus {
-			fields["status"] = "pending"
-		}
+		fields["status"] = "pending"
 		if len(fields) == 0 && newRole == "" && len(newEntityMappings) == 0 {
 			respondWithError(w, http.StatusBadRequest, "No valid fields to update")
 			return
 		}
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			respondWithInternalError(w, err)
+			return
+		}
+		defer tx.Rollback(context.Background())
 
 		var userMap map[string]interface{}
 		if len(fields) > 0 {
@@ -857,44 +841,40 @@ func UpdateUser(pool *pgxpool.Pool) http.HandlerFunc {
 				setClause, len(keys)+1,
 			)
 			values = append(values, id, entityIDs)
-			rows, err := pool.Query(ctx, query, values...)
+			rows, err := tx.Query(ctx, query, values...)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithInternalError(w, err)
 				return
 			}
-			defer rows.Close()
 			if !rows.Next() {
+				rows.Close()
 				respondWithError(w, http.StatusNotFound, "User not found or not accessible")
 				return
 			}
 			vals, err := rows.Values()
 			if err != nil {
-				log.Printf("user.go UpdateUser: scan user row failed: %v", err)
+				rows.Close()
+				respondWithInternalError(w, err)
+				return
 			}
 			userMap = map[string]interface{}{}
 			for i, col := range rows.FieldDescriptions() {
 				userMap[string(col.Name)] = decodeSQLValue(vals[i])
 			}
+			rows.Close()
 		} else {
 			var count int
 			checkQuery := `SELECT COUNT(*) FROM users u WHERE u.id = $1 AND COALESCE(u.is_deleted, false) = false AND` +
 				fmt.Sprintf(userEntityAccessExistsSQL, 2)
-			if err := pool.QueryRow(ctx, checkQuery, id, entityIDs).Scan(&count); err != nil || count == 0 {
+			if err := tx.QueryRow(ctx, checkQuery, id, entityIDs).Scan(&count); err != nil || count == 0 {
 				respondWithError(w, http.StatusNotFound, "User not found or not accessible")
 				return
 			}
 		}
 
 		if len(newEntityMappings) > 0 {
-			tx, err := pool.Begin(ctx)
-			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
-				return
-			}
-			defer tx.Rollback(ctx)
-
 			if _, err := tx.Exec(ctx, "UPDATE user_entity_mappings SET is_deleted = true WHERE user_id = $1", id); err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Failed to soft-delete old mappings: "+err.Error())
+				respondWithError(w, http.StatusInternalServerError, "Failed to soft-delete old mappings: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -905,22 +885,22 @@ func UpdateUser(pool *pgxpool.Pool) http.HandlerFunc {
 					ON CONFLICT (user_id, entity_id) DO UPDATE SET entity_name = EXCLUDED.entity_name, is_deleted = false`,
 					id, em.EntityID, em.EntityName,
 				); err != nil {
-					respondWithError(w, http.StatusInternalServerError, "Failed to insert entity mapping: "+err.Error())
+					respondWithError(w, http.StatusInternalServerError, "Failed to insert entity mapping: "+errtext.Detail(w, err))
 					return
 				}
 			}
 
-			if err := tx.Commit(ctx); err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Failed to commit entity mappings: "+err.Error())
-				return
-			}
 		}
 
 		if newRole != "" {
-			if err := upsertActiveUserRole(ctx, pool, id, newRole); err != nil {
-				respondWithError(w, http.StatusBadRequest, err.Error())
+			if err := upsertActiveUserRole(ctx, tx, id, newRole); err != nil {
+				respondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 				return
 			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			respondWithInternalError(w, err)
+			return
 		}
 
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"user": sanitizeUserMap(userMap)})
@@ -978,7 +958,8 @@ func DeleteUser(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND COALESCE(uem.is_deleted, false) = false
 				  AND uem.entity_id = ANY($3::text[])
 			  )
-			RETURNING *`,
+			RETURNING id, authentication_type, employee_name, username_or_employee_id, email, mobile,
+			          address, status, created_at, created_by, updated_by, updated_at`,
 			deleter, targetIds, entityIDs,
 		)
 		if err != nil {
@@ -997,7 +978,7 @@ func DeleteUser(pool *pgxpool.Pool) http.HandlerFunc {
 			for i, col := range rows.FieldDescriptions() {
 				userMap[string(col.Name)] = decodeSQLValue(vals[i])
 			}
-			updated = append(updated, userMap)
+			updated = append(updated, sanitizeUserMap(userMap))
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"users": updated,
@@ -1024,120 +1005,130 @@ func ApproveMultipleUsers(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, statusCode, errMsg)
 			return
 		}
-		// Get existing users and their status
-		rows, err := pool.Query(ctx, `
-			SELECT id, status FROM users u WHERE id = ANY($1)
-			  AND EXISTS (
-				SELECT 1 FROM user_entity_mappings uem
-				WHERE uem.user_id = u.id
-				  AND COALESCE(uem.is_deleted, false) = false
-				  AND uem.entity_id = ANY($2::text[])
-			  )`,
-			req.Ids, entityIDs,
-		)
+		approvedBy := api.GetUserEmailFromCtx(ctx)
+		if approvedBy == "" {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			return
+		}
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			respondWithInternalError(w, err)
 			return
 		}
-		defer rows.Close()
-		toDelete := []string{}
-		toApprove := []string{}
-		for rows.Next() {
-			var id, status string
-			if err := rows.Scan(&id, &status); err != nil {
-				log.Printf("user.go ApproveMultipleUsers: scan id/status row failed: %v", err)
+		defer tx.Rollback(context.Background())
+
+		targets, err := lockPendingUsers(ctx, tx, req.Ids, entityIDs)
+		if err != nil {
+			respondWithInternalError(w, err)
+			return
+		}
+		toDelete, toApprove, skipped := []string{}, []string{}, []string{}
+		for _, t := range targets {
+			if t.id == api.GetUserIDFromCtx(ctx) || governance.IsSelfApprovalCtx(ctx, t.maker) {
+				skipped = append(skipped, t.id+": "+governance.ErrSelfApproval.Error())
+				continue
 			}
-			if status == constants.StatusCodeDeleteApproval {
-				toDelete = append(toDelete, id)
+			if t.status == constants.StatusCodeDeleteApproval {
+				toDelete = append(toDelete, t.id)
 			} else {
-				toApprove = append(toApprove, id)
+				toApprove = append(toApprove, t.id)
 			}
+		}
+		if len(toDelete)+len(toApprove) == 0 {
+			respondWithError(w, http.StatusForbidden, "no users could be approved: "+strings.Join(skipped, "; "))
+			return
 		}
 		results := map[string]interface{}{
 			"deleted":  []map[string]interface{}{},
 			"approved": []map[string]interface{}{},
 		}
-		// Delete users and their user_roles
 		if len(toDelete) > 0 {
-			// Delete user_roles first for referential integrity
-			_, err := pool.Exec(ctx,
-				"UPDATE user_roles SET is_deleted = true WHERE user_id = ANY($1)",
-				toDelete,
-			)
-			if err != nil {
-				log.Println("[ERROR] delete user_roles:", err)
-				respondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
+			if _, err := tx.Exec(ctx, "UPDATE user_roles SET is_deleted = true WHERE user_id = ANY($1)", toDelete); err != nil {
+				respondWithInternalError(w, err)
 				return
 			}
-			// Soft delete users (set is_deleted = true)
-			delRows, err := pool.Query(ctx, `
-				UPDATE users SET is_deleted = true, status = 'Deleted', updated_at = NOW()
-				WHERE id = ANY($1)
-				  AND EXISTS (
-					SELECT 1 FROM user_entity_mappings uem
-					WHERE uem.user_id = users.id
-					  AND COALESCE(uem.is_deleted, false) = false
-					  AND uem.entity_id = ANY($2::text[])
-				  )
-				RETURNING *`,
-				toDelete, entityIDs,
-			)
-			if err == nil {
-				defer delRows.Close()
-				for delRows.Next() {
-					vals, err := delRows.Values()
-					if err != nil {
-						log.Printf("user.go ApproveMultipleUsers: scan deleted user row failed: %v", err)
-						continue
-					}
-					userMap := map[string]interface{}{}
-					for i, col := range delRows.FieldDescriptions() {
-						userMap[string(col.Name)] = decodeSQLValue(vals[i])
-					}
-					results["deleted"] = append(results["deleted"].([]map[string]interface{}), sanitizeUserMap(userMap))
-				}
+			rows, err := collectUserRows(ctx, tx, `UPDATE users SET is_deleted = true, status = 'Deleted', updated_at = NOW() WHERE id = ANY($1) RETURNING *`, toDelete)
+			if err != nil {
+				respondWithInternalError(w, err)
+				return
 			}
+			results["deleted"] = rows
 		}
-		approvedBy := api.GetUserEmailFromCtx(r.Context())
-		if approvedBy == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
-			return
-		}
-		// Approve users
 		if len(toApprove) > 0 {
-			appRows, err := pool.Query(ctx, `
-				UPDATE users SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2
-				WHERE id = ANY($3)
-				  AND EXISTS (
-					SELECT 1 FROM user_entity_mappings uem
-					WHERE uem.user_id = users.id
-					  AND COALESCE(uem.is_deleted, false) = false
-					  AND uem.entity_id = ANY($4::text[])
-				  )
-				RETURNING *`,
-				approvedBy, req.ApprovalComment, toApprove, entityIDs,
-			)
-			if err == nil {
-				defer appRows.Close()
-				for appRows.Next() {
-					vals, err := appRows.Values()
-					if err != nil {
-						log.Printf("user.go ApproveMultipleUsers: scan approved user row failed: %v", err)
-						continue
-					}
-					userMap := map[string]interface{}{}
-					for i, col := range appRows.FieldDescriptions() {
-						userMap[string(col.Name)] = decodeSQLValue(vals[i])
-					}
-					results["approved"] = append(results["approved"].([]map[string]interface{}), sanitizeUserMap(userMap))
-				}
+			rows, err := collectUserRows(ctx, tx, `UPDATE users SET status = 'Approved', approved_by = $2, approved_at = NOW(), approval_comment = $3 WHERE id = ANY($1) RETURNING *`, toApprove, approvedBy, req.ApprovalComment)
+			if err != nil {
+				respondWithInternalError(w, err)
+				return
 			}
+			results["approved"] = rows
+		}
+		if err := tx.Commit(ctx); err != nil {
+			respondWithInternalError(w, err)
+			return
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"deleted":  results["deleted"],
 			"approved": results["approved"],
+			"skipped":  skipped,
 		})
 	}
+}
+
+type pendingUser struct {
+	id     string
+	status string
+	maker  string
+}
+
+// lockPendingUsers locks the requested in-scope users that are waiting for a decision.
+func lockPendingUsers(ctx context.Context, tx pgx.Tx, ids, entityIDs []string) ([]pendingUser, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT u.id::text, COALESCE(u.status, ''), COALESCE(NULLIF(u.updated_by, ''), u.created_by, '')
+		FROM users u
+		WHERE u.id::text = ANY($1)
+		  AND COALESCE(u.is_deleted, false) = false
+		  AND LOWER(COALESCE(u.status, '')) IN ('pending', 'awaiting-approval', 'delete-approval')
+		  AND EXISTS (
+			SELECT 1 FROM user_entity_mappings uem
+			WHERE uem.user_id = u.id
+			  AND COALESCE(uem.is_deleted, false) = false
+			  AND uem.entity_id = ANY($2::text[])
+		  )
+		FOR UPDATE OF u`, ids, entityIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []pendingUser{}
+	for rows.Next() {
+		var p pendingUser
+		if err := rows.Scan(&p.id, &p.status, &p.maker); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func collectUserRows(ctx context.Context, tx pgx.Tx, query string, args ...interface{}) ([]map[string]interface{}, error) {
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]interface{}{}
+	for rows.Next() {
+		vals, err := rows.Values()
+		if err != nil {
+			return nil, err
+		}
+		m := map[string]interface{}{}
+		for i, col := range rows.FieldDescriptions() {
+			m[string(col.Name)] = decodeSQLValue(vals[i])
+		}
+		out = append(out, sanitizeUserMap(m))
+	}
+	return out, rows.Err()
 }
 
 // Handler: Reject multiple users
@@ -1164,36 +1155,44 @@ func RejectMultipleUsers(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		rows, err := pool.Query(ctx, `
-			UPDATE users SET status = 'Rejected', rejected_by = $1, rejected_at = NOW(), approval_comment = $2
-			WHERE id = ANY($3)
-			  AND EXISTS (
-				SELECT 1 FROM user_entity_mappings uem
-				WHERE uem.user_id = users.id
-				  AND COALESCE(uem.is_deleted, false) = false
-				  AND uem.entity_id = ANY($4::text[])
-			  )
-			RETURNING *`,
-			rejectedBy, req.RejectionComment, req.Ids, entityIDs,
-		)
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			respondWithInternalError(w, err)
 			return
 		}
-		defer rows.Close()
-		updated := []map[string]interface{}{}
-		for rows.Next() {
-			vals, err := rows.Values()
-			if err != nil {
-				log.Printf("user.go RejectMultipleUsers: scan user row failed: %v", err)
+		defer tx.Rollback(context.Background())
+
+		targets, err := lockPendingUsers(ctx, tx, req.Ids, entityIDs)
+		if err != nil {
+			respondWithInternalError(w, err)
+			return
+		}
+		ids, skipped := []string{}, []string{}
+		for _, t := range targets {
+			if t.id == api.GetUserIDFromCtx(ctx) || governance.IsSelfApprovalCtx(ctx, t.maker) {
+				skipped = append(skipped, t.id+": "+governance.ErrSelfApproval.Error())
 				continue
 			}
-			userMap := map[string]interface{}{}
-			for i, col := range rows.FieldDescriptions() {
-				userMap[string(col.Name)] = vals[i]
-			}
-			updated = append(updated, sanitizeUserMap(userMap))
+			ids = append(ids, t.id)
 		}
-		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"updated": updated})
+		if len(ids) == 0 {
+			respondWithError(w, http.StatusForbidden, "no users could be rejected: "+strings.Join(skipped, "; "))
+			return
+		}
+		updated, err := collectUserRows(ctx, tx, `
+			UPDATE users SET
+				status = CASE WHEN approved_at IS NOT NULL AND status = 'Delete-Approval' THEN 'Approved' ELSE 'Rejected' END,
+				rejected_by = $2, rejected_at = NOW(), approval_comment = $3
+			WHERE id = ANY($1)
+			RETURNING *`, ids, rejectedBy, req.RejectionComment)
+		if err != nil {
+			respondWithInternalError(w, err)
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			respondWithInternalError(w, err)
+			return
+		}
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"updated": updated, "skipped": skipped})
 	}
 }

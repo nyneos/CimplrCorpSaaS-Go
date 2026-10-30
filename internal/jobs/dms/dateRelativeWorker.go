@@ -95,6 +95,7 @@ func pollDateRelativeRules(
 
 	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 	dayEnd := dayStart.AddDate(0, 0, 1)
+	var enqueueErr error
 	for _, rule := range rules {
 		if strings.TrimSpace(rule.DateField) == "" || strings.TrimSpace(rule.SourceIDField) == "" {
 			continue
@@ -128,46 +129,39 @@ func pollDateRelativeRules(
 			if sourceID == "" || sourceID == "-" {
 				continue
 			}
-			var exists bool
-			if err := pool.QueryRow(ctx, `
-				SELECT EXISTS (
-					SELECT 1
-					FROM dms_svc.generation_run gr
-					JOIN dms_svc.generation_run_source_row sr ON sr.run_id = gr.run_id
-					WHERE gr.rule_id = $1::uuid
-					  AND gr.trigger_type = 'DATE_RELATIVE'
-					  AND sr.source_id = $2
-					  AND gr.started_at >= $3
-					  AND gr.started_at < $4
-				)`, rule.RuleID, sourceID, dayStart, dayEnd).Scan(&exists); err != nil {
-				return fmt.Errorf("date trigger dedupe: %w", err)
-			}
-			if !exists {
-				sourceIDs = append(sourceIDs, sourceID)
-			}
+			sourceIDs = append(sourceIDs, sourceID)
 		}
 		if len(sourceIDs) == 0 {
 			continue
 		}
-		if docsvc.QueueEnabled() {
-			jobID, qErr := EnqueueRuleGeneration(
-				ctx, pool, rule.RuleID, "DATE_RELATIVE", "SYSTEM:dms-date-trigger",
-				rule.SourceIDField, sourceIDs,
-			)
-			if qErr != nil {
-				api.LogError("[DMS-DATE] rule=%s enqueue: %v", rule.RuleID, qErr)
-			} else {
-				api.LogInfo("[DMS-DATE] rule=%s job=%s queued source_rows=%d", rule.RuleID, jobID, len(sourceIDs))
+		// Lock + insert the run (and job, in queue mode) before enqueue/render.
+		// Dedupe of each source id happens inside that lock, not just before the call.
+		runID, jobID, kept, claimed, reserveErr := reserveDateRelativeTick(
+			ctx, pool, rule.RuleID, rule.SourceIDField, sourceIDs, dayStart, dayEnd,
+		)
+		if reserveErr != nil {
+			api.LogError("[DMS-DATE] rule=%s enqueue: %v", rule.RuleID, reserveErr)
+			if enqueueErr == nil {
+				enqueueErr = fmt.Errorf("date trigger enqueue rule %s: %w", rule.RuleID, reserveErr)
 			}
 			continue
 		}
-		runID, runErr := RunGenerationForSourceIDs(
-			ctx, pool, rule.RuleID, "DATE_RELATIVE", "SYSTEM:dms-date-trigger",
-			rule.SourceIDField, sourceIDs,
+		if !claimed {
+			continue
+		}
+		if docsvc.QueueEnabled() {
+			api.LogInfo("[DMS-DATE] rule=%s job=%s run=%s queued source_rows=%d", rule.RuleID, jobID, runID, len(kept))
+			continue
+		}
+		ruleCtx, cancel := context.WithTimeout(ctx, dmsRuleRunTimeout)
+		finishedID, runErr := runGeneration(
+			ruleCtx, pool, rule.RuleID, "DATE_RELATIVE", dateRelativeActor,
+			rule.SourceIDField, kept, runID,
 		)
+		cancel()
 		if runErr != nil {
-			api.LogError("[DMS-DATE] rule=%s run=%s: %v", rule.RuleID, runID, runErr)
+			api.LogError("[DMS-DATE] rule=%s run=%s: %v", rule.RuleID, finishedID, runErr)
 		}
 	}
-	return nil
+	return enqueueErr
 }

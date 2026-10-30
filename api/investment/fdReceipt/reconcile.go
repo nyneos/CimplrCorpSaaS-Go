@@ -1570,7 +1570,7 @@ func insertException(ctx context.Context, pool *pgxpool.Pool, p ExceptionParams)
 			case_type, exception_status, raised_by, raised_at,
 			is_active, is_deleted
 		) VALUES (
-			'IREX-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
+			`+freeShortIDExpr("IREX-", "investment.fd_receipt_exception", "exception_id")+`,
 			$1,$2,
 			$3,$4,$5,
 			$6,$7,

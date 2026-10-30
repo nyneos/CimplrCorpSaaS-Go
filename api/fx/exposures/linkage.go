@@ -12,6 +12,7 @@ import (
 	"CimplrCorpSaas/internal/logger"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"CimplrCorpSaas/api/approvalengine"
@@ -90,7 +92,7 @@ func HedgeLinksDetails(pool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN exposure_headers h ON l.exposure_header_id = h.exposure_header_id
 			LEFT JOIN forward_bookings f ON l.booking_id = f.system_transaction_id
 			LEFT JOIN LATERAL (
-				SELECT ai.* FROM uam.approval_instance ai
+				SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 				WHERE ai.record_id = (l.exposure_header_id::text || ':' || l.booking_id::text)
 				  AND ai.module_code = 'FX'
 				  AND ai.transaction_type = 'FX_LINKAGE_CREATE'
@@ -100,7 +102,7 @@ func HedgeLinksDetails(pool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) ai ON true
 			LEFT JOIN LATERAL (
-				SELECT aie.* FROM uam.approval_instance_eye aie
+				SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 				WHERE aie.instance_id = ai.instance_id
 				  AND aie.status = 'ACTIVE'
 				ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -585,10 +587,22 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 		// values that will actually be written to forward_booking_ledger,
 		// instead of a thinner field set than the real HEDGE_LINK row shape.
 		var bookingAmount float64
-		_ = pool.QueryRow(ctx, "SELECT Booking_Amount FROM forward_bookings WHERE system_transaction_id = $1 AND COALESCE(is_deleted, false) = false", req.BookingID).Scan(&bookingAmount)
+		if err := pool.QueryRow(ctx, "SELECT COALESCE(booking_amount, 0) FROM forward_bookings WHERE system_transaction_id = $1 AND COALESCE(is_deleted, false) = false", req.BookingID).Scan(&bookingAmount); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				respondWithError(w, http.StatusNotFound, "Forward booking not found")
+				return
+			}
+			logger.LogError("hedge link booking lookup failed booking=%s: %v", req.BookingID, err)
+			respondWithError(w, http.StatusInternalServerError, "Failed to read forward booking")
+			return
+		}
 		var totalUtilized float64
 		sumQuery := `SELECT COALESCE(SUM(amount_changed), 0) FROM forward_booking_ledger WHERE booking_id = $1 AND action_type IN ('UTILIZATION', 'CANCELLATION', 'ROLLOVER')`
-		_ = pool.QueryRow(ctx, sumQuery, req.BookingID).Scan(&totalUtilized)
+		if err := pool.QueryRow(ctx, sumQuery, req.BookingID).Scan(&totalUtilized); err != nil {
+			logger.LogError("hedge link ledger lookup failed booking=%s: %v", req.BookingID, err)
+			respondWithError(w, http.StatusInternalServerError, "Failed to read forward ledger")
+			return
+		}
 		newOpenAmount := math.Abs(math.Abs(bookingAmount) - math.Abs(totalUtilized))
 
 		hedgeRow := hedgeLinkRow{
@@ -621,11 +635,13 @@ func LinkExposureHedge(pool *pgxpool.Pool) http.HandlerFunc {
 			triggerMatrixID = tID
 		}
 		var linkExisted bool
-		_ = pool.QueryRow(ctx, `
+		if err := pool.QueryRow(ctx, `
 			SELECT EXISTS(
 				SELECT 1 FROM exposure_hedge_links
 				WHERE exposure_header_id = $1 AND booking_id = $2
-			)`, req.ExposureHeaderID, req.BookingID).Scan(&linkExisted)
+			)`, req.ExposureHeaderID, req.BookingID).Scan(&linkExisted); err != nil {
+			logger.LogError("hedge link existence check failed exposure=%s booking=%s: %v", req.ExposureHeaderID, req.BookingID, err)
+		}
 		// Upsert exposure_hedge_links as pending until All Linkage approve
 		upsertQuery := `
 			INSERT INTO exposure_hedge_links (exposure_header_id, booking_id, hedged_amount, is_active)
@@ -721,6 +737,67 @@ func sessionEmail(userID string) string {
 	return ""
 }
 
+// activateHedgeLinkWithLedger activates an approved hedge link and writes the forward
+// utilisation ledger row in one transaction, holding locks on the exposure and the
+// booking so the open amount and ledger sequence cannot race. When the exposure is
+// already settled the link is deactivated instead and the exposure status is returned.
+func activateHedgeLinkWithLedger(ctx context.Context, pool *pgxpool.Pool, expID, bookID string) (float64, string, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return 0, "", err
+	}
+	defer tx.Rollback(ctx)
+
+	var exposureStatus string
+	var exposureOpen float64
+	err = tx.QueryRow(ctx, `
+		SELECT UPPER(TRIM(COALESCE(status, ''))), COALESCE(total_open_amount, 0)
+		FROM exposure_headers
+		WHERE exposure_header_id::text = $1 AND COALESCE(is_deleted, false) = false
+		FOR UPDATE
+	`, expID).Scan(&exposureStatus, &exposureOpen)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", err
+	}
+	if errors.Is(err, pgx.ErrNoRows) || settledExposureStatuses[exposureStatus] || math.Abs(exposureOpen) <= 0 {
+		if _, err := tx.Exec(ctx, `UPDATE exposure_hedge_links SET is_active = false WHERE exposure_header_id = $1 AND booking_id = $2`, expID, bookID); err != nil {
+			return 0, "", err
+		}
+		if exposureStatus == "" {
+			exposureStatus = "NOT FOUND"
+		}
+		return 0, exposureStatus, tx.Commit(ctx)
+	}
+
+	var bookingAmount float64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(booking_amount, 0) FROM forward_bookings WHERE system_transaction_id = $1 AND COALESCE(is_deleted, false) = false FOR UPDATE`, bookID).Scan(&bookingAmount); err != nil {
+		return 0, "", fmt.Errorf("lock forward booking: %w", err)
+	}
+	var hedged float64
+	if err := tx.QueryRow(ctx, `
+		UPDATE exposure_hedge_links
+		   SET is_active = true
+		 WHERE exposure_header_id = $1 AND booking_id = $2
+		 RETURNING hedged_amount
+	`, expID, bookID).Scan(&hedged); err != nil {
+		return 0, "", fmt.Errorf("activate hedge link: %w", err)
+	}
+	var totalUtilized float64
+	var nextSeq int
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(SUM(amount_changed) FILTER (WHERE action_type IN ('UTILIZATION', 'CANCELLATION', 'ROLLOVER')), 0),
+		       COALESCE(MAX(ledger_sequence), 0) + 1
+		FROM forward_booking_ledger WHERE booking_id = $1
+	`, bookID).Scan(&totalUtilized, &nextSeq); err != nil {
+		return 0, "", fmt.Errorf("read forward ledger: %w", err)
+	}
+	newOpenAmount := math.Abs(math.Abs(bookingAmount) - math.Abs(totalUtilized) - math.Abs(hedged))
+	if _, err := tx.Exec(ctx, `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, 'UTILIZATION', $3, CURRENT_DATE, $4, $5)`, bookID, nextSeq, expID, hedged, newOpenAmount); err != nil {
+		return 0, "", fmt.Errorf("insert forward ledger: %w", err)
+	}
+	return hedged, "", tx.Commit(ctx)
+}
+
 // ApproveHedgeLinks activates pending links and posts utilization ledger rows.
 func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -806,40 +883,15 @@ func ApproveHedgeLinks(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			// The exposure may have been settled (payment / rollover / cancellation
 			// approved) while this link sat in the queue — it is terminal now.
-			var exposureStatus string
-			var exposureOpen float64
-			_ = pool.QueryRow(ctx, `
-				SELECT UPPER(TRIM(COALESCE(status, ''))), COALESCE(total_open_amount, 0)
-				FROM exposure_headers
-				WHERE exposure_header_id::text = $1 AND COALESCE(is_deleted, false) = false
-			`, expID).Scan(&exposureStatus, &exposureOpen)
-			if settledExposureStatuses[exposureStatus] || math.Abs(exposureOpen) <= 0 {
-				_, _ = pool.Exec(ctx, `UPDATE exposure_hedge_links SET is_active = false WHERE exposure_header_id = $1 AND booking_id = $2`, expID, bookID)
-				skipped = append(skipped, expID+" ("+strings.Title(strings.ToLower(exposureStatus))+")")
-				logger.LogError("approve hedge link refused: exposure %s already settled (%s)", expID, exposureStatus)
-				continue
-			}
-			var hedged float64
-			err := pool.QueryRow(ctx, `
-				UPDATE exposure_hedge_links
-				   SET is_active = true
-				 WHERE exposure_header_id = $1 AND booking_id = $2
-				 RETURNING hedged_amount
-			`, expID, bookID).Scan(&hedged)
+			hedged, settledStatus, err := activateHedgeLinkWithLedger(ctx, pool, expID, bookID)
 			if err != nil {
 				logger.LogError("approve hedge link failed exposure=%s booking=%s: %v", expID, bookID, err)
 				continue
 			}
-
-			var bookingAmount float64
-			_ = pool.QueryRow(ctx, "SELECT Booking_Amount FROM forward_bookings WHERE system_transaction_id = $1 AND COALESCE(is_deleted, false) = false", bookID).Scan(&bookingAmount)
-			var totalUtilized float64
-			_ = pool.QueryRow(ctx, `SELECT COALESCE(SUM(amount_changed), 0) FROM forward_booking_ledger WHERE booking_id = $1 AND action_type IN ('UTILIZATION', 'CANCELLATION', 'ROLLOVER')`, bookID).Scan(&totalUtilized)
-			newOpenAmount := math.Abs(math.Abs(bookingAmount) - math.Abs(totalUtilized) - math.Abs(hedged))
-			var nextSeq int
-			_ = pool.QueryRow(ctx, `SELECT COALESCE(MAX(ledger_sequence), 0) + 1 FROM forward_booking_ledger WHERE booking_id = $1`, bookID).Scan(&nextSeq)
-			if _, lerr := pool.Exec(ctx, `INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, 'UTILIZATION', $3, CURRENT_DATE, $4, $5)`, bookID, nextSeq, expID, hedged, newOpenAmount); lerr != nil {
-				logger.LogError("approve hedge link ledger insert failed booking=%s: %v", bookID, lerr)
+			if settledStatus != "" {
+				skipped = append(skipped, expID+" ("+strings.Title(strings.ToLower(settledStatus))+")")
+				logger.LogError("approve hedge link refused: exposure %s already settled (%s)", expID, settledStatus)
+				continue
 			}
 
 			linkMap := map[string]interface{}{

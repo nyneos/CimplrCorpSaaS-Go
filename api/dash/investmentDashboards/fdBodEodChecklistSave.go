@@ -123,6 +123,65 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
+		// Mode is not part of either conflict key, so a BOD write updates the EOD
+		// row for the same entity and date (and the reverse). Reject that before
+		// any insert. A repeat save of the same mode still upserts.
+		itemIDs := make([]string, 0, len(req.Items))
+		for _, it := range req.Items {
+			if id := strings.TrimSpace(it.ID); id != "" {
+				itemIDs = append(itemIDs, id)
+			}
+		}
+		if len(itemIDs) > 0 {
+			var itemClash bool
+			err = tx.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1
+					FROM investment.fd_eod_checklist_item_status
+					WHERE entity_id = $1
+					  AND as_of_date = $2::date
+					  AND item_id = ANY($3::text[])
+					  AND COALESCE(is_deleted, false) = false
+					  AND BTRIM(COALESCE(mode, '')) <> ''
+					  AND UPPER(BTRIM(mode)) <> UPPER(BTRIM($4))
+				)`,
+				req.EntityID, asOf, itemIDs, req.Mode,
+			).Scan(&itemClash)
+			if err != nil {
+				api.LogErrorForResponse(w, "[BodEodChecklist] item mode check failed: %v", err)
+				api.RespondWithError(w, http.StatusInternalServerError, "checklist save could not be verified")
+				return
+			}
+			if itemClash {
+				api.RespondWithError(w, http.StatusBadRequest, "cannot save BOD and EOD checklist items for the same entity and date")
+				return
+			}
+		}
+		if req.SignedOff {
+			var signoffClash bool
+			err = tx.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1
+					FROM investment.fd_eod_checklist_signoff
+					WHERE entity_id = $1
+					  AND as_of_date = $2::date
+					  AND COALESCE(is_deleted, false) = false
+					  AND BTRIM(COALESCE(mode, '')) <> ''
+					  AND UPPER(BTRIM(mode)) <> UPPER(BTRIM($3))
+				)`,
+				req.EntityID, asOf, req.Mode,
+			).Scan(&signoffClash)
+			if err != nil {
+				api.LogErrorForResponse(w, "[BodEodChecklist] signoff mode check failed: %v", err)
+				api.RespondWithError(w, http.StatusInternalServerError, "checklist save could not be verified")
+				return
+			}
+			if signoffClash {
+				api.RespondWithError(w, http.StatusBadRequest, "cannot sign off both BOD and EOD for the same entity and date")
+				return
+			}
+		}
+
 		saved := make([]map[string]interface{}, 0, len(req.Items))
 		for _, it := range req.Items {
 			if strings.TrimSpace(it.ID) == "" {
@@ -161,8 +220,7 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, "save failed: "+err.Error())
 				return
 			}
-			// audit
-			_, _ = tx.Exec(ctx, `
+			if _, err = tx.Exec(ctx, `
 				INSERT INTO investment.fd_eod_checklist_item_audit (
 					status_id, entity_id, as_of_date, item_id, item_label,
 					is_done, is_critical, comment, action,
@@ -171,7 +229,11 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 				statusID, nullIfBlank(req.EntityID), asOf, it.ID, nullIfBlank(it.Label),
 				it.Done, it.Critical, nullIfBlank(it.Comment), pickAction(it.Done),
 				actorID, nullIfBlank(actorName), nullIfBlank(actorEmail), nullIfBlank(actorRole),
-			)
+			); err != nil {
+				api.LogErrorForResponse(w, "[BodEodChecklist] audit insert failed item=%s: %v", it.ID, err)
+				api.RespondWithError(w, http.StatusInternalServerError, "checklist audit could not be saved")
+				return
+			}
 			saved = append(saved, map[string]interface{}{
 				"status_id":  statusID,
 				"item_id":    it.ID,

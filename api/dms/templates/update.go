@@ -37,6 +37,9 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
 			return
 		}
+		if !common.RequireRecordsEntityAccess(w, r, pool, common.TemplateEntityQuery, []string{req.TemplateID}) {
+			return
+		}
 		req.TemplateID = strings.TrimSpace(req.TemplateID)
 		req.Name = strings.TrimSpace(req.Name)
 		req.ModuleCode = strings.TrimSpace(req.ModuleCode)
@@ -72,7 +75,8 @@ func HandleUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := requirePendingFree(r.Context(), tx, req.TemplateID); err != nil {
-			api.RespondEnvelopeError(w, http.StatusConflict, err.Error(), "DMS_TEMPLATE_PENDING_EXISTS")
+			api.LogErrorForResponse(w, "dms template update pending: %v", err)
+			api.RespondEnvelopeError(w, http.StatusConflict, "a change is already pending", "DMS_TEMPLATE_PENDING_EXISTS")
 			return
 		}
 

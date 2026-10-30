@@ -6,9 +6,26 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
+
+	"CimplrCorpSaas/api"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// Jobs this process has claimed and not yet finished. reclaimExpiredLeases
+// skips them so a slow batch is not flipped back to PENDING while it is still
+// running here. The lease heartbeat is what keeps other processes from
+// reclaiming those rows; this set is only same-process safety.
+var (
+	activeLeaseMu sync.Mutex
+	activeLeases  = map[string]*generationLeaseHold{}
+)
+
+type generationLeaseHold struct {
+	cancel context.CancelFunc
+}
 
 // Local generation queue in dms_svc (client DB). Document-Service never sees these rows.
 
@@ -107,7 +124,141 @@ func insertGenerationJob(ctx context.Context, pool *pgxpool.Pool, j generationJo
 	return jobID, err
 }
 
+func trackActiveGenerationLease(jobID string) {
+	if jobID == "" {
+		return
+	}
+	activeLeaseMu.Lock()
+	if _, ok := activeLeases[jobID]; !ok {
+		activeLeases[jobID] = &generationLeaseHold{}
+	}
+	activeLeaseMu.Unlock()
+}
+
+func untrackActiveGenerationLease(jobID string) {
+	activeLeaseMu.Lock()
+	delete(activeLeases, jobID)
+	activeLeaseMu.Unlock()
+}
+
+func generationLeaseTracked(jobID string) bool {
+	activeLeaseMu.Lock()
+	_, ok := activeLeases[jobID]
+	activeLeaseMu.Unlock()
+	return ok
+}
+
+func setActiveGenerationLeaseCancel(jobID string, cancel context.CancelFunc) {
+	activeLeaseMu.Lock()
+	if h, ok := activeLeases[jobID]; ok {
+		h.cancel = cancel
+	}
+	activeLeaseMu.Unlock()
+}
+
+func clearActiveGenerationLeaseCancel(jobID string) {
+	setActiveGenerationLeaseCancel(jobID, nil)
+}
+
+// cancelRunningGenerationLease aborts the in-flight run when the lease row is
+// no longer ours. Returns false when this process is not currently executing
+// that job (already finished, or still waiting to start).
+func cancelRunningGenerationLease(jobID string) bool {
+	activeLeaseMu.Lock()
+	h, ok := activeLeases[jobID]
+	if !ok || h.cancel == nil {
+		activeLeaseMu.Unlock()
+		return false
+	}
+	cancel := h.cancel
+	delete(activeLeases, jobID)
+	activeLeaseMu.Unlock()
+	cancel()
+	return true
+}
+
+func activeGenerationLeaseIDs() []string {
+	activeLeaseMu.Lock()
+	defer activeLeaseMu.Unlock()
+	ids := make([]string, 0, len(activeLeases))
+	for id := range activeLeases {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func leaseHeartbeatInterval() time.Duration {
+	interval := time.Duration(queueLeaseSeconds()) * time.Second / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	return interval
+}
+
+// renewGenerationLease pushes lease_expires_at out for the row this owner
+// still holds. owned is false when no row matched (lost lease or already finished).
+func renewGenerationLease(ctx context.Context, pool *pgxpool.Pool, jobID, owner string) (owned bool, err error) {
+	if pool == nil || strings.TrimSpace(jobID) == "" || strings.TrimSpace(owner) == "" {
+		return false, fmt.Errorf("lease renew: job and owner required")
+	}
+	lease := fmt.Sprintf("%d seconds", queueLeaseSeconds())
+	tag, err := pool.Exec(ctx, `
+		UPDATE dms_svc.generation_job SET
+		  lease_expires_at = now() + $3::interval
+		WHERE job_id = $1::uuid
+		  AND lease_owner = $2
+		  AND status = 'LEASED'
+		  AND is_deleted = false`, jobID, owner, lease)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func renewActiveGenerationLeases(ctx context.Context, pool *pgxpool.Pool, owner string) {
+	for _, id := range activeGenerationLeaseIDs() {
+		owned, err := renewGenerationLease(ctx, pool, id, owner)
+		if err != nil {
+			api.LogError("[DMS-QUEUE] lease heartbeat job=%s: %v", id, err)
+			continue
+		}
+		if owned {
+			continue
+		}
+		if cancelRunningGenerationLease(id) {
+			api.LogError("[DMS-QUEUE] lease heartbeat job=%s owner=%s updated 0 rows — lease lost, stopping run", id, owner)
+		}
+	}
+}
+
+// startGenerationLeaseHeartbeat extends every lease this process still holds
+// until stop is called. The first renew runs immediately so a job waiting
+// behind a long sibling does not sit on the original claim expiry.
+func startGenerationLeaseHeartbeat(ctx context.Context, pool *pgxpool.Pool, owner string) func() {
+	ticker := time.NewTicker(leaseHeartbeatInterval())
+	done := make(chan struct{})
+	go func() {
+		defer ticker.Stop()
+		renewActiveGenerationLeases(ctx, pool, owner)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				renewActiveGenerationLeases(ctx, pool, owner)
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
 func reclaimExpiredLeases(ctx context.Context, pool *pgxpool.Pool) {
+	skip := activeGenerationLeaseIDs()
+	if skip == nil {
+		skip = []string{}
+	}
 	_, _ = pool.Exec(ctx, `
 		UPDATE dms_svc.generation_job SET
 		  status = 'PENDING',
@@ -118,7 +269,8 @@ func reclaimExpiredLeases(ctx context.Context, pool *pgxpool.Pool) {
 		WHERE is_deleted = false
 		  AND status = 'LEASED'
 		  AND lease_expires_at IS NOT NULL
-		  AND lease_expires_at < now()`)
+		  AND lease_expires_at < now()
+		  AND job_id::text <> ALL($1::text[])`, skip)
 }
 
 func countLeased(ctx context.Context, pool *pgxpool.Pool) int {
@@ -208,30 +360,72 @@ func claimGenerationJobs(ctx context.Context, pool *pgxpool.Pool, owner string, 
 	return out, nil
 }
 
-func finishGenerationJob(ctx context.Context, pool *pgxpool.Pool, jobID string, success bool, runID, errMsg string, retry bool) error {
-	if success {
-		_, err := pool.Exec(ctx, `
+// finishGenerationJob writes the terminal status only when this worker still
+// owns the row (same lease_owner and attempt_count it claimed). A stale
+// worker whose lease was reclaimed updates 0 rows and must not overwrite the
+// newer attempt. errMsg is stored in last_error; pass "" on a clean success.
+func finishGenerationJob(ctx context.Context, pool *pgxpool.Pool, jobID, leaseOwner string, attempt int, success bool, runID, errMsg string, retry bool) error {
+	var updated int64
+	var err error
+	switch {
+	case success:
+		updated, err = execGenerationJob(ctx, pool, `
 			UPDATE dms_svc.generation_job SET
-			  status = 'DONE', finished_at = now(), last_error = '',
-			  run_id = COALESCE(NULLIF($2,'')::uuid, run_id)
-			WHERE job_id = $1::uuid`, jobID, runID)
-		return err
-	}
-	if retry {
-		_, err := pool.Exec(ctx, `
+			  status = 'DONE',
+			  finished_at = now(),
+			  last_error = $4,
+			  run_id = COALESCE(NULLIF($2,'')::uuid, run_id),
+			  lease_owner = NULL,
+			  leased_at = NULL,
+			  lease_expires_at = NULL
+			WHERE job_id = $1::uuid
+			  AND lease_owner = $3
+			  AND attempt_count = $5
+			  AND status = 'LEASED'
+			  AND is_deleted = false`, jobID, runID, leaseOwner, errMsg, attempt)
+	case retry:
+		updated, err = execGenerationJob(ctx, pool, `
 			UPDATE dms_svc.generation_job SET
 			  status = 'DELAYED',
 			  available_at = now() + interval '60 seconds',
 			  lease_owner = NULL,
 			  leased_at = NULL,
 			  lease_expires_at = NULL,
-			  last_error = $2
-			WHERE job_id = $1::uuid`, jobID, errMsg)
+			  last_error = $4
+			WHERE job_id = $1::uuid
+			  AND lease_owner = $2
+			  AND attempt_count = $3
+			  AND status = 'LEASED'
+			  AND is_deleted = false`, jobID, leaseOwner, attempt, errMsg)
+	default:
+		updated, err = execGenerationJob(ctx, pool, `
+			UPDATE dms_svc.generation_job SET
+			  status = 'DEAD',
+			  finished_at = now(),
+			  last_error = $4,
+			  lease_owner = NULL,
+			  leased_at = NULL,
+			  lease_expires_at = NULL
+			WHERE job_id = $1::uuid
+			  AND lease_owner = $2
+			  AND attempt_count = $3
+			  AND status = 'LEASED'
+			  AND is_deleted = false`, jobID, leaseOwner, attempt, errMsg)
+	}
+	if err != nil {
 		return err
 	}
-	_, err := pool.Exec(ctx, `
-		UPDATE dms_svc.generation_job SET
-		  status = 'DEAD', finished_at = now(), last_error = $2
-		WHERE job_id = $1::uuid`, jobID, errMsg)
-	return err
+	if updated == 0 {
+		api.LogError("[DMS-QUEUE] finish job=%s owner=%s attempt=%d updated 0 rows — lease lost, leaving the row unchanged", jobID, leaseOwner, attempt)
+		return fmt.Errorf("generation job %s finish skipped: lease not owned by %s at attempt %d", jobID, leaseOwner, attempt)
+	}
+	return nil
+}
+
+func execGenerationJob(ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) (int64, error) {
+	tag, err := pool.Exec(ctx, sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }

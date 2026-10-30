@@ -6,6 +6,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
+	"CimplrCorpSaas/internal/logger"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -41,7 +42,7 @@ func GetHedgingProposalsAggregated(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Ensure hedging_proposal rows exist for approved bucketing exposures
-		_, _ = pool.Exec(ctx, `INSERT INTO hedging_proposal (exposure_header_id)
+		if _, err := pool.Exec(ctx, `INSERT INTO hedging_proposal (exposure_header_id)
 			SELECT h.exposure_header_id
 			FROM exposure_headers h
 			JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id
@@ -50,7 +51,9 @@ func GetHedgingProposalsAggregated(pool *pgxpool.Pool) http.HandlerFunc {
 			  AND lower(COALESCE(b.status_bucketing, '')) = 'approved'
 			  AND h.exposure_header_id NOT IN (
 				SELECT exposure_header_id FROM hedging_proposal
-			  )`, buNames)
+			  )`, buNames); err != nil {
+			logger.LogError("seed hedging_proposal rows failed: %v", err)
+		}
 
 		// Aggregate hedging proposals from approved bucketing only
 		query := `

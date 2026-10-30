@@ -35,13 +35,17 @@ func GetDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		  SELECT 
 		      e.entity AS bu,
 		      e.currency,
-		      COALESCE(SUM(CASE WHEN fb.order_type = 'Sell' THEN ABS(l.hedged_amount) ELSE 0 END),0) AS cover_taken_export,
-		      COALESCE(SUM(CASE WHEN fb.order_type = 'Buy'  THEN ABS(l.hedged_amount) ELSE 0 END),0) AS cover_taken_import
+		      COALESCE(SUM(CASE WHEN UPPER(TRIM(fb.order_type)) = 'SELL' THEN ABS(l.hedged_amount) ELSE 0 END),0) AS cover_taken_export,
+		      COALESCE(SUM(CASE WHEN UPPER(TRIM(fb.order_type)) = 'BUY'  THEN ABS(l.hedged_amount) ELSE 0 END),0) AS cover_taken_import
 		  FROM exposure_headers e
-		  LEFT JOIN exposure_hedge_links l 
+		  LEFT JOIN exposure_hedge_links l
 		      ON e.exposure_header_id = l.exposure_header_id
+		     AND COALESCE(l.is_active, true) = true
 		  LEFT JOIN forward_bookings fb
 		      ON l.booking_id = fb.system_transaction_id
+		     AND COALESCE(fb.is_deleted, false) = false
+		     AND UPPER(COALESCE(fb.processing_status, '')) = 'APPROVED'
+		     AND UPPER(COALESCE(fb.status, '')) <> 'CANCELLED'
 		  WHERE e.entity = ANY($1)
 		  GROUP BY e.entity, e.currency
 		)
@@ -55,8 +59,8 @@ func GetDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		    es.total_payable_exposure,
 		    cs.cover_taken_export,
 		    cs.cover_taken_import,
-		    (es.debitors - cs.cover_taken_export) AS outstanding_cover_export,
-		    ((es.creditors + es.lc + es.grn) - cs.cover_taken_import) AS outstanding_cover_import
+		    GREATEST(0, es.debitors - COALESCE(cs.cover_taken_export, 0)) AS outstanding_cover_export,
+		    GREATEST(0, (es.creditors + es.lc + es.grn) - COALESCE(cs.cover_taken_import, 0)) AS outstanding_cover_import
 		FROM exposure_summary es
 		LEFT JOIN cover_summary cs 
 		    ON es.bu = cs.bu AND es.currency = cs.currency;

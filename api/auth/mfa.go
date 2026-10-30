@@ -32,25 +32,52 @@ const (
 
 // ── MFA Handlers ──────────────────────────────────────────────────────────────
 
-// MFASetupHandler generates a new TOTP secret for the user.
-// POST /auth/mfa/setup  { "user_id": "..." }
+// MFASetupHandler generates a new TOTP secret for the logged-in caller.
+// When MFA is already active the current code is required.
+// POST /auth/mfa/setup  { "user_id": "...", "code": "123456" }
 func MFASetupHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
+			Code   string `json:"code"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"success": false, "error": constants.ErrUserIIsRequired,
-			})
-			return
-		}
-
-		if !isSessionValid(req.UserID) {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		session := callerSession(r, req.UserID)
+		if session == nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 				"success": false, "error": "Invalid session",
 			})
 			return
+		}
+		userID := session.UserID
+
+		var enabled sql.NullBool
+		var stored sql.NullString
+		if err := pool.QueryRow(r.Context(), `SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, userID).Scan(&enabled, &stored); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+				"success": false, "error": "Failed to load MFA state",
+			})
+			return
+		}
+		if enabled.Valid && enabled.Bool && stored.Valid && stored.String != "" {
+			current, err := openMFASecret(stored.String)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+					"success": false, "error": "Failed to load MFA state",
+				})
+				return
+			}
+			if ok, lockErr := checkTOTP(userID, current, req.Code); !ok {
+				msg := "Current MFA code is required to reset MFA"
+				if lockErr != nil {
+					msg = lockErr.Error()
+				}
+				LogSecurityEvent(r.Context(), pool, userID, "mfa_reset_denied", "", extractClientIPFromRequest(r))
+				writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+					"success": false, "error": msg,
+				})
+				return
+			}
 		}
 
 		secret, err := generateTOTPSecret()
@@ -60,14 +87,20 @@ func MFASetupHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			})
 			return
 		}
+		sealed, err := sealMFASecret(secret)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+				"success": false, "error": "Failed to generate MFA secret",
+			})
+			return
+		}
 
 		var email string
-		_ = pool.QueryRow(r.Context(), `SELECT email FROM users WHERE id = $1`, req.UserID).Scan(&email)
+		_ = pool.QueryRow(r.Context(), `SELECT email FROM users WHERE id = $1`, userID).Scan(&email)
 
-		// Store secret but don't enable yet
 		_, err = pool.Exec(r.Context(),
 			`UPDATE users SET mfa_secret = $1, mfa_enabled = false WHERE id = $2`,
-			secret, req.UserID,
+			sealed, userID,
 		)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
@@ -82,7 +115,7 @@ func MFASetupHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			issuer, email, secret, issuer, totpDigits, totpPeriod,
 		)
 
-		LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_setup_initiated", email, extractClientIPFromRequest(r))
+		LogSecurityEvent(r.Context(), pool, userID, "mfa_setup_initiated", email, extractClientIPFromRequest(r))
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"success":     true,
@@ -93,7 +126,7 @@ func MFASetupHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// MFAConfirmHandler verifies first TOTP code and activates MFA.
+// MFAConfirmHandler verifies the first TOTP code and activates MFA.
 // POST /auth/mfa/confirm  { "user_id": "...", "code": "123456" }
 func MFAConfirmHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -101,14 +134,22 @@ func MFAConfirmHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 			Code   string `json:"code"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || req.Code == "" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Code == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"success": false, "error": constants.ErrUserIDAndCodeRequired,
 			})
 			return
 		}
+		session := callerSession(r, req.UserID)
+		if session == nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+				"success": false, "error": "Invalid session",
+			})
+			return
+		}
+		userID := session.UserID
 
-		secret, err := getUserMFASecret(r.Context(), pool, req.UserID)
+		secret, err := getUserMFASecret(r.Context(), pool, userID)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"success": false, "error": "MFA setup not initiated. Call /auth/mfa/setup first",
@@ -116,15 +157,19 @@ func MFAConfirmHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !ValidateTOTP(secret, req.Code) {
-			LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_confirm_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
+		if ok, lockErr := checkTOTP(userID, secret, req.Code); !ok {
+			msg := "Invalid code. Please try again"
+			if lockErr != nil {
+				msg = lockErr.Error()
+			}
+			LogSecurityEvent(r.Context(), pool, userID, "mfa_confirm_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-				"success": false, "error": "Invalid code. Please try again",
+				"success": false, "error": msg,
 			})
 			return
 		}
 
-		_, err = pool.Exec(r.Context(), `UPDATE users SET mfa_enabled = true WHERE id = $1`, req.UserID)
+		_, err = pool.Exec(r.Context(), `UPDATE users SET mfa_enabled = true WHERE id = $1`, userID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 				"success": false, "error": "Failed to activate MFA",
@@ -132,9 +177,9 @@ func MFAConfirmHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_activated", "", extractClientIPFromRequest(r))
+		LogSecurityEvent(r.Context(), pool, userID, "mfa_activated", "", extractClientIPFromRequest(r))
 		if logger.GlobalLogger != nil {
-			logger.GlobalLogger.LogAudit(fmt.Sprintf("MFA activated for user %s", req.UserID))
+			logger.GlobalLogger.LogAudit(fmt.Sprintf("MFA activated for user %s", userID))
 		}
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -143,58 +188,75 @@ func MFAConfirmHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// MFAVerifyHandler validates a TOTP code during login. On success the session
-// is marked fully logged-in and the full session is returned.
-// POST /auth/mfa/verify  { "user_id": "...", "code": "123456" }
+// MFAVerifyHandler validates a TOTP code during login. On success the pending
+// session is marked fully logged in and returned.
+// POST /auth/mfa/verify  { "mfa_token": "...", "user_id": "...", "code": "123456" }
 func MFAVerifyHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
-			Code   string `json:"code"`
+			UserID   string `json:"user_id"`
+			MFAToken string `json:"mfa_token"`
+			MFACode  string `json:"mfa_code"`
+			Code     string `json:"code"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || req.Code == "" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Code == "" || (req.UserID == "" && req.MFAToken == "" && req.MFACode == "") {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"success": false, "error": constants.ErrUserIDAndCodeRequired,
 			})
 			return
 		}
+		var pending *UserSession
+		if c := strings.TrimSpace(req.MFACode); c != "" {
+			pending = ticketSession(c, false)
+		} else {
+			pending = pendingSession(req.MFAToken, req.UserID)
+		}
+		if pending == nil || (req.UserID != "" && pending.UserID != req.UserID) {
+			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+				"success": false, "error": "Login session not found. Please sign in again",
+			})
+			return
+		}
+		userID := pending.UserID
 
-		secret, err := getUserMFASecret(r.Context(), pool, req.UserID)
+		secret, err := getUserMFASecret(r.Context(), pool, userID)
 		if err != nil {
-			LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_verify_failed", "no secret configured", extractClientIPFromRequest(r))
+			LogSecurityEvent(r.Context(), pool, userID, "mfa_verify_failed", "no secret configured", extractClientIPFromRequest(r))
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"success": false, "error": "MFA is not set up for this account. Please set up MFA first via /auth/mfa/setup",
 			})
 			return
 		}
 
-		if !ValidateTOTP(secret, req.Code) {
-			LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_verify_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
+		if ok, lockErr := checkTOTP(userID, secret, req.Code); !ok {
+			msg := "Invalid MFA code"
+			if lockErr != nil {
+				msg = lockErr.Error()
+			}
+			LogSecurityEvent(r.Context(), pool, userID, "mfa_verify_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-				"success": false, "error": "Invalid MFA code",
+				"success": false, "error": msg,
 			})
 			return
 		}
 
-		// Mark session fully logged in
-		if globalAuthService != nil {
-			globalAuthService.CompleteMFALogin(req.UserID)
-		}
-
-		// Return the now-active session
 		var session *UserSession
 		if globalAuthService != nil {
-			for _, s := range globalAuthService.GetActiveSessions() {
-				if s.UserID == req.UserID {
-					session = s
-					break
-				}
-			}
+			session = globalAuthService.completeMFASession(pending)
+		}
+		if c := strings.TrimSpace(req.MFACode); c != "" {
+			consumeTicket(c)
+		}
+		if session == nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+				"success": false, "error": "Login session not found. Please sign in again",
+			})
+			return
 		}
 
-		LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_verify_success", "", extractClientIPFromRequest(r))
+		LogSecurityEvent(r.Context(), pool, userID, "mfa_verify_success", "", extractClientIPFromRequest(r))
 		if logger.GlobalLogger != nil {
-			logger.GlobalLogger.LogAudit(fmt.Sprintf("MFA verified for user %s", req.UserID))
+			logger.GlobalLogger.LogAudit(fmt.Sprintf("MFA verified for user %s", userID))
 		}
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -203,7 +265,7 @@ func MFAVerifyHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// MFADisableHandler turns off MFA for a user (requires valid code).
+// MFADisableHandler turns off MFA for the caller (requires a valid code).
 // POST /auth/mfa/disable  { "user_id": "...", "code": "123456" }
 func MFADisableHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -211,14 +273,22 @@ func MFADisableHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 			Code   string `json:"code"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || req.Code == "" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Code == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"success": false, "error": constants.ErrUserIDAndCodeRequired,
 			})
 			return
 		}
+		session := callerSession(r, req.UserID)
+		if session == nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+				"success": false, "error": "Invalid session",
+			})
+			return
+		}
+		userID := session.UserID
 
-		secret, err := getUserMFASecret(r.Context(), pool, req.UserID)
+		secret, err := getUserMFASecret(r.Context(), pool, userID)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"success": false, "error": "MFA is not set up for this account",
@@ -226,15 +296,19 @@ func MFADisableHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !ValidateTOTP(secret, req.Code) {
-			LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_disable_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
+		if ok, lockErr := checkTOTP(userID, secret, req.Code); !ok {
+			msg := "Invalid MFA code"
+			if lockErr != nil {
+				msg = lockErr.Error()
+			}
+			LogSecurityEvent(r.Context(), pool, userID, "mfa_disable_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-				"success": false, "error": "Invalid MFA code",
+				"success": false, "error": msg,
 			})
 			return
 		}
 
-		_, err = pool.Exec(r.Context(), `UPDATE users SET mfa_enabled = false, mfa_secret = NULL WHERE id = $1`, req.UserID)
+		_, err = pool.Exec(r.Context(), `UPDATE users SET mfa_enabled = false, mfa_secret = NULL WHERE id = $1`, userID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 				"success": false, "error": "Failed to disable MFA",
@@ -242,9 +316,9 @@ func MFADisableHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		LogSecurityEvent(r.Context(), pool, req.UserID, "mfa_disabled", "", extractClientIPFromRequest(r))
+		LogSecurityEvent(r.Context(), pool, userID, "mfa_disabled", "", extractClientIPFromRequest(r))
 		if logger.GlobalLogger != nil {
-			logger.GlobalLogger.LogAudit(fmt.Sprintf("MFA disabled for user %s", req.UserID))
+			logger.GlobalLogger.LogAudit(fmt.Sprintf("MFA disabled for user %s", userID))
 		}
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -253,23 +327,25 @@ func MFADisableHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// MFAStatusHandler returns whether MFA is enabled for a user.
+// MFAStatusHandler returns whether MFA is enabled for the caller.
 // POST /auth/mfa/status  { "user_id": "..." }
 func MFAStatusHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"success": false, "error": constants.ErrUserIIsRequired,
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		session := callerSession(r, req.UserID)
+		if session == nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+				"success": false, "error": "Invalid session",
 			})
 			return
 		}
 
 		var mfaEnabled sql.NullBool
 		var mfaSecret sql.NullString
-		err := pool.QueryRow(r.Context(), `SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, req.UserID).Scan(&mfaEnabled, &mfaSecret)
+		err := pool.QueryRow(r.Context(), `SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, session.UserID).Scan(&mfaEnabled, &mfaSecret)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]interface{}{
 				"success": false, "error": "User not found",
@@ -299,17 +375,20 @@ func (a *AuthService) CompleteMFALogin(userID string) {
 	}
 }
 
-// isSessionValid checks if a user has an active (logged-in) session.
-func isSessionValid(userID string) bool {
-	if globalAuthService == nil {
-		return false
+// completeMFASession marks the given pending session logged in when it is still live.
+func (a *AuthService) completeMFASession(pending *UserSession) *UserSession {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	live, ok := a.users[pending.SessionID]
+	if !ok || live != pending {
+		return nil
 	}
-	for _, s := range globalAuthService.GetActiveSessions() {
-		if s.UserID == userID {
-			return true
-		}
+	live.IsLoggedIn = true
+	live.lastActivityUnix = time.Now().Unix()
+	if a.MaxLoginAttempts > 0 {
+		delete(a.failedAttempts, live.UserID)
 	}
-	return false
+	return live
 }
 
 // getUserMFASecret retrieves the MFA secret for a user, returning error if not set.
@@ -319,7 +398,7 @@ func getUserMFASecret(ctx context.Context, pool *pgxpool.Pool, userID string) (s
 	if err != nil || !mfaSecret.Valid || mfaSecret.String == "" {
 		return "", fmt.Errorf("no MFA secret")
 	}
-	return mfaSecret.String, nil
+	return openMFASecret(mfaSecret.String)
 }
 
 // ── TOTP core ─────────────────────────────────────────────────────────────────
@@ -334,14 +413,8 @@ func generateTOTPSecret() (string, error) {
 
 // ValidateTOTP checks code against the secret allowing ±totpSkew windows.
 func ValidateTOTP(secret, code string) bool {
-	now := time.Now().Unix()
-	for i := -totpSkew; i <= totpSkew; i++ {
-		t := (now / totpPeriod) + int64(i)
-		if generateTOTPCode(secret, t) == code {
-			return true
-		}
-	}
-	return false
+	_, ok := matchTOTP(secret, code)
+	return ok
 }
 
 func generateTOTPCode(secret string, counter int64) string {

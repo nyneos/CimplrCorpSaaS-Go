@@ -1,6 +1,7 @@
 package fx
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -45,7 +46,7 @@ func NewFXAuditHandler(pool *pgxpool.Pool, cfg fxAuditConfig) http.HandlerFunc {
 
 		var req map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeFXAuditError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			writeFXAuditError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 

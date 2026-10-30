@@ -17,6 +17,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	"CimplrCorpSaas/api/investment/uploadutil"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
@@ -160,6 +161,9 @@ type maturityDashboardEnvelope struct {
 	maturityDashboardRequest
 }
 
+// maxNearMaturityDaysAhead caps the look-ahead window of GetFDsNearMaturity.
+const maxNearMaturityDaysAhead = 3650
+
 func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var env maturityDashboardEnvelope
@@ -175,6 +179,9 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+		if req.DaysAhead > maxNearMaturityDaysAhead {
+			req.DaysAhead = maxNearMaturityDaysAhead
 		}
 		if req.DaysAhead <= 0 {
 			req.DaysAhead = 30
@@ -207,15 +214,13 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			    AND ncc.is_deleted = false
 			)`,
 		}
-		args := []interface{}{}
-		argIdx := 1
+		args := []interface{}{req.DaysAhead}
+		argIdx := 2
 
 		if req.IncludePast {
-			conditions = append(conditions,
-				fmt.Sprintf("m.maturity_date <= CURRENT_DATE + INTERVAL '%d days'", req.DaysAhead))
+			conditions = append(conditions, "m.maturity_date <= CURRENT_DATE + make_interval(days => $1)")
 		} else {
-			conditions = append(conditions, fmt.Sprintf(
-				"m.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '%d days'", req.DaysAhead))
+			conditions = append(conditions, "m.maturity_date BETWEEN CURRENT_DATE AND CURRENT_DATE + make_interval(days => $1)")
 		}
 		if !appendClosureScopeConditions(ctx, w, &conditions, &args, &argIdx, closureScopeFilter{EntityCol: "b.entity_id", BankCol: "m.bank_id", EntityID: req.EntityID, BankID: req.BankID}) {
 			return
@@ -223,9 +228,13 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 		where := strings.Join(conditions, " AND ")
 
 		var totalCount int
-		_ = pool.QueryRow(ctx,
+		if err := pool.QueryRow(ctx,
 			fmt.Sprintf("SELECT COUNT(DISTINCT m.fd_id) FROM investment.fd_master m LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id WHERE %s", where),
-			args...).Scan(&totalCount)
+			args...).Scan(&totalCount); err != nil {
+			api.LogError("[FDClosure] near-maturity count: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to count FDs near maturity")
+			return
+		}
 
 		dataSQL := fmt.Sprintf(`
 			SELECT
@@ -548,7 +557,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		isMultipart := strings.Contains(strings.ToLower(r.Header.Get(constants.ContentTypeText)), "multipart/form-data")
 		if isMultipart {
 			if err := r.ParseMultipartForm(32 << 20); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Invalid multipart form: "+err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid multipart form: "+errtext.Detail(w, err))
 				return
 			}
 			payload := strings.TrimSpace(r.FormValue("payload"))
@@ -607,13 +616,13 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 						api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
 						return
 					}
-					api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+errtext.Detail(w, err))
 					return
 				}
 				var uploadErr error
 				uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, moduleKey, userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "bank_advice", "bankAdviceDocument", "attachment", "file", "files"))
 				if uploadErr != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "S3 upload failed: "+uploadErr.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "S3 upload failed: "+errtext.Detail(w, uploadErr))
 					return
 				}
 			}
@@ -939,13 +948,13 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		if instErr != nil {
 			cleanupUpload()
 			api.LogError("[FDClosure] InitiateClosure approval engine: %v", instErr)
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to start approval workflow: "+instErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to start approval workflow: "+errtext.Detail(w, instErr))
 			return
 		}
 		if instID != "" {
 			if _, err = tx.Exec(ctx, `UPDATE investment.fd_closure_request SET approval_instance_id=$1 WHERE closure_request_id=$2`, instID, closureRequestID); err != nil {
 				cleanupUpload()
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to link approval instance: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to link approval instance: "+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -1958,7 +1967,10 @@ func GetFDClosureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 			ClosureRequestID string `json:"closure_request_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			api.RespondWithResult(w, false, "Invalid JSON: "+errtext.Detail(w, err))
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `SELECT entity_id::text FROM investment.fd_closure_request WHERE closure_request_id::text = $1`, req.ClosureRequestID) {
 			return
 		}
 		closureRequestID := strings.TrimSpace(req.ClosureRequestID)
@@ -1982,7 +1994,7 @@ func GetFDClosureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			api.RespondWithResult(w, false, "Failed to generate download url: "+errtext.Detail(w, err))
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
@@ -1999,7 +2011,10 @@ func GetFDClosureBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 			ClosureRequestIDs []string `json:"closure_request_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			api.RespondWithResult(w, false, "Invalid JSON: "+errtext.Detail(w, err))
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `SELECT entity_id::text FROM investment.fd_closure_request WHERE closure_request_id::text = ANY($1)`, req.ClosureRequestIDs) {
 			return
 		}
 		if len(req.ClosureRequestIDs) == 0 {
@@ -2077,6 +2092,9 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `SELECT entity_id::text FROM investment.fd_closure_request WHERE closure_request_id::text = ANY($1)`, req.ClosureRequestIDs) {
+			return
+		}
 		if len(req.ClosureRequestIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "closure_request_ids are required")
 			return
@@ -2090,6 +2108,7 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		engineActed, directActed := 0, 0
 		var errors []string
 
+		var notifyIDs []string
 		for _, crID := range req.ClosureRequestIDs {
 			var fdID, closureType, closureStatus string
 			var principalAmt, accruedInt, tdsAmt, penaltyAmt, netPayout float64
@@ -2128,7 +2147,7 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 
 			closureRow, rowErr := loadFDClosureRequestRow(ctx, pool, crID)
 			if rowErr != nil {
-				errors = append(errors, crID+": "+rowErr.Error())
+				errors = append(errors, crID+": "+errtext.Text(rowErr))
 				continue
 			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{EventCode: common.TriggerPreApprove, HandlerName: "BulkApproveClosureRequest",
@@ -2139,17 +2158,18 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
-				errors = append(errors, crID+": "+actionErr.Error())
+				errors = append(errors, crID+": "+errtext.Text(actionErr))
 				continue
 			}
 			if actionRes.Acted {
 				engineActed++ // action recorded; count regardless of whether this is the final eye
+				notifyIDs = append(notifyIDs, crID)
 				var instTransactionType string
 				_ = pool.QueryRow(ctx, `SELECT transaction_type FROM uam.approval_instance WHERE instance_id=$1`, actionRes.InstanceID).Scan(&instTransactionType)
 				if actionRes.InstanceStatus == constants.StatusApproved && instTransactionType != "FD_CLOSURE_DELETE" && !isDeleteApproval {
-					if postErr := postClosureJournals(ctx, PostClosureJournalsParams{Pool: pool, ClosureRequestID: crID, FDID: fdID, ClosureType: closureType, EntityID: entityID, EntityName: entityName, PrincipalAmt: principalAmt, AccruedInterest: accruedInt, TDSAmt: tdsAmt, PenaltyAmt: penaltyAmt, NetPayout: netPayout, ApprovedBy: req.UserID, ApprovedByEmail: userEmail}); postErr != nil {
+					if postErr := postClosureJournals(ctx, PostClosureJournalsParams{Pool: pool, ClosureRequestID: crID, FDID: fdID, ClosureType: closureType, EntityID: entityID, EntityName: entityName, PrincipalAmt: principalAmt, AccruedInterest: accruedInt, TDSAmt: tdsAmt, PenaltyAmt: penaltyAmt, NetPayout: netPayout, ApprovedBy: req.UserID, ApprovedByEmail: userEmail}); postErr != nil && !isClosureAlreadyPosted(postErr) {
 						api.LogError("[FDClosure] postClosureJournals failed for %s: %v", crID, postErr)
-						errors = append(errors, crID+": journal posting failed: "+postErr.Error())
+						errors = append(errors, crID+": journal posting failed: "+errtext.Text(postErr))
 					}
 				}
 			} else {
@@ -2174,7 +2194,7 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 						SubmittedByEmail: userEmail,
 					})
 					if instErr != nil {
-						errors = append(errors, crID+": delete approval instance missing and recreate failed: "+instErr.Error())
+						errors = append(errors, crID+": delete approval instance missing and recreate failed: "+errtext.Text(instErr))
 						continue
 					}
 					if instID == "" {
@@ -2182,12 +2202,12 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 						continue
 					}
 					if _, updErr := pool.Exec(ctx, `UPDATE investment.fd_closure_request SET approval_instance_id=$1, updated_at=NOW() WHERE closure_request_id=$2`, instID, crID); updErr != nil {
-						errors = append(errors, crID+": delete approval instance created but linking failed: "+updErr.Error())
+						errors = append(errors, crID+": delete approval instance created but linking failed: "+errtext.Text(updErr))
 						continue
 					}
 					retryRes, retryErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 					if retryErr != nil {
-						errors = append(errors, crID+": "+retryErr.Error())
+						errors = append(errors, crID+": "+errtext.Text(retryErr))
 						continue
 					}
 					if !retryRes.Acted {
@@ -2199,17 +2219,19 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 						continue
 					}
 					engineActed++
+					notifyIDs = append(notifyIDs, crID)
 					continue
 				}
-				if postErr := postClosureJournals(ctx, PostClosureJournalsParams{Pool: pool, ClosureRequestID: crID, FDID: fdID, ClosureType: closureType, EntityID: entityID, EntityName: entityName, PrincipalAmt: principalAmt, AccruedInterest: accruedInt, TDSAmt: tdsAmt, PenaltyAmt: penaltyAmt, NetPayout: netPayout, ApprovedBy: req.UserID, ApprovedByEmail: userEmail}); postErr != nil {
-					errors = append(errors, crID+": "+postErr.Error())
+				if postErr := postClosureJournals(ctx, PostClosureJournalsParams{Pool: pool, ClosureRequestID: crID, FDID: fdID, ClosureType: closureType, EntityID: entityID, EntityName: entityName, PrincipalAmt: principalAmt, AccruedInterest: accruedInt, TDSAmt: tdsAmt, PenaltyAmt: penaltyAmt, NetPayout: netPayout, ApprovedBy: req.UserID, ApprovedByEmail: userEmail}); postErr != nil && !isClosureAlreadyPosted(postErr) {
+					errors = append(errors, crID+": "+errtext.Text(postErr))
 					continue
 				}
 				directActed++
+				notifyIDs = append(notifyIDs, crID)
 			}
 		}
 
-		for _, crID := range req.ClosureRequestIDs {
+		for _, crID := range notifyIDs {
 			go func(id, uEmail string) {
 				defer func() { recover() }() //nolint:errcheck
 				notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/closure/bulk-approve", id, map[string]interface{}{
@@ -2256,6 +2278,9 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `SELECT entity_id::text FROM investment.fd_closure_request WHERE closure_request_id::text = ANY($1)`, req.ClosureRequestIDs) {
+			return
+		}
 		if len(req.ClosureRequestIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "closure_request_ids are required")
 			return
@@ -2293,7 +2318,7 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 
 			closureRow, rowErr := loadFDClosureRequestRow(ctx, pool, crID)
 			if rowErr != nil {
-				errors = append(errors, crID+": "+rowErr.Error())
+				errors = append(errors, crID+": "+errtext.Text(rowErr))
 				continue
 			}
 			if ok, pmsg := fdEnforceInline(ctx, r, pool, enforceCtx{EventCode: common.TriggerPreReject, HandlerName: "BulkRejectClosureRequest",
@@ -2304,7 +2329,7 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: crID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
-				errors = append(errors, crID+": "+actionErr.Error())
+				errors = append(errors, crID+": "+errtext.Text(actionErr))
 				continue
 			}
 			if actionRes.Acted {
@@ -2395,6 +2420,9 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		var req deleteClosureRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `SELECT entity_id::text FROM investment.fd_closure_request WHERE closure_request_id::text = $1`, req.ClosureRequestID) {
 			return
 		}
 		if req.ClosureRequestID == "" {
@@ -2674,6 +2702,9 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 	// if two concurrent requests both pass the pre-call status check.
 	var currentStatus string
 	_ = tx.QueryRow(ctx, `SELECT closure_status FROM investment.fd_closure_request WHERE closure_request_id=$1 AND is_deleted=false FOR UPDATE`, closureRequestID).Scan(&currentStatus)
+	if currentStatus == closureStatusPosted {
+		return fmt.Errorf("closure %s: %w", closureRequestID, errClosureAlreadyPosted)
+	}
 	if currentStatus != constants.StatusPendingApproval {
 		return fmt.Errorf("closure %s status is %s — skipped", closureRequestID, currentStatus)
 	}
@@ -3603,7 +3634,7 @@ func init() {
 						break
 					}
 				}
-				if postErr := postClosureJournals(ctx, PostClosureJournalsParams{Pool: pool, ClosureRequestID: recordID, FDID: fdID, ClosureType: closureType, EntityID: entityID, EntityName: entityName, PrincipalAmt: principalAmt, AccruedInterest: accruedInterest, TDSAmt: tdsAmt, PenaltyAmt: penaltyAmt, NetPayout: netPayout, ApprovedBy: approvedBy, ApprovedByEmail: actorEmail}); postErr != nil {
+				if postErr := postClosureJournals(ctx, PostClosureJournalsParams{Pool: pool, ClosureRequestID: recordID, FDID: fdID, ClosureType: closureType, EntityID: entityID, EntityName: entityName, PrincipalAmt: principalAmt, AccruedInterest: accruedInterest, TDSAmt: tdsAmt, PenaltyAmt: penaltyAmt, NetPayout: netPayout, ApprovedBy: approvedBy, ApprovedByEmail: actorEmail}); postErr != nil && !isClosureAlreadyPosted(postErr) {
 					api.LogError("[FDClosure] postFinalizeHook journal posting failed for %s: %v", recordID, postErr)
 				}
 			} else if finalStatus == constants.StatusRejected {

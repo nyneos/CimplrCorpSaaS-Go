@@ -3,6 +3,7 @@ package fdMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"fmt"
 	"net/http"
 	"strings"
@@ -32,7 +33,7 @@ func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		schemaName, tableName := splitQualifiedTable(auditTable)
 		cols, err := loadTableColumns(ctx, pgxPool, schemaName, tableName)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+errtext.Detail(w, err))
 			return
 		}
 		refCol := pickFirstExistingColumn(cols, "fd_id", "master_id", "confirmation_id")
@@ -43,14 +44,14 @@ func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, fmt.Sprintf("SELECT * FROM %s WHERE %s = $1 ORDER BY requested_at DESC", auditTable, refCol), fdID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
 
 		payload, err := rowsToMaps(rows)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+errtext.Detail(w, err))
 			return
 		}
 		uploadRows, err := pgxPool.Query(ctx, `
@@ -74,13 +75,13 @@ func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND a.parent_record_id = $1
 			ORDER BY a.requested_at DESC`, fdID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+errtext.Detail(w, err))
 			return
 		}
 		defer uploadRows.Close()
 		uploadPayload, err := rowsToMaps(uploadRows)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+errtext.Detail(w, err))
 			return
 		}
 		payload = append(payload, uploadPayload...)
@@ -114,7 +115,7 @@ func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(aie.is_escalated,false)   AS is_escalated
 			FROM investment.fd_audit_cashflow_schedule a
 			LEFT JOIN LATERAL (
-				SELECT ai.* FROM uam.approval_instance ai
+				SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 				WHERE ai.record_id = a.audit_id::text
 				  AND ai.module_code = 'FIXED_DEPOSIT'
 				  AND ai.status = 'PENDING'
@@ -123,7 +124,7 @@ func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) ai ON true
 			LEFT JOIN LATERAL (
-				SELECT aie.* FROM uam.approval_instance_eye aie
+				SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 				WHERE aie.instance_id = ai.instance_id
 				  AND aie.status = 'ACTIVE'
 				ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -146,14 +147,14 @@ func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
 
 		payload, err := rowsToMaps(rows)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+errtext.Detail(w, err))
 			return
 		}
 		if payload == nil {
@@ -181,13 +182,13 @@ func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				  AND a.parent_record_id = $1
 				ORDER BY a.requested_at DESC`, fdID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+errtext.Detail(w, err))
 				return
 			}
 			defer uploadRows.Close()
 			uploadPayload, err := rowsToMaps(uploadRows)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+errtext.Detail(w, err))
 				return
 			}
 			payload = append(payload, uploadPayload...)

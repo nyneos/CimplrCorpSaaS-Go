@@ -33,7 +33,8 @@ type RateEntry struct {
 	InrEquivalentRate float64 `json:"inrEquivalentRate"`
 }
 
-// init tries to load the rate file; if it fails, it fallbacks to a minimal set.
+// init tries to load the rate file. If every path fails, the error is logged and
+// no rate table is installed.
 func init() {
 	// Try a few common relative paths so running from different working directories works,
 	// plus a path anchored to this source file's own location (works regardless of the
@@ -52,13 +53,9 @@ func init() {
 		}
 	}
 
-	logger.LogError("ticker: failed to load rate.json from known paths: %v, using minimal fallback", lastErr)
-	inrRates = map[string]float64{
-		"USD": 83.1,
-		"EUR": 90.2,
-		"GBP": 105.5,
-		"INR": 1.0,
-	}
+	// Do not invent rates. A missing rate.json leaves inrRates nil so callers
+	// skip unconverted amounts instead of treating every currency as 1.0.
+	logger.LogError("ticker: failed to load rate.json from known paths: %v", lastErr)
 }
 
 // LoadInrRates reads the given JSON file and populates the inrRates map.
@@ -171,9 +168,10 @@ func RateBetween(base, target string) (float64, error) {
 }
 
 // InrEquivalentRates returns a copy of INR-per-unit rates (same as rate.json inrEquivalentRate).
+// An empty map means rate.json was not loaded; INR is not invented as 1.0 in that case.
 func InrEquivalentRates() map[string]float64 {
-	if inrRates == nil {
-		return map[string]float64{"INR": 1.0}
+	if len(inrRates) == 0 {
+		return map[string]float64{}
 	}
 	out := make(map[string]float64, len(inrRates))
 	for code, rate := range inrRates {
@@ -183,18 +181,22 @@ func InrEquivalentRates() map[string]float64 {
 }
 
 // ConvertAmountToINR converts amount in the given currency to INR using loaded ticker rates.
-// Empty, unknown, or INR currency returns the amount unchanged when no rate is available.
+// INR is already the quote currency, so it is returned unchanged. An empty or unknown
+// currency, or a missing rate file, is skipped (0) rather than valued at 1.0.
 func ConvertAmountToINR(amount float64, currency string) float64 {
 	if amount == 0 {
 		return 0
 	}
 	cur := strings.ToUpper(strings.TrimSpace(currency))
-	if cur == "" || cur == "INR" {
+	if cur == "INR" {
 		return amount
+	}
+	if cur == "" {
+		return 0
 	}
 	rate, err := RateBetween(cur, "INR")
 	if err != nil || rate == 0 {
-		return amount
+		return 0
 	}
 	return amount * rate
 }
@@ -203,6 +205,9 @@ func ConvertAmountToINR(amount float64, currency string) float64 {
 // the resulting payload (already ready to encode to JSON), an HTTP status
 // code and an error (nil on success). Call this directly from other handlers.
 func ProcessTicker(req TickerRequest) (interface{}, int, error) {
+	if len(inrRates) == 0 {
+		return nil, http.StatusServiceUnavailable, fmt.Errorf("FX rates are not loaded")
+	}
 	// normalize bases
 	base := strings.ToUpper(strings.TrimSpace(req.Base))
 	bases := make([]string, 0)
@@ -310,11 +315,19 @@ func GetInrRatesHandler() http.Handler {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
+		if len(inrRates) == 0 {
+			api.RespondEnvelopeError(w, http.StatusServiceUnavailable, "FX rates are not loaded", "FX_RATES_UNAVAILABLE")
+			return
+		}
 		api.RespondEnvelopeSuccess(w, "Success", InrEquivalentRates())
 	})
 }
 
 func tickerHandler(w http.ResponseWriter, r *http.Request) {
+	if len(inrRates) == 0 {
+		api.RespondEnvelopeError(w, http.StatusServiceUnavailable, "FX rates are not loaded", "FX_RATES_UNAVAILABLE")
+		return
+	}
 
 	var req TickerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

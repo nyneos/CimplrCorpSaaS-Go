@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -67,6 +69,7 @@ type owOutboxRow struct {
 	CorrelationID   string
 	RecipientUserID string
 	CcEmails        string
+	LeaseToken      string
 }
 
 type owSendPayload struct {
@@ -106,7 +109,85 @@ type owItemResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
+const (
+	// Written immediately before the HTTP call. A stale row still carrying this
+	// may already have been accepted, so the reaper must not send it again.
+	owLastErrDispatching = "dispatching:"
+	// Written after the endpoint reports success, before the SENT status update.
+	// The reaper finishes SENT from this marker and does not send again.
+	owLastErrSendAccepted = "send accepted"
+	owAmbiguousSendPrefix = "ambiguous send:"
+	// Added to the client timeout. Default timeout is 120s, so the lease is 3 minutes.
+	owStaleMargin = 60 * time.Second
+)
+
+// errAmbiguousSend marks a call whose request may have been accepted.
+var errAmbiguousSend = errors.New("ambiguous send")
+
+func owSendTimeout() time.Duration {
+	secs := owGetenvInt("OUTBOX_WORKER_TIMEOUT_SECS", 120)
+	if secs < 1 {
+		secs = 120
+	}
+	return time.Duration(secs) * time.Second
+}
+
+func owClientTimeout(hasAttachments bool) time.Duration {
+	timeout := owSendTimeout()
+	if hasAttachments && timeout < 60*time.Second {
+		return 60 * time.Second
+	}
+	return timeout
+}
+
+func owProcessingStaleAfter() time.Duration {
+	timeout := owSendTimeout()
+	if timeout < 60*time.Second {
+		timeout = 60 * time.Second
+	}
+	return timeout + owStaleMargin
+}
+
+func owIsAmbiguousSendErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errAmbiguousSend) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func owAmbiguousReason(err error) string {
+	if err == nil {
+		return owAmbiguousSendPrefix + " outcome unknown"
+	}
+	msg := err.Error()
+	if errors.Is(err, context.Canceled) || strings.Contains(msg, "context cancelled") {
+		return owAmbiguousSendPrefix + " context cancelled; outcome unknown"
+	}
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) || strings.Contains(strings.ToLower(msg), "timeout") {
+		return owAmbiguousSendPrefix + " timeout; outcome unknown"
+	}
+	return owAmbiguousSendPrefix + " incomplete response; outcome unknown"
+}
+
+func owDefiniteSendErr(err error) string {
+	if err == nil {
+		return "send endpoint request failed"
+	}
+	msg := err.Error()
+	if strings.HasPrefix(msg, "endpoint HTTP ") || strings.HasPrefix(msg, "json:") {
+		return owTruncate(msg, 300)
+	}
+	return "send endpoint request failed"
+}
+
 func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string, batchSize int) {
+	owReapStaleProcessing(ctx, pool, batchSize)
+
 	const selectQ = `
 		SELECT o.outbox_id, o.channel,
 		       o.recipient_email, o.recipient_name,
@@ -167,33 +248,36 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 		logger.LogError("[outbox-worker] rows iteration error: %v", rows.Err())
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		logger.LogError("[outbox-worker] commit read tx: %v", err)
-		return
-	}
-
-	if len(batch) == 0 {
-		return
-	}
-	logger.LogInfo("[outbox-worker] picked up %d rows", len(batch))
-
+	// Claim while the SKIP LOCKED row locks are still held. The status predicate
+	// stays conditional so a second worker cannot send the same row.
 	var toSend []owOutboxRow
 	for _, row := range batch {
-		n, err := owExecRowsAffected(ctx, pool,
+		row.LeaseToken = "claimed:" + row.OutboxID + ":" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		ct, err := tx.Exec(ctx,
 			`UPDATE notification_svc.outbox
-			    SET processing_status = 'PROCESSING', processed_at = now()
+			    SET processing_status = 'PROCESSING', processed_at = now(), last_error = $2
 			  WHERE outbox_id = $1 AND processing_status = 'PENDING'`,
-			row.OutboxID)
-		if err != nil || n == 0 {
-			logger.LogError("[outbox-worker] outbox_id=%s already claimed or error: %v", row.OutboxID, err)
+			row.OutboxID, row.LeaseToken)
+		if err != nil {
+			logger.LogError("[outbox-worker] outbox_id=%s claim: %v", row.OutboxID, err)
+			return
+		}
+		if ct.RowsAffected() == 0 {
+			logger.LogError("[outbox-worker] outbox_id=%s already claimed", row.OutboxID)
 			continue
 		}
 		toSend = append(toSend, row)
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		logger.LogError("[outbox-worker] commit claim tx: %v", err)
+		return
+	}
+
 	if len(toSend) == 0 {
 		return
 	}
+	logger.LogInfo("[outbox-worker] picked up %d rows", len(toSend))
 
 	owApplyDmsEmailCovers(ctx, pool, toSend)
 
@@ -235,57 +319,73 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 		return
 	}
 
-	resultMap := owCallEndpoint(ctx, endpointURL, payloads)
+	dispatched, dispatchPayloads := owMarkDispatching(ctx, pool, ready, payloads)
+	if len(dispatchPayloads) == 0 {
+		return
+	}
 
-	for _, p := range payloads {
+	resultMap, callErr := owCallEndpoint(ctx, endpointURL, dispatchPayloads)
+	if callErr != nil && owIsAmbiguousSendErr(callErr) {
+		reason := owAmbiguousReason(callErr)
+		for _, row := range dispatched {
+			owRecordAmbiguous(ctx, pool, row, reason)
+		}
+		return
+	}
+	if callErr != nil {
+		msg := owDefiniteSendErr(callErr)
+		for _, row := range dispatched {
+			owHandleFailure(ctx, pool, row, msg)
+		}
+		return
+	}
+
+	for _, p := range dispatchPayloads {
 		if res, ok := resultMap[p.OutboxID]; ok && !res.Success {
 			logger.LogError("[outbox-worker] NS send failed outbox=%s: %s", p.OutboxID, res.Error)
 		}
 	}
 
-	for _, row := range ready {
+	for _, row := range dispatched {
 		res, found := resultMap[row.OutboxID]
 		if !found {
 			owHandleFailure(ctx, pool, row, "send endpoint returned no result for this outbox_id")
 			continue
 		}
 		if res.Success {
-			_ = owExec(ctx, pool,
-				`UPDATE notification_svc.outbox
-				    SET processing_status = 'SENT', sent_at = now(), last_error = NULL
-				  WHERE outbox_id = $1`,
-				row.OutboxID)
-			owInsertHistory(ctx, pool, row, "SENT", res.MessageID, res.MessageID, row.RetryCount+1)
-			logger.LogInfo("[outbox-worker] SENT outbox_id=%s to=%s", row.OutboxID, row.RecipientEmail)
-		} else {
-			owHandleFailure(ctx, pool, row, res.Error)
+			owMarkSent(ctx, pool, row, res.MessageID)
+			continue
 		}
+		errMsg := res.Error
+		if strings.TrimSpace(errMsg) == "" {
+			errMsg = "send endpoint reported failure"
+		}
+		owHandleFailure(ctx, pool, row, errMsg)
 	}
 }
 
-func owCallEndpoint(ctx context.Context, endpointURL string, payloads []owSendPayload) map[string]owItemResult {
+func owCallEndpoint(ctx context.Context, endpointURL string, payloads []owSendPayload) (map[string]owItemResult, error) {
 	resultMap := make(map[string]owItemResult, len(payloads))
 
 	body, err := json.Marshal(payloads)
 	if err != nil {
 		logger.LogError("[outbox-worker] marshal payload: %v", err)
-		return resultMap
+		return resultMap, err
 	}
 
-	timeoutSecs := owGetenvInt("OUTBOX_WORKER_TIMEOUT_SECS", 120)
+	hasAttachments := false
 	for _, p := range payloads {
-		if len(p.Attachments) > 0 && timeoutSecs < 60 {
-			timeoutSecs = 60
+		if len(p.Attachments) > 0 {
+			hasAttachments = true
 			break
 		}
 	}
-	timeout := time.Duration(timeoutSecs) * time.Second
-	client := &http.Client{Timeout: timeout}
+	client := &http.Client{Timeout: owClientTimeout(hasAttachments)}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
 	if err != nil {
 		logger.LogError("[outbox-worker] build HTTP request: %v", err)
-		return resultMap
+		return resultMap, err
 	}
 	req.Header.Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	if apiKey := strings.TrimSpace(os.Getenv("SEND_ENDPOINT_API_KEY")); apiKey != "" {
@@ -295,57 +395,337 @@ func owCallEndpoint(ctx context.Context, endpointURL string, payloads []owSendPa
 	resp, err := client.Do(req)
 	if err != nil {
 		logger.LogError("[outbox-worker] POST **** failed: %v", err)
-		return resultMap
+		if owIsAmbiguousSendErr(err) {
+			return resultMap, fmt.Errorf("%w: %s", errAmbiguousSend, owAmbiguousReason(err))
+		}
+		return resultMap, err
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		logger.LogError("[outbox-worker] read response: %v", readErr)
+		return resultMap, fmt.Errorf("%w: %s", errAmbiguousSend, owAmbiguousReason(readErr))
+	}
+	if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusGatewayTimeout {
+		logger.LogInfo("[outbox-worker] endpoint returned HTTP %d: %s",
+			resp.StatusCode, owTruncate(string(respBody), 300))
+		return resultMap, fmt.Errorf("%w: %s timeout; outcome unknown", errAmbiguousSend, owAmbiguousSendPrefix)
+	}
 	if resp.StatusCode != http.StatusOK {
 		logger.LogInfo("[outbox-worker] endpoint returned HTTP %d: %s",
 			resp.StatusCode, owTruncate(string(respBody), 300))
-		return resultMap
+		return resultMap, fmt.Errorf("endpoint HTTP %d", resp.StatusCode)
 	}
 
 	var bulk owBulkResponse
 	if err := json.Unmarshal(respBody, &bulk); err != nil {
 		logger.LogError("[outbox-worker] decode response: %v", err)
-		return resultMap
+		return resultMap, fmt.Errorf("%w: %s", errAmbiguousSend, owAmbiguousReason(err))
 	}
 
 	for _, item := range bulk.Results {
 		resultMap[item.OutboxID] = item
 	}
-	return resultMap
+	return resultMap, nil
 }
 
 func owHandleFailure(ctx context.Context, pool *pgxpool.Pool, row owOutboxRow, errMsg string) {
+	if strings.HasPrefix(errMsg, owAmbiguousSendPrefix) || strings.HasPrefix(errMsg, "dispatching") {
+		owRecordAmbiguous(ctx, pool, row, errMsg)
+		return
+	}
+	if row.LeaseToken == "" {
+		logger.LogError("[outbox-worker] outbox_id=%s failure not applied; missing lease", row.OutboxID)
+		return
+	}
+
 	retryMax, retryBackoffSecs := owFetchRetryConfig(ctx, pool, row.EventID)
 
 	if row.RetryCount < retryMax {
 		backoff := float64(retryBackoffSecs) * math.Pow(2, float64(row.RetryCount))
 		nextScheduled := time.Now().Add(time.Duration(backoff) * time.Second)
-		_ = owExec(ctx, pool,
+		n, err := owExecRowsAffected(ctx, pool,
 			`UPDATE notification_svc.outbox
 			    SET processing_status = 'PENDING',
 			        retry_count       = retry_count + 1,
 			        last_error        = $2,
 			        scheduled_at      = $3
-			  WHERE outbox_id = $1`,
-			row.OutboxID, errMsg, nextScheduled)
+			  WHERE outbox_id = $1
+			    AND processing_status = 'PROCESSING'
+			    AND last_error = $4`,
+			row.OutboxID, errMsg, nextScheduled, row.LeaseToken)
+		if err != nil {
+			logger.LogError("[outbox-worker] retry update failed outbox_id=%s: %v", row.OutboxID, err)
+			return
+		}
+		if n == 0 {
+			logger.LogError("[outbox-worker] retry update matched no row outbox_id=%s; not treating as retried", row.OutboxID)
+			return
+		}
 		logger.LogError("[outbox-worker] RETRY outbox_id=%s attempt=%d next_at=%s err=%s",
 			row.OutboxID, row.RetryCount+1, nextScheduled.Format(time.RFC3339), owTruncate(errMsg, 120))
 	} else {
-		_ = owExec(ctx, pool,
+		n, err := owExecRowsAffected(ctx, pool,
 			`UPDATE notification_svc.outbox
 			    SET processing_status = 'DEAD',
 			        retry_count       = retry_count + 1,
 			        last_error        = $2
-			  WHERE outbox_id = $1`,
-			row.OutboxID, errMsg)
+			  WHERE outbox_id = $1
+			    AND processing_status = 'PROCESSING'
+			    AND last_error = $3`,
+			row.OutboxID, errMsg, row.LeaseToken)
+		if err != nil {
+			logger.LogError("[outbox-worker] DEAD update failed outbox_id=%s: %v", row.OutboxID, err)
+			return
+		}
+		if n == 0 {
+			logger.LogError("[outbox-worker] DEAD update matched no row outbox_id=%s; not treating as failed", row.OutboxID)
+			return
+		}
 		logger.LogError("[outbox-worker] DEAD outbox_id=%s after %d attempts err=%s",
 			row.OutboxID, row.RetryCount+1, owTruncate(errMsg, 120))
 	}
 	owInsertHistory(ctx, pool, row, "FAILED", errMsg, "", row.RetryCount+1)
+}
+
+func owMarkDispatching(ctx context.Context, pool *pgxpool.Pool, ready []owOutboxRow, payloads []owSendPayload) ([]owOutboxRow, []owSendPayload) {
+	dispatched := make([]owOutboxRow, 0, len(ready))
+	dispatchPayloads := make([]owSendPayload, 0, len(payloads))
+	for i, row := range ready {
+		if i >= len(payloads) {
+			logger.LogError("[outbox-worker] outbox_id=%s missing payload; not dispatching", row.OutboxID)
+			continue
+		}
+		if !strings.HasPrefix(row.LeaseToken, "claimed:") {
+			logger.LogError("[outbox-worker] outbox_id=%s missing claim lease; not dispatching", row.OutboxID)
+			continue
+		}
+		marker := owLastErrDispatching + strings.TrimPrefix(row.LeaseToken, "claimed:")
+		n, err := owExecRowsAffected(ctx, pool,
+			`UPDATE notification_svc.outbox
+			    SET last_error = $2, processed_at = now()
+			  WHERE outbox_id = $1
+			    AND processing_status = 'PROCESSING'
+			    AND last_error = $3`,
+			row.OutboxID, marker, row.LeaseToken)
+		if err != nil || n == 0 {
+			logger.LogError("[outbox-worker] outbox_id=%s dispatch lease not taken: %v", row.OutboxID, err)
+			continue
+		}
+		row.LeaseToken = marker
+		dispatched = append(dispatched, row)
+		dispatchPayloads = append(dispatchPayloads, payloads[i])
+	}
+	return dispatched, dispatchPayloads
+}
+
+func owRecordAmbiguous(ctx context.Context, pool *pgxpool.Pool, row owOutboxRow, reason string) {
+	if !strings.HasPrefix(reason, owAmbiguousSendPrefix) {
+		reason = owAmbiguousSendPrefix + " " + reason
+	}
+	if row.LeaseToken == "" {
+		logger.LogError("[outbox-worker] ambiguous outcome not recorded outbox_id=%s: missing lease", row.OutboxID)
+		return
+	}
+	n, err := owExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET last_error = $2
+		  WHERE outbox_id = $1
+		    AND processing_status = 'PROCESSING'
+		    AND last_error = $3`,
+		row.OutboxID, owTruncate(reason, 400), row.LeaseToken)
+	if err != nil || n == 0 {
+		logger.LogError("[outbox-worker] ambiguous outcome not recorded outbox_id=%s: %v", row.OutboxID, err)
+		return
+	}
+	logger.LogError("[outbox-worker] ambiguous send outbox_id=%s left PROCESSING (no immediate retry): %s",
+		row.OutboxID, owTruncate(reason, 200))
+}
+
+func owMarkSent(ctx context.Context, pool *pgxpool.Pool, row owOutboxRow, messageID string) {
+	if row.LeaseToken == "" {
+		logger.LogError("[outbox-worker] SENT update skipped outbox_id=%s: missing lease", row.OutboxID)
+		return
+	}
+	owInsertHistory(ctx, pool, row, "SENT", messageID, messageID, row.RetryCount+1)
+	if _, err := owExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET last_error = $2
+		  WHERE outbox_id = $1
+		    AND processing_status = 'PROCESSING'
+		    AND last_error = $3`,
+		row.OutboxID, owLastErrSendAccepted, row.LeaseToken); err != nil {
+		logger.LogError("[outbox-worker] record send accepted failed outbox_id=%s: %v", row.OutboxID, err)
+	}
+
+	n, err := owExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET processing_status = 'SENT', sent_at = now(), last_error = NULL
+		  WHERE outbox_id = $1
+		    AND (
+		          (processing_status = 'PROCESSING' AND last_error IN ($2, $3))
+		       OR (processing_status = 'DEAD' AND last_error LIKE 'stale PROCESSING after dispatch%')
+		    )`,
+		row.OutboxID, owLastErrSendAccepted, row.LeaseToken)
+	if err != nil {
+		logger.LogError("[outbox-worker] SENT update failed outbox_id=%s: %v", row.OutboxID, err)
+		return
+	}
+	if n == 0 {
+		var status string
+		qerr := pool.QueryRow(ctx,
+			`SELECT processing_status FROM notification_svc.outbox WHERE outbox_id = $1`,
+			row.OutboxID).Scan(&status)
+		if qerr != nil || status != "SENT" {
+			logger.LogError("[outbox-worker] SENT update matched no row outbox_id=%s status=%q err=%v; not treating as done",
+				row.OutboxID, status, qerr)
+			return
+		}
+	}
+	logger.LogInfo("[outbox-worker] SENT outbox_id=%s to=%s", row.OutboxID, row.RecipientEmail)
+}
+
+func owReapStaleProcessing(ctx context.Context, pool *pgxpool.Pool, limit int) {
+	if limit < 1 {
+		limit = 1
+	}
+	staleSecs := int(owProcessingStaleAfter() / time.Second)
+	rows, err := pool.Query(ctx, `
+		SELECT o.outbox_id, o.channel,
+		       o.recipient_email, o.recipient_name,
+		       o.rendered_subject, o.rendered_body,
+		       o.sender_email, o.sender_name,
+		       o.retry_count, o.priority_level,
+		       o.event_id, o.audit_id::text, o.correlation_id, o.recipient_user_id,
+		       COALESCE(o.cc_emails, ''),
+		       COALESCE(o.last_error, ''),
+		       EXISTS (
+		           SELECT 1 FROM notification_svc.send_history h
+		            WHERE h.outbox_id = o.outbox_id AND h.processing_status = 'SENT'
+		       )
+		FROM   notification_svc.outbox o
+		WHERE  o.processing_status = 'PROCESSING'
+		  AND  o.channel = 'EMAIL'
+		  AND  (o.processed_at IS NULL OR o.processed_at < now() - make_interval(secs => $1))
+		ORDER  BY o.processed_at ASC NULLS FIRST
+		LIMIT  $2`, staleSecs, limit)
+	if err != nil {
+		logger.LogError("[outbox-worker] reap stale PROCESSING: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var row owOutboxRow
+		var recipientName, senderEmail, senderName, auditID, correlationID, recipientUserID *string
+		var ccEmails, lastErr string
+		var sendAccepted bool
+		if err := rows.Scan(
+			&row.OutboxID, &row.Channel,
+			&row.RecipientEmail, &recipientName,
+			&row.RenderedSubject, &row.RenderedBody,
+			&senderEmail, &senderName,
+			&row.RetryCount, &row.PriorityLevel,
+			&row.EventID, &auditID, &correlationID, &recipientUserID,
+			&ccEmails, &lastErr, &sendAccepted,
+		); err != nil {
+			logger.LogError("[outbox-worker] reap scan: %v", err)
+			continue
+		}
+		owDeref(&row.RecipientName, recipientName)
+		owDeref(&row.SenderEmail, senderEmail)
+		owDeref(&row.SenderName, senderName)
+		owDeref(&row.AuditID, auditID)
+		owDeref(&row.CorrelationID, correlationID)
+		owDeref(&row.RecipientUserID, recipientUserID)
+		row.CcEmails = strings.TrimSpace(ccEmails)
+		owReconcileStale(ctx, pool, row, strings.TrimSpace(lastErr), sendAccepted)
+	}
+	if rows.Err() != nil {
+		logger.LogError("[outbox-worker] reap rows: %v", rows.Err())
+	}
+}
+
+func owReconcileStale(ctx context.Context, pool *pgxpool.Pool, row owOutboxRow, lastErr string, sendAccepted bool) {
+	if sendAccepted || lastErr == owLastErrSendAccepted {
+		owReconcileAccepted(ctx, pool, row, sendAccepted)
+		return
+	}
+	if lastErr == "" || strings.HasPrefix(lastErr, "claimed:") {
+		owRequeueBeforeDispatch(ctx, pool, row, lastErr)
+		return
+	}
+	if strings.HasPrefix(lastErr, "dispatching") || strings.HasPrefix(lastErr, owAmbiguousSendPrefix) {
+		msg := lastErr
+		if strings.HasPrefix(lastErr, "dispatching") {
+			msg = "stale PROCESSING after dispatch; send outcome unknown, not resent"
+		}
+		owFailStaleProcessing(ctx, pool, row, lastErr, msg)
+		return
+	}
+	row.LeaseToken = lastErr
+	owHandleFailure(ctx, pool, row, lastErr)
+}
+
+func owReconcileAccepted(ctx context.Context, pool *pgxpool.Pool, row owOutboxRow, sendAccepted bool) {
+	if !sendAccepted {
+		owInsertHistory(ctx, pool, row, "SENT", owLastErrSendAccepted, "", row.RetryCount+1)
+	}
+	n, err := owExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET processing_status = 'SENT', sent_at = COALESCE(sent_at, now()), last_error = NULL
+		  WHERE outbox_id = $1 AND processing_status = 'PROCESSING'`,
+		row.OutboxID)
+	if err != nil {
+		logger.LogError("[outbox-worker] reconcile SENT failed outbox_id=%s: %v", row.OutboxID, err)
+		return
+	}
+	if n == 0 {
+		return
+	}
+	logger.LogInfo("[outbox-worker] reconciled SENT outbox_id=%s (no resend)", row.OutboxID)
+}
+
+func owRequeueBeforeDispatch(ctx context.Context, pool *pgxpool.Pool, row owOutboxRow, observed string) {
+	msg := "reaped stale PROCESSING before dispatch"
+	n, err := owExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET processing_status = 'PENDING',
+		        last_error = $2,
+		        scheduled_at = now()
+		  WHERE outbox_id = $1
+		    AND processing_status = 'PROCESSING'
+		    AND COALESCE(last_error, '') = $3`,
+		row.OutboxID, msg, observed)
+	if err != nil {
+		logger.LogError("[outbox-worker] requeue stale outbox_id=%s: %v", row.OutboxID, err)
+		return
+	}
+	if n == 0 {
+		return
+	}
+	logger.LogInfo("[outbox-worker] requeued stale outbox_id=%s (never dispatched)", row.OutboxID)
+}
+
+func owFailStaleProcessing(ctx context.Context, pool *pgxpool.Pool, row owOutboxRow, observed, msg string) {
+	n, err := owExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET processing_status = 'DEAD',
+		        last_error = $2
+		  WHERE outbox_id = $1
+		    AND processing_status = 'PROCESSING'
+		    AND last_error = $3`,
+		row.OutboxID, owTruncate(msg, 400), observed)
+	if err != nil {
+		logger.LogError("[outbox-worker] stale PROCESSING fail update outbox_id=%s: %v", row.OutboxID, err)
+		return
+	}
+	if n == 0 {
+		return
+	}
+	logger.LogError("[outbox-worker] DEAD stale outbox_id=%s err=%s", row.OutboxID, owTruncate(msg, 200))
+	owInsertHistory(ctx, pool, row, "FAILED", msg, "", row.RetryCount+1)
 }
 
 func owFetchRetryConfig(ctx context.Context, pool *pgxpool.Pool, eventID string) (retryMax, retryBackoffSecs int) {

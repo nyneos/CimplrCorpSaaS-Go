@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
@@ -95,7 +96,7 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := validateExchangeInput(req.ExchangeInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -190,22 +191,32 @@ func CreateExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(eid, uID, uEmail string) {
-			defer func() { recover() }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
-			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "EXCHANGE_MASTER_CREATE",
 				RecordID: eid, RecordTable: "apibox.exchange_master",
 				AuditTable: "apibox.audit_exchange_master", AuditIDColumn: "exchange_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 				RequirePinnedMatrix: true,
 				AutoApplyIfUnpinned: true,
-			})
+			}); err != nil {
+				logger.LogError("[CounterpartyHub] approval instance creation failed: %v", err)
+			}
 		}(exchangeID, req.UserID, userEmail)
 
 		go func(eid, uEmail string) {
-			defer func() { recover() }()
-			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 				"/master/counterparty-hub/exchange/create", eid,
 				map[string]interface{}{"record_id": eid, "event": "EXCHANGE_MASTER_CREATED", "actor_email": uEmail},
 			)
@@ -248,7 +259,7 @@ func CreateExchangeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for i, row := range req.Rows {
 			if err := validateExchangeInput(row); err != nil {
 				errorsList = append(errorsList, map[string]interface{}{
-					"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error(),
+					"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err),
 				})
 				continue
 			}
@@ -534,8 +545,8 @@ func BulkApproveExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.Exec(ctx, `
 				UPDATE apibox.audit_exchange_master
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE audit_id=$3`, userEmail, req.Comment, a.AuditID); err != nil {
-				errList = append(errList, map[string]interface{}{"exchange_id": a.ID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				WHERE (audit_id=$3) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`, userEmail, req.Comment, a.AuditID); err != nil {
+				errList = append(errList, map[string]interface{}{"exchange_id": a.ID, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 				continue
 			}
 			success = append(success, map[string]interface{}{constants.ValueSuccess: true, "exchange_id": a.ID})
@@ -586,7 +597,7 @@ func BulkRejectExchange(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		res, err := tx.Exec(ctx, `
 			UPDATE apibox.audit_exchange_master
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE exchange_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'`,
+			WHERE (exchange_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`,
 			userEmail, req.Comment, req.ExchangeIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")
@@ -778,7 +789,7 @@ func GetExchangeAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -873,7 +884,7 @@ func GetExchangeDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusNotFound, "Exchange not found")
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 

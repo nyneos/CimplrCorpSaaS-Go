@@ -3,8 +3,10 @@ package emailcommon
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
+	"CimplrCorpSaas/api"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	emailjobs "CimplrCorpSaas/internal/jobs/email"
 	"CimplrCorpSaas/internal/services/mailruntime"
@@ -312,3 +314,65 @@ func ResolveManualUploadInbox(
 		strings.TrimSpace(msg.Envelope.From), msg.Envelope.To,
 	)
 }
+
+// CanManageInbox reports whether the user may act on the inbox: admin, owner,
+// submitter, member, or an inbox entity inside the caller's entity scope.
+func CanManageInbox(ctx context.Context, pool *pgxpool.Pool, inboxID, userID string) bool {
+	inboxID = strings.TrimSpace(inboxID)
+	if inboxID == "" || userID == "" {
+		return false
+	}
+	if IsEmailAdmin(ctx, userID) {
+		return true
+	}
+	var owner, submitter, entityID string
+	var member bool
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(i.owner_user_id,''), COALESCE(i.submitted_by,''), COALESCE(i.entity_id,''),
+		       EXISTS(SELECT 1 FROM email_svc.inbox_members im WHERE im.inbox_id = i.inbox_id AND im.user_id = $2)
+		FROM email_svc.inbox_config i
+		WHERE i.inbox_id::text = $1 AND i.is_deleted = false
+	`, inboxID, userID).Scan(&owner, &submitter, &entityID, &member)
+	if err != nil {
+		return false
+	}
+	if owner == userID || submitter == userID || member {
+		return true
+	}
+	return entityID != "" && EntityInScope(entityID, api.GetEntityIDsFromCtx(ctx))
+}
+
+// RequireMessageAccess writes a 403 (or 500) unless the caller can see every
+// message the query selects (one message_id per row).
+func RequireMessageAccess(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, messageQuery string, args ...any) bool {
+	ctx := r.Context()
+	userID, userEmail, _, _ := RequestIdentity(r, "", "")
+	admin := IsEmailAdmin(ctx, userID)
+	if admin {
+		return true
+	}
+	n := len(args)
+	q := fmt.Sprintf(`
+		SELECT COUNT(*) FILTER (WHERE NOT EXISTS (
+			SELECT 1 FROM email_svc.message m
+			WHERE m.message_id = t.message_id %s
+		))
+		FROM (%s) t(message_id)`, ListMessageScopedToUserSQLAt(n+1, n+2, n+3), messageQuery)
+	var denied int
+	if err := pool.QueryRow(ctx, q, append(args, admin, userID, userEmail)...).Scan(&denied); err != nil {
+		api.LogErrorForResponse(w, "email message access lookup: %v", err)
+		RespondInternal(w, "failed to verify message access")
+		return false
+	}
+	if denied > 0 {
+		RespondForbidden(w, "message not accessible")
+		return false
+	}
+	return true
+}
+
+const (
+	MessageByIDQuery      = `SELECT $1::uuid`
+	MessageByResultQuery  = `SELECT ma.message_id FROM email_svc.transformation_results tr JOIN email_svc.message_attachment ma ON ma.attachment_id = tr.attachment_id WHERE tr.result_id = $1::uuid`
+	MessageByResultsQuery = `SELECT ma.message_id FROM email_svc.transformation_results tr JOIN email_svc.message_attachment ma ON ma.attachment_id = tr.attachment_id WHERE tr.result_id::text = ANY($1)`
+)

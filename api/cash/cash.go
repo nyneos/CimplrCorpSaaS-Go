@@ -6,7 +6,9 @@ import (
 	"CimplrCorpSaas/internal/observability"
 	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -28,23 +30,35 @@ func NewCashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	if sslMode == "" {
 		sslMode = "require"
 	}
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
-	pgxPool, err := dbutil.NewTracedPool(context.Background(), dsn, serviceName)
+	u := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(user, pass),
+		Host:   net.JoinHostPort(host, dbPort),
+		Path:   "/" + name,
+	}
+	q := url.Values{}
+	q.Set("sslmode", sslMode)
+	u.RawQuery = q.Encode()
+	pgxPool, err := dbutil.NewTracedPool(context.Background(), u.String(), serviceName)
 	if err != nil {
-
 		return nil, nil, fmt.Errorf("failed to connect to pgxpool DB: %w", err)
 	}
 
 	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := pgxPool.Ping(pingCtx); err != nil {
-		logger.LogError("failed to verify pgxpool DB connectivity at startup: %v", err)
+		pgxPool.Close()
+		return nil, nil, fmt.Errorf("cash database ping failed: %w", err)
 	}
 	RegisterCashRoutes(mux, serviceName, pgxPool)
 
+	// No WriteTimeout: statement conversion streams the converter response for minutes.
 	server := &http.Server{
-		Addr:    ":" + port,
-		Handler: observability.WrapHTTP(serviceName, cashJSONActionResponses(mux)),
+		Addr:              ":" + port,
+		Handler:           observability.WrapHTTP(serviceName, cashJSONActionResponses(mux)),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		IdleTimeout:       120 * time.Second,
 	}
 	return server, pgxPool, nil
 }

@@ -3,6 +3,7 @@ package categorywisedata
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -288,7 +289,7 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		filters = append(filters, "bs.is_deleted = false")
-		filters = append(filters, "bs.current_status = 'APPROVED'")
+		filters = append(filters, "UPPER(TRIM(bs.current_status)) = 'APPROVED'")
 		whereClause := ""
 		if len(filters) > 0 {
 			whereClause = constants.ErrWhereClause + strings.Join(filters, " AND ")
@@ -329,6 +330,10 @@ ORDER BY inflow DESC, outflow DESC;
 			if err := catRows.Scan(&c.Category, &c.Inflow, &c.Outflow); err == nil {
 				categories = append(categories, c)
 			}
+		}
+		if err := catRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		/* ---------------- Entity breakdown + transaction statements ----------------
@@ -389,7 +394,7 @@ LEFT JOIN LATERAL (
 	LEFT JOIN public.mastercashflowcategory tc
 		ON tx.category_id = tc.category_id
   WHERE bs2.is_deleted = false
-    AND bs2.current_status = 'APPROVED'
+    AND UPPER(TRIM(bs2.current_status)) = 'APPROVED'
     AND bs2.account_number = x.account_number
     AND bs2.entity_id = x.entity_id
     AND COALESCE(tx.transaction_date, tx.value_date) >= $1::date
@@ -413,7 +418,9 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 			var inflow, outflow float64
 			var txnsJSON []byte
 			if err := entityRows.Scan(&id, &entityName, &bankName, &acct, &inflow, &outflow, &txnsJSON); err != nil {
-				continue
+				entityRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			var txns []StatementTxnRow
@@ -433,6 +440,10 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 				Net:       inflow - outflow,
 				Statement: txns,
 			})
+		}
+		if err := entityRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		/* ---------------- Transactions list (flat) ---------------- */
@@ -490,6 +501,10 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 			); err == nil {
 				txns = append(txns, tr)
 			}
+		}
+		if err := txnRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		/* ---------------- Realtime KPIs (bank_balances_manual) ---------------- */
@@ -564,7 +579,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 	JOIN public.masterbankaccount mba ON b.account_no = mba.account_number AND mba.is_deleted = false
 	JOIN approved ap
 	  ON ap.balance_id = b.balance_id
-	 AND ap.processing_status = 'APPROVED'
+	 AND UPPER(TRIM(ap.processing_status)) = 'APPROVED'
 	` + kpiWhere + `
 	GROUP BY COALESCE(b.bank_name, 'Unknown')
 	ORDER BY total DESC
@@ -602,7 +617,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 	JOIN public.masterbankaccount mba ON b.account_no = mba.account_number AND mba.is_deleted = false
 	JOIN approved ap
 	  ON ap.balance_id = b.balance_id
-	 AND ap.processing_status = 'APPROVED'
+	 AND UPPER(TRIM(ap.processing_status)) = 'APPROVED'
 	` + kpiWhere + `
 	ORDER BY balance ASC
 	LIMIT 1;
@@ -648,7 +663,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 			snapArgs = append(snapArgs, allowedCurrenciesNorm)
 			sn++
 			snapParts = append(snapParts, "bs.is_deleted = false")
-			snapParts = append(snapParts, "bs.current_status = 'APPROVED'")
+			snapParts = append(snapParts, "UPPER(TRIM(bs.current_status)) = 'APPROVED'")
 			if entityF != "" {
 				eid, ok := api.ResolveEntityIDForFilter(ctx, entityF)
 				if ok {
@@ -785,6 +800,10 @@ LIMIT ` + strconv.Itoa(txnLimit) + `;
 				misclassifiedTxns = append(misclassifiedTxns, tr)
 			}
 		}
+		if err := misclassifiedRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
+		}
 
 		resp := map[string]interface{}{
 			"categories":                 categories,
@@ -826,7 +845,7 @@ LIMIT ` + strconv.Itoa(txnLimit) + `;
 					FROM cimplrcorpsaas.auditactionbankstatement
 					ORDER BY bankstatementid, requested_at DESC
 				) ap ON ap.bankstatementid = bs.bank_statement_id
-					AND ap.processing_status = 'APPROVED'
+					AND UPPER(TRIM(ap.processing_status)) = 'APPROVED'
 				WHERE bs.entity_id = ANY($1)
 					AND bs.account_number = ANY($2)
 					AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($3)

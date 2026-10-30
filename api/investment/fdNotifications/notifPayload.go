@@ -96,8 +96,13 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
+
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+const notifPayloadIDChunk = 500
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
@@ -145,6 +150,43 @@ func placeholders(n, offset int) string {
 		parts[i] = fmt.Sprintf("$%d", i+offset)
 	}
 	return strings.Join(parts, ",")
+}
+
+func readNotifRows(rows pgx.Rows) ([]map[string]interface{}, error) {
+	defer rows.Close()
+	out := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		vals, err := rows.Values()
+		if err != nil {
+			return nil, err
+		}
+		cols := rows.FieldDescriptions()
+		row := make(map[string]interface{}, len(cols))
+		for i, col := range cols {
+			row[string(col.Name)] = vals[i]
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func fetchInIDChunks(ids []string, fetch func([]string) ([]map[string]interface{}, error)) ([]map[string]interface{}, error) {
+	if len(ids) <= notifPayloadIDChunk {
+		return fetch(ids)
+	}
+	all := make([]map[string]interface{}, 0, len(ids))
+	for start := 0; start < len(ids); start += notifPayloadIDChunk {
+		end := start + notifPayloadIDChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		part, err := fetch(ids[start:end])
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, part...)
+	}
+	return all, nil
 }
 
 // stringsToAny converts []string to []interface{} for pgx args.
@@ -236,6 +278,11 @@ func fetchBookingRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	if len(ids) > notifPayloadIDChunk {
+		return fetchInIDChunks(ids, func(chunk []string) ([]map[string]interface{}, error) {
+			return fetchBookingRows(ctx, pool, chunk)
+		})
+	}
 	q := fmt.Sprintf(`
 		SELECT
 			b.booking_id,
@@ -289,22 +336,7 @@ func fetchBookingRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("fetchBookingRows: %w", err)
 	}
-	defer rows.Close()
-
-	var out []map[string]interface{}
-	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			continue
-		}
-		cols := rows.FieldDescriptions()
-		row := make(map[string]interface{}, len(cols))
-		for i, col := range cols {
-			row[string(col.Name)] = vals[i]
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return readNotifRows(rows)
 }
 
 // BuildBookingNotifPayload constructs a rich notification payload for booking events.
@@ -331,7 +363,7 @@ func BuildBookingNotifPayload(
 	}
 	rows, err := fetchBookingRows(ctx, pool, bookingIDs)
 	if err != nil {
-		fmt.Printf("[ERROR] BuildBookingNotifPayload: %v\n", err)
+		api.LogError("[FD notif] BuildBookingNotifPayload: %v\n", err)
 		return p
 	}
 	p.Bookings = rows
@@ -384,6 +416,11 @@ func fetchConfirmationRows(ctx context.Context, pool *pgxpool.Pool, ids []string
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	if len(ids) > notifPayloadIDChunk {
+		return fetchInIDChunks(ids, func(chunk []string) ([]map[string]interface{}, error) {
+			return fetchConfirmationRows(ctx, pool, chunk)
+		})
+	}
 	q := fmt.Sprintf(`
 		SELECT
 			c.confirmation_id,
@@ -431,22 +468,7 @@ func fetchConfirmationRows(ctx context.Context, pool *pgxpool.Pool, ids []string
 	if err != nil {
 		return nil, fmt.Errorf("fetchConfirmationRows: %w", err)
 	}
-	defer rows.Close()
-
-	var out []map[string]interface{}
-	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			continue
-		}
-		cols := rows.FieldDescriptions()
-		row := make(map[string]interface{}, len(cols))
-		for i, col := range cols {
-			row[string(col.Name)] = vals[i]
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return readNotifRows(rows)
 }
 
 // BuildConfirmationNotifPayload constructs a rich notification payload for confirmation events.
@@ -473,7 +495,7 @@ func BuildConfirmationNotifPayload(
 	}
 	rows, err := fetchConfirmationRows(ctx, pool, confirmationIDs)
 	if err != nil {
-		fmt.Printf("[ERROR] BuildConfirmationNotifPayload: %v\n", err)
+		api.LogError("[FD notif] BuildConfirmationNotifPayload: %v\n", err)
 		return p
 	}
 	p.Confirmations = rows
@@ -527,6 +549,11 @@ func fetchFDMasterRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	if len(ids) > notifPayloadIDChunk {
+		return fetchInIDChunks(ids, func(chunk []string) ([]map[string]interface{}, error) {
+			return fetchFDMasterRows(ctx, pool, chunk)
+		})
+	}
 	q := fmt.Sprintf(`
 		SELECT
 			m.fd_id,
@@ -577,22 +604,7 @@ func fetchFDMasterRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([
 	if err != nil {
 		return nil, fmt.Errorf("fetchFDMasterRows: %w", err)
 	}
-	defer rows.Close()
-
-	var out []map[string]interface{}
-	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			continue
-		}
-		cols := rows.FieldDescriptions()
-		row := make(map[string]interface{}, len(cols))
-		for i, col := range cols {
-			row[string(col.Name)] = vals[i]
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return readNotifRows(rows)
 }
 
 // BuildFDMasterNotifPayload constructs a rich notification payload for fd_master events.
@@ -619,7 +631,7 @@ func BuildFDMasterNotifPayload(
 	}
 	rows, err := fetchFDMasterRows(ctx, pool, fdIDs)
 	if err != nil {
-		fmt.Printf("[ERROR] BuildFDMasterNotifPayload: %v\n", err)
+		api.LogError("[FD notif] BuildFDMasterNotifPayload: %v\n", err)
 		return p
 	}
 	p.FDs = rows
@@ -676,6 +688,11 @@ func fetchClosureRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	if len(ids) > notifPayloadIDChunk {
+		return fetchInIDChunks(ids, func(chunk []string) ([]map[string]interface{}, error) {
+			return fetchClosureRows(ctx, pool, chunk)
+		})
+	}
 	q := fmt.Sprintf(`
 		SELECT
 			cr.closure_request_id,
@@ -725,22 +742,7 @@ func fetchClosureRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("fetchClosureRows: %w", err)
 	}
-	defer rows.Close()
-
-	var out []map[string]interface{}
-	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			continue
-		}
-		cols := rows.FieldDescriptions()
-		row := make(map[string]interface{}, len(cols))
-		for i, col := range cols {
-			row[string(col.Name)] = vals[i]
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return readNotifRows(rows)
 }
 
 // BuildClosureNotifPayload constructs a rich notification payload for closure events.
@@ -767,7 +769,7 @@ func BuildClosureNotifPayload(
 	}
 	rows, err := fetchClosureRows(ctx, pool, closureIDs)
 	if err != nil {
-		fmt.Printf("[ERROR] BuildClosureNotifPayload: %v\n", err)
+		api.LogError("[FD notif] BuildClosureNotifPayload: %v\n", err)
 		return p
 	}
 	p.Closures = rows
@@ -819,7 +821,8 @@ func (p *AccrualNotifPayload) ToMap() map[string]interface{} {
 }
 
 // BuildAccrualNotifPayload constructs a rich notification payload for an accrual run.
-// Pass fdIDs = all FDs processed in the run, runDate = "YYYY-MM-DD".
+// Pass fdIDs = all FDs processed in the run, runDate = "YYYY-MM-DD" (the accrual period end).
+// Rows come from the accrual ledger the engine writes.
 func BuildAccrualNotifPayload(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -841,54 +844,50 @@ func BuildAccrualNotifPayload(
 		return p
 	}
 
-	q := fmt.Sprintf(`
+	var accruals []map[string]interface{}
+	for start := 0; start < len(fdIDs); start += notifPayloadIDChunk {
+		end := start + notifPayloadIDChunk
+		if end > len(fdIDs) {
+			end = len(fdIDs)
+		}
+		chunk := fdIDs[start:end]
+		q := fmt.Sprintf(`
 		SELECT
 			a.fd_id,
 			COALESCE(m.bank_fd_ref_no,'')                                       AS fd_ref_no,
 			COALESCE(m.entity_name,'')                                          AS entity_name,
 			COALESCE(m.bank_name,'')                                            AS bank_name,
-			COALESCE(TO_CHAR(a.accrual_date,'YYYY-MM-DD'),'')                   AS accrual_date,
-			COALESCE(a.daily_interest_amount,0)                                 AS daily_interest,
-			COALESCE(a.cumulative_accrual,0)                                    AS cumulative_accrual,
-			COALESCE(a.tds_accrued,0)                                           AS tds_accrued,
+			COALESCE(TO_CHAR(a.accrual_period_end,'YYYY-MM-DD'),'')             AS accrual_date,
+			COALESCE(a.period_interest_accrued,0)                               AS daily_interest,
+			COALESCE(a.closing_accrued_balance,0)                               AS cumulative_accrual,
+			COALESCE(a.tds_deducted_in_period,0)                                AS tds_accrued,
 			COALESCE(m.principal_amount,0)                                      AS principal_amount,
 			COALESCE(m.interest_rate,0)                                         AS interest_rate,
 			COALESCE(TO_CHAR(m.maturity_date,'YYYY-MM-DD'),'')                  AS maturity_date
-		FROM investment.fd_accrual_log a
+		FROM investment.fd_accrual_ledger a
 		JOIN investment.fd_master m ON m.fd_id = a.fd_id
 		WHERE a.fd_id IN (%s)
-		  AND TO_CHAR(a.accrual_date,'YYYY-MM-DD') = $%d
+		  AND a.accrual_period_end >= $%d::date
+		  AND a.accrual_period_end < ($%d::date + INTERVAL '1 day')
 		ORDER BY m.entity_name, m.bank_name
-	`, placeholders(len(fdIDs), 1), len(fdIDs)+1)
-
-	args := append(stringsToAny(fdIDs), runDate)
-	rows, err := pool.Query(ctx, q, args...)
-	if err != nil {
-		fmt.Printf("[ERROR] BuildAccrualNotifPayload: %v\n", err)
-		return p
-	}
-	defer rows.Close()
-
-	var accruals []map[string]interface{}
-	for rows.Next() {
-		vals, err := rows.Values()
+	`, placeholders(len(chunk), 1), len(chunk)+1, len(chunk)+1)
+		rows, err := pool.Query(ctx, q, append(stringsToAny(chunk), runDate)...)
 		if err != nil {
-			continue
+			api.LogError("[FD notif] BuildAccrualNotifPayload: %v", err)
+			return p
 		}
-		cols := rows.FieldDescriptions()
-		row := make(map[string]interface{}, len(cols))
-		for i, col := range cols {
-			row[string(col.Name)] = vals[i]
+		part, err := readNotifRows(rows)
+		if err != nil {
+			api.LogError("[FD notif] BuildAccrualNotifPayload scan: %v", err)
+			return p
 		}
-		accruals = append(accruals, row)
+		accruals = append(accruals, part...)
 	}
-	if rows.Err() == nil {
-		p.Accruals = accruals
-		p.ByEntityKPIs = computeKPIs(accruals, "entity_name", "daily_interest")
-		p.ByBankKPIs = computeKPIs(accruals, "bank_name", "daily_interest")
-		for _, row := range accruals {
-			p.TotalInterestAccrued += fdAnyToFloat64(row["daily_interest"])
-		}
+	p.Accruals = accruals
+	p.ByEntityKPIs = computeKPIs(accruals, "entity_name", "daily_interest")
+	p.ByBankKPIs = computeKPIs(accruals, "bank_name", "daily_interest")
+	for _, row := range accruals {
+		p.TotalInterestAccrued += fdAnyToFloat64(row["daily_interest"])
 	}
 	return p
 }
@@ -930,6 +929,11 @@ func (p *ReceiptNotifPayload) ToMap() map[string]interface{} {
 func fetchReceiptRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]map[string]interface{}, error) {
 	if len(ids) == 0 {
 		return nil, nil
+	}
+	if len(ids) > notifPayloadIDChunk {
+		return fetchInIDChunks(ids, func(chunk []string) ([]map[string]interface{}, error) {
+			return fetchReceiptRows(ctx, pool, chunk)
+		})
 	}
 	q := fmt.Sprintf(`
 		SELECT
@@ -984,22 +988,7 @@ func fetchReceiptRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("fetchReceiptRows: %w", err)
 	}
-	defer rows.Close()
-
-	var out []map[string]interface{}
-	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			continue
-		}
-		cols := rows.FieldDescriptions()
-		row := make(map[string]interface{}, len(cols))
-		for i, col := range cols {
-			row[string(col.Name)] = vals[i]
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return readNotifRows(rows)
 }
 
 // BuildReceiptNotifPayload constructs a rich notification payload for receipt events.
@@ -1026,7 +1015,7 @@ func BuildReceiptNotifPayload(
 	}
 	rows, err := fetchReceiptRows(ctx, pool, receiptIDs)
 	if err != nil {
-		fmt.Printf("[ERROR] BuildReceiptNotifPayload: %v\n", err)
+		api.LogError("[FD notif] BuildReceiptNotifPayload: %v\n", err)
 		return p
 	}
 	p.Receipts = rows
@@ -1053,6 +1042,11 @@ func BuildReceiptNotifPayload(
 func fetchCimplrClosureInitiateRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]map[string]interface{}, error) {
 	if len(ids) == 0 {
 		return nil, nil
+	}
+	if len(ids) > notifPayloadIDChunk {
+		return fetchInIDChunks(ids, func(chunk []string) ([]map[string]interface{}, error) {
+			return fetchCimplrClosureInitiateRows(ctx, pool, chunk)
+		})
 	}
 	q := fmt.Sprintf(`
 		SELECT
@@ -1100,27 +1094,17 @@ func fetchCimplrClosureInitiateRows(ctx context.Context, pool *pgxpool.Pool, ids
 	if err != nil {
 		return nil, fmt.Errorf("fetchCimplrClosureInitiateRows: %w", err)
 	}
-	defer rows.Close()
-
-	var out []map[string]interface{}
-	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			continue
-		}
-		cols := rows.FieldDescriptions()
-		row := make(map[string]interface{}, len(cols))
-		for i, col := range cols {
-			row[string(col.Name)] = vals[i]
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return readNotifRows(rows)
 }
 
 func fetchCimplrClosureConfirmRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]map[string]interface{}, error) {
 	if len(ids) == 0 {
 		return nil, nil
+	}
+	if len(ids) > notifPayloadIDChunk {
+		return fetchInIDChunks(ids, func(chunk []string) ([]map[string]interface{}, error) {
+			return fetchCimplrClosureConfirmRows(ctx, pool, chunk)
+		})
 	}
 	q := fmt.Sprintf(`
 		SELECT
@@ -1168,22 +1152,7 @@ func fetchCimplrClosureConfirmRows(ctx context.Context, pool *pgxpool.Pool, ids 
 	if err != nil {
 		return nil, fmt.Errorf("fetchCimplrClosureConfirmRows: %w", err)
 	}
-	defer rows.Close()
-
-	var out []map[string]interface{}
-	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			continue
-		}
-		cols := rows.FieldDescriptions()
-		row := make(map[string]interface{}, len(cols))
-		for i, col := range cols {
-			row[string(col.Name)] = vals[i]
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
+	return readNotifRows(rows)
 }
 
 func BuildCimplrClosureInitiateNotifPayload(
@@ -1208,7 +1177,7 @@ func BuildCimplrClosureInitiateNotifPayload(
 	}
 	rows, err := fetchCimplrClosureInitiateRows(ctx, pool, closureInitiateIDs)
 	if err != nil {
-		fmt.Printf("[ERROR] BuildCimplrClosureInitiateNotifPayload: %v\n", err)
+		api.LogError("[FD notif] BuildCimplrClosureInitiateNotifPayload: %v\n", err)
 		return p
 	}
 	p.Closures = rows
@@ -1249,7 +1218,7 @@ func BuildCimplrClosureConfirmNotifPayload(
 	}
 	rows, err := fetchCimplrClosureConfirmRows(ctx, pool, closureConfirmIDs)
 	if err != nil {
-		fmt.Printf("[ERROR] BuildCimplrClosureConfirmNotifPayload: %v\n", err)
+		api.LogError("[FD notif] BuildCimplrClosureConfirmNotifPayload: %v\n", err)
 		return p
 	}
 	p.Closures = rows

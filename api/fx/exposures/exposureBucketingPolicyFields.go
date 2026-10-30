@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -95,7 +96,11 @@ func buildExposureBucketingPolicyFields(row exposureBucketingRow) map[string]int
 // exposure_header_id — used by DeleteBucketingStatus/ApproveBucketingStatus/
 // RejectBucketingStatus, which only ever receive exposure_header_id(s), never
 // the full bucketing row.
-func loadExposureBucketingRow(ctx context.Context, pool *pgxpool.Pool, exposureHeaderID string) (exposureBucketingRow, error) {
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func loadExposureBucketingRow(ctx context.Context, pool rowQuerier, exposureHeaderID string) (exposureBucketingRow, error) {
 	var row exposureBucketingRow
 	row.ExposureHeaderID = exposureHeaderID
 	err := pool.QueryRow(ctx, `

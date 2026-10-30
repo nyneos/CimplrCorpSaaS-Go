@@ -2,6 +2,7 @@ package accountingworkbench
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/ctxutil"
 	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
@@ -1004,7 +1005,7 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		sel := `
-			SELECT DISTINCT ON (activity_id) action_id, activity_id, actiontype, processing_status
+			SELECT DISTINCT ON (activity_id) action_id, activity_id, actiontype, processing_status, COALESCE(requested_by, '')
 			FROM investment.auditactionaccountingactivity
 			WHERE activity_id = ANY($1)
 			  AND UPPER(COALESCE(actiontype, '')) NOT IN ('UPLOAD_FILE', 'DOWNLOAD')
@@ -1024,8 +1025,11 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var deleteActivityIDs []string
 
 		for rows.Next() {
-			var aid, actid, atype, pstatus string
-			if err := rows.Scan(&aid, &actid, &atype, &pstatus); err != nil {
+			var aid, actid, atype, pstatus, maker string
+			if err := rows.Scan(&aid, &actid, &atype, &pstatus, &maker); err != nil {
+				continue
+			}
+			if governance.IsSelfApprovalCtx(ctx, maker) {
 				continue
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))

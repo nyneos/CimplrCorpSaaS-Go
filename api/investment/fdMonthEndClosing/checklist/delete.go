@@ -1,6 +1,7 @@
 package checklist
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -47,7 +48,7 @@ func DeleteChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, itemID := range ids {
 			if err := stageChecklistDelete(ctx, pool, itemID, actor, req.Reason); err != nil {
-				errs = append(errs, itemID+": "+err.Error())
+				errs = append(errs, itemID+": "+errtext.Text(err))
 				continue
 			}
 			submitted++

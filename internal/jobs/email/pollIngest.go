@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
+	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,8 +28,14 @@ func (id pollIngestIdentity) dedupeArgs(s3RawKey string) (string, string, string
 // Graph / OAuth / Gmail DWD / IMAP pollers share this path (same S3 bucket + audit shape).
 func ingestPollMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow, msg mailruntime.ParsedMessage, id pollIngestIdentity, mailDirection string) error {
 	s3Raw, graphID, imapKey := id.dedupeArgs(msg.S3RawKey)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
 	var exists bool
-	if err := pool.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM email_svc.message
 			WHERE s3_raw_key = $1
@@ -70,7 +78,7 @@ func ingestPollMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow, 
 	}
 
 	var messageID string
-	err := pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO email_svc.message (
 			inbox_id, s3_raw_key, s3_parsed_key, message_id_header, graph_message_id, imap_message_key,
 			envelope_from, envelope_to, subject, received_at,
@@ -94,9 +102,17 @@ func ingestPollMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow, 
 		return err
 	}
 
+	type queuedRule struct {
+		attachmentID string
+		filename     string
+		contentType  string
+		s3Key        string
+		fileSize     int64
+	}
+	queued := make([]queuedRule, 0, len(msg.Attachments))
 	for _, att := range msg.Attachments {
 		var attachmentID string
-		err := pool.QueryRow(ctx, `
+		err := tx.QueryRow(ctx, `
 			INSERT INTO email_svc.message_attachment (
 				message_id, filename, content_type, file_size, s3_key, file_hash
 			) VALUES ($1::uuid, $2, $3, $4, $5, $6)
@@ -105,14 +121,16 @@ func ingestPollMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow, 
 		if err != nil {
 			return err
 		}
-		logAttachmentIngest(ctx, pool, attachmentIngestInfo{
-			MessageID: messageID, AttachmentID: attachmentID, Source: sourceType,
-			Filename: att.Filename, ContentType: att.ContentType, S3Key: att.S3Key, FileSize: att.SizeBytes,
+		queued = append(queued, queuedRule{
+			attachmentID: attachmentID,
+			filename:     att.Filename,
+			contentType:  att.ContentType,
+			s3Key:        att.S3Key,
+			fileSize:     att.SizeBytes,
 		})
-		go ProcessAttachmentRules(context.Background(), pool, inbox.InboxID, messageID, attachmentID, att.Filename, att.S3Key)
 	}
 
-	detail, _ := json.Marshal(map[string]string{
+	detail, err := json.Marshal(map[string]string{
 		"source":           sourceType,
 		"graph_message_id": graphID,
 		"imap_message_key": imapKey,
@@ -121,7 +139,35 @@ func ingestPollMessage(ctx context.Context, pool *pgxpool.Pool, inbox inboxRow, 
 		"mailbox":          inbox.MailboxAddress,
 		"mail_direction":   mailDirection,
 	})
-	logMessageIngest(ctx, pool, messageID, logStep, detail)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO email_svc.processing_log (message_id, step, status, detail)
+		VALUES ($1::uuid, $2, 'OK', $3::jsonb)
+	`, messageID, logStep, string(detail)); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
 
+	for _, att := range queued {
+		logAttachmentIngest(ctx, pool, attachmentIngestInfo{
+			MessageID: messageID, AttachmentID: att.attachmentID, Source: sourceType,
+			Filename: att.filename, ContentType: att.contentType, S3Key: att.s3Key, FileSize: att.fileSize,
+		})
+		inboxID, attachmentID, filename, s3Key := inbox.InboxID, att.attachmentID, att.filename, att.s3Key
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[email-poll] attachment rules panic: %v", rec)
+				}
+			}()
+			runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+			defer cancel()
+			ProcessAttachmentRules(runCtx, pool, inboxID, messageID, attachmentID, filename, s3Key)
+		}()
+	}
 	return nil
 }

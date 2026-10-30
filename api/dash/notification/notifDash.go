@@ -18,6 +18,7 @@ package notification
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -38,7 +39,8 @@ import (
 func writeJSON(w http.ResponseWriter, _ int, v interface{}) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+		api.LogErrorForResponse(w, "notification dashboard encode: %v", err)
+		api.RespondEnvelopeError(w, http.StatusInternalServerError, "database operation failed", "")
 		return
 	}
 	var fields map[string]interface{}
@@ -52,6 +54,11 @@ func writeJSON(w http.ResponseWriter, _ int, v interface{}) {
 
 func errResp(w http.ResponseWriter, code int, msg string) {
 	api.RespondEnvelopeError(w, code, msg, "")
+}
+
+func errRespInternal(w http.ResponseWriter, err error) {
+	api.LogErrorForResponse(w, "notification dashboard: %v", err)
+	errResp(w, http.StatusInternalServerError, "database operation failed")
 }
 
 // filterRequest is the common filter body shared by all endpoints.
@@ -192,7 +199,7 @@ WHERE o.created_at BETWEEN $1 AND $2
 			&kpi.ChannelEmail, &kpi.ChannelSMS, &kpi.ChannelPush, &kpi.ChannelWhatsApp,
 			&kpi.AvgRetryCount, &kpi.AvgLatencyMs,
 		); err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 		if kpi.TotalDispatched > 0 {
@@ -293,7 +300,7 @@ WHERE o.created_at BETWEEN $1 AND $2
 			start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
 			f.MinRetry, f.MaxRetry,
 		).Scan(&total); err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 
@@ -317,7 +324,7 @@ ORDER BY o.created_at DESC`
 			f.MinRetry, f.MaxRetry,
 		)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 		defer rows.Close()
@@ -339,7 +346,9 @@ ORDER BY o.created_at DESC`
 				&row.RenderedSubject, &row.PriorityLevel,
 				&variablesRaw,
 			); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			row.LatencyMs = latencyMs
 			row.CreatedAt = createdAt.UTC().Format(time.RFC3339)
@@ -355,6 +364,10 @@ ORDER BY o.created_at DESC`
 			}
 			row.RetryHistory = []RetryAttempt{}
 			result = append(result, row)
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		rows.Close() // release connection back to pool before batch queries
 
@@ -404,6 +417,10 @@ WHERE audit_id = ANY($1)`, auditIDs)
 						m[t.AuditID] = t
 					}
 				}
+				if err := tplRows.Err(); err != nil {
+					tplC <- tplRes{m, err}
+					return
+				}
 				tplC <- tplRes{m, nil}
 			}()
 
@@ -428,6 +445,10 @@ ORDER BY outbox_id, attempt_number ASC`, outboxIDs)
 						ra.AttemptedAt = at.UTC().Format(time.RFC3339)
 						m[oid] = append(m[oid], ra)
 					}
+				}
+				if err := histRows.Err(); err != nil {
+					histC <- histRes{m, err}
+					return
 				}
 				histC <- histRes{m, nil}
 			}()
@@ -510,7 +531,7 @@ ORDER BY total DESC
 			start, end, f.Status, f.CorrelationID, f.MinRetry, f.MaxRetry,
 		)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 		defer rows.Close()
@@ -522,12 +543,18 @@ ORDER BY total DESC
 				&cs.Channel, &cs.Total, &cs.Sent, &cs.Failed, &cs.Dead,
 				&cs.Pending, &cs.AvgRetry, &cs.IsEnabled,
 			); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			if cs.Total > 0 {
 				cs.DeliveryRate = float64(cs.Sent) / float64(cs.Total) * 100
 			}
 			channels = append(channels, cs)
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		writeJSON(w, http.StatusOK, ChannelBreakdownResponse{Success: true, Channels: channels})
 	}
@@ -574,7 +601,7 @@ ORDER BY 1 ASC
 `
 		rows, err := pool.Query(r.Context(), q, windowStart, f.Channel)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 		defer rows.Close()
@@ -584,10 +611,16 @@ ORDER BY 1 ASC
 			var b HourlyBucket
 			var hourBucket time.Time
 			if err := rows.Scan(&hourBucket, &b.Total, &b.Sent, &b.Failed, &b.Dead); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			b.Hour = hourBucket.UTC().Format(time.RFC3339)
 			buckets = append(buckets, b)
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		writeJSON(w, http.StatusOK, HourlyTrendResponse{Success: true, Buckets: buckets})
 	}
@@ -643,7 +676,7 @@ ORDER BY total DESC
 `
 		rows, err := pool.Query(r.Context(), q, start, end, f.Channel, f.Status)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 		defer rows.Close()
@@ -655,12 +688,18 @@ ORDER BY total DESC
 				&es.EventID, &es.EventName, &es.SourceRoute,
 				&es.Total, &es.Sent, &es.Failed, &es.Dead, &es.AvgRetry,
 			); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			if es.Total > 0 {
 				es.DeliveryRate = float64(es.Sent) / float64(es.Total) * 100
 			}
 			events = append(events, es)
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		writeJSON(w, http.StatusOK, TopEventsResponse{Success: true, Events: events})
 	}
@@ -722,7 +761,7 @@ ORDER BY o.created_at ASC
 `
 		rows, err := pool.Query(r.Context(), outboxQ, body.CorrelationID)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 		defer rows.Close()
@@ -741,7 +780,9 @@ ORDER BY o.created_at ASC
 				&createdAt, &scheduledAt, &processedAt, &sentAt,
 				&retryCount, &lastError, &recipient, &subject, &priority,
 			); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			tlStatus := "PENDING"
@@ -795,6 +836,10 @@ ORDER BY o.created_at ASC
 				})
 			}
 		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
+		}
 
 		// Enrich with send_history retry attempts
 		histQ := `
@@ -825,7 +870,9 @@ ORDER BY sh.attempted_at ASC
 					&histID, &channel, &status, &attemptedAt, &attemptNum,
 					&provResponse, &provMsgID, &recipient,
 				); err != nil {
-					continue
+					histRows.Close()
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+					return
 				}
 				tlStatus := "SUCCESS"
 				if status == "FAILED" {
@@ -852,6 +899,10 @@ ORDER BY sh.attempted_at ASC
 					Description: "Delivery attempt " + strconv.Itoa(attemptNum) + " via " + channel + " → " + status,
 					Metadata:    meta,
 				})
+			}
+			if err := histRows.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 		}
 
@@ -921,7 +972,7 @@ WHERE created_at BETWEEN $1 AND $2
 		if err := pool.QueryRow(r.Context(), summaryQ, start, end, f.Channel).Scan(
 			&deadCount, &maxRetry, &avgRetry,
 		); err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 
@@ -940,7 +991,7 @@ ORDER BY retry_count ASC
 `
 		distribRows, err := pool.Query(r.Context(), distribQ, start, end, f.Channel)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 		defer distribRows.Close()
@@ -948,9 +999,15 @@ ORDER BY retry_count ASC
 		for distribRows.Next() {
 			var row RetryDepthRow
 			if err := distribRows.Scan(&row.RetryCount, &row.Total, &row.StillFailed, &row.Recovered); err != nil {
-				continue
+				distribRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			distrib = append(distrib, row)
+		}
+		if err := distribRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		chQ := `
@@ -966,7 +1023,7 @@ ORDER BY avg_retry DESC
 `
 		chRows, err := pool.Query(r.Context(), chQ, start, end)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 		defer chRows.Close()
@@ -974,9 +1031,15 @@ ORDER BY avg_retry DESC
 		for chRows.Next() {
 			var cr ChannelRetryStat
 			if err := chRows.Scan(&cr.Channel, &cr.AvgRetry, &cr.MaxRetry, &cr.DeadCount); err != nil {
-				continue
+				chRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			chStats = append(chStats, cr)
+		}
+		if err := chRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		writeJSON(w, http.StatusOK, RetryStatsResponse{
@@ -1055,7 +1118,7 @@ ORDER BY sh.attempted_at ASC
 `
 		rows, err := pool.Query(r.Context(), q, body.OutboxID, body.CorrelationID)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 		defer rows.Close()
@@ -1070,10 +1133,16 @@ ORDER BY sh.attempted_at ASC
 				&sh.Recipient, &sh.ProviderResponse, &sh.ProviderMsgID,
 				&sh.RenderedSubject, &sh.SenderName,
 			); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			sh.AttemptedAt = attemptedAt.UTC().Format(time.RFC3339)
 			result = append(result, sh)
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		writeJSON(w, http.StatusOK, SendHistoryResponse{Success: true, Rows: result})
 	}
@@ -1188,10 +1257,14 @@ WHERE sh.attempted_at BETWEEN $1 AND $2
 	for rows.Next() {
 		var raw string
 		if err := rows.Scan(&raw); err != nil {
-			continue
+			rows.Close()
+			return FailureReasonsResponse{}, err
 		}
 		bucket := normaliseError(raw)
 		counts[bucket]++
+	}
+	if err := rows.Err(); err != nil {
+		return FailureReasonsResponse{}, err
 	}
 
 	// Sort by count descending
@@ -1229,7 +1302,7 @@ func GetFailureReasons(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		res, err := fetchFailureReasons(r.Context(), pool, f)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, res)
@@ -1277,7 +1350,7 @@ ORDER BY total_attempts DESC
 `
 		rows, err := pool.Query(r.Context(), q, start, end, f.Channel, f.Status)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 		defer rows.Close()
@@ -1289,12 +1362,18 @@ ORDER BY total_attempts DESC
 				&ps.Channel, &ps.TotalAttempts, &ps.Succeeded, &ps.Failed,
 				&ps.UniqueMessages, &ps.AvgAttempts,
 			); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			if ps.TotalAttempts > 0 {
 				ps.SuccessRate = float64(ps.Succeeded) / float64(ps.TotalAttempts) * 100
 			}
 			providers = append(providers, ps)
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		writeJSON(w, http.StatusOK, ProviderStatsResponse{Success: true, Providers: providers})
 	}
@@ -1343,7 +1422,7 @@ ORDER BY e.event_id, nc.channel
 `
 		rows, err := pool.Query(r.Context(), q)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errRespInternal(w, err)
 			return
 		}
 		defer rows.Close()
@@ -1363,7 +1442,9 @@ ORDER BY e.event_id, nc.channel
 				&eventID, &eventName, &sourceRoute, &isActive,
 				&channel, &isEnabled, &retryMax, &priority,
 			); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			if _, ok := eventMap[eventID]; !ok {
 				eventMap[eventID] = &EventConfigRow{
@@ -1388,6 +1469,10 @@ ORDER BY e.event_id, nc.channel
 				}
 				eventMap[eventID].Channels = append(eventMap[eventID].Channels, chCfg)
 			}
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		result := make([]EventConfigRow, 0, len(eventOrder))
@@ -1503,12 +1588,16 @@ ORDER BY 2 DESC
 	for rows.Next() {
 		var cs ChannelStat
 		if err := rows.Scan(&cs.Channel, &cs.Total, &cs.Sent, &cs.Failed, &cs.Dead, &cs.Pending, &cs.AvgRetry, &cs.IsEnabled); err != nil {
-			continue
+			rows.Close()
+			return ChannelBreakdownResponse{}, err
 		}
 		if cs.Total > 0 {
 			cs.DeliveryRate = float64(cs.Sent) / float64(cs.Total) * 100
 		}
 		channels = append(channels, cs)
+	}
+	if err := rows.Err(); err != nil {
+		return ChannelBreakdownResponse{}, err
 	}
 	return ChannelBreakdownResponse{Success: true, Channels: channels}, nil
 }
@@ -1534,10 +1623,14 @@ GROUP BY 1 ORDER BY 1 ASC
 		var b HourlyBucket
 		var h time.Time
 		if err := rows.Scan(&h, &b.Total, &b.Sent, &b.Failed, &b.Dead); err != nil {
-			continue
+			rows.Close()
+			return HourlyTrendResponse{}, err
 		}
 		b.Hour = h.UTC().Format(time.RFC3339)
 		buckets = append(buckets, b)
+	}
+	if err := rows.Err(); err != nil {
+		return HourlyTrendResponse{}, err
 	}
 	return HourlyTrendResponse{Success: true, Buckets: buckets}, nil
 }
@@ -1569,12 +1662,16 @@ ORDER BY 4 DESC
 	for rows.Next() {
 		var es EventStat
 		if err := rows.Scan(&es.EventID, &es.EventName, &es.SourceRoute, &es.Total, &es.Sent, &es.Failed, &es.Dead, &es.AvgRetry); err != nil {
-			continue
+			rows.Close()
+			return TopEventsResponse{}, err
 		}
 		if es.Total > 0 {
 			es.DeliveryRate = float64(es.Sent) / float64(es.Total) * 100
 		}
 		events = append(events, es)
+	}
+	if err := rows.Err(); err != nil {
+		return TopEventsResponse{}, err
 	}
 	return TopEventsResponse{Success: true, Events: events}, nil
 }
@@ -1606,9 +1703,13 @@ GROUP BY retry_count ORDER BY retry_count ASC
 	for distribRows.Next() {
 		var row RetryDepthRow
 		if err := distribRows.Scan(&row.RetryCount, &row.Total, &row.StillFailed, &row.Recovered); err != nil {
-			continue
+			distribRows.Close()
+			return RetryStatsResponse{}, err
 		}
 		distrib = append(distrib, row)
+	}
+	if err := distribRows.Err(); err != nil {
+		return RetryStatsResponse{}, err
 	}
 	chRows, err := pool.Query(ctx, `
 SELECT channel, COALESCE(AVG(retry_count),0), COALESCE(MAX(retry_count),0),
@@ -1623,9 +1724,13 @@ FROM notification_svc.outbox WHERE created_at BETWEEN $1 AND $2 GROUP BY channel
 	for chRows.Next() {
 		var cr ChannelRetryStat
 		if err := chRows.Scan(&cr.Channel, &cr.AvgRetry, &cr.MaxRetry, &cr.DeadCount); err != nil {
-			continue
+			chRows.Close()
+			return RetryStatsResponse{}, err
 		}
 		chStats = append(chStats, cr)
+	}
+	if err := chRows.Err(); err != nil {
+		return RetryStatsResponse{}, err
 	}
 	return RetryStatsResponse{
 		Success: true, DeadLetterCount: deadCount, MaxRetryObs: maxRetry, AvgRetryCount: avgRetry,
@@ -1696,7 +1801,8 @@ ORDER BY o.created_at DESC`
 			&row.RenderedSubject, &row.PriorityLevel,
 			&variablesRaw,
 		); err != nil {
-			continue
+			rows.Close()
+			return LogsResponse{}, err
 		}
 		row.LatencyMs = latencyMs
 		row.CreatedAt = createdAt.UTC().Format(time.RFC3339)
@@ -1714,6 +1820,9 @@ ORDER BY o.created_at DESC`
 		// RetryHistory defaults to empty slice (never nil in JSON)
 		row.RetryHistory = []RetryAttempt{}
 		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return LogsResponse{}, err
 	}
 	rows.Close() // close early so the connection returns to the pool before batch queries
 
@@ -1767,6 +1876,10 @@ WHERE audit_id = ANY($1)`, auditIDs)
 					m[t.AuditID] = t
 				}
 			}
+			if err := tplRows.Err(); err != nil {
+				tplC <- tplFetchRes{m, err}
+				return
+			}
 			tplC <- tplFetchRes{m, nil}
 		}()
 
@@ -1792,6 +1905,10 @@ ORDER BY outbox_id, attempt_number ASC`, outboxIDs)
 					ra.AttemptedAt = at.UTC().Format(time.RFC3339)
 					m[oid] = append(m[oid], ra)
 				}
+			}
+			if err := histRows.Err(); err != nil {
+				histC <- histFetchRes{m, err}
+				return
 			}
 			histC <- histFetchRes{m, nil}
 		}()
@@ -1834,12 +1951,16 @@ GROUP BY sh.channel ORDER BY 2 DESC
 	for rows.Next() {
 		var ps ProviderStat
 		if err := rows.Scan(&ps.Channel, &ps.TotalAttempts, &ps.Succeeded, &ps.Failed, &ps.UniqueMessages, &ps.AvgAttempts); err != nil {
-			continue
+			rows.Close()
+			return ProviderStatsResponse{}, err
 		}
 		if ps.TotalAttempts > 0 {
 			ps.SuccessRate = float64(ps.Succeeded) / float64(ps.TotalAttempts) * 100
 		}
 		providers = append(providers, ps)
+	}
+	if err := rows.Err(); err != nil {
+		return ProviderStatsResponse{}, err
 	}
 	return ProviderStatsResponse{Success: true, Providers: providers}, nil
 }
@@ -1867,7 +1988,8 @@ ORDER BY e.event_id, nc.channel
 			retryMax, priority              *int
 		)
 		if err := rows.Scan(&eventID, &eventName, &sourceRoute, &isActive, &channel, &isEnabled, &retryMax, &priority); err != nil {
-			continue
+			rows.Close()
+			return EventConfigResponse{}, err
 		}
 		if _, ok := eventMap[eventID]; !ok {
 			eventMap[eventID] = &EventConfigRow{EventID: eventID, EventName: eventName, SourceRoute: sourceRoute, IsActive: isActive, Channels: make([]EventConfigChannel, 0)}
@@ -1886,6 +2008,9 @@ ORDER BY e.event_id, nc.channel
 			}
 			eventMap[eventID].Channels = append(eventMap[eventID].Channels, chCfg)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return EventConfigResponse{}, err
 	}
 	result := make([]EventConfigRow, 0, len(eventOrder))
 	for _, id := range eventOrder {
@@ -2008,7 +2133,7 @@ func GetOverview(pool *pgxpool.Pool) http.HandlerFunc {
 
 		res := <-ch
 		if res.err != nil {
-			errResp(w, http.StatusInternalServerError, res.err.Error())
+			errRespInternal(w, res.err)
 			return
 		}
 

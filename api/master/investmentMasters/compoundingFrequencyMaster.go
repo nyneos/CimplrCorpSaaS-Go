@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -111,7 +112,7 @@ func GetCompoundingFrequenciesApprovedActive(pgxPool *pgxpool.Pool) http.Handler
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -125,7 +126,7 @@ func GetCompoundingFrequenciesApprovedActive(pgxPool *pgxpool.Pool) http.Handler
 			var isActive bool
 
 			if err := rows.Scan(&id, &code, &name, &ftype, &periods, &days, &desc, &isActive); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+errtext.Detail(w, err))
 				api.LogError("Database scan error in GetCompoundingFrequenciesApprovedActive: %v", err)
 				return
 			}
@@ -399,7 +400,7 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			api.LogError("Bulk create transaction begin failed: %v", err)
 			return
 		}
@@ -497,7 +498,7 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var id, code string
 			if err := rows.Scan(&id, &code); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+errtext.Detail(w, err))
 				api.LogError("Insert scan failed: %v", err)
 				return
 			}
@@ -558,7 +559,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		fileBytes, err := io.ReadAll(file)
 		file.Close()
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -582,7 +583,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err = parseXLSXFile(newBytesMultipartFile(fileBytes))
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "File parsing failed: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "File parsing failed: "+errtext.Detail(w, err))
 			api.LogError("File parsing failed: %v", err)
 			return
 		}
@@ -740,7 +741,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			storedFileName = s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -750,7 +751,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if s3Key != "" {
 				_ = s3storage.DeleteFromS3(ctx, s3Key)
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		committed := false
@@ -853,7 +854,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rowsRes.Next() {
 			var id, code string
 			if err := rowsRes.Scan(&id, &code); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+errtext.Detail(w, err))
 				api.LogError("Insert scan failed: %v", err)
 				return
 			}
@@ -1036,7 +1037,7 @@ func GetCompoundingFrequenciesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1058,7 +1059,7 @@ func GetCompoundingFrequenciesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+errtext.Detail(w, rows.Err()))
 			api.LogError("Row iteration error in GetCompoundingFrequenciesWithAudit: %v", rows.Err())
 			return
 		}
@@ -1101,7 +1102,7 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			api.LogError("Bulk delete transaction begin failed: %v", err)
 			return
 		}
@@ -1126,7 +1127,7 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Verification scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Verification scan failed: "+errtext.Detail(w, err))
 				api.LogError("Delete verification scan failed: %v", err)
 				return
 			}
@@ -1247,7 +1248,7 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_compounding_frequency
 			SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2
-			WHERE frequency_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+			WHERE (frequency_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, userEmail, req.Comment, req.FrequencyIDs)
 
 		if err != nil {
@@ -1273,7 +1274,10 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, id := range deleteApprovedIDs {
 				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_compounding_frequency_master", id)
 				if len(blockers) > 0 {
-					_, _ = tx.Exec(ctx, `UPDATE investment.fd_audit_compounding_frequency SET processing_status='PENDING_DELETE_APPROVAL', checker_by=NULL, checker_at=NULL, checker_comment=NULL WHERE frequency_id=$1 AND action_type='DELETE' AND processing_status='APPROVED'`, id)
+					if _, err := tx.Exec(ctx, `UPDATE investment.fd_audit_compounding_frequency SET processing_status='PENDING_DELETE_APPROVAL', checker_by=NULL, checker_at=NULL, checker_comment=NULL WHERE frequency_id=$1 AND action_type='DELETE' AND processing_status='APPROVED'`, id); err != nil {
+						api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+						return
+					}
 					blockedItems = append(blockedItems, map[string]interface{}{"frequency_id": id, "blocked_by": dependency.BlockersSummary(blockers)})
 				}
 			}
@@ -1356,7 +1360,7 @@ func BulkRejectCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_compounding_frequency
 			SET processing_status = 'REJECTED', checker_by = $1, checker_at = now(), checker_comment = $2
-			WHERE frequency_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+			WHERE (frequency_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, userEmail, req.Comment, req.FrequencyIDs)
 
 		if err != nil {
@@ -1582,7 +1586,7 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			api.LogError("Bulk update transaction begin failed: %v", err)
 			return
 		}
@@ -1607,7 +1611,7 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			var vals [7]interface{}
 			if err := rowsOld.Scan(&id, &vals[0], &vals[1], &vals[2], &vals[3], &vals[4], &vals[5], &vals[6]); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+errtext.Detail(w, err))
 				api.LogError("Old values scan failed: %v", err)
 				return
 			}
@@ -1694,7 +1698,7 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			auditQuery := fmt.Sprintf("INSERT INTO investment.fd_audit_compounding_frequency (%s) VALUES (%s)", strings.Join(auditCols, ", "), strings.Join(auditParams, ", "))
 			if _, err := tx.Exec(ctx, auditQuery, auditVals...); err != nil {
-				errors = append(errors, map[string]interface{}{"frequency_id": up.FrequencyID, constants.ValueSuccess: false, constants.ValueError: "Audit failed: " + err.Error()})
+				errors = append(errors, map[string]interface{}{"frequency_id": up.FrequencyID, constants.ValueSuccess: false, constants.ValueError: "Audit failed: " + errtext.Text(err)})
 				continue
 			}
 

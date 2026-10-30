@@ -55,7 +55,14 @@ func StartOAuthPoller(ctx context.Context, pool *pgxpool.Pool) {
 	defer ticker.Stop()
 
 	runOnce := func() {
-		if err := oauthPollOnce(ctx, pool, rt); err != nil {
+		if !oauthPollMu.TryLock() {
+			logger.LogInfo("[oauth-poller] skip tick, already running")
+			return
+		}
+		defer oauthPollMu.Unlock()
+		if err := runPollCycle(ctx, pool, "email-oauth-poll", func(ctx context.Context) error {
+			return oauthPollOnce(ctx, pool, rt)
+		}); err != nil {
 			logger.LogError("[oauth-poller] tick error: %v", err)
 		}
 	}
@@ -370,8 +377,7 @@ func ingestOAuthPollPage(ctx context.Context, pool *pgxpool.Pool, inbox oauthInb
 		}
 
 		if err := ingestGraphMessage(ctx, pool, inboxRow, om.Parsed, om.ProviderMessageID, folder.direction, "OAUTH"); err != nil {
-			logger.LogError("[oauth-poller] ingest id=%s err=%v", om.ProviderMessageID, err)
-			continue
+			return ingested, err
 		}
 		ingested++
 	}

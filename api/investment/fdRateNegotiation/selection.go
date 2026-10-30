@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/policyengine/common"
 	"context"
 	"encoding/json"
@@ -367,7 +368,7 @@ func LinkBooking(pool *pgxpool.Pool) http.HandlerFunc {
 			RateRequestID: req.RateRequestID, BookingID: bookingID, OldStatus: oldStatus, OldBookingID: oldBookingID,
 			UserEmail: userEmail, ClientIP: api.ClientIPFromContext(ctx),
 		}); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 

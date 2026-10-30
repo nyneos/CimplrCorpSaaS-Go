@@ -1,6 +1,7 @@
 package fdInterestAndTdsWorkbench
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -203,7 +204,7 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 
 		statusRows, err := pool.Query(ctx, statusSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Status query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Status query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer statusRows.Close()
@@ -235,7 +236,7 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 
 		recentRows, err := pool.Query(ctx, recentSQL, recentArgs...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Recent receipts query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Recent receipts query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer recentRows.Close()
@@ -330,7 +331,7 @@ func GetTDSWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 
 		entityRows, err := pool.Query(ctx, entitySQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Entity breakdown query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Entity breakdown query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer entityRows.Close()
@@ -355,7 +356,7 @@ func GetTDSWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 		exSQL += " ORDER BY raised_at DESC LIMIT 10"
 		exRows, err := pool.Query(ctx, exSQL, exArgs...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Exception query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Exception query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer exRows.Close()
@@ -414,7 +415,7 @@ func GetReconciliationDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		runRows, err := pool.Query(ctx, runSQL, runArgs...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Run history query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Run history query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer runRows.Close()
@@ -435,7 +436,7 @@ func GetReconciliationDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		pipelineSQL += " GROUP BY severity, exception_status ORDER BY severity, exception_status"
 		pipelineRows, err := pool.Query(ctx, pipelineSQL, pipelineArgs...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Pipeline query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Pipeline query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer pipelineRows.Close()
@@ -529,7 +530,7 @@ func GetInterestVsAccrualAnalysis(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, analysisSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Analysis query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Analysis query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()

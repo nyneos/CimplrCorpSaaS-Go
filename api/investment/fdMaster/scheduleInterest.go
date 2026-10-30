@@ -2,6 +2,7 @@ package fdMaster
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,14 +12,16 @@ import (
 // PeriodInterestFromSchedule sums period interest from fd_cashflow_schedule rows.
 // It follows cashflow summary semantics, adjusted for accrual windows so payout
 // rows contribute only the due-not-accrued slice already embedded in the receipt.
-// Returns found=true when at least one in-scope cashflow row exists for the FD.
+// Returns found=true when at least one in-scope cashflow row exists for the FD, and a
+// non-nil error when the schedule could not be read (callers must not treat that as
+// "no schedule" and silently fall back to the formula).
 func PeriodInterestFromSchedule(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	fdID string,
 	periodStart, periodEnd time.Time,
 	interestTypeCode string,
-) (interest float64, cashflowIDs []string, found bool) {
+) (interest float64, cashflowIDs []string, found bool, err error) {
 	return PeriodInterestFromScheduleWithEnd(ctx, pool, fdID, periodStart, periodEnd, interestTypeCode, true)
 }
 
@@ -32,7 +35,7 @@ func PeriodInterestFromScheduleWithEnd(
 	periodStart, periodEnd time.Time,
 	interestTypeCode string,
 	includePeriodEnd bool,
-) (interest float64, cashflowIDs []string, found bool) {
+) (interest float64, cashflowIDs []string, found bool, err error) {
 	rows, err := pool.Query(ctx, `
 		SELECT cashflow_id, event_type, event_date,
 		       COALESCE(interest_accrued, 0),
@@ -46,7 +49,7 @@ func PeriodInterestFromScheduleWithEnd(
 		fdID, periodStart, periodEnd, includePeriodEnd,
 	)
 	if err != nil {
-		return 0, nil, false
+		return 0, nil, false, fmt.Errorf("read cashflow schedule for fd %s: %w", fdID, err)
 	}
 	defer rows.Close()
 
@@ -63,7 +66,7 @@ func PeriodInterestFromScheduleWithEnd(
 	for rows.Next() {
 		var r row
 		if err := rows.Scan(&r.id, &r.eventType, &r.eventDate, &r.interest, &r.dueNotAccrued); err != nil {
-			continue
+			return 0, nil, false, fmt.Errorf("scan cashflow schedule for fd %s: %w", fdID, err)
 		}
 		switch r.eventType {
 		case "ACCRUAL":
@@ -71,8 +74,11 @@ func PeriodInterestFromScheduleWithEnd(
 		}
 		schedule = append(schedule, r)
 	}
+	if err := rows.Err(); err != nil {
+		return 0, nil, false, fmt.Errorf("read cashflow schedule for fd %s: %w", fdID, err)
+	}
 	if len(schedule) == 0 {
-		return 0, nil, false
+		return 0, nil, false, nil
 	}
 	found = true
 
@@ -115,5 +121,5 @@ func PeriodInterestFromScheduleWithEnd(
 			interest += r.interest
 		}
 	}
-	return interest, cashflowIDs, found
+	return interest, cashflowIDs, found, nil
 }

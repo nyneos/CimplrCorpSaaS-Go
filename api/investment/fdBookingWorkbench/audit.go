@@ -3,6 +3,7 @@ package fdBooking
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -97,7 +98,7 @@ func GetBookingAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY a.requested_at DESC
 		`, req.BookingID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -127,7 +128,7 @@ func GetBookingAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND a.parent_record_id = $1
 			ORDER BY a.requested_at DESC`, req.BookingID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		uploadPayload, err := collectPgxRows(uploadRows)
@@ -201,7 +202,7 @@ func GetConfirmationAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY a.requested_at DESC
 		`, req.ConfirmationID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -231,7 +232,7 @@ func GetConfirmationAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND a.parent_record_id = $1
 			ORDER BY a.requested_at DESC`, req.ConfirmationID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		uploadPayload, err := collectPgxRows(uploadRows)

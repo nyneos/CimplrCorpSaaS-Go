@@ -60,7 +60,7 @@ func RunPortfolioRefreshWorker(db *pgxpool.Pool) error {
 		return fmt.Errorf("invalid timezone for portfolio refresh worker: %w", err)
 	}
 
-	c := cron.New(cron.WithLocation(loc))
+	c := cron.New(cron.WithLocation(loc), cron.WithChain(cron.Recover(cron.DefaultLogger), cron.SkipIfStillRunning(cron.DefaultLogger)))
 
 	// Daily at 09:00 IST — after AMFI NAV data is typically updated
 	_, err = c.AddFunc("0 9 * * *", func() {

@@ -30,19 +30,19 @@ type executionDetailDoc struct {
 }
 
 type executionDetailResp struct {
-	RunID        string               `json:"run_id"`
-	RuleID       string               `json:"rule_id"`
-	RuleName     string               `json:"rule_name"`
-	VersionID    string               `json:"version_id"`
-	TriggerType  string               `json:"trigger_type"`
-	TriggeredBy  string               `json:"triggered_by"`
-	StartedAt    string               `json:"started_at"`
-	FinishedAt   *string              `json:"finished_at"`
-	Status       string               `json:"status"`
-	ErrorDetail  string               `json:"error_detail"`
-	WindowStart  *string              `json:"window_start"`
-	WindowEnd    *string              `json:"window_end"`
-	Documents    []executionDetailDoc `json:"documents"`
+	RunID       string               `json:"run_id"`
+	RuleID      string               `json:"rule_id"`
+	RuleName    string               `json:"rule_name"`
+	VersionID   string               `json:"version_id"`
+	TriggerType string               `json:"trigger_type"`
+	TriggeredBy string               `json:"triggered_by"`
+	StartedAt   string               `json:"started_at"`
+	FinishedAt  *string              `json:"finished_at"`
+	Status      string               `json:"status"`
+	ErrorDetail string               `json:"error_detail"`
+	WindowStart *string              `json:"window_start"`
+	WindowEnd   *string              `json:"window_end"`
+	Documents   []executionDetailDoc `json:"documents"`
 }
 
 // HandleExecutionDetail returns one generation_run with its generated documents.
@@ -54,6 +54,9 @@ func HandleExecutionDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		var req executionDetailReq
 		if err := common.DecodeJSON(r, &req); err != nil {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		if !common.RequireRecordsEntityAccess(w, r, pool, common.RunEntityQuery, []string{req.RunID}) {
 			return
 		}
 		runID := strings.TrimSpace(req.RunID)

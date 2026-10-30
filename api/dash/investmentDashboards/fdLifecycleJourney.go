@@ -288,6 +288,10 @@ func fetchFDJourney(ctx context.Context, pool *pgxpool.Pool, entityFilter, key s
 				of.IsSelected = sel != nil && *sel
 				x.Offers = append(x.Offers, of)
 			}
+			if err := offerRows.Err(); err != nil {
+				offerRows.Close()
+				return nil, false, err
+			}
 			offerRows.Close()
 			rr = &x
 		}

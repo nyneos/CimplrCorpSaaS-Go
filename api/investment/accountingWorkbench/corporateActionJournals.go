@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 // CARecord represents a corporate action record
@@ -274,67 +276,98 @@ func generateBonusJournal(ctx context.Context, tx DBExecutor, activityID string,
 		return fmt.Errorf("scheme not found: %w", err)
 	}
 
-	// Calculate bonus units being issued
-	var totalBonusUnits float64
-	var entityName string
-	err = tx.QueryRow(ctx, `
-		SELECT 
-			COALESCE(SUM(total_units), 0),
-			COALESCE(MAX(entity_name), '') as entity_name
+	if rec.RatioNew <= 0 || rec.RatioOld <= 0 {
+		return fmt.Errorf("bonus ratio must be positive (got %v:%v)", rec.RatioNew, rec.RatioOld)
+	}
+
+	// Existing units per entity: each entity holding the scheme gets its own memo entry.
+	rows, err := tx.Query(ctx, `
+		SELECT COALESCE(entity_name, ''), COALESCE(SUM(total_units), 0)::text
 		FROM investment.portfolio_snapshot
 		WHERE scheme_id = $1
 		GROUP BY entity_name
-		LIMIT 1
-	`, rec.SourceSchemeID).Scan(&totalBonusUnits, &entityName)
-
-	if totalBonusUnits == 0 {
-		return nil // No holdings, no bonus
+		ORDER BY entity_name
+	`, rec.SourceSchemeID)
+	if err != nil {
+		return fmt.Errorf("load bonus holdings: %w", err)
+	}
+	type entityUnits struct {
+		entityName string
+		units      decimal.Decimal
+	}
+	var holdings []entityUnits
+	for rows.Next() {
+		var name, unitsText string
+		if err := rows.Scan(&name, &unitsText); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan bonus holdings: %w", err)
+		}
+		units, err := decimal.NewFromString(unitsText)
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("invalid units %q for entity %s: %w", unitsText, name, err)
+		}
+		if units.IsPositive() {
+			holdings = append(holdings, entityUnits{entityName: name, units: units})
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("load bonus holdings: %w", err)
 	}
 
-	// Calculate bonus units: floor((existing units × ratio_new / ratio_old) × 1000) / 1000
-	bonusUnits := float64(int((totalBonusUnits*rec.RatioNew/rec.RatioOld)*1000)) / 1000
+	ratioNew := decimal.NewFromFloat(rec.RatioNew)
+	ratioOld := decimal.NewFromFloat(rec.RatioOld)
+	for _, h := range holdings {
+		// Bonus units: floor(existing units × ratio_new / ratio_old) to 3 decimals, in exact decimal.
+		bonusUnits := h.units.Mul(ratioNew).Div(ratioOld).RoundFloor(3)
+		bonusUnitsF, _ := bonusUnits.Float64()
 
-	// Create memo journal entry (₹0 transaction)
-	je := &JournalEntry{
-		ActivityID:       activityID,
-		EntityID:         entityName,
-		EntityName:       entityName,
-		EntryDate:        rec.EffectiveDate,
-		AccountingPeriod: rec.AccountingPeriod,
-		EntryType:        "CORPORATE_ACTION",
-		Description:      fmt.Sprintf("Bonus Issue %d:%d - %s (Memo Entry)", int(rec.RatioNew), int(rec.RatioOld), schemeName),
-		Lines:            []JournalEntryLine{},
+		// Create memo journal entry (₹0 transaction)
+		je := &JournalEntry{
+			ActivityID:       activityID,
+			EntityID:         h.entityName,
+			EntityName:       h.entityName,
+			EntryDate:        rec.EffectiveDate,
+			AccountingPeriod: rec.AccountingPeriod,
+			EntryType:        "CORPORATE_ACTION",
+			Description:      fmt.Sprintf("Bonus Issue %d:%d - %s (Memo Entry)", int(rec.RatioNew), int(rec.RatioOld), schemeName),
+			Lines:            []JournalEntryLine{},
+		}
+
+		// Use 0.01 for memo entry to keep journal balanced
+		memoAmount := 0.01
+
+		// Debit: Investment Account (bonus units received)
+		je.Lines = append(je.Lines, JournalEntryLine{
+			LineNumber:    1,
+			AccountNumber: fmt.Sprintf(constants.FormatInvestmentID, rec.SourceSchemeID),
+			AccountName:   fmt.Sprintf(constants.FormatInvestmentName, schemeName),
+			AccountType:   "ASSET",
+			DebitAmount:   memoAmount,
+			CreditAmount:  0,
+			SchemeID:      rec.SourceSchemeID,
+			Narration:     fmt.Sprintf("Bonus units issued: %.3f units at ₹0 cost", bonusUnitsF),
+		})
+
+		// Credit: Bonus Income / Capital Reserve
+		je.Lines = append(je.Lines, JournalEntryLine{
+			LineNumber:    2,
+			AccountNumber: "INC-BONUS",
+			AccountName:   "Bonus Income / Capital Reserve",
+			AccountType:   "INCOME",
+			DebitAmount:   0,
+			CreditAmount:  memoAmount,
+			SchemeID:      rec.SourceSchemeID,
+			Narration:     fmt.Sprintf("Bonus issue %d:%d - %.3f units received", int(rec.RatioNew), int(rec.RatioOld), bonusUnitsF),
+		})
+
+		je.TotalDebit = memoAmount
+		je.TotalCredit = memoAmount
+
+		if err := SaveJournalEntry(ctx, tx, je); err != nil {
+			return fmt.Errorf("save bonus journal for %s: %w", h.entityName, err)
+		}
 	}
-
-	// Use 0.01 for memo entry to keep journal balanced
-	memoAmount := 0.01
-
-	// Debit: Investment Account (bonus units received)
-	je.Lines = append(je.Lines, JournalEntryLine{
-		LineNumber:    1,
-		AccountNumber: fmt.Sprintf(constants.FormatInvestmentID, rec.SourceSchemeID),
-		AccountName:   fmt.Sprintf(constants.FormatInvestmentName, schemeName),
-		AccountType:   "ASSET",
-		DebitAmount:   memoAmount,
-		CreditAmount:  0,
-		SchemeID:      rec.SourceSchemeID,
-		Narration:     fmt.Sprintf("Bonus units issued: %.3f units at ₹0 cost", bonusUnits),
-	})
-
-	// Credit: Bonus Income / Capital Reserve
-	je.Lines = append(je.Lines, JournalEntryLine{
-		LineNumber:    2,
-		AccountNumber: "INC-BONUS",
-		AccountName:   "Bonus Income / Capital Reserve",
-		AccountType:   "INCOME",
-		DebitAmount:   0,
-		CreditAmount:  memoAmount,
-		SchemeID:      rec.SourceSchemeID,
-		Narration:     fmt.Sprintf("Bonus issue %d:%d - %.3f units received", int(rec.RatioNew), int(rec.RatioOld), bonusUnits),
-	})
-
-	je.TotalDebit = memoAmount
-	je.TotalCredit = memoAmount
-
-	return SaveJournalEntry(ctx, tx, je)
+	return nil
 }

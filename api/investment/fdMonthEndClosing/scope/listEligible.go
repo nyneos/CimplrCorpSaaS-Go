@@ -164,11 +164,11 @@ func ListEligibleFDs(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		fdclosingcommon.RespondSuccess(w, "Eligible FDs loaded", map[string]interface{}{
-			"rows":              out,
-			"count":             len(out),
-			"include_matured":   includeMatured,
-			"bank_id":           req.BankID,
-			"currency_code":     req.CurrencyCode,
+			"rows":                    out,
+			"count":                   len(out),
+			"include_matured":         includeMatured,
+			"bank_id":                 req.BankID,
+			"currency_code":           req.CurrencyCode,
 			"currency_filter_applied": currencyFilterApplied,
 			"bank_filter_applied":     req.BankID != "",
 			"eligible_statuses":       statuses,

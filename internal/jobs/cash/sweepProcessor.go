@@ -112,7 +112,7 @@ func RunSweepScheduler(cfg *SweepConfig, db *pgxpool.Pool) error {
 		loc = time.UTC
 	}
 
-	c := cron.New(cron.WithLocation(loc))
+	c := cron.New(cron.WithLocation(loc), cron.WithChain(cron.Recover(cron.DefaultLogger), cron.SkipIfStillRunning(cron.DefaultLogger)))
 
 	_, err = c.AddFunc(cfg.Schedule, func() {
 		err := ProcessApprovedSweeps(db, cfg.BatchSize)

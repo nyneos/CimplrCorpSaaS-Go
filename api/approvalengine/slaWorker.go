@@ -3,6 +3,8 @@ package approvalengine
 import (
 	"CimplrCorpSaas/api"
 	"context"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -57,6 +59,7 @@ type breachedEye struct {
 	auditIDColumn     string // derived from LookupTxTableConfig, not read from DB
 	actionType        string
 	submittedBy       string
+	transactionType   string
 }
 
 // runSLACycle finds all SLA-breached active eyes and handles each one in its
@@ -114,6 +117,7 @@ func runSLACycle(ctx context.Context, pool *pgxpool.Pool) {
 		}
 		// audit_id_column is not stored in the DB — derive it from the transaction type.
 		_, e.auditIDColumn = LookupTxTableConfig(txType)
+		e.transactionType = txType
 		eyes = append(eyes, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -128,16 +132,14 @@ func runSLACycle(ctx context.Context, pool *pgxpool.Pool) {
 	api.LogInfo("[SLA WORKER] Cycle done: %d breached eyes processed", len(eyes))
 }
 
+const slaRejectComment = "Auto-rejected: SLA breached and no escalation configured"
+
 // processBreachedEye handles one SLA-breached eye in its own transaction.
 func processBreachedEye(ctx context.Context, pool *pgxpool.Pool, eye breachedEye) {
 	// Determine system actor user ID.
-	systemActorID := eye.submittedBy // fallback
-	var sysID string
-	lookupErr := pool.QueryRow(ctx,
-		`SELECT id FROM public.users WHERE email ILIKE '%system%' LIMIT 1`,
-	).Scan(&sysID)
-	if lookupErr == nil && sysID != "" {
-		systemActorID = sysID
+	systemActorID := strings.TrimSpace(os.Getenv("APPROVAL_SYSTEM_USER_ID"))
+	if systemActorID == "" {
+		systemActorID = eye.submittedBy
 	}
 
 	hasEscalation := (eye.escalationUserID != nil && *eye.escalationUserID != "") ||
@@ -167,12 +169,16 @@ func handleEscalation(ctx context.Context, pool *pgxpool.Pool, eye breachedEye, 
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	if _, err = tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE uam.approval_instance_eye
 		SET is_escalated = true, escalated_at = now()
-		WHERE instance_eye_id = $1`,
-		eye.eyeID); err != nil {
+		WHERE instance_eye_id = $1 AND status = 'ACTIVE' AND is_escalated = false`,
+		eye.eyeID)
+	if err != nil {
 		api.LogError("[SLA WORKER] Escalation eye update eye=%s: %v", eye.eyeID, err)
+		return
+	}
+	if tag.RowsAffected() != 1 {
 		return
 	}
 
@@ -202,12 +208,16 @@ func handleSequentialSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedE
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	if _, err = tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE uam.approval_instance_eye
 		SET status = 'SKIPPED', resolved_at = now()
-		WHERE instance_eye_id = $1`,
-		eye.eyeID); err != nil {
+		WHERE instance_eye_id = $1 AND status = 'ACTIVE'`,
+		eye.eyeID)
+	if err != nil {
 		api.LogError("[SLA WORKER] SeqSkip eye update eye=%s: %v", eye.eyeID, err)
+		return
+	}
+	if tag.RowsAffected() != 1 {
 		return
 	}
 
@@ -273,7 +283,7 @@ func handleSequentialSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedE
 		if _, err = tx.Exec(ctx, `
 			UPDATE uam.approval_instance
 			SET status = 'REJECTED', resolved_at = now(), resolved_by_email = 'SYSTEM'
-			WHERE instance_id = $1`, eye.instanceID); err != nil {
+			WHERE instance_id = $1 AND status = 'PENDING'`, eye.instanceID); err != nil {
 			api.LogError("[SLA WORKER] SeqSkip finalize instance=%s: %v", eye.instanceID, err)
 			return
 		}
@@ -296,6 +306,7 @@ func handleSequentialSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedE
 			return
 		}
 		api.LogInfo("[SLA WORKER] Instance %s auto-rejected after last eye skipped", eye.instanceID)
+		go RunPostFinalizeHook(context.Background(), pool, eye.transactionType, eye.recordID, InstStatusRejected, "system@auto", slaRejectComment)
 		return
 	}
 
@@ -312,12 +323,16 @@ func handleParallelSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedEye
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	if _, err = tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE uam.approval_instance_eye
 		SET status = 'SKIPPED', resolved_at = now()
-		WHERE instance_eye_id = $1`,
-		eye.eyeID); err != nil {
+		WHERE instance_eye_id = $1 AND status = 'ACTIVE'`,
+		eye.eyeID)
+	if err != nil {
 		api.LogError("[SLA WORKER] ParSkip eye update eye=%s: %v", eye.eyeID, err)
+		return
+	}
+	if tag.RowsAffected() != 1 {
 		return
 	}
 
@@ -348,7 +363,7 @@ func handleParallelSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedEye
 		if _, err = tx.Exec(ctx, `
 			UPDATE uam.approval_instance
 			SET status = 'REJECTED', resolved_at = now(), resolved_by_email = 'SYSTEM'
-			WHERE instance_id = $1`, eye.instanceID); err != nil {
+			WHERE instance_id = $1 AND status = 'PENDING'`, eye.instanceID); err != nil {
 			api.LogError("[SLA WORKER] ParSkip finalize instance=%s: %v", eye.instanceID, err)
 			return
 		}
@@ -372,4 +387,7 @@ func handleParallelSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedEye
 		return
 	}
 	api.LogInfo("[SLA WORKER] Parallel eye %s skipped", eye.eyeID)
+	if remaining == 0 {
+		go RunPostFinalizeHook(context.Background(), pool, eye.transactionType, eye.recordID, InstStatusRejected, "system@auto", slaRejectComment)
+	}
 }

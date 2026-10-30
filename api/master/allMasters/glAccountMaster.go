@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/dependency"
@@ -395,7 +396,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp); err != nil {
 					logger.LogError("CreateGLAccounts: rollback to savepoint failed (insert): %v", err)
 				}
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "gl_account_code": rrow.GLAccountCode})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errtext.Text(err), "gl_account_code": rrow.GLAccountCode})
 				continue
 			}
 
@@ -404,7 +405,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp); err != nil {
 					logger.LogError("CreateGLAccounts: rollback to savepoint failed (audit insert): %v", err)
 				}
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "gl_account_id": id})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + errtext.Text(err), "gl_account_id": id})
 				continue
 			}
 
@@ -439,15 +440,21 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			relQ := `INSERT INTO glaccountrelationships (parent_gl_account_id, child_gl_account_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`
 			if _, err := tx.Exec(ctx, relQ, parentID, info.ID); err != nil {
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrBulkRelationshipInsertFailed + err.Error(), "gl_account_id": info.ID})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrBulkRelationshipInsertFailed + errtext.Text(err), "gl_account_id": info.ID})
 				continue
 			}
 
 			var parentLevel int
 			if err := tx.QueryRow(ctx, `SELECT gl_account_level FROM masterglaccount WHERE gl_account_id=$1`, parentID).Scan(&parentLevel); err == nil {
-				_, _ = tx.Exec(ctx, `UPDATE masterglaccount SET parent_gl_code=$1, gl_account_level=$2, is_top_level_gl_account=false WHERE gl_account_id=$3`, info.Parent, parentLevel+1, info.ID)
+				if _, err := tx.Exec(ctx, `UPDATE masterglaccount SET parent_gl_code=$1, gl_account_level=$2, is_top_level_gl_account=false WHERE gl_account_id=$3`, info.Parent, parentLevel+1, info.ID); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
+				}
 			} else {
-				_, _ = tx.Exec(ctx, `UPDATE masterglaccount SET parent_gl_code=$1 WHERE gl_account_id=$2`, info.Parent, info.ID)
+				if _, err := tx.Exec(ctx, `UPDATE masterglaccount SET parent_gl_code=$1 WHERE gl_account_id=$2`, info.Parent, info.ID); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
+				}
 			}
 		}
 
@@ -717,7 +724,7 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
 		if err != nil {
-			api.RespondWithResult(w, false, err.Error())
+			api.RespondWithResult(w, false, errtext.Detail(w, err))
 			return
 		}
 		defer relRows.Close()
@@ -849,7 +856,7 @@ func GetApprovedActiveGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, map[string]interface{}{"gl_account_id": id, "gl_account_code": ifaceToString(code), "gl_account_name": ifaceToString(name), "gl_account_type": ifaceToString(typ)})
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": out})
@@ -885,7 +892,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error(), "gl_account_id": row.GLAccountID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + errtext.Text(err), "gl_account_id": row.GLAccountID})
 				continue
 			}
 			committed := false
@@ -909,7 +916,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				sel := `SELECT gl_account_code, gl_account_name, gl_account_type, parent_gl_code, status, source, gl_account_level, is_top_level_gl_account, default_currency, tags, external_code, segment, sap_bukrs, sap_ktopl, sap_saknr, sap_ktoks, oracle_ledger, oracle_coa, oracle_balancing_seg, oracle_natural_account, tally_ledger_name, tally_ledger_group, sage_department, sage_cost_centre, effective_from, effective_to FROM masterglaccount WHERE gl_account_id=$1 FOR UPDATE`
 
 				if err := tx.QueryRow(ctx, sel, row.GLAccountID).Scan(&existingCode, &existingName, &existingType, &existingParentCode, &existingStatus, &existingSource, &existingLevel, &existingIsTop, &existingDefaultCurrency, &existingTags, &existingExtCode, &existingSegment, &existingSapBukrs, &existingSapKtopl, &existingSapSaknr, &existingSapKtoks, &existingOracleLedger, &existingOracleCoa, &existingOracleBal, &existingOracleNat, &existingTallyName, &existingTallyGroup, &existingSageDept, &existingSageCost, &existingEffFrom, &existingEffTo); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "gl_account_id": row.GLAccountID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + errtext.Text(err), "gl_account_id": row.GLAccountID})
 					return
 				}
 
@@ -1103,7 +1110,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE masterglaccount SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE gl_account_id=$%d RETURNING gl_account_id", pos)
 					args = append(args, row.GLAccountID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + err.Error(), "gl_account_id": row.GLAccountID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + errtext.Text(err), "gl_account_id": row.GLAccountID})
 						return
 					}
 				}
@@ -1111,19 +1118,19 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if newParentID != nil {
 					relQ := `INSERT INTO glaccountrelationships (parent_gl_account_id, child_gl_account_id) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM glaccountrelationships WHERE parent_gl_account_id=$1 AND child_gl_account_id=$2)`
 					if _, err := tx.Exec(ctx, relQ, newParentID, updatedID); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrBulkRelationshipInsertFailed + err.Error(), "gl_account_id": updatedID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrBulkRelationshipInsertFailed + errtext.Text(err), "gl_account_id": updatedID})
 						return
 					}
 				}
 
 				auditQ := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
 				if _, err := tx.Exec(ctx, auditQ, updatedID, row.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "audit failed: " + err.Error(), "gl_account_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "audit failed: " + errtext.Text(err), "gl_account_id": updatedID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "gl_account_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + errtext.Text(err), "gl_account_id": updatedID})
 					return
 				}
 				committed = true
@@ -1182,7 +1189,7 @@ func DeleteGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer relRows.Close()
@@ -1255,7 +1262,7 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer relRows.Close()
@@ -1308,7 +1315,7 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		query := `UPDATE auditactionglaccount SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE gl_account_id = ANY($3) RETURNING action_id, gl_account_id`
+		query := `UPDATE auditactionglaccount SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (gl_account_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, gl_account_id`
 		rows2, err := tx.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to reject GL account actions")
@@ -1367,7 +1374,7 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer relRows.Close()
@@ -1446,7 +1453,7 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		query := `UPDATE auditactionglaccount SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE gl_account_id = ANY($3) RETURNING action_id, gl_account_id, actiontype`
+		query := `UPDATE auditactionglaccount SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (gl_account_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, gl_account_id, actiontype`
 		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, safeToApprove)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to approve GL account actions")
@@ -1477,7 +1484,7 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			updQ := `UPDATE masterglaccount SET is_deleted=true WHERE gl_account_id = ANY($1)`
 			if _, err := tx.Exec(ctx, updQ, deleteIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to set is_deleted: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to set is_deleted: "+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -1605,7 +1612,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -1613,7 +1620,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Begin transaction
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+errtext.Detail(w, err))
 				return
 			}
 			committed := false
@@ -1656,7 +1663,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Step 3: Stage data fast
 			if _, err = tx.CopyFrom(ctx, pgx.Identifier{"input_glaccount_table"}, columns, pgx.CopyFromRows(copyRows)); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1738,7 +1745,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			rows, err := tx.Query(ctx, insertSQL, batchID, s3KeyPtr)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+errtext.Detail(w, err))
 				return
 			}
 			var newIDs []string
@@ -1787,7 +1794,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ON CONFLICT (parent_gl_account_id, child_gl_account_id) DO NOTHING;
 			`
 			if _, err := tx.Exec(ctx, syncSQL); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Hierarchy sync failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Hierarchy sync failed: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1798,13 +1805,13 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					SELECT gl_account_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now()
 					FROM masterglaccount WHERE gl_account_id = ANY($2)`
 				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+errtext.Detail(w, err))
 					return
 				}
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 				return
 			}
 			committed = true
@@ -1978,7 +1985,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -1986,7 +1993,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Begin tx and insert directly into masterglaccount (no staging table)
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+errtext.Detail(w, err))
 				return
 			}
 			committed := false
@@ -2079,7 +2086,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tStartCopy := time.Now()
 			// Use CopyFrom directly into masterglaccount
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"masterglaccount"}, cols, pgx.CopyFromRows(copyRowsMaster)); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert into masterglaccount: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert into masterglaccount: "+errtext.Detail(w, err))
 				return
 			}
 			logger.LogInfo("UploadGLAccountSimple: COPY inserted %d rows in %v", len(copyRowsMaster), time.Since(tStartCopy))
@@ -2104,7 +2111,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				q := `SELECT gl_account_id, gl_account_code FROM masterglaccount WHERE gl_account_code = ANY($1) AND COALESCE(is_deleted, false) = false`
 				rrows, err := tx.Query(ctx, q, codes)
 				if err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch inserted IDs: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch inserted IDs: "+errtext.Detail(w, err))
 					return
 				}
 				for rrows.Next() {
@@ -2119,7 +2126,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Commit tx now to free locks; run heavyweight sync and audit asynchronously to avoid blocking the client
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 				return
 			}
 			committed = true

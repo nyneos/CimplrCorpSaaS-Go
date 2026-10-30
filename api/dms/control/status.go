@@ -30,15 +30,19 @@ func HandleStatus(w http.ResponseWriter, r *http.Request) {
 	client := docsvc.NewFromEnv()
 	q, err := client.QuotaCheck(r.Context())
 	if err != nil {
+		api.LogErrorForResponse(w, "dms generation control status: %v", err)
 		code := "DOCUMENT_SERVICE_UNAVAILABLE"
 		status := http.StatusServiceUnavailable
+		message := "document service is unavailable"
 		if strings.Contains(err.Error(), "DOCUMENT_SERVICE_UNAUTHORIZED") {
 			code = "DOCUMENT_SERVICE_UNAUTHORIZED"
 			status = http.StatusUnauthorized
+			message = "document service rejected the request"
 		} else if strings.Contains(err.Error(), "not configured") {
 			code = "DOCUMENT_SERVICE_MISCONFIGURED"
+			message = "document service is not configured"
 		}
-		api.RespondEnvelopeError(w, status, err.Error(), code)
+		api.RespondEnvelopeError(w, status, message, code)
 		return
 	}
 	api.RespondEnvelopeSuccess(w, "generation control status", map[string]interface{}{

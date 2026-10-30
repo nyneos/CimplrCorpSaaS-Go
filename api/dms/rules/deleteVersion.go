@@ -30,6 +30,9 @@ func HandleDeleteVersion(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
 			return
 		}
+		if !common.RequireRecordsEntityAccess(w, r, pool, common.RuleEntityQuery, []string{req.RuleID}) {
+			return
+		}
 		req.RuleID = strings.TrimSpace(req.RuleID)
 		req.VersionID = strings.TrimSpace(req.VersionID)
 		if req.RuleID == "" || req.VersionID == "" {
@@ -47,7 +50,8 @@ func HandleDeleteVersion(pool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(r.Context())
 
 		if err := requirePendingFree(r.Context(), tx, req.RuleID); err != nil {
-			api.RespondEnvelopeError(w, http.StatusConflict, err.Error(), "DMS_RULE_PENDING")
+			api.LogErrorForResponse(w, "dms rule version delete pending: %v", err)
+			api.RespondEnvelopeError(w, http.StatusConflict, "a change is already pending", "DMS_RULE_PENDING")
 			return
 		}
 

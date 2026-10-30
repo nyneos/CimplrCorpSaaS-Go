@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -43,3 +44,49 @@ func RequireEntityAccess(w http.ResponseWriter, scope ctxutil.RequestScope, enti
 	api.RespondEnvelopeError(w, http.StatusForbidden, "entity is outside your access scope", "DMS_ENTITY_FORBIDDEN")
 	return false
 }
+
+// RecordsEntityAllowed runs query (one nullable entity id per row) and reports
+// whether every row is org-wide or inside the caller's entity scope.
+func RecordsEntityAllowed(ctx context.Context, db api.RowQuerier, query string, args ...any) (bool, error) {
+	scope := ctxutil.FromContext(ctx)
+	if scope.IsAdminOverride {
+		return true, nil
+	}
+	rows, err := db.Query(ctx, query, args...)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var entityID *string
+		if err := rows.Scan(&entityID); err != nil {
+			return false, err
+		}
+		if entityID != nil && strings.TrimSpace(*entityID) != "" && !scope.HasEntityAccess(*entityID) {
+			return false, nil
+		}
+	}
+	return true, rows.Err()
+}
+
+// RequireRecordsEntityAccess writes a 403 (or 500) unless RecordsEntityAllowed passes.
+func RequireRecordsEntityAccess(w http.ResponseWriter, r *http.Request, db api.RowQuerier, query string, args ...any) bool {
+	ok, err := RecordsEntityAllowed(r.Context(), db, query, args...)
+	if err != nil {
+		api.LogErrorForResponse(w, "dms entity scope lookup: %v", err)
+		api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to verify record access", "DMS_SCOPE_LOOKUP_FAILED")
+		return false
+	}
+	if !ok {
+		api.RespondEnvelopeError(w, http.StatusForbidden, "entity is outside your access scope", "DMS_ENTITY_FORBIDDEN")
+		return false
+	}
+	return true
+}
+
+const (
+	RuleEntityQuery     = `SELECT entity_id::text FROM dms_svc.generation_rule WHERE rule_id::text = ANY($1)`
+	TemplateEntityQuery = `SELECT entity_id::text FROM dms_svc.template WHERE template_id::text = ANY($1)`
+	RunEntityQuery      = `SELECT r.entity_id::text FROM dms_svc.generation_run gr LEFT JOIN dms_svc.generation_rule r ON r.rule_id = gr.rule_id WHERE gr.run_id::text = ANY($1)`
+	DocEntityQuery      = `SELECT r.entity_id::text FROM dms_svc.generated_document gd JOIN dms_svc.generation_run gr ON gr.run_id = gd.run_id LEFT JOIN dms_svc.generation_rule r ON r.rule_id = gr.rule_id WHERE gd.doc_id::text = ANY($1)`
+)

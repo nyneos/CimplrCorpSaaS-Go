@@ -1,6 +1,7 @@
 package bankbalance
 
 import (
+	"CimplrCorpSaas/api/dash/fxrates"
 	"CimplrCorpSaas/api"
 	"context"
 	"encoding/json"
@@ -58,19 +59,7 @@ func normalizeUpperTrimSlice(in []string) []string {
 // Handler: GetCurrencyWiseDashboard
 func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	// Spot rates for conversion (INR stays 1.0 to avoid double converting)
-	var spotRates = map[string]float64{
-		"USD": 90.0,
-		"AUD": 60.5,
-		"CAD": 66.8,
-		"CHF": 101.0,
-		"CNY": 13.42,
-		"RMB": 13.42,
-		"EUR": 98.0,
-		"GBP": 114.0,
-		"JPY": 0.60,
-		"SEK": 8.6,
-		"INR": 1.0,
-	}
+	var spotRates = fxrates.INRPerUnit()
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -116,7 +105,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM bank_balances_manual bbm
 				JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
 				JOIN auditactionbankbalances a ON a.balance_id = bbm.balance_id
-				WHERE a.processing_status = 'APPROVED'
+				WHERE UPPER(TRIM(a.processing_status)) = 'APPROVED'
 					AND mba.is_deleted = false
 					AND mba.entity_id = ANY($1)
 					AND bbm.account_no = ANY($2)
@@ -149,7 +138,8 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var entity, bank, accountNumber, currency string
 			var openingBalance, closingBalance float64
 			if err := rows.Scan(&entity, &bank, &accountNumber, &currency, &openingBalance, &closingBalance); err != nil {
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
 			}
 			spot := spotRates[currency]
 			if spot == 0 {
@@ -166,6 +156,10 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"closingBalanceINR": closingBalance * spot,
 			})
 		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			return
+		}
 
 		// Day-wise balances: pull from bank_balances_manual (approved only) — NOT from bank_statements.
 		dayRows, err := pgxPool.Query(ctx, `
@@ -174,7 +168,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					balance_id,
 					requested_at
 				FROM public.auditactionbankbalances
-				WHERE processing_status = 'APPROVED'
+				WHERE UPPER(TRIM(processing_status)) = 'APPROVED'
 				ORDER BY balance_id, requested_at DESC
 			),
 			rows_scoped AS (
@@ -213,12 +207,11 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var currency, entityName, bankName, accountNo string
 				var closing float64
 				if err := dayRows.Scan(&day, &entityName, &bankName, &accountNo, &currency, &closing); err != nil {
-					continue
+					dayRows.Close()
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+					return
 				}
 				spot := spotRates[currency]
-				if spot == 0 {
-					spot = 1.0
-				}
 				dayWise = append(dayWise, map[string]interface{}{
 					"date":              day.Format(constants.DateFormat),
 					"entity":            entityName,
@@ -230,6 +223,10 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			}
 			dayRows.Close()
+			if err := dayRows.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
+			}
 		}
 
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
@@ -242,19 +239,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 	// Spot rates for conversion (INR = 1.0 baseline)
-	var spotRates = map[string]float64{
-		"USD": 90.0,
-		"AUD": 60.5,
-		"CAD": 66.8,
-		"CHF": 101.0,
-		"CNY": 13.42,
-		"RMB": 13.42,
-		"EUR": 98.0,
-		"GBP": 114.0,
-		"JPY": 0.60,
-		"SEK": 8.6,
-		"INR": 1.0,
-	}
+	var spotRates = fxrates.INRPerUnit()
 
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -298,7 +283,7 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM bank_balances_manual bbm
 				JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
 				JOIN auditactionbankbalances a ON a.balance_id = bbm.balance_id
-				WHERE a.processing_status = 'APPROVED'
+				WHERE UPPER(TRIM(a.processing_status)) = 'APPROVED'
 					AND mba.is_deleted = false
 					AND mba.entity_id = ANY($1)
 					AND bbm.account_no = ANY($2)
@@ -332,13 +317,11 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var closing float64
 
 			if err := rows.Scan(&entity, &bank, &accountNo, &currency, &closing); err != nil {
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
 			}
 
 			spot := spotRates[currency]
-			if spot == 0 {
-				spot = 1.0
-			}
 
 			if _, ok := entityMap[entity]; !ok {
 				entityMap[entity] = map[string][]map[string]interface{}{}
@@ -354,6 +337,10 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				},
 			)
 		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			return
+		}
 
 		/* ---------------------------------------------------------
 		   2️⃣ DAY-WISE APPROVED BALANCE HISTORY
@@ -367,7 +354,7 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					balance_id,
 					requested_at
 				FROM public.auditactionbankbalances
-				WHERE processing_status = 'APPROVED'
+				WHERE UPPER(TRIM(processing_status)) = 'APPROVED'
 				ORDER BY balance_id, requested_at DESC
 			),
 			rows_scoped AS (
@@ -415,13 +402,12 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&currency,
 					&closing,
 				); err != nil {
-					continue
+					dayRows.Close()
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+					return
 				}
 
 				spot := spotRates[currency]
-				if spot == 0 {
-					spot = 1.0
-				}
 
 				dayWise = append(dayWise, map[string]interface{}{
 					"date":              day.Format(constants.DateFormat),
@@ -434,6 +420,10 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			}
 			dayRows.Close()
+			if err := dayRows.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
+			}
 		}
 
 		/* ---------------------------------------------------------
@@ -467,19 +457,7 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // Aggregates balances from bank_balances_manual using the latest audit status (only APPROVED)
 func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
-	var spotRates = map[string]float64{
-		"USD": 90.0,
-		"AUD": 60.5,
-		"CAD": 66.8,
-		"CHF": 101.0,
-		"CNY": 13.42,
-		"RMB": 13.42,
-		"EUR": 98.0,
-		"GBP": 114.0,
-		"JPY": 0.60,
-		"SEK": 8.6,
-		"INR": 1.0,
-	}
+	var spotRates = fxrates.INRPerUnit()
 
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -524,7 +502,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			    FROM bank_balances_manual mb
 			    JOIN latest_audit la
 			      ON la.balance_id = mb.balance_id
-			     AND la.processing_status = 'APPROVED'
+			     AND UPPER(TRIM(la.processing_status)) = 'APPROVED'
 			),
 			latest_per_account AS (
 			    SELECT DISTINCT ON (mb.account_no)
@@ -560,13 +538,11 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var closing float64
 
 			if err := rows.Scan(&entity, &bankName, &accountNo, &currency, &closing); err != nil {
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
 			}
 
 			spot := spotRates[currency]
-			if spot == 0 {
-				spot = 1.0
-			}
 
 			bal := math.Round(math.Abs(closing)*100) / 100
 			inr := math.Round((bal*spot)*100) / 100
@@ -579,6 +555,10 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"closingBalance":    bal,
 				"closingBalanceINR": inr,
 			})
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			return
 		}
 
 		/* ---------------------------------------------------------
@@ -601,7 +581,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			    FROM bank_balances_manual mb
 			    JOIN latest_audit la
 			      ON la.balance_id = mb.balance_id
-			     AND la.processing_status = 'APPROVED'
+			     AND UPPER(TRIM(la.processing_status)) = 'APPROVED'
 			)
 			SELECT
 			    COALESCE(e.entity_name, '') AS entity_name,
@@ -634,13 +614,12 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&closing,
 					&day,
 				); err != nil {
-					continue
+					dayRows.Close()
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+					return
 				}
 
 				spot := spotRates[currency]
-				if spot == 0 {
-					spot = 1.0
-				}
 
 				bal := math.Round(math.Abs(closing)*100) / 100
 				inr := math.Round((bal*spot)*100) / 100
@@ -656,6 +635,10 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			}
 			dayRows.Close()
+			if err := dayRows.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
+			}
 		}
 
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
@@ -708,7 +691,7 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT DISTINCT ON (balance_id) balance_id, processing_status
 				FROM auditactionbankbalances
 				ORDER BY balance_id, requested_at DESC
-			) a ON a.balance_id = mb.balance_id AND a.processing_status = 'APPROVED'
+			) a ON a.balance_id = mb.balance_id AND UPPER(TRIM(a.processing_status)) = 'APPROVED'
 			WHERE mba.is_deleted = false
 			  AND mba.entity_id = ANY($1)
 			  AND mb.account_no = ANY($2)
@@ -727,7 +710,8 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var entity, bank, currency string
 			var balance float64
 			if err := rows.Scan(&entity, &bank, &currency, &balance); err != nil {
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
 			}
 			if _, ok := entityMap[entity]; !ok {
 				entityMap[entity] = map[string]map[string]float64{}
@@ -739,6 +723,10 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			b := math.Abs(balance)
 			b = math.Round(b*100) / 100
 			entityMap[entity][bank][currency] = b
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			return
 		}
 
 		resp := []map[string]interface{}{}

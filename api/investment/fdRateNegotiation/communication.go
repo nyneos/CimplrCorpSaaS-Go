@@ -3,6 +3,7 @@ package fdRateNegotiation
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -627,7 +628,7 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		responseDate, err := parseOptionalTimestamp(req.ResponseDate)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -653,17 +654,17 @@ func CreateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if intent == "RECEIVE" {
 			if err = assertParentStatus(ctx, tx, req.RateRequestID, "APPROVED", "SENT_TO_BANKS", "RESPONSE_RECEIVED", "OFFERS_RECEIVED"); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 				return
 			}
 		} else if err = assertParentStatus(ctx, tx, req.RateRequestID, "APPROVED", "SENT_TO_BANKS", "RESPONSE_RECEIVED", "OFFERS_RECEIVED"); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
 		resolvedBankID, resolvedBankName, err := resolveCommunicationBank(ctx, tx, req.RateRequestID, req.BankID, req.BankName)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -971,7 +972,7 @@ func UpdateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if strings.TrimSpace(req.ResponseDate) != "" {
 			parsed, err := parseOptionalTimestamp(req.ResponseDate)
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 				return
 			}
 			newResponseDate = parsed
@@ -982,7 +983,7 @@ func UpdateCommunication(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		newBankName := keepOrReplace(derefOrEmpty(oldBankName), req.BankName)
 		newBankID, newBankName, err = resolveCommunicationBank(ctx, tx, oldRateRequestID, newBankID, newBankName)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 

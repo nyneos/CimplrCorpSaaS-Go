@@ -1,6 +1,7 @@
 package forecastVsActual
 
 import (
+	"CimplrCorpSaas/api/dash/fxrates"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,19 +17,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var rates = map[string]float64{
-	"USD": 1.0,
-	"AUD": 0.68,
-	"CAD": 0.75,
-	"CHF": 1.1,
-	"CNY": 0.14,
-	"RMB": 0.14,
-	"EUR": 1.09,
-	"GBP": 1.28,
-	"JPY": 0.0067,
-	"SEK": 0.095,
-	"INR": 0.0117,
-}
+// maxDashboardHorizonDays bounds client-supplied horizons that drive per-day loops.
+const maxDashboardHorizonDays = 3650
+
+// maxDashboardHorizonMonths bounds the month-based forecast-vs-actual view.
+const maxDashboardHorizonMonths = 120
+
+var rates = fxrates.USDPerUnit()
 
 type requestScope struct {
 	Entities   []string
@@ -115,6 +110,9 @@ func GetForecastVsActualRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 30
 		}
+		if req.Horizon > maxDashboardHorizonDays {
+			req.Horizon = maxDashboardHorizonDays
+		}
 		scope, msg := resolveRequestScope(r.Context(), req.EntityName, req.Currency)
 		if msg != "" {
 			http.Error(w, msg, http.StatusForbidden)
@@ -149,6 +147,9 @@ func GetForecastVsActualKPIHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 30
 		}
+		if req.Horizon > maxDashboardHorizonDays {
+			req.Horizon = maxDashboardHorizonDays
+		}
 		scope, msg := resolveRequestScope(r.Context(), req.EntityName, req.Currency)
 		if msg != "" {
 			http.Error(w, msg, http.StatusForbidden)
@@ -181,6 +182,9 @@ func GetForecastVsActualByDateHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.Horizon <= 0 {
 			req.Horizon = 30
+		}
+		if req.Horizon > maxDashboardHorizonDays {
+			req.Horizon = maxDashboardHorizonDays
 		}
 		scope, msg := resolveRequestScope(r.Context(), req.EntityName, req.Currency)
 		if msg != "" {
@@ -217,6 +221,10 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 90
 		}
+		// The by-month view treats horizon as a number of months.
+		if req.Horizon > maxDashboardHorizonMonths {
+			req.Horizon = maxDashboardHorizonMonths
+		}
 		scope, msg := resolveRequestScope(r.Context(), req.EntityName, req.Currency)
 		if msg != "" {
 			http.Error(w, msg, http.StatusForbidden)
@@ -233,7 +241,8 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 func GetForecastVsActualRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope requestScope) ([]CatRow, error) {
 
-	today := time.Now().UTC()
+	// Midnight, so items dated today are inside the window regardless of the time of day.
+	today := time.Now().UTC().Truncate(24 * time.Hour)
 	end := today.AddDate(0, 0, horizon-1)
 	actualQ := `
         SELECT fpl.category, fpl.source_ref, fpl.amount::float8, fpl.currency, fg.primary_key, fg.primary_value
@@ -242,7 +251,7 @@ func GetForecastVsActualRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon
         LEFT JOIN LATERAL (
             SELECT processing_status FROM auditaction_fund_plan_groups a WHERE a.group_id = fg.group_id ORDER BY requested_at DESC LIMIT 1
         ) aa ON TRUE
-        WHERE aa.processing_status = 'APPROVED'
+        WHERE UPPER(TRIM(aa.processing_status)) = 'APPROVED'
           AND (UPPER(fpl.source_ref) LIKE 'TR-PAY-%' OR UPPER(fpl.source_ref) LIKE 'TR-REC-%')
     `
 	aargs := []interface{}{scope.Currencies, scope.Entities}
@@ -259,7 +268,8 @@ func GetForecastVsActualRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon
 		var cat, srcRef, cur, pk, pv string
 		var amt float64
 		if err := arows.Scan(&cat, &srcRef, &amt, &cur, &pk, &pv); err != nil {
-			continue
+			arows.Close()
+			return nil, err
 		}
 		up := strings.ToUpper(srcRef)
 		typ := ""
@@ -295,11 +305,11 @@ func GetForecastVsActualRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon
 			continue
 		}
 		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
 		key := fmt.Sprintf("%s-(%s)", cat, typ)
 		actuals[key] += amt * rate
+	}
+	if err := arows.Err(); err != nil {
+		return nil, err
 	}
 
 	startKey := today.Year()*12 + int(today.Month())
@@ -312,7 +322,7 @@ func GetForecastVsActualRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon
         LEFT JOIN LATERAL (
             SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
         ) aa ON TRUE
-        WHERE aa.processing_status = 'APPROVED'
+        WHERE UPPER(TRIM(aa.processing_status)) = 'APPROVED'
           AND (cpm.year * 12 + cpm.month) BETWEEN $1 AND $2
     `
 	fargs := []interface{}{startKey, endKey}
@@ -331,14 +341,15 @@ func GetForecastVsActualRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon
 		var cat, typ, cur string
 		var amt float64
 		if err := frows.Scan(&cat, &typ, &amt, &cur); err != nil {
-			continue
+			frows.Close()
+			return nil, err
 		}
 		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
 		key := fmt.Sprintf("%s-(%s)", cat, typ)
 		forecasts[key] += amt * rate
+	}
+	if err := frows.Err(); err != nil {
+		return nil, err
 	}
 
 	combined := map[string]CatRow{}
@@ -380,7 +391,8 @@ func GetForecastVsActualRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon
 }
 
 func GetForecastVsActualByDateRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope requestScope) ([]DateCatRow, error) {
-	today := time.Now().UTC()
+	// Midnight, so items dated today are inside the window regardless of the time of day.
+	today := time.Now().UTC().Truncate(24 * time.Hour)
 	end := today.AddDate(0, 0, horizon-1)
 
 	actualQ := `
@@ -390,7 +402,7 @@ func GetForecastVsActualByDateRows(ctx context.Context, pgxPool *pgxpool.Pool, h
         LEFT JOIN LATERAL (
             SELECT processing_status FROM auditaction_fund_plan_groups a WHERE a.group_id = fg.group_id ORDER BY requested_at DESC LIMIT 1
         ) aa ON TRUE
-        WHERE aa.processing_status = 'APPROVED'
+        WHERE UPPER(TRIM(aa.processing_status)) = 'APPROVED'
           AND (UPPER(fpl.source_ref) LIKE 'TR-PAY-%' OR UPPER(fpl.source_ref) LIKE 'TR-REC-%')
     `
 	aargs := []interface{}{scope.Currencies, scope.Entities}
@@ -410,7 +422,8 @@ func GetForecastVsActualByDateRows(ctx context.Context, pgxPool *pgxpool.Pool, h
 		var cat, srcRef, cur, pk, pv string
 		var amt float64
 		if err := arows.Scan(&cat, &srcRef, &amt, &cur, &pk, &pv); err != nil {
-			continue
+			arows.Close()
+			return nil, err
 		}
 		up := strings.ToUpper(srcRef)
 		typ := ""
@@ -445,14 +458,14 @@ func GetForecastVsActualByDateRows(ctx context.Context, pgxPool *pgxpool.Pool, h
 		}
 		dateKey := d.Format(constants.DateFormat)
 		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
 		key := fmt.Sprintf(constants.FormatPipelineTriple, dateKey, cat, typ)
 		if _, ok := combined[key]; !ok {
 			combined[key] = &DateCatRow{Date: dateKey, Category: cat, Type: typ}
 		}
 		combined[key].Actual += amt * rate
+	}
+	if err := arows.Err(); err != nil {
+		return nil, err
 	}
 
 	startKey := today.Year()*12 + int(today.Month())
@@ -465,7 +478,7 @@ func GetForecastVsActualByDateRows(ctx context.Context, pgxPool *pgxpool.Pool, h
         LEFT JOIN LATERAL (
             SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
         ) aa ON TRUE
-        WHERE aa.processing_status = 'APPROVED'
+        WHERE UPPER(TRIM(aa.processing_status)) = 'APPROVED'
           AND (cpm.year * 12 + cpm.month) BETWEEN $1 AND $2
     `
 	fargs := []interface{}{startKey, endKey}
@@ -486,14 +499,12 @@ func GetForecastVsActualByDateRows(ctx context.Context, pgxPool *pgxpool.Pool, h
 		var startDate *time.Time
 		var amt float64
 		if err := frows.Scan(&year, &month, &cat, &typ, &startDate, &amt, &cur); err != nil {
-			continue
+			frows.Close()
+			return nil, err
 		}
 		firstOfMonth := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
 		daysInMonth := time.Date(year, time.Month(month)+1, 0, 0, 0, 0, 0, time.UTC).Day()
 		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
 		if startDate != nil {
 			effDay := startDate.Day()
 			if effDay > daysInMonth {
@@ -521,6 +532,9 @@ func GetForecastVsActualByDateRows(ctx context.Context, pgxPool *pgxpool.Pool, h
 				combined[key].Forecast += daily
 			}
 		}
+	}
+	if err := frows.Err(); err != nil {
+		return nil, err
 	}
 	out := make([]DateCatRow, 0, len(combined))
 	for _, v := range combined {
@@ -598,11 +612,12 @@ func GetForecastVsActualByMonthRows(
 		horizon = 3
 	}
 
+	// Month buckets from the first of the current month; stepping from the 1st avoids
+	// day-of-month overflow (Jan 31 + 1 month = Mar 3) skipping a month.
 	today := time.Now().UTC()
-	anchors := []time.Time{}
-	for i := 0; i < horizon; i++ {
-		anchors = append(anchors, today.AddDate(0, i, 0)) // same day-of-month
-	}
+	firstMonth := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
+	lastMonth := firstMonth.AddDate(0, horizon-1, 0)
+	layouts := []string{constants.DateFormat, time.RFC3339, constants.DateTimeFormat}
 
 	// Query lines with APPROVED status
 	q := `
@@ -616,7 +631,7 @@ func GetForecastVsActualByMonthRows(
             WHERE a.group_id = fg.group_id
             ORDER BY requested_at DESC LIMIT 1
         ) aa ON TRUE
-        WHERE aa.processing_status = 'APPROVED'
+        WHERE UPPER(TRIM(aa.processing_status)) = 'APPROVED'
           AND (UPPER(fpl.source_ref) LIKE 'TR-PAY-%'
             OR UPPER(fpl.source_ref) LIKE 'TR-REC-%'
             OR UPPER(fpl.source_ref) LIKE 'PROP-%')
@@ -641,7 +656,8 @@ func GetForecastVsActualByMonthRows(
 		var cat, srcRef, cur, direction, pk, pv string
 		var amt float64
 		if err := rows.Scan(&cat, &srcRef, &amt, &cur, &direction, &pk, &pv); err != nil {
-			continue
+			rows.Close()
+			return nil, err
 		}
 
 		up := strings.ToUpper(srcRef)
@@ -662,9 +678,6 @@ func GetForecastVsActualByMonthRows(
 
 		// Normalize by FX rate
 		rate := rates[cur]
-		if rate == 0 {
-			rate = 1.0
-		}
 		amtNorm := amt * rate
 		if typ == "Outflow" {
 			amtNorm = -math.Abs(amtNorm)
@@ -672,22 +685,39 @@ func GetForecastVsActualByMonthRows(
 			amtNorm = math.Abs(amtNorm)
 		}
 
-		for _, anchor := range anchors {
-			monthKey := anchor.Format(constants.DateFormat)
-			key := fmt.Sprintf("%s|%s", monthKey, cat)
-			// choose a sensible Type value: prefer computed typ, otherwise fall back to group's direction
-			rowType := typ
-			if rowType == "" && strings.TrimSpace(direction) != "" {
-				rowType = direction
+		// Attribute the line to the month of its plan date (same date source as the
+		// by-date view); lines without a parseable date or outside the horizon are skipped.
+		var lineDate time.Time
+		parsed := false
+		if strings.TrimSpace(pv) != "" {
+			for _, layout := range layouts {
+				if td, e := time.Parse(layout, pv); e == nil {
+					lineDate, parsed = td, true
+					break
+				}
 			}
-			if _, ok := combined[key]; !ok {
-				combined[key] = &DateCatRow{Date: monthKey, Category: cat, Type: rowType}
-			}
-			if isForecast {
-				combined[key].Forecast += amtNorm
-			} else {
-				combined[key].Actual += amtNorm
-			}
+		}
+		if !parsed {
+			continue
+		}
+		lineMonth := time.Date(lineDate.Year(), lineDate.Month(), 1, 0, 0, 0, 0, time.UTC)
+		if lineMonth.Before(firstMonth) || lineMonth.After(lastMonth) {
+			continue
+		}
+		monthKey := lineMonth.Format(constants.DateFormat)
+		// choose a sensible Type value: prefer computed typ, otherwise fall back to group's direction
+		rowType := typ
+		if rowType == "" && strings.TrimSpace(direction) != "" {
+			rowType = direction
+		}
+		key := fmt.Sprintf(constants.FormatPipelineTriple, monthKey, cat, rowType)
+		if _, ok := combined[key]; !ok {
+			combined[key] = &DateCatRow{Date: monthKey, Category: cat, Type: rowType}
+		}
+		if isForecast {
+			combined[key].Forecast += amtNorm
+		} else {
+			combined[key].Actual += amtNorm
 		}
 	}
 

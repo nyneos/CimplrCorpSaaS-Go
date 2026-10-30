@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/portfolio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -323,6 +324,12 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		resolved := make([]mtmNAV, len(holdings))
+		for i := range holdings {
+			h := holdings[i]
+			resolved[i] = resolveCreateMTMNAV(ctx, pgxPool, h.SchemeID, h.ISIN, h.InternalCode, h.SchemeName, h.AvgNAV, startDate, endDate)
+		}
+
 		// Single transaction for entire batch
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -357,222 +364,25 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		results := make([]map[string]interface{}, 0, len(holdings))
 		hadError := false
 
-		// STEP 2: For each holding, fetch historical NAV and calculate MTM
-		for _, h := range holdings {
-			// Determine previous NAV (prev_nav). Prefer the previous day's market NAV (relative
-			// to the end NAV date). Fall back to amfi_nav_staging, and finally to avg_nav (cost basis).
-			var prevNAV float64
-			// We'll compute prevNAV after we have actualEndDate (set below when fetching end NAV).
-
-			// Try to fetch current/end-of-month NAV from MFapi.in using ISIN or internal code
-			// MFapi uses scheme_code which maps to AMFI codes
-			var endNAV float64
-			var actualEndDate string
-			var navFetchError string
-
-			// First, try to find scheme_code from our masterscheme table (if it has amfi_scheme_code)
-			var amfiCode string
-			if err := tx.QueryRow(ctx, `
-				SELECT COALESCE(amfi_scheme_code, '') FROM investment.masterscheme 
-				WHERE scheme_id = $1 OR isin = $2 OR internal_scheme_code = $3 
-				LIMIT 1
-			`, h.SchemeID, h.ISIN, h.InternalCode).Scan(&amfiCode); err != nil || amfiCode == "" {
-				// Fallback: Try using internal_scheme_code as AMFI code
-				amfiCode = h.InternalCode
-			}
-
-			if amfiCode != "" {
-				// Call MFapi.in to get historical NAV
-				// Format: https://api.mfapi.in/mf/{scheme_code}?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
-				apiURL := fmt.Sprintf("https://api.mfapi.in/mf/%s?startDate=%s&endDate=%s", amfiCode, startDate, endDate)
-
-				resp, err := http.Get(apiURL)
-				if err == nil && resp.StatusCode == 200 {
-					defer resp.Body.Close()
-					body, _ := io.ReadAll(resp.Body)
-
-					var apiResp struct {
-						Meta struct {
-							SchemeName string `json:"scheme_name"`
-						} `json:"meta"`
-						Data []struct {
-							Date string `json:"date"`
-							NAV  string `json:"nav"`
-						} `json:"data"`
-						Status string `json:"status"`
-					}
-
-					if err := json.Unmarshal(body, &apiResp); err == nil && len(apiResp.Data) > 0 {
-						// Get the latest NAV from the period (last entry)
-						lastEntry := apiResp.Data[len(apiResp.Data)-1]
-						// Parse possible MFAPI date formats into YYYY-MM-DD
-						parsed := time.Time{}
-						var parseErr error
-						// Try a few common formats MFAPI returns
-						for _, f := range []string{constants.DateFormat, constants.DateFormatAlt, "02-Jan-2006", "02-Jan-06"} {
-							parsed, parseErr = time.Parse(f, lastEntry.Date)
-							if parseErr == nil {
-								break
-							}
-						}
-						if parseErr != nil {
-							// If we cannot parse, log and mark as fetch error
-							logger.LogError("CreateMTMBulk: unable to parse NAV date '%s' for scheme %s: %v", lastEntry.Date, amfiCode, parseErr)
-							navFetchError = "Invalid NAV date format"
-						} else {
-							actualEndDate = parsed.Format(constants.DateFormat)
-						}
-
-						if navVal, err := strconv.ParseFloat(lastEntry.NAV, 64); err == nil {
-							endNAV = navVal
-						} else {
-							navFetchError = "Failed to parse NAV value"
-						}
-					} else {
-						navFetchError = "No NAV data found in response"
-					}
-				} else if resp != nil {
-					navFetchError = fmt.Sprintf("MFapi returned status %d", resp.StatusCode)
-				} else {
-					navFetchError = "Failed to fetch from MFapi: " + err.Error()
-				}
-			} else {
-				navFetchError = "No AMFI code found for scheme"
-			}
-
-			// If MFapi failed, try local amfi_nav_staging as fallback
-			if endNAV == 0 {
-				// Try to use numeric AMFI code (amfiCode) for fallback staging table
-				if amfiCode != "" {
-					if amfiInt, err := strconv.ParseInt(amfiCode, 10, 64); err == nil {
-						var localNAV float64
-						if err := tx.QueryRow(ctx, `
-							SELECT COALESCE(nav_value, 0) 
-							FROM investment.amfi_nav_staging 
-							WHERE scheme_code = $1 
-								AND nav_date BETWEEN $2::date AND $3::date
-							ORDER BY nav_date DESC 
-							LIMIT 1
-						`, amfiInt, startDate, endDate).Scan(&localNAV); err == nil && localNAV > 0 {
-							endNAV = localNAV
-							actualEndDate = endDate
-							navFetchError = "" // Clear error, fallback succeeded
-						} else if err != nil {
-							logger.LogError("CreateMTMBulk: amfi_nav_staging lookup failed for amfiCode=%d scheme=%s: %v", amfiInt, h.SchemeID, err)
-						}
-					} else {
-						logger.LogInfo("CreateMTMBulk: amfiCode '%s' for scheme %s is not numeric, cannot query amfi_nav_staging", amfiCode, h.SchemeID)
-					}
-				}
-			}
-
-			// If still no end NAV, record error and skip
-			if endNAV == 0 {
-				logger.LogInfo("CreateMTMBulk: unable to fetch end NAV for scheme %s (%s): %s", h.SchemeID, h.SchemeName, navFetchError)
+		// STEP 2: market NAV was resolved before the transaction opened.
+		for i, h := range holdings {
+			nav := resolved[i]
+			if nav.skip {
 				results = append(results, map[string]interface{}{
 					"success":     false,
 					"scheme_id":   h.SchemeID,
 					"scheme_name": h.SchemeName,
-					"error":       fmt.Sprintf("Unable to fetch end NAV: %s", navFetchError),
+					"error":       nav.skipMsg,
 				})
-				continue
-			}
-
-			// At this point endNAV and actualEndDate should be set. Choose prevNAV as
-			// the most recent available market NAV on or before actualEndDate.
-			// Strategy:
-			// 1. Query MFapi for a small historical window (last 7 days up to actualEndDate)
-			//    and pick the latest entry with date <= actualEndDate.
-			// 2. Fallback to investment.amfi_nav_staging with `nav_date <= actualEndDate` ordered desc.
-			// 3. Final fallback to avg_nav (cost basis).
-			if actualEndDate != "" {
-				parsedEnd, perr := time.Parse(constants.DateFormat, actualEndDate)
-				if perr == nil {
-					startRange := parsedEnd.AddDate(0, 0, -7).Format(constants.DateFormat)
-					// Try MFapi for range startRange..actualEndDate
-					if amfiCode != "" {
-						apiRangeURL := fmt.Sprintf("https://api.mfapi.in/mf/%s?startDate=%s&endDate=%s", amfiCode, startRange, actualEndDate)
-						if respRange, err := http.Get(apiRangeURL); err == nil && respRange.StatusCode == 200 {
-							defer respRange.Body.Close()
-							bodyRange, _ := io.ReadAll(respRange.Body)
-							var apiRangeResp struct {
-								Data []struct {
-									Date string `json:"date"`
-									NAV  string `json:"nav"`
-								} `json:"data"`
-							}
-							if err := json.Unmarshal(bodyRange, &apiRangeResp); err == nil && len(apiRangeResp.Data) > 0 {
-								// Find the latest entry with date <= parsedEnd
-								var bestDate time.Time
-								var bestNAV float64
-								for _, e := range apiRangeResp.Data {
-									var d time.Time
-									var dErr error
-									for _, f := range []string{constants.DateFormat, constants.DateFormatAlt, "02-Jan-2006", "02-Jan-06"} {
-										d, dErr = time.Parse(f, e.Date)
-										if dErr == nil {
-											break
-										}
-									}
-									if dErr != nil {
-										continue
-									}
-									if d.After(parsedEnd) {
-										continue
-									}
-									if bestDate.IsZero() || d.After(bestDate) {
-										if navVal, nErr := strconv.ParseFloat(e.NAV, 64); nErr == nil {
-											bestDate = d
-											bestNAV = navVal
-										}
-									}
-								}
-								if !bestDate.IsZero() {
-									prevNAV = bestNAV
-								}
-							}
-						} else if respRange != nil {
-							logger.LogInfo("CreateMTMBulk: MFapi range returned status %d for amfiCode=%s", respRange.StatusCode, amfiCode)
-						} else if err != nil {
-							logger.LogError("CreateMTMBulk: MFapi range request failed for amfiCode=%s: %v", amfiCode, err)
-						}
-					}
-
-					// Fallback to staging: latest nav_date <= actualEndDate
-					if prevNAV == 0 && amfiCode != "" {
-						if amfiInt, err := strconv.ParseInt(amfiCode, 10, 64); err == nil {
-							var stagedPrev float64
-							if err := tx.QueryRow(ctx, `
-								SELECT COALESCE(nav_value,0) FROM investment.amfi_nav_staging
-								WHERE scheme_code = $1 AND nav_date <= $2::date
-								ORDER BY nav_date DESC LIMIT 1
-							`, amfiInt, actualEndDate).Scan(&stagedPrev); err == nil && stagedPrev > 0 {
-								prevNAV = stagedPrev
-							} else if err != nil {
-								logger.LogError("CreateMTMBulk: amfi_nav_staging lookup failed for amfiCode=%d scheme=%s up to date=%s: %v", amfiInt, h.SchemeID, actualEndDate, err)
-							}
-						}
-					}
-				} else {
-					logger.LogError("CreateMTMBulk: cannot parse actualEndDate '%s' for scheme %s: %v", actualEndDate, h.SchemeID, perr)
-				}
-			}
-
-			// Final fallback to avg_nav (cost basis) if prevNAV is still zero or invalid
-			if prevNAV <= 0 {
-				prevNAV = h.AvgNAV
-				if prevNAV <= 0 {
-					results = append(results, map[string]interface{}{
-						"success":     false,
-						"scheme_id":   h.SchemeID,
-						"scheme_name": h.SchemeName,
-						"error":       "Invalid avg_nav (prev_nav fallback <= 0)",
-					})
+				if nav.hardFail {
 					hadError = true
 					logger.LogError("CreateMTMBulk: no valid prev_nav found for scheme %s; avg_nav also invalid", h.SchemeID)
-					continue
 				}
+				continue
 			}
+			prevNAV := nav.prevNAV
+			endNAV := nav.endNAV
+			actualEndDate := nav.actualEndDate
 
 			// Calculate MTM values (previous NAV -> current market NAV)
 			prevValue := h.Units * prevNAV
@@ -1268,11 +1078,8 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Call MFapi.in to get NAV data
 				apiURL := fmt.Sprintf("https://api.mfapi.in/mf/%s", amfiCode)
 
-				resp, err := http.Get(apiURL)
-				if err == nil && resp.StatusCode == 200 {
-					defer resp.Body.Close()
-					body, _ := io.ReadAll(resp.Body)
-
+				body, status, err := readMFAPI(ctx, apiURL)
+				if err == nil && status == http.StatusOK {
 					var apiResp struct {
 						Meta struct {
 							SchemeName string `json:"scheme_name"`
@@ -1321,10 +1128,11 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					} else {
 						preview.Error = "No NAV data found in MFapi response"
 					}
-				} else if resp != nil {
-					preview.Error = fmt.Sprintf("MFapi returned status %d", resp.StatusCode)
+				} else if status != 0 {
+					preview.Error = fmt.Sprintf("MFapi returned status %d", status)
 				} else {
-					preview.Error = "Failed to fetch from MFapi: " + err.Error()
+					logger.LogError("MTM preview: MFapi request failed for scheme %s: %v", h.SchemeID, err)
+					preview.Error = "Failed to fetch from MFapi"
 				}
 			} else {
 				preview.Error = "No AMFI code found for scheme"
@@ -1630,4 +1438,179 @@ func CommitMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"mtm_records":       results,
 		})
 	}
+}
+
+type mtmNAV struct {
+	endNAV        float64
+	prevNAV       float64
+	actualEndDate string
+	skip          bool
+	hardFail      bool
+	skipMsg       string
+}
+
+func readMFAPI(ctx context.Context, apiURL string) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	if len(body) > 2<<20 {
+		return nil, resp.StatusCode, fmt.Errorf("mfapi response exceeds 2MB")
+	}
+	return body, resp.StatusCode, nil
+}
+
+func parseMFAPIDate(raw string) (time.Time, bool) {
+	for _, layout := range []string{constants.DateFormat, constants.DateFormatAlt, "02-Jan-2006", "02-Jan-06"} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func resolveCreateMTMNAV(ctx context.Context, pool *pgxpool.Pool, schemeID, isin, internalCode, schemeName string, avgNAV float64, startDate, endDate string) mtmNAV {
+	var out mtmNAV
+	var amfiCode string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(amfi_scheme_code, '') FROM investment.masterscheme
+		WHERE scheme_id = $1 OR isin = $2 OR internal_scheme_code = $3
+		LIMIT 1
+	`, schemeID, isin, internalCode).Scan(&amfiCode); err != nil || amfiCode == "" {
+		amfiCode = internalCode
+	}
+	if amfiCode != "" {
+		apiURL := fmt.Sprintf("https://api.mfapi.in/mf/%s?startDate=%s&endDate=%s", amfiCode, startDate, endDate)
+		body, status, err := readMFAPI(ctx, apiURL)
+		if err == nil && status == http.StatusOK {
+			var apiResp struct {
+				Data []struct {
+					Date string `json:"date"`
+					NAV  string `json:"nav"`
+				} `json:"data"`
+			}
+			if json.Unmarshal(body, &apiResp) == nil && len(apiResp.Data) > 0 {
+				last := apiResp.Data[len(apiResp.Data)-1]
+				if parsed, ok := parseMFAPIDate(last.Date); ok {
+					out.actualEndDate = parsed.Format(constants.DateFormat)
+				} else {
+					out.skipMsg = "Invalid NAV date format"
+				}
+				if navVal, nerr := strconv.ParseFloat(last.NAV, 64); nerr == nil {
+					out.endNAV = navVal
+				} else if out.skipMsg == "" {
+					out.skipMsg = "Failed to parse NAV value"
+				}
+			} else if out.skipMsg == "" {
+				out.skipMsg = "No NAV data found in response"
+			}
+		} else if err != nil {
+			out.skipMsg = "Failed to fetch from MFapi"
+			logger.LogError("CreateMTMBulk: MFapi request failed for scheme %s: %v", schemeID, err)
+		} else {
+			out.skipMsg = fmt.Sprintf("MFapi returned status %d", status)
+		}
+	} else {
+		out.skipMsg = "No AMFI code found for scheme"
+	}
+	if out.endNAV == 0 && amfiCode != "" {
+		if amfiInt, err := strconv.ParseInt(amfiCode, 10, 64); err == nil {
+			var localNAV float64
+			if err := pool.QueryRow(ctx, `
+				SELECT COALESCE(nav_value, 0)
+				FROM investment.amfi_nav_staging
+				WHERE scheme_code = $1
+				  AND nav_date BETWEEN $2::date AND $3::date
+				ORDER BY nav_date DESC
+				LIMIT 1
+			`, amfiInt, startDate, endDate).Scan(&localNAV); err == nil && localNAV > 0 {
+				out.endNAV = localNAV
+				out.actualEndDate = endDate
+				out.skipMsg = ""
+			} else if err != nil {
+				logger.LogError("CreateMTMBulk: amfi_nav_staging lookup failed for amfiCode=%d scheme=%s: %v", amfiInt, schemeID, err)
+			}
+		}
+	}
+	if out.endNAV == 0 {
+		out.skip = true
+		if out.skipMsg == "" {
+			out.skipMsg = "Unable to fetch end NAV"
+		} else {
+			out.skipMsg = "Unable to fetch end NAV: " + out.skipMsg
+		}
+		logger.LogInfo("CreateMTMBulk: unable to fetch end NAV for scheme %s (%s): %s", schemeID, schemeName, out.skipMsg)
+		return out
+	}
+	if out.actualEndDate != "" && amfiCode != "" {
+		if parsedEnd, ok := parseMFAPIDate(out.actualEndDate); ok {
+			startRange := parsedEnd.AddDate(0, 0, -7).Format(constants.DateFormat)
+			apiRangeURL := fmt.Sprintf("https://api.mfapi.in/mf/%s?startDate=%s&endDate=%s", amfiCode, startRange, out.actualEndDate)
+			body, status, err := readMFAPI(ctx, apiRangeURL)
+			if err == nil && status == http.StatusOK {
+				var apiRangeResp struct {
+					Data []struct {
+						Date string `json:"date"`
+						NAV  string `json:"nav"`
+					} `json:"data"`
+				}
+				if json.Unmarshal(body, &apiRangeResp) == nil {
+					var bestDate time.Time
+					var bestNAV float64
+					for _, e := range apiRangeResp.Data {
+						d, ok := parseMFAPIDate(e.Date)
+						if !ok || d.After(parsedEnd) {
+							continue
+						}
+						navVal, nerr := strconv.ParseFloat(e.NAV, 64)
+						if nerr != nil {
+							continue
+						}
+						if bestDate.IsZero() || d.After(bestDate) {
+							bestDate = d
+							bestNAV = navVal
+						}
+					}
+					if !bestDate.IsZero() {
+						out.prevNAV = bestNAV
+					}
+				}
+			} else if err != nil {
+				logger.LogError("CreateMTMBulk: MFapi range request failed for amfiCode=%s: %v", amfiCode, err)
+			}
+			if out.prevNAV == 0 {
+				if amfiInt, err := strconv.ParseInt(amfiCode, 10, 64); err == nil {
+					var stagedPrev float64
+					if err := pool.QueryRow(ctx, `
+						SELECT COALESCE(nav_value,0) FROM investment.amfi_nav_staging
+						WHERE scheme_code = $1 AND nav_date <= $2::date
+						ORDER BY nav_date DESC LIMIT 1
+					`, amfiInt, out.actualEndDate).Scan(&stagedPrev); err == nil && stagedPrev > 0 {
+						out.prevNAV = stagedPrev
+					} else if err != nil {
+						logger.LogError("CreateMTMBulk: amfi_nav_staging prev lookup failed for scheme %s: %v", schemeID, err)
+					}
+				}
+			}
+		}
+	}
+	if out.prevNAV <= 0 {
+		out.prevNAV = avgNAV
+	}
+	if out.prevNAV <= 0 {
+		out.skip = true
+		out.hardFail = true
+		out.skipMsg = "Invalid avg_nav (prev_nav fallback <= 0)"
+	}
+	return out
 }

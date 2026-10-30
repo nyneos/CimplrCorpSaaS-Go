@@ -1,7 +1,9 @@
- package role
+package role
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/utils"
 
 	"github.com/jackc/pgx/v5"
@@ -236,7 +239,7 @@ func GetRolesPageData(pool *pgxpool.Pool) http.HandlerFunc {
 		// Pagination
 		pagination, err := utils.ExtractPagination(r)
 		if err != nil {
-			respondWithError(w, http.StatusBadRequest, err.Error())
+			respondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -319,96 +322,130 @@ func ApproveMultipleRoles(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
-			UserID  string   `json:"user_id"`
-			RoleIds []string `json:"roleIds"`
-			// ApprovedBy      string `json:"approved_by"`
-			ApprovalComment string `json:"approval_comment,omitempty"`
+			UserID          string   `json:"user_id"`
+			RoleIds         []string `json:"roleIds"`
+			ApprovalComment string   `json:"approval_comment,omitempty"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.RoleIds) == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.RoleIds) == 0 {
 			respondWithError(w, http.StatusBadRequest, "user_id and roleIds are required")
 			return
 		}
-		// Middleware: check business units
-		// Uncomment if you want to restrict by business units
-		// buNames := api.GetEntityNamesFromCtx(r.Context())
-		// if len(buNames) == 0 {
-		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-		//     return
-		// }
-
-		// Fetch current statuses
-		rows, err := pool.Query(ctx, `SELECT id, status FROM roles WHERE id = ANY($1)`, req.RoleIds)
-		if err != nil {
-			respondWithInternalError(w, err)
-			return
-		}
-		defer rows.Close()
-		toDelete := []string{}
-		toApprove := []string{}
-		for rows.Next() {
-			var id string
-			var status string
-			if err := rows.Scan(&id, &status); err != nil {
-				log.Printf("role.go ApproveMultipleRoles: scan id/status row failed: %v", err)
-			}
-			if status == constants.StatusCodeDeleteApproval {
-				toDelete = append(toDelete, id)
-			} else {
-				toApprove = append(toApprove, id)
-			}
-		}
-		results := map[string]interface{}{
-			"deleted":  []map[string]interface{}{},
-			"approved": []map[string]interface{}{},
-		}
-		// Delete roles (Soft Delete)
-		if len(toDelete) > 0 {
-			delRows, err := pool.Query(ctx, `UPDATE roles SET is_deleted = true, status = 'Deleted', edited_at = NOW() WHERE id = ANY($1) RETURNING *`, toDelete)
-			if err == nil {
-				defer delRows.Close()
-				for delRows.Next() {
-					vals, err := delRows.Values()
-					if err != nil {
-						log.Printf("role.go ApproveMultipleRoles: scan deleted role row failed: %v", err)
-						continue
-					}
-					roleMap := map[string]interface{}{}
-					for i, col := range delRows.FieldDescriptions() {
-						roleMap[string(col.Name)] = vals[i]
-					}
-					results["deleted"] = append(results["deleted"].([]map[string]interface{}), roleMap)
-				}
-			}
-		}
-		approvedBy := api.GetUserEmailFromCtx(r.Context())
+		approvedBy := api.GetUserEmailFromCtx(ctx)
 		if approvedBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		// Approve roles
-		if len(toApprove) > 0 {
-			appRows, err := pool.Query(ctx, `UPDATE roles SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) RETURNING *`, approvedBy, req.ApprovalComment, toApprove)
-			if err == nil {
-				defer appRows.Close()
-				for appRows.Next() {
-					vals, err := appRows.Values()
-					if err != nil {
-						log.Printf("role.go ApproveMultipleRoles: scan approved role row failed: %v", err)
-						continue
-					}
-					roleMap := map[string]interface{}{}
-					for i, col := range appRows.FieldDescriptions() {
-						roleMap[string(col.Name)] = vals[i]
-					}
-					results["approved"] = append(results["approved"].([]map[string]interface{}), roleMap)
-				}
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			respondWithInternalError(w, err)
+			return
+		}
+		defer tx.Rollback(context.Background())
+
+		targets, err := lockPendingRoles(ctx, tx, req.RoleIds)
+		if err != nil {
+			respondWithInternalError(w, err)
+			return
+		}
+		toDelete, toApprove, skipped := []string{}, []string{}, []string{}
+		for _, t := range targets {
+			if governance.IsSelfApprovalCtx(ctx, t.maker) {
+				skipped = append(skipped, t.id+": "+governance.ErrSelfApproval.Error())
+				continue
 			}
+			if t.status == constants.StatusCodeDeleteApproval {
+				toDelete = append(toDelete, t.id)
+			} else {
+				toApprove = append(toApprove, t.id)
+			}
+		}
+		if len(toDelete)+len(toApprove) == 0 {
+			respondWithError(w, http.StatusForbidden, "no roles could be approved: "+strings.Join(skipped, "; "))
+			return
+		}
+
+		results := map[string]interface{}{
+			"deleted":  []map[string]interface{}{},
+			"approved": []map[string]interface{}{},
+		}
+		if len(toDelete) > 0 {
+			rows, err := collectRoleRows(ctx, tx, `UPDATE roles SET is_deleted = true, status = 'Deleted', edited_at = NOW() WHERE id = ANY($1) RETURNING *`, toDelete)
+			if err != nil {
+				respondWithInternalError(w, err)
+				return
+			}
+			results["deleted"] = rows
+		}
+		if len(toApprove) > 0 {
+			rows, err := collectRoleRows(ctx, tx, `UPDATE roles SET status = 'Approved', approved_by = $2, approved_at = NOW(), approval_comment = $3 WHERE id = ANY($1) RETURNING *`, toApprove, approvedBy, req.ApprovalComment)
+			if err != nil {
+				respondWithInternalError(w, err)
+				return
+			}
+			results["approved"] = rows
+		}
+		if err := tx.Commit(ctx); err != nil {
+			respondWithInternalError(w, err)
+			return
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"deleted":  results["deleted"],
 			"approved": results["approved"],
+			"skipped":  skipped,
 		})
 	}
+}
+
+type pendingRole struct {
+	id     string
+	status string
+	maker  string
+}
+
+// lockPendingRoles locks the requested roles that are waiting for a decision.
+func lockPendingRoles(ctx context.Context, tx pgx.Tx, ids []string) ([]pendingRole, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id::text, COALESCE(status, ''), COALESCE(NULLIF(edited_by, ''), created_by, '')
+		FROM roles
+		WHERE id::text = ANY($1)
+		  AND COALESCE(is_deleted, false) = false
+		  AND LOWER(COALESCE(status, '')) IN ('pending', 'awaiting-approval', 'delete-approval')
+		FOR UPDATE`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []pendingRole{}
+	for rows.Next() {
+		var p pendingRole
+		if err := rows.Scan(&p.id, &p.status, &p.maker); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func collectRoleRows(ctx context.Context, tx pgx.Tx, query string, args ...interface{}) ([]map[string]interface{}, error) {
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]interface{}{}
+	for rows.Next() {
+		vals, err := rows.Values()
+		if err != nil {
+			return nil, err
+		}
+		m := map[string]interface{}{}
+		for i, col := range rows.FieldDescriptions() {
+			m[string(col.Name)] = vals[i]
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // Handler: Delete role (soft delete)
@@ -470,58 +507,58 @@ func DeleteRole(pool *pgxpool.Pool) http.HandlerFunc {
 // Handler: Reject multiple roles
 func RejectMultipleRoles(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
-			UserID  string   `json:"user_id"`
-			RoleIds []string `json:"roleIds"`
-			// RejectedBy       string `json:"rejected_by"`
-			RejectionComment string `json:"rejection_comment"`
+			UserID           string   `json:"user_id"`
+			RoleIds          []string `json:"roleIds"`
+			RejectionComment string   `json:"rejection_comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.RoleIds) == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.RoleIds) == 0 {
 			respondWithError(w, http.StatusBadRequest, "user_id, roleIds are required")
 			return
 		}
-		// Middleware: check business units
-		// buNames := api.GetEntityNamesFromCtx(r.Context())
-		// if len(buNames) == 0 {
-		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-		//     return
-		// }
-		rejectedBy := api.GetUserEmailFromCtx(r.Context())
+		rejectedBy := api.GetUserEmailFromCtx(ctx)
 		if rejectedBy == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		rows, err := pool.Query(r.Context(),
-			`UPDATE roles SET status = 'Rejected', rejected_by = $1, rejected_at = NOW(), rejection_comment = $2 WHERE id = ANY($3) RETURNING *`,
-			rejectedBy, req.RejectionComment, req.RoleIds,
-		)
+
+		tx, err := pool.Begin(ctx)
 		if err != nil {
 			respondWithInternalError(w, err)
 			return
 		}
-		defer rows.Close()
-		fieldDescs := rows.FieldDescriptions()
-		cols := make([]string, len(fieldDescs))
-		for i, fd := range fieldDescs {
-			cols[i] = fd.Name
+		defer tx.Rollback(context.Background())
+
+		targets, err := lockPendingRoles(ctx, tx, req.RoleIds)
+		if err != nil {
+			respondWithInternalError(w, err)
+			return
 		}
-		updated := []map[string]interface{}{}
-		for rows.Next() {
-			vals := make([]interface{}, len(cols))
-			valPtrs := make([]interface{}, len(cols))
-			for i := range vals {
-				valPtrs[i] = &vals[i]
+		ids, skipped := []string{}, []string{}
+		for _, t := range targets {
+			if governance.IsSelfApprovalCtx(ctx, t.maker) {
+				skipped = append(skipped, t.id+": "+governance.ErrSelfApproval.Error())
+				continue
 			}
-			if err := rows.Scan(valPtrs...); err != nil {
-				log.Printf("role.go RejectMultipleRoles: scan updated role row failed: %v", err)
-			}
-			roleMap := map[string]interface{}{}
-			for i, col := range cols {
-				roleMap[col] = vals[i]
-			}
-			updated = append(updated, roleMap)
+			ids = append(ids, t.id)
 		}
-		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"updated": updated})
+		if len(ids) == 0 {
+			respondWithError(w, http.StatusForbidden, "no roles could be rejected: "+strings.Join(skipped, "; "))
+			return
+		}
+		updated, err := collectRoleRows(ctx, tx,
+			`UPDATE roles SET status = 'Rejected', rejected_by = $2, rejected_at = NOW(), rejection_comment = $3 WHERE id::text = ANY($1) RETURNING *`,
+			ids, rejectedBy, req.RejectionComment)
+		if err != nil {
+			respondWithInternalError(w, err)
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			respondWithInternalError(w, err)
+			return
+		}
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"updated": updated, "skipped": skipped})
 	}
 }
 
@@ -530,7 +567,7 @@ func GetRolesForDropdown(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rows, err := pool.Query(r.Context(), "SELECT id, name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND COALESCE(is_deleted, false) = false")
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -677,7 +714,7 @@ func GetPendingRoles(pool *pgxpool.Pool) http.HandlerFunc {
 		// Pagination for pending roles
 		pagination, err := utils.ExtractPagination(r)
 		if err != nil {
-			respondWithError(w, http.StatusBadRequest, err.Error())
+			respondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 		totalPendingQuery := "SELECT COUNT(*) FROM roles WHERE status IN ($1, $2, $3) AND COALESCE(is_deleted, false) = false"
@@ -753,7 +790,8 @@ func UpdateRole(pool *pgxpool.Pool) http.HandlerFunc {
 
 		editor := api.GetUserEmailFromCtx(r.Context())
 		if editor == "" {
-			editor = userID
+			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
+			return
 		}
 		// Middleware: check business units (uncomment if needed)
 		// buNames := api.GetEntityNamesFromCtx(r.Context())
@@ -764,14 +802,12 @@ func UpdateRole(pool *pgxpool.Pool) http.HandlerFunc {
 		// Prepare fields for update
 		// Map frontend keys to DB column names and ignore unknown keys to avoid SQL errors
 		allowedMap := map[string][]string{
-			"name":                    {"name"},
-			"description":             {"description"},
-			"startTime":               {"office_start_time_ist"},
-			"endTime":                 {"office_end_time_ist"},
-			"office_start_time_ist":   {"office_start_time_ist"},
-			"office_end_time_ist":     {"office_end_time_ist"},
-			"status":                  {"status"},
-			"roles_permission_status": {"roles_permission_status"},
+			"name":                  {"name"},
+			"description":           {"description"},
+			"startTime":             {"office_start_time_ist"},
+			"endTime":               {"office_end_time_ist"},
+			"office_start_time_ist": {"office_start_time_ist"},
+			"office_end_time_ist":   {"office_end_time_ist"},
 			// support multiple role code column names (keep both in sync)
 			"roleCode":  {"role_code", "rolecode"},
 			"role_code": {"role_code", "rolecode"},
@@ -793,10 +829,8 @@ func UpdateRole(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Always set status to Awaiting-Approval unless caller explicitly set status
-		if _, ok := fields["status"]; ok {
-			fields["status"] = constants.StatusCodeAwaitingApproval
-		}
+		// Every edit goes back through approval.
+		fields["status"] = constants.StatusCodeAwaitingApproval
 
 		// Set edited_by and edited_at for auditing
 		fields["edited_by"] = editor
@@ -838,7 +872,8 @@ func UpdateRole(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		vals, err := rows.Values()
 		if err != nil {
-			log.Printf("role.go UpdateRole: scan role row failed: %v", err)
+			respondWithInternalError(w, err)
+			return
 		}
 		roleMap := map[string]interface{}{}
 		for i, col := range rows.FieldDescriptions() {

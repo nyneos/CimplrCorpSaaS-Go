@@ -6,10 +6,11 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/policyengine/common"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/schemacache"
 	"bytes"
 	"context"
-	"encoding/json"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -1222,6 +1223,9 @@ func ListFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
 			return
 		}
+		if !closureFileParentInScope(w, r, pool, parentID) {
+			return
+		}
 		if idKind == "" {
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			legacyHandler(w, r)
@@ -1257,6 +1261,9 @@ func UploadFDClosureAdditionalFilesHandler(pool *pgxpool.Pool) http.HandlerFunc 
 		idKind, err := cimplrClosureAdditionalIDKind(r.Context(), pool, parentID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
+			return
+		}
+		if !closureFileParentInScope(w, r, pool, parentID) {
 			return
 		}
 		if idKind == "" {
@@ -1523,6 +1530,9 @@ func DownloadFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
 			return
 		}
+		if !closureFileParentInScope(w, r, pool, parentID) {
+			return
+		}
 		if idKind == "" {
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			legacyHandler(w, r)
@@ -1591,6 +1601,9 @@ func DeleteFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
 			return
 		}
+		if !closureFileParentInScope(w, r, pool, parentID) {
+			return
+		}
 		if idKind == "" {
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			legacyHandler(w, r)
@@ -1634,7 +1647,7 @@ func DeleteFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		if idKind == "initiate" {
 			parentColumn = "closure_initiate_id"
 		}
-		
+
 		_, err = tx.Exec(r.Context(), fmt.Sprintf(`
 			INSERT INTO cimplr.fd_closure_files_audit (file_id, %s, action_type, processing_status, reason, requested_by, requested_at, requested_ip)
 			VALUES ($1, $2, 'DELETE', 'PENDING_DELETE_APPROVAL', $3, $4, NOW(), $5)
@@ -1752,6 +1765,9 @@ func AuditFDClosureAdditionalFileHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		idKind, err := cimplrClosureAdditionalIDKind(r.Context(), pool, parentID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrParentLookupFailed+err.Error())
+			return
+		}
+		if !closureFileParentInScope(w, r, pool, parentID) {
 			return
 		}
 		if idKind == "" {
@@ -2263,6 +2279,9 @@ func investmentAdditionalFilesConfig(def investmentFileDefinition) cashfiles.Con
 		},
 	}
 	cfg.PolicyModuleCode, cfg.PolicySubModule, cfg.PolicyAPIPath = investmentFilesPolicyScope(def.Module)
+	cfg.ParentAccess = func(ctx context.Context, pool *pgxpool.Pool, parentID string) (bool, error) {
+		return investmentParentInScope(ctx, pool, def.ParentTable, def.ParentColumn, parentID)
+	}
 
 	switch def.Module {
 	case proposalFilesDefinition.Module:
@@ -2497,4 +2516,58 @@ func missingInvestmentAdditionalFileIDs(expected []string, files []cashfiles.Fil
 		}
 	}
 	return missing
+}
+
+// investmentParentInScope checks the parent row's entity against the caller's scope.
+// Parent tables without an entity column cannot be scoped and are allowed.
+func investmentParentInScope(ctx context.Context, pool *pgxpool.Pool, table, idColumn, parentID string) (bool, error) {
+	if api.IsAdminOverride(ctx) {
+		return true, nil
+	}
+	parts := strings.SplitN(table, ".", 2)
+	if len(parts) != 2 {
+		return true, nil
+	}
+	cols, err := schemacache.Columns("additionalfiles:"+table, func() (map[string]bool, error) {
+		rows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`, parts[0], parts[1])
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := map[string]bool{}
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				return nil, err
+			}
+			out[c] = true
+		}
+		return out, rows.Err()
+	})
+	if err != nil {
+		return false, err
+	}
+	entityCol := ""
+	for _, c := range []string{"entity_id", "entity_name"} {
+		if cols[c] {
+			entityCol = c
+			break
+		}
+	}
+	if entityCol == "" || !cols[idColumn] {
+		return true, nil
+	}
+	return api.RecordsInScope(ctx, pool, fmt.Sprintf(`SELECT %s::text FROM %s WHERE %s::text = $1`, entityCol, table, idColumn), parentID)
+}
+
+// closureFileParentInScope checks a closure initiate or confirm parent against the caller's scope.
+func closureFileParentInScope(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, parentID string) bool {
+	return api.RequireRecordsInScope(r.Context(), w, pool, `
+		SELECT COALESCE(ci.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_initiate ci
+		LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
+		WHERE ci.closure_initiate_id::text = $1
+		UNION ALL
+		SELECT COALESCE(cc.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_confirm cc
+		LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
+		WHERE cc.closure_confirm_id::text = $1`, parentID)
 }

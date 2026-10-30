@@ -90,46 +90,43 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 		return projections
 	}
 
-	// Recurring: Distribute across months based on frequency
+	// Recurring: distribute expectedAmount (the total for the 12-month window) across
+	// month buckets. Months are stepped from the first of the effective month so a
+	// 29th-31st start never normalises past a short month and drops a bucket.
 	freq := strings.ToLower(strings.TrimSpace(frequency))
-	endDate := effectiveDate.AddDate(0, 12, 0) // 12 months window
+	firstMonth := time.Date(effectiveDate.Year(), effectiveDate.Month(), 1, 0, 0, 0, 0, time.UTC)
+	monthKey := func(offset int) string {
+		d := firstMonth.AddDate(0, offset, 0)
+		return fmt.Sprintf(constants.FormatYearMonth, d.Year(), d.Month())
+	}
 
 	switch freq {
 	case "weekly":
-		// Weekly: Divide by ~4.33 weeks/month
-		monthlyAmount := expectedAmount / 4.33
-		for d := effectiveDate; d.Before(endDate); d = d.AddDate(0, 1, 0) {
-			key := fmt.Sprintf(constants.FormatYearMonth, d.Year(), d.Month())
-			projections[key] = monthlyAmount
+		// 52 weekly occurrences from the effective date, each a 1/52 share,
+		// added to the month it falls in.
+		perWeek := expectedAmount / 52.0
+		for w := 0; w < 52; w++ {
+			d := effectiveDate.AddDate(0, 0, 7*w)
+			projections[fmt.Sprintf(constants.FormatYearMonth, d.Year(), d.Month())] += perWeek
 		}
 
 	case "monthly":
-		// Monthly: Divide by 12 months
 		monthlyAmount := expectedAmount / 12.0
-		for d := effectiveDate; d.Before(endDate); d = d.AddDate(0, 1, 0) {
-			key := fmt.Sprintf(constants.FormatYearMonth, d.Year(), d.Month())
-			projections[key] = monthlyAmount
+		for i := 0; i < 12; i++ {
+			projections[monthKey(i)] = monthlyAmount
 		}
 
 	case "quarterly":
-		// Quarterly: Divide by 4, distribute in months matching effective month
+		// Effective month and every third month after it (e.g. Jan/Apr/Jul/Oct)
 		quarterlyAmount := expectedAmount / 4.0
-		effMonth := int(effectiveDate.Month())
-		for d := effectiveDate; d.Before(endDate); d = d.AddDate(0, 1, 0) {
-			month := int(d.Month())
-			// Match quarter months: if effective is Jan, then Jan/Apr/Jul/Oct
-			if (month-effMonth)%3 == 0 {
-				key := fmt.Sprintf(constants.FormatYearMonth, d.Year(), d.Month())
-				projections[key] = quarterlyAmount
-			}
+		for i := 0; i < 12; i += 3 {
+			projections[monthKey(i)] = quarterlyAmount
 		}
 
 	case "halfyearly", "half yearly", "semi-annual":
-		// HalfYearly: Divide by 2, distribute in 6-month intervals
 		halfYearlyAmount := expectedAmount / 2.0
-		for d := effectiveDate; d.Before(endDate); d = d.AddDate(0, 6, 0) {
-			key := fmt.Sprintf(constants.FormatYearMonth, d.Year(), d.Month())
-			projections[key] = halfYearlyAmount
+		for i := 0; i < 12; i += 6 {
+			projections[monthKey(i)] = halfYearlyAmount
 		}
 
 	case "yearly", "annual":
@@ -158,6 +155,9 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id::text = ANY($1) AND COALESCE(is_deleted, false) = false`, req.ProposalIDs) {
 			return
 		}
 
@@ -303,6 +303,9 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id::text = ANY($1) AND COALESCE(is_deleted, false) = false`, req.ProposalIDs) {
 			return
 		}
 
@@ -496,6 +499,9 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id::text = ANY($1) AND COALESCE(is_deleted, false) = false`, req.ProposalIDs) {
 			return
 		}
 
@@ -988,6 +994,9 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id::text = $1 AND COALESCE(is_deleted, false) = false`, req.ProposalID) {
 			return
 		}
 
@@ -1524,6 +1533,9 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id::text = $1 AND COALESCE(is_deleted, false) = false`, req.ProposalID) {
 			return
 		}
 

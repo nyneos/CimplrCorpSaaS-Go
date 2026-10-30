@@ -77,7 +77,7 @@ func fdClosingScopeBankFilter(ctx context.Context, argOffset int) (string, []any
 	return fmt.Sprintf(`AND EXISTS (
 			SELECT 1 FROM investment.fd_closing_cycle_fd_scope bs
 			JOIN investment.fd_master fm ON fm.fd_id = bs.fd_id
-			WHERE bs.cycle_id = c.cycle_id AND bs.is_deleted = false AND bs.selection_status = 'APPROVED' %s
+			WHERE bs.cycle_id = c.cycle_id AND bs.is_deleted = false AND UPPER(TRIM(bs.selection_status)) = 'APPROVED' %s
 		)`, bf), bfArgs
 }
 
@@ -128,7 +128,7 @@ func queryFDClosingCycle(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 				FROM investment.fd_closing_cycle_fd_scope s
 				WHERE s.cycle_id = c.cycle_id
 				  AND s.is_deleted = false
-				  AND s.selection_status = 'APPROVED'
+				  AND UPPER(TRIM(s.selection_status)) = 'APPROVED'
 			), 0) AS fd_count,
 			COALESCE(agg.readiness_score, 0) AS readiness_score,
 			COALESCE(agg.blocker_count, 0)::int AS blocker_count,
@@ -143,7 +143,7 @@ func queryFDClosingCycle(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 				  ON s.fd_id = ex.fd_id
 				 AND s.cycle_id = c.cycle_id
 				 AND s.is_deleted = false
-				 AND s.selection_status = 'APPROVED'
+				 AND UPPER(TRIM(s.selection_status)) = 'APPROVED'
 				LEFT JOIN LATERAL (
 					SELECT xa.processing_status
 					FROM investment.fd_receipt_exception_audit xa
@@ -308,7 +308,7 @@ func queryFDClosingVarianceExceptions(ctx context.Context, pool *pgxpool.Pool, e
 			JOIN investment.fd_closing_cycle c ON c.cycle_id = s.cycle_id
 			WHERE s.fd_id = e.fd_id
 			  AND s.is_deleted = false
-			  AND s.selection_status = 'APPROVED'
+			  AND UPPER(TRIM(s.selection_status)) = 'APPROVED'
 			  AND COALESCE(c.is_deleted, false) = false
 			ORDER BY c.period_end DESC NULLS LAST, c.cycle_id DESC
 			LIMIT 1

@@ -1,12 +1,18 @@
 package templates
 
 import (
+	"CimplrCorpSaas/api/errtext"
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/dms/common"
@@ -18,6 +24,49 @@ import (
 const maxTemplateUploadBytes = 25 << 20 // 25 MB
 
 const errFailedUploadTemplate = "failed to upload template"
+
+// templateUploadTypes is the set the studio import accepts.
+var templateUploadTypes = map[string]string{
+	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	".pdf":  "application/pdf",
+	".xls":  "application/vnd.ms-excel",
+	".csv":  "text/csv",
+}
+
+func validateTemplateUpload(filename string, body []byte) (ext, contentType string, err error) {
+	ext = strings.ToLower(filepath.Ext(filename))
+	contentType, ok := templateUploadTypes[ext]
+	if !ok {
+		return "", "", fmt.Errorf("unsupported file type %q", ext)
+	}
+	if len(body) == 0 {
+		return "", "", fmt.Errorf("file is empty")
+	}
+	switch ext {
+	case ".docx", ".xlsx":
+		if !bytes.HasPrefix(body, []byte("PK\x03\x04")) {
+			return "", "", fmt.Errorf("file content does not match %s", ext)
+		}
+	case ".pdf":
+		if !bytes.HasPrefix(body, []byte("%PDF")) {
+			return "", "", fmt.Errorf("file content does not match .pdf")
+		}
+	case ".xls":
+		if !bytes.HasPrefix(body, []byte{0xD0, 0xCF, 0x11, 0xE0}) {
+			return "", "", fmt.Errorf("file content does not match .xls")
+		}
+	case ".csv":
+		sample := body
+		if len(sample) > 8192 {
+			sample = sample[:8192]
+		}
+		if bytes.IndexByte(sample, 0) >= 0 || !utf8.Valid(sample) {
+			return "", "", fmt.Errorf("file content does not match .csv")
+		}
+	}
+	return ext, contentType, nil
+}
 
 // HandleUpload registers an externally authored file (e.g. .docx) as a
 // template version. content_json stays the '{}' default for these rows —
@@ -56,14 +105,34 @@ func HandleUpload(pool *pgxpool.Pool) http.HandlerFunc {
 		if safeName == "" || safeName == "." {
 			safeName = "template-upload"
 		}
-		ext := filepath.Ext(safeName)
-		contentType := header.Header.Get("Content-Type")
-		if contentType == "" {
-			contentType = "application/octet-stream"
+		ext, contentType, err := validateTemplateUpload(safeName, body)
+		if err != nil {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errtext.Detail(w, err), "VALIDATION_ERROR")
+			return
 		}
 
 		templateID := strings.TrimSpace(r.FormValue("template_id"))
 		actor, ip := requestActorAndIP(r, r.FormValue("actor_id"))
+
+		sum := sha256.Sum256(body)
+		s3Key := s3storage.BuildModuleS3Key("dms", "templates", hex.EncodeToString(sum[:]), ext)
+		if err := s3storage.PutObjectToS3(r.Context(), s3Key, body, contentType); err != nil {
+			api.LogErrorForResponse(w, "dms template upload s3: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to store uploaded file", "DMS_TEMPLATE_UPLOAD_FAILED")
+			return
+		}
+		stored := true
+		committed := false
+		defer func() {
+			if !stored || committed {
+				return
+			}
+			delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if derr := s3storage.DeleteFromS3(delCtx, s3Key); derr != nil {
+				api.LogError("dms template upload cleanup %s: %v", s3Key, derr)
+			}
+		}()
 
 		tx, err := pool.Begin(r.Context())
 		if err != nil {
@@ -95,17 +164,9 @@ func HandleUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			auditActionType = "CREATE"
 		} else {
 			if err := requirePendingFree(r.Context(), tx, templateID); err != nil {
-				api.RespondEnvelopeError(w, http.StatusConflict, err.Error(), "DMS_TEMPLATE_PENDING_EXISTS")
+				api.RespondEnvelopeError(w, http.StatusConflict, errtext.Detail(w, err), "DMS_TEMPLATE_PENDING_EXISTS")
 				return
 			}
-		}
-
-		sum := sha256.Sum256(body)
-		s3Key := s3storage.BuildModuleS3Key("dms", "templates", hex.EncodeToString(sum[:]), ext)
-		if err := s3storage.PutObjectToS3(r.Context(), s3Key, body, contentType); err != nil {
-			api.LogErrorForResponse(w, "dms template upload s3: %v", err)
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to store uploaded file", "DMS_TEMPLATE_UPLOAD_FAILED")
-			return
 		}
 
 		var nextVersionNo int
@@ -164,6 +225,7 @@ func HandleUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, errFailedUploadTemplate, "DMS_TEMPLATE_UPLOAD_FAILED")
 			return
 		}
+		committed = true
 		api.RespondEnvelopeSuccess(w, "Template file uploaded and submitted for approval", map[string]interface{}{
 			"template_id": templateID,
 			"version_id":  versionID,

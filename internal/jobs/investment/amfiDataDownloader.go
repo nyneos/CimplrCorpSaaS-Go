@@ -141,6 +141,38 @@ func NewDefaultConfig() *Config {
 	}
 }
 
+// tryAMFIJobLock takes a transaction-scoped advisory lock on a held connection so only
+// one replica runs the AMFI download and upsert at a time; the returned func releases it.
+func tryAMFIJobLock(db *pgxpool.Pool) (func(), bool) {
+	ctx := context.Background()
+	conn, err := db.Acquire(ctx)
+	if err != nil {
+		logger.GlobalLogger.LogAudit(fmt.Sprintf("AMFI job lock: acquire connection: %v", err))
+		return nil, false
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		conn.Release()
+		logger.GlobalLogger.LogAudit(fmt.Sprintf("AMFI job lock: begin: %v", err))
+		return nil, false
+	}
+	var locked bool
+	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtext('amfi-data-downloader'))`).Scan(&locked); err != nil || !locked {
+		_ = tx.Rollback(ctx)
+		conn.Release()
+		if err != nil {
+			logger.GlobalLogger.LogAudit(fmt.Sprintf("AMFI job lock: %v", err))
+		} else {
+			logger.GlobalLogger.LogAudit("AMFI job already running on another instance — skipping")
+		}
+		return nil, false
+	}
+	return func() {
+		_ = tx.Rollback(ctx)
+		conn.Release()
+	}, true
+}
+
 func RunAMFIDataDownloader(cfg *Config, db *pgxpool.Pool) error {
 	// Set default values if not provided
 	if cfg.DefaultSchemeURL == "" {
@@ -174,8 +206,13 @@ func RunAMFIDataDownloader(cfg *Config, db *pgxpool.Pool) error {
 	httpCircuitBreaker := NewCircuitBreaker(5, 30*time.Second)
 	dbCircuitBreaker := NewCircuitBreaker(3, 60*time.Second)
 
-	c := cron.New(cron.WithLocation(loc))
+	c := cron.New(cron.WithLocation(loc), cron.WithChain(cron.Recover(cron.DefaultLogger), cron.SkipIfStillRunning(cron.DefaultLogger)))
 	_, err = c.AddFunc(cfg.DefaultSchemeSchedule, func() {
+		release, ok := tryAMFIJobLock(db)
+		if !ok {
+			return
+		}
+		defer release()
 		successMsg := fmt.Sprintf("Running AMFI Data Downloader at %s", time.Now().In(loc))
 		logger.GlobalLogger.LogAudit(successMsg)
 
@@ -615,11 +652,22 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 	copyDuration := time.Since(start)
 	logger.GlobalLogger.LogAudit(fmt.Sprintf("Bulk copy completed in %v", copyDuration))
 
+	// New schemes and NAV rows are loaded atomically: a failure part-way leaves the
+	// master and NAV history unchanged instead of half-loaded.
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin NAV load transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('amfi-nav-load'))`); err != nil {
+		return fmt.Errorf("NAV load lock: %w", err)
+	}
+
 	// STEP 1: Check for new schemes and insert them into amfi_scheme_master_staging
 	logger.GlobalLogger.LogAudit("Checking for new schemes not in master database...")
 
 	var newSchemesCount int
-	err = conn.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT t.scheme_code)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.scheme_code::bigint = s.scheme_code
@@ -632,7 +680,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("Found %d new schemes, adding to scheme master...", newSchemesCount))
 
 		// Insert new schemes into amfi_scheme_master_staging
-		schemeResult, err := conn.Exec(ctx, `
+		schemeResult, err := tx.Exec(ctx, `
 			INSERT INTO investment.amfi_scheme_master_staging
 			(amc_name, scheme_code, scheme_name, isin_div_payout_growth, isin_div_reinvestment, file_date)
 			SELECT DISTINCT
@@ -653,16 +701,14 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 				file_date = EXCLUDED.file_date`)
 
 		if err != nil {
-			logger.GlobalLogger.LogAudit(fmt.Sprintf("Warning: Failed to insert new schemes: %v", err))
-		} else {
-			addedSchemes := schemeResult.RowsAffected()
-			logger.GlobalLogger.LogAudit(fmt.Sprintf("Added %d new schemes to scheme master database", addedSchemes))
+			return fmt.Errorf("error inserting new schemes: %w", err)
 		}
+		logger.GlobalLogger.LogAudit(fmt.Sprintf("Added %d new schemes to scheme master database", schemeResult.RowsAffected()))
 	}
 
 	// Count distinct new AMCs for reporting
 	var newAmcCount int
-	err = conn.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT t.amc_name)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.amc_name = s.amc_name
@@ -680,7 +726,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 	logger.GlobalLogger.LogAudit("Processing NAV data for all matched schemes...")
 
 	// Insert NAV records for all schemes that now exist in the master (including newly added ones)
-	result, err := conn.Exec(ctx, `
+	result, err := tx.Exec(ctx, `
 		INSERT INTO investment.amfi_nav_staging
 		(scheme_code, isin_div_payout_growth, isin_div_reinvestment,
 		scheme_name, nav_value, nav_date, amc_name, file_date)
@@ -690,7 +736,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 			   t.isin_div_reinvestment,
 			   t.scheme_name,
 			   CASE
-				   WHEN t.nav_value ~ '^-?[0-9]+(\.[0-9]+)?$' THEN t.nav_value::numeric(18,4)
+				   WHEN t.nav_value ~ '^[0-9]+(\.[0-9]+)?$' AND t.nav_value::numeric > 0 THEN t.nav_value::numeric(18,4)
 				   ELSE NULL
 			   END,
 			   t.nav_date,
@@ -705,7 +751,7 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 			isin_div_payout_growth = EXCLUDED.isin_div_payout_growth,
 			isin_div_reinvestment = EXCLUDED.isin_div_reinvestment,
 			scheme_name = EXCLUDED.scheme_name,
-			nav_value = EXCLUDED.nav_value,
+			nav_value = COALESCE(EXCLUDED.nav_value, investment.amfi_nav_staging.nav_value),
 			amc_name = EXCLUDED.amc_name,
 			file_date = EXCLUDED.file_date`)
 
@@ -718,13 +764,17 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 
 	// Count unmatched records
 	var unmatchedCount int
-	err = conn.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT COUNT(*)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.scheme_code::bigint = s.scheme_code
 		WHERE t.scheme_code ~ '^[0-9]+$' AND s.scheme_code IS NULL`).Scan(&unmatchedCount)
 	if err != nil {
 		unmatchedCount = 0
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit NAV load: %w", err)
 	}
 
 	logger.GlobalLogger.LogAudit(fmt.Sprintf("Processed and inserted %d NAV records into NAV History", rowsAffected))

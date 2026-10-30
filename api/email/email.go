@@ -3,7 +3,9 @@ package email
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -22,6 +24,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func emailPostgresDSN(user, pass, host, port, name, sslMode string) string {
+	u := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(user, pass),
+		Host:   net.JoinHostPort(host, port),
+		Path:   "/" + name,
+	}
+	q := url.Values{}
+	q.Set("sslmode", sslMode)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 func NewEmailServer(pool *pgxpool.Pool, port string) (*http.Server, *pgxpool.Pool, bool, error) {
 	const serviceName = "email"
 	mux := http.NewServeMux()
@@ -35,11 +50,17 @@ func NewEmailServer(pool *pgxpool.Pool, port string) (*http.Server, *pgxpool.Poo
 		name := os.Getenv("DB_NAME")
 		if user != "" && pass != "" && host != "" && dbPort != "" && name != "" {
 			sslMode := dbutil.EffectiveSSLMode(host)
-			dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
+			dsn := emailPostgresDSN(user, pass, host, dbPort, name, sslMode)
 			var err error
 			pool, err = dbutil.NewTracedPool(context.Background(), dsn, serviceName)
 			if err != nil {
 				return nil, nil, false, fmt.Errorf("email pgxpool connect: %w", err)
+			}
+			pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := pool.Ping(pingCtx); err != nil {
+				pool.Close()
+				return nil, nil, false, fmt.Errorf("email database ping failed: %w", err)
 			}
 			ownsPool = true
 		}
@@ -78,6 +99,9 @@ func NewEmailServer(pool *pgxpool.Pool, port string) (*http.Server, *pgxpool.Poo
 		Addr:              ":" + port,
 		Handler:           observability.WrapHTTP(serviceName, mux),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       120 * time.Second,
 	}
 	return server, pool, ownsPool, nil
 }

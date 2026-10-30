@@ -25,6 +25,10 @@ import (
 // Response:
 //
 //	{ "success": true, "rows": { "processed": N, "skipped": N, "failed": N, "elapsed_ms": N } }
+
+// autoMaturitySystemActor is the maker and checker recorded for confirms the job creates.
+const autoMaturitySystemActor = "system@cimplr.auto"
+
 func CimplrAutoMaturityRunNow(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -33,9 +37,9 @@ func CimplrAutoMaturityRunNow(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		actor := strings.TrimSpace(req.UserEmail)
+		actor := api.GetUserEmailFromCtx(r.Context())
 		if actor == "" {
-			actor = strings.TrimSpace(req.UserID)
+			actor = api.GetUserIDFromCtx(r.Context())
 		}
 		if actor == "" {
 			actor = "manual-trigger"
@@ -74,10 +78,40 @@ const (
 // RunCimplrAutoMaturityDue creates and finalizes payout/rollover confirms for approved
 // initiates whose FD maturity date has arrived. Each initiate is processed at most once.
 func RunCimplrAutoMaturityDue(ctx context.Context, pool *pgxpool.Pool) (processed, skipped, failed int) {
+	// One sweep at a time across replicas and the run-now endpoint. Transaction-scoped
+	// lock on a held connection, which stays correct on the Supabase transaction pooler.
+	lockConn, err := pool.Acquire(ctx)
+	if err != nil {
+		api.LogError("[CimplrAutoMaturity] acquire lock connection: %v", err)
+		return 0, 0, 0
+	}
+	lockTx, err := lockConn.Begin(ctx)
+	if err != nil {
+		lockConn.Release()
+		api.LogError("[CimplrAutoMaturity] begin lock transaction: %v", err)
+		return 0, 0, 0
+	}
+	defer func() {
+		_ = lockTx.Rollback(context.WithoutCancel(ctx))
+		lockConn.Release()
+	}()
+	var locked bool
+	if err := lockTx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtext('cimplr-auto-maturity'))`).Scan(&locked); err != nil {
+		api.LogError("[CimplrAutoMaturity] advisory lock: %v", err)
+		return 0, 0, 0
+	}
+	if !locked {
+		api.LogInfo("[CimplrAutoMaturity] another sweep is already running — skipping")
+		return 0, 0, 0
+	}
+
 	if err := ensureCimplrExecutionLogTable(ctx, pool); err != nil {
 		api.LogError("[CimplrAutoMaturity] ensureCimplrExecutionLogTable failed: %v", err)
 	}
 	generateAutoRenewalInitiates(ctx, pool)
+	if posted, failedPosts := RetryApprovedClosureJournals(ctx, pool); posted+failedPosts > 0 {
+		api.LogInfo("[CimplrAutoMaturity] closure journal retry posted=%d failed=%d", posted, failedPosts)
+	}
 
 	// cimplr.fd_closure_initiate has NO rollover_amount_basis column — that
 	// preference lives only on the rollover_confirm detail row. For
@@ -155,7 +189,7 @@ func RunCimplrAutoMaturityDue(ctx context.Context, pool *pgxpool.Pool) (processe
 			continue
 		}
 		if strings.TrimSpace(actorEmail) == "" {
-			actorEmail = "system@cimplr.auto"
+			actorEmail = autoMaturitySystemActor
 		}
 		if strings.TrimSpace(actorUserID) == "" {
 			actorUserID = actorEmail
@@ -318,14 +352,14 @@ func processCimplrAutoMaturityInitiate(ctx context.Context, pool *pgxpool.Pool, 
 	if err := insertCimplrCalculation(ctx, tx, initiateID, closureConfirmID, src, calc); err != nil {
 		return autoMaturityOutcomeFailed, closureConfirmID, fmt.Errorf("insert calculation: %w", err)
 	}
-	if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: initiateID, Action: "CREATE", Status: constants.StatusApproved, Reason: req.Reason, RequestedBy: actorUserID, Old: nil}); err != nil {
+	if err := insertCimplrConfirmAudit(ctx, tx, confirmAuditEntry{ConfirmID: closureConfirmID, InitiateID: initiateID, Action: "CREATE", Status: constants.StatusApproved, Reason: req.Reason, RequestedBy: autoMaturitySystemActor, Old: nil}); err != nil {
 		return autoMaturityOutcomeFailed, closureConfirmID, fmt.Errorf("insert confirm audit: %w", err)
 	}
 	_, err = tx.Exec(ctx, `
 		UPDATE cimplr.fd_closure_confirm_audit
 		SET checker_by=$1, checker_at=NOW(), checker_comment=$2, processing_status='APPROVED'
-		WHERE closure_confirm_id=$3 AND processing_status LIKE 'PENDING%'`,
-		actorEmail, "Auto-approved on maturity date", closureConfirmID)
+		WHERE closure_confirm_id=$3 AND (processing_status LIKE 'PENDING%' OR checker_by IS NULL)`,
+		autoMaturitySystemActor, "Auto-approved on maturity date", closureConfirmID)
 	if err != nil {
 		return autoMaturityOutcomeFailed, closureConfirmID, fmt.Errorf("stamp approved audit: %w", err)
 	}

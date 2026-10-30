@@ -11,6 +11,7 @@ package fdMonthEndClosing
 
 import (
 	"net/http"
+	"time"
 
 	"CimplrCorpSaas/api/investment/fdMonthEndClosing/checklist"
 	"CimplrCorpSaas/api/investment/fdMonthEndClosing/cycle"
@@ -48,11 +49,14 @@ const serviceName = "fd-month-end-closing"
 func NewFdMonthEndClosingServer(pool *pgxpool.Pool, port string) *http.Server {
 	mux := http.NewServeMux()
 	RegisterFDMonthEndClosingRoutes(mux, pool)
-	mux.Handle("/investment/fd-closing/metrics", observability.MetricsHandler(serviceName))
 
 	return &http.Server{
-		Addr:    ":" + port,
-		Handler: observability.WrapHTTP(serviceName, mux),
+		Addr:              ":" + port,
+		Handler:           observability.WrapHTTP(serviceName, mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       120 * time.Second,
 	}
 }
 

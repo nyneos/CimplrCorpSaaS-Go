@@ -2,6 +2,7 @@ package fdRateNegotiation
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -123,7 +124,7 @@ func ListApprovedOffersByEntityBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, "Row iteration error: "+err.Error(), "")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "Row iteration error: "+errtext.Detail(w, err), "")
 			return
 		}
 

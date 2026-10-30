@@ -2,6 +2,7 @@ package amfisync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -207,8 +209,12 @@ func getAmcCount(pool *pgxpool.Pool) (int, error) {
 	var count int
 	err := pool.QueryRow(ctx, "SELECT COUNT(DISTINCT amc_name) FROM investment.amfi_scheme_master_staging").Scan(&count)
 	if err != nil {
-		// If table doesn't exist or query fails, return 0
-		return 0, nil
+		// A missing table (first sync) counts as zero; any other failure is reported.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			return 0, nil
+		}
+		return 0, err
 	}
 	return count, nil
 }
@@ -220,8 +226,12 @@ func getSchemeCount(pool *pgxpool.Pool) (int, error) {
 	var count int
 	err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM investment.amfi_scheme_master_staging").Scan(&count)
 	if err != nil {
-		// If table doesn't exist or query fails, return 0
-		return 0, nil
+		// A missing table (first sync) counts as zero; any other failure is reported.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			return 0, nil
+		}
+		return 0, err
 	}
 	return count, nil
 }

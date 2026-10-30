@@ -318,6 +318,11 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, pool *pgxpool.
 	// legacy matchCategoryForTransaction engine.
 	if pool != nil && len(newTxns) > 0 {
 		go func(bsID string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("goroutine panic: %v", rec)
+				}
+			}()
 			if err := cashjobs.ProcessUncategorizedTransactions(pool, 500, bsID); err != nil {
 				log.Printf("[SMART-CAT] post-upload categorization error (bs_id=%s): %v", bsID, err)
 			}

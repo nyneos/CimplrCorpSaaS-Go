@@ -1,6 +1,7 @@
 package fdMaturityAndRollover
 
 import (
+	"CimplrCorpSaas/api"
 	"net/http"
 
 	middlewares "CimplrCorpSaas/api/middlewares"
@@ -133,5 +134,5 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
 	// runs synchronously and returns counts. Use to verify worker behavior or
 	// catch up after data import without waiting for the next tick.
 	mux.Handle("/investment/fd/closure/auto-maturity/run-now",
-		mid(http.HandlerFunc(CimplrAutoMaturityRunNow(pool))))
+		mid(api.RequireAdminOverride(http.HandlerFunc(CimplrAutoMaturityRunNow(pool)))))
 }

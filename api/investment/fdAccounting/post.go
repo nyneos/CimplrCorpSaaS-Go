@@ -1,6 +1,7 @@
 package fdAccounting
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -72,7 +73,7 @@ func postOne(ctx context.Context, pool *pgxpool.Pool, entryID, actionType string
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fail(constants.ErrTxBeginFailedCapitalized + err.Error())
+		return fail(constants.ErrTxBeginFailedCapitalized + errtext.Text(err))
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
@@ -91,7 +92,7 @@ func postOne(ctx context.Context, pool *pgxpool.Pool, entryID, actionType string
 		return fail("journal entry not found")
 	}
 	if err != nil {
-		return fail(constants.ErrQueryFailed + err.Error())
+		return fail(constants.ErrQueryFailed + errtext.Text(err))
 	}
 	allowed := false
 	for _, s := range allowedFrom {
@@ -104,7 +105,7 @@ func postOne(ctx context.Context, pool *pgxpool.Pool, entryID, actionType string
 	}
 	// Maker-checker gate: the newest audit decision must be APPROVED.
 	if latest, lerr := latestAuditStatus(ctx, tx, entryID); lerr != nil {
-		return fail(constants.ErrQueryFailed + lerr.Error())
+		return fail(constants.ErrQueryFailed + errtext.Text(lerr))
 	} else if latest != constants.StatusApproved && latest != "COMPLETED" && latest != "FAILED" {
 		return fail("entry has not been approved by a checker (latest action " + latest + ")")
 	}
@@ -112,14 +113,14 @@ func postOne(ctx context.Context, pool *pgxpool.Pool, entryID, actionType string
 	// Validations = the whole "ERP response".
 	reason := ""
 	if locked, why, lerr := periodLocked(ctx, tx, entityID, entityName, entryDate); lerr != nil {
-		return fail(constants.ErrQueryFailed + lerr.Error())
+		return fail(constants.ErrQueryFailed + errtext.Text(lerr))
 	} else if locked {
 		reason = why
 	}
 	if reason == "" {
 		lines, lerr := loadLines(ctx, tx, entryID)
 		if lerr != nil {
-			return fail(constants.ErrQueryFailed + lerr.Error())
+			return fail(constants.ErrQueryFailed + errtext.Text(lerr))
 		}
 		reason = validateForPosting(lines, totalDebit, totalCredit)
 	}
@@ -135,16 +136,16 @@ func postOne(ctx context.Context, pool *pgxpool.Pool, entryID, actionType string
 	if reason != "" {
 		if _, uerr := tx.Exec(ctx, `UPDATE `+journalTable+` SET status = $2, failure_reason = $3 WHERE entry_id = $1`,
 			entryID, statusFailed, reason); uerr != nil {
-			return fail(constants.ErrUpdateFailed + uerr.Error())
+			return fail(constants.ErrUpdateFailed + errtext.Text(uerr))
 		}
 		if aerr := insertJournalAudit(ctx, tx, journalAuditWrite{
 			EntryID: entryID, ActionType: actionType, ProcessingStatus: "FAILED",
 			Reason: reason, ActorEmail: actorEmail, Checker: true,
 		}); aerr != nil {
-			return fail(constants.ErrAuditInsertFailed + aerr.Error())
+			return fail(constants.ErrAuditInsertFailed + errtext.Text(aerr))
 		}
 		if cerr := tx.Commit(ctx); cerr != nil {
-			return fail(constants.ErrCommitFailedCapitalized + cerr.Error())
+			return fail(constants.ErrCommitFailedCapitalized + errtext.Text(cerr))
 		}
 		api.LogInfo("[FDAccounting] %s %s FAILED: %s", actionType, entryID, reason)
 		return map[string]interface{}{"entry_id": entryID, "success": false, "status": statusFailed, "error": reason}
@@ -154,38 +155,44 @@ func postOne(ctx context.Context, pool *pgxpool.Pool, entryID, actionType string
 		UPDATE `+journalTable+`
 		SET status = $2, posted_by = $3, posted_at = now(), posting_reference = entry_id, failure_reason = NULL
 		WHERE entry_id = $1`, entryID, statusPosted, api.SystemIfBlank(actorEmail)); uerr != nil {
-		return fail(constants.ErrUpdateFailed + uerr.Error())
+		return fail(constants.ErrUpdateFailed + errtext.Text(uerr))
 	}
-	_, _ = tx.Exec(ctx, `
+	if _, uerr := tx.Exec(ctx, `
 		UPDATE investment.accounting_activity SET status = 'POSTED'
-		WHERE activity_id = (SELECT activity_id FROM `+journalTable+` WHERE entry_id = $1)`, entryID)
+		WHERE activity_id = (SELECT activity_id FROM `+journalTable+` WHERE entry_id = $1)`, entryID); uerr != nil {
+		return fail("update accounting activity: " + errtext.Text(uerr))
+	}
 	if isReversal && reversalOf != "" {
 		var revType string
-		_ = tx.QueryRow(ctx, `SELECT COALESCE(reversal_type,'FULL') FROM `+journalTable+` WHERE entry_id = $1`, entryID).Scan(&revType)
+		if rerr := tx.QueryRow(ctx, `SELECT COALESCE(reversal_type,'FULL') FROM `+journalTable+` WHERE entry_id = $1`, entryID).Scan(&revType); rerr != nil {
+			return fail(constants.ErrQueryFailed + errtext.Text(rerr))
+		}
 		if strings.EqualFold(strings.TrimSpace(revType), "PARTIAL") {
 			// Partial only nets part of the original — leave original POSTED so
 			// the remaining exposure stays on the ledger. Audit records the link.
-			_ = insertJournalAudit(ctx, tx, journalAuditWrite{
+			if aerr := insertJournalAudit(ctx, tx, journalAuditWrite{
 				EntryID: reversalOf, ActionType: "EDIT", ProcessingStatus: "COMPLETED",
 				Reason: "Partially reversed by " + entryID, ActorEmail: actorEmail, Checker: true,
-			})
+			}); aerr != nil {
+				return fail(constants.ErrAuditInsertFailed + errtext.Text(aerr))
+			}
 		} else if _, uerr := tx.Exec(ctx, `UPDATE `+journalTable+` SET status = $2 WHERE entry_id = $1`, reversalOf, statusReversed); uerr != nil {
-			return fail("flip original to REVERSED: " + uerr.Error())
-		} else {
-			_ = insertJournalAudit(ctx, tx, journalAuditWrite{
-				EntryID: reversalOf, ActionType: "EDIT", ProcessingStatus: "COMPLETED",
-				Reason: "Reversed by " + entryID, ActorEmail: actorEmail, Checker: true,
-			})
+			return fail("flip original to REVERSED: " + errtext.Text(uerr))
+		} else if aerr := insertJournalAudit(ctx, tx, journalAuditWrite{
+			EntryID: reversalOf, ActionType: "EDIT", ProcessingStatus: "COMPLETED",
+			Reason: "Reversed by " + entryID, ActorEmail: actorEmail, Checker: true,
+		}); aerr != nil {
+			return fail(constants.ErrAuditInsertFailed + errtext.Text(aerr))
 		}
 	}
 	if aerr := insertJournalAudit(ctx, tx, journalAuditWrite{
 		EntryID: entryID, ActionType: actionType, ProcessingStatus: "COMPLETED",
 		Reason: "Posted to ledger (" + postingModeValue + ")", ActorEmail: actorEmail, Checker: true,
 	}); aerr != nil {
-		return fail(constants.ErrAuditInsertFailed + aerr.Error())
+		return fail(constants.ErrAuditInsertFailed + errtext.Text(aerr))
 	}
 	if cerr := tx.Commit(ctx); cerr != nil {
-		return fail(constants.ErrCommitFailedCapitalized + cerr.Error())
+		return fail(constants.ErrCommitFailedCapitalized + errtext.Text(cerr))
 	}
 	api.LogInfo("[FDAccounting] %s %s POSTED by %s", actionType, entryID, actorEmail)
 	return map[string]interface{}{

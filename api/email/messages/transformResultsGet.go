@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/api/utils/s3storage"
 
@@ -36,6 +37,9 @@ func HandleTransformResultGet(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			emailcommon.RespondBadRequest(w, "Invalid request body")
+			return
+		}
+		if !emailcommon.RequireMessageAccess(w, r, pool, emailcommon.MessageByResultQuery, req.ResultID) {
 			return
 		}
 		if req.ResultID == "" {
@@ -117,7 +121,8 @@ func HandleTransformResultGet(pool *pgxpool.Pool) http.HandlerFunc {
 			&res.MappingName,
 		)
 		if err != nil {
-			emailcommon.RespondInternal(w, "Failed to fetch transformation result: "+err.Error())
+			api.LogErrorForResponse(w, "email transform result get failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 			return
 		}
 

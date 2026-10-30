@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -32,6 +33,9 @@ func HandleTransformResultsBulkDownload(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
+			return
+		}
+		if !emailcommon.RequireMessageAccess(w, r, pool, emailcommon.MessageByResultsQuery, req.IDs) {
 			return
 		}
 
@@ -114,7 +118,8 @@ func HandleTransformResultsBulkDownload(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(r.Context(), query, ids, admin, userID, userEmail)
 		if err != nil {
-			http.Error(w, "Failed to load files: "+err.Error(), http.StatusInternalServerError)
+			api.LogErrorForResponse(w, "email transform bulk download query failed: %v", err)
+			http.Error(w, "database operation failed", http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()

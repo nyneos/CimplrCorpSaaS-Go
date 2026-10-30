@@ -1,8 +1,10 @@
 package fdAccrual
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime/debug"
@@ -19,6 +21,7 @@ import (
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -139,7 +142,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		runTimeDB, runTimeErr := parseRunTimeForDB(req.RunTime)
 		if runTimeErr != nil {
-			api.RespondWithError(w, http.StatusBadRequest, runTimeErr.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, runTimeErr))
 			return
 		}
 
@@ -190,7 +193,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nextRun, req.AcrualGranularity, req.PeriodCoverage, userEmail,
 		).Scan(&configID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Create schedule config failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Create schedule config failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -200,7 +203,26 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				(config_id, action_type, processing_status, requested_by, requested_at, requested_ip)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`,
 			configID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); auditErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Schedule audit insert failed: "+auditErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Schedule audit insert failed: "+errtext.Detail(w, auditErr))
+			return
+		}
+
+		if err := startScheduleApproval(ctx, pgxPool, approvalengine.InstanceRequest{
+			ModuleCode:          "FIXED_DEPOSIT",
+			EntityCode:          req.EntityID,
+			TransactionType:     "FD_ACCRUAL_SCHEDULE_CREATE",
+			RecordID:            configID,
+			RecordTable:         constants.QuerryAccrualScheduleConfig,
+			AuditTable:          constants.QuerryAccrualScheduleConfigAudit,
+			AuditIDColumn:       "config_id",
+			ActionType:          "CREATE",
+			SubmittedBy:         req.UserID,
+			SubmittedByEmail:    userEmail,
+			MatrixID:            schedCreateMatrixID,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: true,
+		}); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Schedule was saved but its approval workflow could not be started")
 			return
 		}
 
@@ -221,21 +243,6 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"record_id": cfgID, "event": "FD_ACCRUAL_SCHEDULE_CREATED", "actor_email": email, "entity_id": entID,
 			})
 			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_FD", "FD_ACCRUAL_SCHED", "POST_CREATE", []string{cfgID}, email)
-			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:          "FIXED_DEPOSIT",
-				EntityCode:          entID,
-				TransactionType:     "FD_ACCRUAL_SCHEDULE_CREATE",
-				RecordID:            cfgID,
-				RecordTable:         constants.QuerryAccrualScheduleConfig,
-				AuditTable:          constants.QuerryAccrualScheduleConfigAudit,
-				AuditIDColumn:       "config_id",
-				ActionType:          "CREATE",
-				SubmittedBy:         uID,
-				SubmittedByEmail:    email,
-				MatrixID:            matrixID,
-				RequirePinnedMatrix: true,
-				AutoApplyIfUnpinned: true,
-			})
 		}(configID, req.EntityID, req.UserID, userEmail, schedCreateMatrixID)
 		api.LogInfo("[FDAccrual] CreateScheduleConfig: config_id=%s entity=%s freq=%s", configID, req.EntityID, req.ScheduleFrequency)
 	}
@@ -272,7 +279,7 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		entityID, ok, scopeErr := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID)
 		if scopeErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+scopeErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+errtext.Detail(w, scopeErr))
 			return
 		}
 		if !ok {
@@ -312,7 +319,7 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if s, ok := val.(string); ok {
 					parsed, pErr := parseRunTimeForDB(s)
 					if pErr != nil {
-						api.RespondWithError(w, http.StatusBadRequest, pErr.Error())
+						api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, pErr))
 						return
 					}
 					val = parsed
@@ -329,7 +336,7 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		updateBaseRow, pfErr := loadFDAccrualScheduleRow(ctx, pgxPool, req.ConfigID)
 		if pfErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+pfErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+errtext.Detail(w, pfErr))
 			return
 		}
 		updatedRow := applyFDAccrualScheduleEdits(updateBaseRow, req.Fields)
@@ -344,13 +351,20 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+errtext.Detail(w, err))
+			return
+		}
+		defer tx.Rollback(ctx)
+
 		// Snapshot old values before update
 		var oldFreq, oldRunMode, oldBankFilter, oldFDFilter, oldPeriodCoverage string
 		var oldRunDay int
 		var oldAutoSubmit bool
 		var oldNotifRecipients []byte
 		var oldRunTime interface{}
-		_ = pgxPool.QueryRow(ctx, `
+		snapErr := tx.QueryRow(ctx, `
 			SELECT
 				COALESCE(schedule_frequency,''),
 				COALESCE(run_day_of_month,1),
@@ -362,8 +376,17 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(notification_recipients,'[]'::jsonb)::text,
 				COALESCE(period_coverage,'RUN')
 			FROM investment.fd_accrual_schedule_config
-			WHERE config_id=$1`, req.ConfigID,
+			WHERE config_id=$1 AND COALESCE(is_deleted,false)=false
+			FOR UPDATE`, req.ConfigID,
 		).Scan(&oldFreq, &oldRunDay, &oldRunTime, &oldRunMode, &oldBankFilter, &oldFDFilter, &oldAutoSubmit, &oldNotifRecipients, &oldPeriodCoverage)
+		if errors.Is(snapErr, pgx.ErrNoRows) {
+			api.RespondWithError(w, http.StatusNotFound, "schedule config not found or already disabled")
+			return
+		}
+		if snapErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+errtext.Detail(w, snapErr))
+			return
+		}
 
 		args = append(args, req.ConfigID)
 		query := fmt.Sprintf(
@@ -371,9 +394,9 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			joinStrings(setParts, ", "),
 			len(args),
 		)
-		ct, err := pgxPool.Exec(ctx, query, args...)
+		ct, err := tx.Exec(ctx, query, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Update schedule config failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Update schedule config failed: "+errtext.Detail(w, err))
 			return
 		}
 		if ct.RowsAffected() == 0 {
@@ -382,16 +405,18 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Recompute next_run_at when schedule timing fields change
-		if _, freqOK := req.Fields["schedule_frequency"]; freqOK {
-			recalcScheduleNextRun(ctx, pgxPool, req.ConfigID)
-		} else if _, dayOK := req.Fields["run_day_of_month"]; dayOK {
-			recalcScheduleNextRun(ctx, pgxPool, req.ConfigID)
-		} else if _, timeOK := req.Fields["run_time"]; timeOK {
-			recalcScheduleNextRun(ctx, pgxPool, req.ConfigID)
+		_, freqOK := req.Fields["schedule_frequency"]
+		_, dayOK := req.Fields["run_day_of_month"]
+		_, timeOK := req.Fields["run_time"]
+		if freqOK || dayOK || timeOK {
+			if err := recalcScheduleNextRunErr(ctx, tx, req.ConfigID); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Update schedule config failed: next run could not be recalculated")
+				return
+			}
 		}
 
 		// Audit trail with full old-value snapshot
-		_, _ = pgxPool.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO investment.fd_accrual_schedule_config_audit (
 				config_id, action_type, processing_status, requested_by, requested_at, requested_ip,
 				old_schedule_frequency, old_run_day_of_month, old_run_time,
@@ -401,7 +426,33 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,true,$12)`,
 			req.ConfigID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			oldFreq, oldRunDay, oldRunTime, oldRunMode, oldBankFilter, oldFDFilter,
-			oldAutoSubmit, string(oldNotifRecipients), oldPeriodCoverage)
+			oldAutoSubmit, string(oldNotifRecipients), oldPeriodCoverage); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Schedule audit insert failed: "+errtext.Detail(w, err))
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+errtext.Detail(w, err))
+			return
+		}
+
+		if err := startScheduleApproval(ctx, pgxPool, approvalengine.InstanceRequest{
+			ModuleCode:          "FIXED_DEPOSIT",
+			EntityCode:          entityID,
+			TransactionType:     "FD_ACCRUAL_SCHEDULE_EDIT",
+			RecordID:            req.ConfigID,
+			RecordTable:         constants.QuerryAccrualScheduleConfig,
+			AuditTable:          constants.QuerryAccrualScheduleConfigAudit,
+			AuditIDColumn:       "config_id",
+			ActionType:          "EDIT",
+			SubmittedBy:         req.UserID,
+			SubmittedByEmail:    userEmail,
+			MatrixID:            schedEditMatrixID,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: true,
+		}); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Schedule was updated but its approval workflow could not be started")
+			return
+		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"config_id":         req.ConfigID,
@@ -413,21 +464,6 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bg := context.Background()
 			notifcatalog.TriggerNotification(bg, pgxPool, "/investment/fd/accrual/schedule/update", cfgID, map[string]interface{}{
 				"record_id": cfgID, "event": "FD_ACCRUAL_SCHEDULE_UPDATED", "actor_email": email,
-			})
-			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:          "FIXED_DEPOSIT",
-				EntityCode:          entID,
-				TransactionType:     "FD_ACCRUAL_SCHEDULE_EDIT",
-				RecordID:            cfgID,
-				RecordTable:         constants.QuerryAccrualScheduleConfig,
-				AuditTable:          constants.QuerryAccrualScheduleConfigAudit,
-				AuditIDColumn:       "config_id",
-				ActionType:          "EDIT",
-				SubmittedBy:         uID,
-				SubmittedByEmail:    email,
-				MatrixID:            matrixID,
-				RequirePinnedMatrix: true,
-				AutoApplyIfUnpinned: true,
 			})
 		}(req.ConfigID, entityID, req.UserID, userEmail, schedEditMatrixID)
 		api.LogInfo("[FDAccrual] UpdateScheduleConfig: config_id=%s by=%s", req.ConfigID, userEmail)
@@ -479,7 +515,7 @@ func GetScheduleConfigs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -499,7 +535,7 @@ func GetScheduleConfigs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			configs = append(configs, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, err))
 			return
 		}
 
@@ -535,7 +571,7 @@ func DisableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		if _, ok, scopeErr := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID); scopeErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+scopeErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+errtext.Detail(w, scopeErr))
 			return
 		} else if !ok {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
@@ -543,7 +579,7 @@ func DisableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		schedFields, disableEntityID, pfErr := accrualSchedulePolicyFields(ctx, pgxPool, req.ConfigID)
 		if pfErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, pfErr))
 			return
 		}
 		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, enforceCtx{
@@ -560,7 +596,7 @@ func DisableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SET is_active=false, updated_by=$1, updated_at=now()
 			WHERE config_id=$2`, userEmail, req.ConfigID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Disable failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Disable failed: "+errtext.Detail(w, err))
 			return
 		}
 		if ct.RowsAffected() == 0 {
@@ -607,7 +643,7 @@ func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		if _, ok, scopeErr := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID); scopeErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+scopeErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+errtext.Detail(w, scopeErr))
 			return
 		} else if !ok {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
@@ -615,7 +651,7 @@ func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		schedFields, enableEntityID, pfErr := accrualSchedulePolicyFields(ctx, pgxPool, req.ConfigID)
 		if pfErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, pfErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, pfErr))
 			return
 		}
 		if !fdAccrualSchedEnforce(ctx, w, r, pgxPool, enforceCtx{
@@ -632,7 +668,7 @@ func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SET is_active=true, updated_by=$1, updated_at=now()
 			WHERE config_id=$2`, userEmail, req.ConfigID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Enable failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Enable failed: "+errtext.Detail(w, err))
 			return
 		}
 		if ct.RowsAffected() == 0 {
@@ -693,7 +729,7 @@ func ApproveScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			schedFields, approveEntityID, pfErr := accrualSchedulePolicyFields(ctx, pgxPool, configID)
 			if pfErr != nil {
-				errors = append(errors, configID+": "+pfErr.Error())
+				errors = append(errors, configID+": "+errtext.Text(pfErr))
 				continue
 			}
 			if ok, pmsg := fdAccrualSchedEnforceInline(ctx, r, pgxPool, enforceCtx{
@@ -708,14 +744,14 @@ func ApproveScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: configID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: comment})
 			if actionErr != nil {
-				errors = append(errors, configID+": "+actionErr.Error())
+				errors = append(errors, configID+": "+errtext.Text(actionErr))
 				continue
 			}
 			if actionRes.Acted {
 				if actionRes.InstanceStatus == approvalengine.InstStatusApproved {
 					isDeleted, applyErr := applyApprovedScheduleConfig(ctx, pgxPool, configID, userEmail)
 					if applyErr != nil {
-						errors = append(errors, configID+": apply failed: "+applyErr.Error())
+						errors = append(errors, configID+": apply failed: "+errtext.Text(applyErr))
 						continue
 					}
 					if isDeleted {
@@ -738,18 +774,18 @@ func ApproveScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(directConfigIDs) > 0 {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+errtext.Detail(w, err))
 				return
 			}
 			defer tx.Rollback(ctx) //nolint:errcheck
 
 			directApproved, directDeleted, err := finalizeScheduleConfigAudits(ctx, tx, directConfigIDs, userEmail, req.Comment, true)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+errtext.Detail(w, err))
 				return
 			}
 			approved = append(approved, directApproved...)
@@ -852,7 +888,7 @@ func RejectScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			schedFields, rejectEntityID, pfErr := accrualSchedulePolicyFields(ctx, pgxPool, configID)
 			if pfErr != nil {
-				errors = append(errors, configID+": "+pfErr.Error())
+				errors = append(errors, configID+": "+errtext.Text(pfErr))
 				continue
 			}
 			if ok, pmsg := fdAccrualSchedEnforceInline(ctx, r, pgxPool, enforceCtx{
@@ -867,7 +903,7 @@ func RejectScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: configID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: comment})
 			if actionErr != nil {
-				errors = append(errors, configID+": "+actionErr.Error())
+				errors = append(errors, configID+": "+errtext.Text(actionErr))
 				continue
 			}
 			if actionRes.Acted {
@@ -875,7 +911,7 @@ func RejectScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					UPDATE investment.fd_accrual_schedule_config
 					SET is_active=false, updated_by=$1, updated_at=now()
 					WHERE config_id=$2`, userEmail, configID); execErr != nil {
-					errors = append(errors, configID+": status update failed: "+execErr.Error())
+					errors = append(errors, configID+": status update failed: "+errtext.Text(execErr))
 					continue
 				}
 				rejected = append(rejected, configID)
@@ -893,17 +929,17 @@ func RejectScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(directConfigIDs) > 0 {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+errtext.Detail(w, err))
 				return
 			}
 			defer tx.Rollback(ctx) //nolint:errcheck
 
 			if _, _, err = finalizeScheduleConfigAudits(ctx, tx, directConfigIDs, userEmail, req.Comment, false); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+errtext.Detail(w, err))
 				return
 			}
 			rejected = append(rejected, directConfigIDs...)
@@ -1104,7 +1140,7 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		entityID, ok, scopeErr := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID)
 		if scopeErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+scopeErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+errtext.Detail(w, scopeErr))
 			return
 		}
 		if !ok {
@@ -1142,7 +1178,7 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		deleteRow, pfErr := loadFDAccrualScheduleRow(ctx, pgxPool, req.ConfigID)
 		if pfErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+pfErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+errtext.Detail(w, pfErr))
 			return
 		}
 		schedDeleteOK, schedDeleteMatrixID := fdAccrualSchedEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{
@@ -1168,7 +1204,26 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.ConfigID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)),
 			dOldFreq, dOldRunDay, dOldRunTime, dOldRunMode, dOldBankFilter, dOldFDFilter,
 			dOldAutoSubmit, string(dOldNotif), dOldPeriodCoverage); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Delete audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Delete audit insert failed: "+errtext.Detail(w, err))
+			return
+		}
+
+		if err := startScheduleApproval(ctx, pgxPool, approvalengine.InstanceRequest{
+			ModuleCode:          "FIXED_DEPOSIT",
+			EntityCode:          entityID,
+			TransactionType:     "FD_ACCRUAL_SCHEDULE_DELETE",
+			RecordID:            req.ConfigID,
+			RecordTable:         constants.QuerryAccrualScheduleConfig,
+			AuditTable:          constants.QuerryAccrualScheduleConfigAudit,
+			AuditIDColumn:       "config_id",
+			ActionType:          "DELETE",
+			SubmittedBy:         req.UserID,
+			SubmittedByEmail:    userEmail,
+			MatrixID:            schedDeleteMatrixID,
+			RequirePinnedMatrix: true,
+			AutoApplyIfUnpinned: true,
+		}); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Delete request was saved but its approval workflow could not be started")
 			return
 		}
 
@@ -1181,21 +1236,6 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bg := context.Background()
 			notifcatalog.TriggerNotification(bg, pgxPool, "/investment/fd/accrual/schedule/delete", cfgID, map[string]interface{}{
 				"record_id": cfgID, "event": "FD_ACCRUAL_SCHEDULE_DELETED", "actor_email": email,
-			})
-			_, _ = approvalengine.CreateInstance(bg, pgxPool, approvalengine.InstanceRequest{
-				ModuleCode:          "FIXED_DEPOSIT",
-				EntityCode:          entID,
-				TransactionType:     "FD_ACCRUAL_SCHEDULE_DELETE",
-				RecordID:            cfgID,
-				RecordTable:         constants.QuerryAccrualScheduleConfig,
-				AuditTable:          constants.QuerryAccrualScheduleConfigAudit,
-				AuditIDColumn:       "config_id",
-				ActionType:          "DELETE",
-				SubmittedBy:         uID,
-				SubmittedByEmail:    email,
-				MatrixID:            matrixID,
-				RequirePinnedMatrix: true,
-				AutoApplyIfUnpinned: true,
 			})
 		}(req.ConfigID, entityID, req.UserID, userEmail, schedDeleteMatrixID)
 		api.LogInfo("[FDAccrual] DeleteScheduleConfig: config_id=%s by=%s", req.ConfigID, userEmail)
@@ -1286,7 +1326,23 @@ func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
 
 	api.LogInfo("[FDAccrual] Scheduler tick: %d due config(s)", len(due))
 	for _, c := range due {
-		fireScheduledRun(ctx, pool, FireScheduledParams{
+		// Claim the config by leasing next_run_at forward, conditioned on the value just
+		// read. Only one replica wins; a crashed or panicking run is retried after the
+		// lease instead of on every tick. updateLastRunStatus sets the real next run.
+		claim, err := pool.Exec(ctx, `
+			UPDATE investment.fd_accrual_schedule_config
+			SET next_run_at = now() + $3::interval, updated_at = now()
+			WHERE config_id = $1 AND next_run_at = $2`,
+			c.ConfigID, c.NextRunAt, accrualScheduleLease)
+		if err != nil {
+			api.LogError("[FDAccrual] Scheduler claim config=%s: %v", c.ConfigID, err)
+			continue
+		}
+		if claim.RowsAffected() == 0 {
+			continue
+		}
+		runCtx, cancel := context.WithTimeout(ctx, accrualScheduleRunTimeout)
+		fireScheduledRun(runCtx, pool, FireScheduledParams{
 			ConfigID:       c.ConfigID,
 			EntityID:       c.EntityID,
 			EntityName:     c.EntityName,
@@ -1300,8 +1356,14 @@ func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
 			Granularity:    c.Granularity,
 			ScheduledAt:    c.NextRunAt,
 		})
+		cancel()
 	}
 }
+
+const (
+	accrualScheduleLease      = "30 minutes"
+	accrualScheduleRunTimeout = 25 * time.Minute
+)
 
 // fireScheduledRun creates a run, validates, executes, and optionally submits.
 type FireScheduledParams struct {
@@ -1371,7 +1433,7 @@ func fireScheduledRun(
 	// Skip if a scheduler-created run already exists for this entity+period+mode
 	// that is not in a terminal failure state.
 	var existingRun string
-	_ = pool.QueryRow(ctx, `
+	if err := pool.QueryRow(ctx, `
 		SELECT COALESCE(run_id,'') FROM investment.fd_accrual_run
 		WHERE entity_id=$1
 		  AND accrual_period_start=$2
@@ -1381,7 +1443,11 @@ func fireScheduledRun(
 		  AND run_status NOT IN ('FAILED','VALIDATION_FAILED')
 		LIMIT 1`,
 		entityID, periodStart, periodEnd, runMode,
-	).Scan(&existingRun)
+	).Scan(&existingRun); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		api.LogError("[FDAccrual] Scheduler duplicate check config=%s: %v", configID, err)
+		updateLastRunStatus(ctx, pool, configID, "", truncateStatus("DUPLICATE_CHECK_FAILED: "+err.Error()))
+		return
+	}
 	if existingRun != "" {
 		api.LogInfo("[FDAccrual] Scheduler skip entity=%s period=%s→%s mode=%s — run %s already exists",
 			entityID, periodStart.Format(constants.DateFormat), periodEnd.Format(constants.DateFormat), runMode, existingRun)
@@ -1493,9 +1559,13 @@ func fireScheduledRun(
 	if blockers > 0 {
 		newStatus = "VALIDATION_FAILED"
 	}
-	_, _ = pool.Exec(ctx,
+	if _, err := pool.Exec(ctx,
 		`UPDATE investment.fd_accrual_run SET run_status=$1, fds_in_scope=$2 WHERE run_id=$3`,
-		newStatus, eligible, runID)
+		newStatus, eligible, runID); err != nil {
+		api.LogError("[FDAccrual] Scheduler set status run=%s: %v", runID, err)
+		updateLastRunStatus(ctx, pool, configID, runID, "VALIDATE_FAILED")
+		return
+	}
 
 	if blockers > 0 {
 		api.LogInfo("[FDAccrual] Scheduler run=%s has %d blockers — skipping execution", runID, blockers)
@@ -1542,13 +1612,17 @@ func updateLastRunStatus(ctx context.Context, pool *pgxpool.Pool, configID, runI
 	if runID != "" {
 		runIDArg = runID
 	}
+	// Detached from the run's deadline so a timed-out run still records its outcome.
+	ctx = context.WithoutCancel(ctx)
 	nextRun := loadAndComputeNextRunAt(ctx, pool, configID)
-	_, _ = pool.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		UPDATE investment.fd_accrual_schedule_config
 		SET last_run_at=now(), last_run_id=$1, last_run_status=$2,
 		    next_run_at=$3, updated_at=now()
 		WHERE config_id=$4`,
-		runIDArg, status, nextRun, configID)
+		runIDArg, status, nextRun, configID); err != nil {
+		api.LogError("[FDAccrual] Scheduler update config=%s: %v", configID, err)
+	}
 }
 
 // RecalcScheduleNextRun recalculates next_run_at from current config timing (e.g. after fixing run_time).
@@ -1577,7 +1651,7 @@ func RecalcScheduleNextRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SET next_run_at=$1, updated_at=now()
 			WHERE config_id=$2 AND is_active=true`, nextRun, req.ConfigID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Recalc failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Recalc failed: "+errtext.Detail(w, err))
 			return
 		}
 		if ct.RowsAffected() == 0 {
@@ -1592,16 +1666,42 @@ func RecalcScheduleNextRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // recalcScheduleNextRun reloads timing from DB and writes next_run_at (used after config edits).
-func recalcScheduleNextRun(ctx context.Context, pool *pgxpool.Pool, configID string) {
+func recalcScheduleNextRun(ctx context.Context, pool scheduleDB, configID string) {
+	if err := recalcScheduleNextRunErr(ctx, pool, configID); err != nil {
+		api.LogError("[FDAccrual] recalc next_run_at for %s: %v", configID, err)
+	}
+}
+
+func recalcScheduleNextRunErr(ctx context.Context, pool scheduleDB, configID string) error {
 	nextRun := loadAndComputeNextRunAt(ctx, pool, configID)
-	_, _ = pool.Exec(ctx, `
+	_, err := pool.Exec(ctx, `
 		UPDATE investment.fd_accrual_schedule_config
 		SET next_run_at=$1, updated_at=now()
 		WHERE config_id=$2`, nextRun, configID)
+	return err
+}
+
+// scheduleDB is satisfied by both the pool and a transaction.
+type scheduleDB interface {
+	Exec(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}
+
+// startScheduleApproval starts the approval workflow for a schedule config change before
+// the caller responds, so a failure is reported instead of leaving a PENDING audit row
+// with no workflow.
+func startScheduleApproval(ctx context.Context, pool *pgxpool.Pool, req approvalengine.InstanceRequest) error {
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
+	if _, err := approvalengine.CreateInstance(bgCtx, pool, req); err != nil {
+		api.LogError("[FDAccrual] approval instance %s for %s: %v", req.TransactionType, req.RecordID, err)
+		return err
+	}
+	return nil
 }
 
 // loadAndComputeNextRunAt reads schedule_frequency, run_day_of_month, run_time from config.
-func loadAndComputeNextRunAt(ctx context.Context, pool *pgxpool.Pool, configID string) time.Time {
+func loadAndComputeNextRunAt(ctx context.Context, pool scheduleDB, configID string) time.Time {
 	var freq string
 	var runDay int
 	var runTime interface{}
@@ -1946,7 +2046,7 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1966,7 +2066,7 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			configs = append(configs, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, err))
 			return
 		}
 
@@ -2099,7 +2199,7 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&auditChkBy, &auditChkAt, &auditComment,
 			&histCreatedBy, &histCreatedAt, &histEditedBy, &histEditedAt, &histDeletedBy, &histDeletedAt,
 		); err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Schedule config not found: "+err.Error())
+			api.RespondWithError(w, http.StatusNotFound, "Schedule config not found: "+errtext.Detail(w, err))
 			return
 		}
 		if code, msg := validateAccrualEntityParam(ctx, entityID); code != 0 {
@@ -2176,7 +2276,7 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LIMIT 100`, entityID)
 
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Runs query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Runs query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer runsRows.Close()
@@ -2440,7 +2540,7 @@ func GetScheduleExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		argIdx := 1
 		if req.ConfigID != "" {
 			if _, ok, err := requireScheduleConfigScope(ctx, pgxPool, req.ConfigID); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScheduleConfigLookupFailed+errtext.Detail(w, err))
 				return
 			} else if !ok {
 				api.RespondWithError(w, http.StatusForbidden, "Schedule config is not within your authorized entity scope.")
@@ -2465,7 +2565,7 @@ func GetScheduleExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		configRows, err := pgxPool.Query(ctx, configQuery, configArgs...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Schedule config query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Schedule config query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer configRows.Close()

@@ -58,6 +58,11 @@ func NewPackageZipHandler(pool *pgxpool.Pool, cfg Config, opts PackageZipOptions
 			http.Error(w, fmt.Sprintf("%s is required", idField), http.StatusBadRequest)
 			return
 		}
+		for _, id := range rowIDs {
+			if !parentAllowed(w, r, pool, cfg, id) {
+				return
+			}
+		}
 
 		rows := collectPackageRows(r.Context(), pool, cfg, opts, rowIDs)
 		rows = preparePackageRows(r.Context(), rows)

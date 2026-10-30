@@ -2,15 +2,18 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/internal/logger"
 
 	"github.com/google/uuid"
@@ -116,7 +119,7 @@ type EntityMasterBulkRequest struct {
 // 				createdBy,
 // 			).Scan(&newEntityID)
 // 			if err != nil {
-// 				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "entity_name": entity.EntityName})
+// 				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errtext.Text(err), "entity_name": entity.EntityName})
 // 				continue
 // 			}
 // 			entityIDs[entity.EntityName] = newEntityID
@@ -422,24 +425,46 @@ func ApproveEntity(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		id := req.ID
+		var maker string
+		_ = pool.QueryRow(ctx, `
+			SELECT COALESCE(requested_by, '') FROM auditactionentity
+			WHERE entity_id = $1 AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+			ORDER BY requested_at DESC LIMIT 1`, id).Scan(&maker)
+		if governance.IsSelfApprovalCtx(ctx, maker) {
+			api.RespondEnvelopeError(w, http.StatusForbidden, errtext.Detail(w, governance.ErrSelfApproval), "SELF_APPROVAL")
+			return
+		}
 		var status string
 		err := pool.QueryRow(ctx, `SELECT approval_status FROM masterentity WHERE entity_id = $1`, id).Scan(&status)
 		if errors.Is(err, pgx.ErrNoRows) {
 			api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrEntityNotFound, "")
 			return
 		}
+		if err != nil {
+			api.LogErrorForResponse(w, "ApproveEntity: status lookup failed: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrEntityUpdateFailed, "")
+			return
+		}
 		if status == constants.StatusCodeDeleteApproval {
 			// Get all descendants
-			relRows, _ := pool.Query(ctx, `SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
+			relRows, relErr := pool.Query(ctx, `SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
+			if relErr != nil {
+				api.LogErrorForResponse(w, "ApproveEntity: relationships query failed: %v", relErr)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrEntityUpdateFailed, "")
+				return
+			}
 			defer relRows.Close()
 			parentMap := map[string][]string{}
 			for relRows.Next() {
 				var parent, child string
 				if err := relRows.Scan(&parent, &child); err != nil {
-					logger.LogError("ApproveEntity: relationships scan failed: %v", err)
+					api.LogErrorForResponse(w, "ApproveEntity: relationships scan failed: %v", err)
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrEntityUpdateFailed, "")
+					return
 				}
 				parentMap[parent] = append(parentMap[parent], child)
 			}
+			relRows.Close()
 			// var getAllDescendants func([]string) []string
 			getAllDescendants := func(ids []string) []string {
 				all := map[string]bool{}
@@ -473,7 +498,8 @@ func ApproveEntity(pool *pgxpool.Pool) http.HandlerFunc {
 			if rows.Next() {
 				vals, err := rows.Values()
 				if err != nil {
-					logger.LogError("ApproveEntity: entity scan failed: %v", err)
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDatabaseScanFailed, "")
+					return
 				}
 				entity := map[string]interface{}{}
 				for i, col := range rows.FieldDescriptions() {
@@ -482,16 +508,21 @@ func ApproveEntity(pool *pgxpool.Pool) http.HandlerFunc {
 
 				// Audit stage 2 (delete path): stamp APPROVED with checker identity.
 				checkerBy := api.GetUserEmailFromCtx(r.Context())
-				_, _ = pool.Exec(ctx,
+				rows.Close()
+				if _, err := pool.Exec(ctx,
 					`UPDATE public.auditactionentity
 					 SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2
-					 WHERE entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL'`,
+					 WHERE (entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`,
 					checkerBy, req.Comments, allToApprove,
-				)
+				); err != nil {
+					api.LogErrorForResponse(w, "ApproveEntity: audit stamp failed: %v", err)
+				}
 
 				api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"entity": entity})
 				return
 			}
+			api.RespondEnvelopeError(w, http.StatusNotFound, constants.ErrEntityNotFound, "")
+			return
 		} else {
 			rows, err := pool.Query(ctx, `UPDATE masterentity SET approval_status = 'Approved', comments = $2 WHERE entity_id = $1 RETURNING *`, id, req.Comments)
 			if err != nil {
@@ -529,7 +560,12 @@ func RejectEntitiesBulk(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "entityIds array required", "")
 			return
 		}
-		relRows, _ := pool.Query(ctx, `SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
+		relRows, relErr := pool.Query(ctx, `SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
+		if relErr != nil {
+			api.LogErrorForResponse(w, "RejectEntitiesBulk: relationships query failed: %v", relErr)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrEntityUpdateFailed, "")
+			return
+		}
 		defer relRows.Close()
 		parentMap := map[string][]string{}
 		for relRows.Next() {
@@ -587,13 +623,31 @@ func RejectEntitiesBulk(pool *pgxpool.Pool) http.HandlerFunc {
 		_, _ = pool.Exec(ctx,
 			`UPDATE public.auditactionentity
 			 SET processing_status = 'REJECTED', checker_by = $1, checker_at = now(), checker_comment = $2
-			 WHERE entity_id = ANY($3) AND processing_status LIKE '%PENDING%'`,
+			 WHERE (entity_id = ANY($3) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`,
 			checkerBy, req.Comments, allToReject,
 		)
 
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"updated": updated})
 	}
 }
+
+// entityEditableColumnList is the set of masterentity columns UpdateEntity may change;
+// it mirrors the fields the entity hierarchy edit form sends.
+var entityEditableColumnList = []string{
+	"address", "contact_phone", "contact_email", "registration_number", "pan_gst",
+	"legal_entity_identifier", "tax_identification_number", "default_currency",
+	"associated_business_units", "reporting_currency", "unique_identifier", "legal_entity_type",
+	"fx_trading_authority", "internal_fx_trading_limit", "associated_treasury_contact",
+	"company_name", "comments",
+}
+
+var entityEditableColumns = func() map[string]bool {
+	m := make(map[string]bool, len(entityEditableColumnList))
+	for _, c := range entityEditableColumnList {
+		m[c] = true
+	}
+	return m
+}()
 
 // Update entity (always sets approval_status to Pending)
 func UpdateEntity(pool *pgxpool.Pool) http.HandlerFunc {
@@ -607,17 +661,30 @@ func UpdateEntity(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "Missing id or fields in body", "")
 			return
 		}
+		// Column names come only from the allowlist below, never from request keys.
+		keys := make([]string, 0, len(req.Fields))
+		for k := range req.Fields {
+			if entityEditableColumns[k] {
+				keys = append(keys, k)
+			}
+		}
+		if len(keys) == 0 {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "No editable entity fields in request", "")
+			return
+		}
+		sort.Strings(keys)
 		setClause := ""
 		args := []interface{}{}
 		i := 1
-		for k, v := range req.Fields {
+		for _, k := range keys {
 			setClause += k + " = $" + strconv.Itoa(i) + ", "
-			args = append(args, v)
+			args = append(args, req.Fields[k])
 			i++
 		}
 		setClause += "approval_status = 'Pending'"
 		args = append(args, req.ID)
-		query := "UPDATE masterentity SET " + setClause + " WHERE entity_id = $" + strconv.Itoa(i) + " RETURNING *"
+		query := "UPDATE masterentity SET " + setClause + " WHERE entity_id = $" + strconv.Itoa(i) +
+			" RETURNING entity_id, entity_name, parentname, is_top_level_entity, " + strings.Join(entityEditableColumnList, ", ") + ", approval_status, level"
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrEntityUpdateFailed, "")
@@ -883,7 +950,7 @@ func GetRenderVarsHierarchical(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		relRows, err := pool.Query(r.Context(), "SELECT * FROM entityrelationships")
 		if err != nil {
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 			return
 		}
 		defer relRows.Close()

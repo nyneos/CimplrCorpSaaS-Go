@@ -3,6 +3,7 @@ package accountingworkbench
 import (
 	"context"
 	"fmt"
+	"github.com/shopspring/decimal"
 	"math"
 	"strings"
 	"sync"
@@ -235,29 +236,44 @@ func accountingEntitiesForQuery(ctx context.Context, pool *pgxpool.Pool) ([]stri
 
 // RoundUnits rounds units based on precision and rounding mode
 func RoundUnits(value float64, precision int, roundingMode string) float64 {
-	multiplier := math.Pow(10, float64(precision))
-	mode := strings.ToUpper(roundingMode)
-
-	switch mode {
-	case "BANKERS":
-		// Banker's rounding (round half to even)
-		return math.Round(value*multiplier) / multiplier
-	case "UP":
-		return math.Ceil(value*multiplier) / multiplier
-	case "DOWN":
-		return math.Floor(value*multiplier) / multiplier
-	case "FLOOR":
-		return math.Floor(value*multiplier) / multiplier
-	case "CEILING":
-		return math.Ceil(value*multiplier) / multiplier
-	default:
-		// Default to banker's rounding
-		return math.Round(value*multiplier) / multiplier
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return value
 	}
+	places := clampPrecision(precision)
+	d := decimal.NewFromFloat(value).Round(places + 6)
+	switch strings.ToUpper(strings.TrimSpace(roundingMode)) {
+	case "BANKERS":
+		d = d.RoundBank(places)
+	case "UP":
+		d = d.RoundUp(places)
+	case "DOWN":
+		d = d.RoundDown(places)
+	case "FLOOR":
+		d = d.RoundFloor(places)
+	case "CEILING":
+		d = d.RoundCeil(places)
+	default:
+		// Half away from zero, the behaviour callers have always had for unset modes.
+		d = d.Round(places)
+	}
+	return d.InexactFloat64()
 }
 
-// RoundAmount rounds monetary amounts
+// RoundAmount rounds monetary amounts half away from zero.
 func RoundAmount(value float64, precision int) float64 {
-	multiplier := math.Pow(10, float64(precision))
-	return math.Round(value*multiplier) / multiplier
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return value
+	}
+	places := clampPrecision(precision)
+	return decimal.NewFromFloat(value).Round(places + 6).Round(places).InexactFloat64()
+}
+
+func clampPrecision(precision int) int32 {
+	if precision < 0 {
+		return 0
+	}
+	if precision > 12 {
+		return 12
+	}
+	return int32(precision)
 }

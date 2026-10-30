@@ -121,7 +121,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			var activeAmt, pendingAmt float64
 			var activeCnt, pendingCnt int64
 
-			_ = pool.QueryRow(ctx, `
+			if err := pool.QueryRow(ctx, `
 				SELECT COALESCE(SUM(m.principal_amount),0), COUNT(*)
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
@@ -143,9 +143,11 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.interest_type_code=$2)
 				  AND ($3::text='' OR m.bank_id=$3)`+snapshotFilter,
-				entityFilter, fdTypeFilter, bankFilter).Scan(&activeAmt, &activeCnt)
+				entityFilter, fdTypeFilter, bankFilter).Scan(&activeAmt, &activeCnt); err != nil {
+				return nil, err
+			}
 
-			_ = pool.QueryRow(ctx, `
+			if err := pool.QueryRow(ctx, `
 				SELECT COALESCE(SUM(m.principal_amount),0), COUNT(*)
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
@@ -154,7 +156,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				  AND ($2::text='' OR m.interest_type_code=$2)
 				  AND ($3::text='' OR m.bank_id=$3)`+snapshotFilter,
-				entityFilter, fdTypeFilter, bankFilter).Scan(&pendingAmt, &pendingCnt)
+				entityFilter, fdTypeFilter, bankFilter).Scan(&pendingAmt, &pendingCnt); err != nil {
+				return nil, err
+			}
 
 			total := activeAmt + pendingAmt
 			return map[string]interface{}{
@@ -180,8 +184,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND ($3::text='' OR m.bank_id=$3)`+snapshotFilter,
 				entityFilter, fdTypeFilter, bankFilter).Scan(&cnt)
 			if err != nil {
-				api.LogError("[TreasuryDash] fd_count_active query error: %v", err)
-				return int64(0), nil
+				return nil, err
 			}
 			return cnt, nil
 		})
@@ -258,7 +261,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				)
 				if err2 := rows.Scan(&id, &bank, &entity, &amount, &offeredRate, &tenor,
 					&requestStatus, &hasOffer, &agingDays, &expiresAt); err2 != nil {
-					continue
+					return nil, err2
 				}
 				// Map the maker-checker request_status onto the simple lifecycle
 				// label the dashboard/funnel renders — one stage per real status,
@@ -285,6 +288,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					OfferedRate: fdRound(offeredRate, 2), Tenor: tenor, Status: status,
 					AgingDays: agingDays, ExpiresAt: expiresAt,
 				})
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			if negRows == nil {
 				negRows = []negRow{}
@@ -315,14 +321,16 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			// single highest live offer; benchmark_rate is the average of all
 			// live offers, i.e. the real prevailing rate to compare it against.
 			var bestRate, benchmarkRate float64
-			_ = pool.QueryRow(ctx, `
+			if err := pool.QueryRow(ctx, `
 				SELECT COALESCE(MAX(o.offered_interest_rate),0), COALESCE(AVG(o.offered_interest_rate),0)
 				FROM investment.fd_rate_offer o
 				JOIN investment.fd_rate_negotiation n ON n.rate_request_id = o.rate_request_id
 				WHERE COALESCE(o.is_deleted,false) = false
 				  AND UPPER(COALESCE(o.offer_status,'')) NOT IN ('REJECTED','EXPIRED','INACTIVE')
 				  AND (n.entity_id = ANY(string_to_array($1, ',')))`,
-				entityFilter).Scan(&bestRate, &benchmarkRate)
+				entityFilter).Scan(&bestRate, &benchmarkRate); err != nil {
+				return nil, err
+			}
 
 			return map[string]interface{}{
 				"rows":           negRows,
@@ -427,7 +435,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&mr.Status, &mr.DaysToMaturity, &mr.InterestAccrued,
 					&mr.ClosureInitiateID, &mr.WorkflowClosureType,
 					&mr.WorkflowClosureStatus, &mr.WorkflowActionAtMat); err2 != nil {
-					continue
+					return nil, err2
 				}
 				mr.Principal = fdRound(mr.Principal, 2)
 				mr.Rate = fdRound(mr.Rate, 4)
@@ -443,6 +451,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				totalAmt += mr.Principal
 				out = append(out, mr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{
 				"rows":             out,
@@ -482,10 +493,15 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			out := []depRow{}
 			for rows.Next() {
 				var dr depRow
-				if err2 := rows.Scan(&dr.Bank, &dr.Exposure, &dr.FDCount); err2 == nil {
-					dr.Exposure = fdRound(dr.Exposure, 2)
-					out = append(out, dr)
+				if err2 := rows.Scan(&dr.Bank, &dr.Exposure, &dr.FDCount); err2 != nil {
+					return nil, err2
 				}
+				dr.Exposure = fdRound(dr.Exposure, 2)
+				out = append(out, dr)
+
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -520,10 +536,15 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			out := []yieldRow{}
 			for rows.Next() {
 				var yr yieldRow
-				if err2 := rows.Scan(&yr.Bank, &yr.WeightedAvgYield); err2 == nil {
-					yr.WeightedAvgYield = fdRound(yr.WeightedAvgYield, 2)
-					out = append(out, yr)
+				if err2 := rows.Scan(&yr.Bank, &yr.WeightedAvgYield); err2 != nil {
+					return nil, err2
 				}
+				yr.WeightedAvgYield = fdRound(yr.WeightedAvgYield, 2)
+				out = append(out, yr)
+
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -584,10 +605,15 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			out := []ladderRow{}
 			for rows.Next() {
 				var lr ladderRow
-				if err2 := rows.Scan(&lr.Period, &lr.Amount, &lr.Count); err2 == nil {
-					lr.Amount = fdRound(lr.Amount, 2)
-					out = append(out, lr)
+				if err2 := rows.Scan(&lr.Period, &lr.Amount, &lr.Count); err2 != nil {
+					return nil, err2
 				}
+				lr.Amount = fdRound(lr.Amount, 2)
+				out = append(out, lr)
+
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -638,10 +664,15 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			out := []rateRow{}
 			for rows.Next() {
 				var rr rateRow
-				if err2 := rows.Scan(&rr.Bank, &rr.RateBucket, &rr.FDCount, &rr.Exposure, &rr.AvgRate); err2 == nil {
-					rr.AvgRate = fdRound(rr.AvgRate, 2)
-					out = append(out, rr)
+				if err2 := rows.Scan(&rr.Bank, &rr.RateBucket, &rr.FDCount, &rr.Exposure, &rr.AvgRate); err2 != nil {
+					return nil, err2
 				}
+				rr.AvgRate = fdRound(rr.AvgRate, 2)
+				out = append(out, rr)
+
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -751,7 +782,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&cr.LastActor, &cr.LastActionAt,
 				); err2 != nil {
 					api.LogError("[TreasuryDash] booking_confirmations scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				cr.Amount = fdRound(cr.Amount, 2)
 				cr.ElapsedHours = fdRound(cr.ElapsedHours, 1)
@@ -818,6 +849,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					cr.SLAStatus = "On Track"
 				}
 				out = append(out, cr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{
 				"rows":             out,
@@ -892,12 +926,15 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&r.BankFDReference, &r.CreatedBy, &r.CreatedAt, &r.ElapsedHours,
 					&r.BookingStatus,
 				); err2 != nil {
-					continue
+					return nil, err2
 				}
 				r.Amount = fdRound(r.Amount, 2)
 				r.Rate = fdRound(r.Rate, 4)
 				r.ElapsedHours = fdRound(r.ElapsedHours, 1)
 				out = append(out, r)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{"rows": out, "total": len(out)}, nil
 		})
@@ -966,11 +1003,14 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&r.BankFDReference, &r.ReceiptDate, &r.BookingStatus,
 					&r.CreatedBy, &r.CreatedAt, &r.FDActivated,
 				); err2 != nil {
-					continue
+					return nil, err2
 				}
 				r.Amount = fdRound(r.Amount, 2)
 				r.Rate = fdRound(r.Rate, 4)
 				out = append(out, r)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{"rows": out, "total": len(out)}, nil
 		})
@@ -1110,11 +1150,14 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&r.Principal, &r.Rate, &r.MaturityDate, &r.ClosureStatus,
 					&r.ClosureType, &r.DaysToMaturity, &r.MaturityInstructions,
 				); err2 != nil {
-					continue
+					return nil, err2
 				}
 				r.Principal = fdRound(r.Principal, 2)
 				r.Rate = fdRound(r.Rate, 4)
 				out = append(out, r)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{"rows": out, "total": len(out)}, nil
 		})
@@ -1218,12 +1261,15 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&fr.CreatedBy, &fr.DaysToMaturity, &fr.InterestAccrued, &fr.HasAccrual,
 				); err2 != nil {
 					api.LogError("[TreasuryDash] fd_list scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				fr.PrincipalAmount = fdRound(fr.PrincipalAmount, 2)
 				fr.InterestRate = fdRound(fr.InterestRate, 4)
 				fr.InterestAccrued = fdRound(fr.InterestAccrued, 2)
 				out = append(out, fr)
+			}
+			if err := fdRows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -1267,11 +1313,16 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			out := []ycRow{}
 			for rows.Next() {
 				var yr ycRow
-				if err2 := rows.Scan(&yr.Bucket, &yr.AvgRate, &yr.Exposure); err2 == nil {
-					yr.AvgRate = fdRound(yr.AvgRate, 2)
-					yr.Exposure = fdRound(yr.Exposure, 2)
-					out = append(out, yr)
+				if err2 := rows.Scan(&yr.Bucket, &yr.AvgRate, &yr.Exposure); err2 != nil {
+					return nil, err2
 				}
+				yr.AvgRate = fdRound(yr.AvgRate, 2)
+				yr.Exposure = fdRound(yr.Exposure, 2)
+				out = append(out, yr)
+
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -1430,7 +1481,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&w.TotalSteps, &w.CurrentStep, &w.IsEscalated, &w.SlaDeadline,
 				); err2 != nil {
 					api.LogError("[TreasuryDash] approval_workflow scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				w.Amount = fdRound(w.Amount, 2)
 				if w.ApprovalsRequired > 0 {
@@ -1453,6 +1504,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					escalated++
 				}
 				out = append(out, w)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{
 				"rows":      out,
@@ -1480,7 +1534,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 			var bkTotal, bkApprovalPending int64
 			var bkAmt float64
-			_ = pool.QueryRow(ctx, `
+			if err := pool.QueryRow(ctx, `
 				SELECT COUNT(*),
 				       COUNT(*) FILTER (WHERE `+sqlBookingAwaitingApproval+`),
 				       COALESCE(SUM(principal_amount),0)
@@ -1489,22 +1543,26 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND `+sqlExcludeTerminalFdOnBooking+`
 				  AND b.created_at >= $2::date AND b.created_at <= ($3::date + INTERVAL '1 day')
 				  AND (b.entity_id = ANY(string_to_array($1, ',')))`,
-				entityFilter, startDateStr, endDateStr).Scan(&bkTotal, &bkApprovalPending, &bkAmt)
+				entityFilter, startDateStr, endDateStr).Scan(&bkTotal, &bkApprovalPending, &bkAmt); err != nil {
+				return nil, err
+			}
 
 			var apTotal int64
 			var apAmt float64
-			_ = pool.QueryRow(ctx, `
+			if err := pool.QueryRow(ctx, `
 				SELECT COUNT(*), COALESCE(SUM(principal_amount),0)
 				FROM investment.fd_booking_request
 				WHERE is_deleted=false
-				  AND booking_status='APPROVED'
+				  AND UPPER(TRIM(booking_status)) = 'APPROVED'
 				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
 				  AND (entity_id = ANY(string_to_array($1, ',')))`,
-				entityFilter, startDateStr, endDateStr).Scan(&apTotal, &apAmt)
+				entityFilter, startDateStr, endDateStr).Scan(&apTotal, &apAmt); err != nil {
+				return nil, err
+			}
 
 			var sentTotal, sentStuck int64
 			var sentAmt float64
-			_ = pool.QueryRow(ctx, `
+			if err := pool.QueryRow(ctx, `
 				SELECT COUNT(*),
 				       COUNT(*) FILTER (WHERE EXTRACT(DAY FROM (('`+snapshotDate+`'::timestamp)-created_at)) >= 2),
 				       COALESCE(SUM(principal_amount),0)
@@ -1513,11 +1571,13 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND booking_status='SENT_TO_BANK'
 				  AND created_at >= $2::date AND created_at <= ($3::date + INTERVAL '1 day')
 				  AND (entity_id = ANY(string_to_array($1, ',')))`,
-				entityFilter, startDateStr, endDateStr).Scan(&sentTotal, &sentStuck, &sentAmt)
+				entityFilter, startDateStr, endDateStr).Scan(&sentTotal, &sentStuck, &sentAmt); err != nil {
+				return nil, err
+			}
 
 			var confTotal int64
 			var confAmt float64
-			_ = pool.QueryRow(ctx, `
+			if err := pool.QueryRow(ctx, `
 				SELECT COUNT(*), COALESCE(SUM(c.actual_principal),0)
 				FROM investment.fd_confirmation c
 				JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id AND b.is_deleted=false
@@ -1527,25 +1587,31 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND COALESCE(b.created_at, c.created_at) >= $2::date
 				  AND COALESCE(b.created_at, c.created_at) <= ($3::date + INTERVAL '1 day')
 				  AND (COALESCE(b.entity_id,m.entity_id) = ANY(string_to_array($1, ',')))`,
-				entityFilter, startDateStr, endDateStr).Scan(&confTotal, &confAmt)
+				entityFilter, startDateStr, endDateStr).Scan(&confTotal, &confAmt); err != nil {
+				return nil, err
+			}
 
 			var activeTotal int64
 			var activeAmt float64
-			_ = pool.QueryRow(ctx, `
+			if err := pool.QueryRow(ctx, `
 				SELECT COUNT(*), COALESCE(SUM(principal_amount),0)
 				FROM investment.fd_master
 				WHERE is_deleted=false
 				  AND fd_status='ACTIVE'
-				  AND (entity_id = ANY(string_to_array($1, ',')))`, entityFilter).Scan(&activeTotal, &activeAmt)
+				  AND (entity_id = ANY(string_to_array($1, ',')))`, entityFilter).Scan(&activeTotal, &activeAmt); err != nil {
+				return nil, err
+			}
 
 			var maturedTotal int64
 			var maturedAmt float64
-			_ = pool.QueryRow(ctx, `
+			if err := pool.QueryRow(ctx, `
 				SELECT COUNT(*), COALESCE(SUM(principal_amount),0)
 				FROM investment.fd_master
 				WHERE is_deleted=false
 				  AND fd_status IN ('MATURED','CLOSED')
-				  AND (entity_id = ANY(string_to_array($1, ',')))`, entityFilter).Scan(&maturedTotal, &maturedAmt)
+				  AND (entity_id = ANY(string_to_array($1, ',')))`, entityFilter).Scan(&maturedTotal, &maturedAmt); err != nil {
+				return nil, err
+			}
 
 			stages := []stage{
 				{ID: "booking", Label: "Booking Created", Count: bkTotal, Amount: fdRound(bkAmt, 2), Stuck: bkApprovalPending, StuckLabel: "awaiting approval"},
@@ -1605,11 +1671,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND ($2::text='' OR ir.bank_id=$2)`,
 				entityFilter, bankFilter).Scan(&mtd, &qtd, &ytd, &received)
 			if err != nil {
-				api.LogError("[TreasuryDash] interest_income query error: %v", err)
-				return map[string]interface{}{
-					"mtd_accrued": 0.0, "qtd_accrued": 0.0,
-					"ytd_accrued": 0.0, "received": 0.0,
-				}, nil
+				return nil, err
 			}
 			return map[string]interface{}{
 				"mtd_accrued": fdRound(mtd, 2),
@@ -1621,6 +1683,14 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// wait for all
 		wg.Wait()
+
+		for _, sub := range results {
+			if sub.err != nil {
+				api.LogErrorForResponse(w, "investment dashboard query failed: %v", sub.err)
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDB)
+				return
+			}
+		}
 
 		get := func(key string) interface{} {
 			if r, ok := results[key]; ok && r.err == nil {

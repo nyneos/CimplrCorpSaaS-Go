@@ -265,7 +265,7 @@ func seedDefaultGoogleWorkspaceTenantIfEmpty(ctx context.Context, pool *pgxpool.
 func AllowedMailboxDomainsFromEnv() []string {
 	raw := strings.TrimSpace(os.Getenv("EMAIL_ALLOWED_MAILBOX_DOMAINS"))
 	if raw == "" {
-		raw = "nyneos.com"
+		return nil
 	}
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))

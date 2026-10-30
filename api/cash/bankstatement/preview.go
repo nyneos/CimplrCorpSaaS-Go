@@ -164,6 +164,10 @@ func processZipPreviewFlat(ctx context.Context, pool *pgxpool.Pool, zipBytes []b
 	if err != nil {
 		return nil, fmt.Errorf("invalid ZIP file: %w", err)
 	}
+	if err := checkZipEntryCount(zipReader); err != nil {
+		return nil, err
+	}
+	budget := newZipReadBudget()
 
 	allTransactions := []map[string]interface{}{}
 
@@ -182,13 +186,10 @@ func processZipPreviewFlat(ctx context.Context, pool *pgxpool.Pool, zipBytes []b
 			continue
 		}
 
-		rc, err := f.Open()
-		if err != nil {
-			continue
+		fileBytes, err := budget.read(f)
+		if errors.Is(err, errZipLimitExceeded) {
+			return nil, err
 		}
-
-		fileBytes, err := io.ReadAll(rc)
-		rc.Close()
 		if err != nil {
 			continue
 		}

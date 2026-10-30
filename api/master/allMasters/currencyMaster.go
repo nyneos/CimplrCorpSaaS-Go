@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	dependency "CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
 	"encoding/json"
@@ -446,7 +447,7 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if anyError != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, anyError))
 			return
 		}
 		if currencies == nil {
@@ -645,7 +646,7 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if checkerBy == "" {
 			checkerBy = session.Name
 		}
-		query := `UPDATE auditactioncurrency SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE currency_id = ANY($3) RETURNING action_id,currency_id`
+		query := `UPDATE auditactioncurrency SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (currency_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id,currency_id`
 		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to reject currency actions")
@@ -709,8 +710,8 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			    checker_by = $1,
 			    checker_at = now(),
 			    checker_comment = $2
-			WHERE currency_id = ANY($3)
-			  AND processing_status = 'PENDING_DELETE_APPROVAL'
+			WHERE (currency_id = ANY($3)
+			  AND processing_status = 'PENDING_DELETE_APPROVAL') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 			RETURNING action_id, currency_id
 		`
 		delRows, delErr := pgxPool.Query(ctx, delQuery, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
@@ -743,8 +744,8 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			    checker_by = $1,
 			    checker_at = now(),
 			    checker_comment = $2
-			WHERE currency_id = ANY($3)
-			  AND processing_status != 'PENDING_DELETE_APPROVAL'
+			WHERE (currency_id = ANY($3)
+			  AND processing_status != 'PENDING_DELETE_APPROVAL') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 			RETURNING action_id, currency_id
 		`
 		rows, err := pgxPool.Query(ctx, approveQuery, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
@@ -881,7 +882,7 @@ func GetActiveApprovedCurrencyCodes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if anyError != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, anyError))
 			return
 		}
 		if results == nil {

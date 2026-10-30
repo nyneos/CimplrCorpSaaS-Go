@@ -4,11 +4,26 @@ import (
 	"CimplrCorpSaas/api"
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// selfApprovalAllowed keeps the old behaviour only when explicitly configured.
+func selfApprovalAllowed() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("APPROVAL_ALLOW_SELF_APPROVAL")), "true")
+}
+
+func isSubmitter(submittedBy, actorUserID, actorEmail string) bool {
+	sb := strings.TrimSpace(submittedBy)
+	if sb == "" {
+		return false
+	}
+	return strings.EqualFold(sb, strings.TrimSpace(actorUserID)) || strings.EqualFold(sb, strings.TrimSpace(actorEmail))
+}
 
 // canUserActOnEye returns true if the given user is eligible to act on the
 // specified eye, either via direct/role membership or via the escalation path.
@@ -18,10 +33,19 @@ func canUserActOnEye(ctx context.Context, tx pgx.Tx, userID, matrixEyeID, instan
 	err := tx.QueryRow(ctx, `
 		SELECT COUNT(*)
 		FROM uam.approval_matrix_eye_member m
+		LEFT JOIN LATERAL (
+			SELECT action_type, processing_status
+			FROM uam.audit_approval_matrix_eye_member ma
+			WHERE ma.member_id = m.member_id
+			ORDER BY ma.requested_at DESC, ma.audit_id DESC
+			LIMIT 1
+		) mla ON true
 		WHERE m.eye_id      = $1
 		  AND m.member_type = 'APPROVER'
 		  AND m.is_deleted  = false
 		  AND m.is_active   = true
+		  AND COALESCE(mla.processing_status, 'APPROVED') = 'APPROVED'
+		  AND COALESCE(mla.action_type, '') <> 'DELETE'
 		  AND `+sqlUserOnEyeMember("$2"),
 		matrixEyeID, userID,
 	).Scan(&directCount)
@@ -83,20 +107,21 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 	// audit_id_column does NOT exist on approval_instance; it is derived at
 	// runtime from LookupTxTableConfig(transactionType). audit_table IS a real column.
 	var (
-		instanceID      string
-		matrixEyeID     string
-		eyeStatus       string
-		approvalsReq    int
-		approvalsRcvd   int
-		currentPos      int
-		approvalOrder   string
-		recordID        string
-		recordTable     string
-		auditTable      string
-		transactionType string
-		actionType      string
-		instanceStatus  string
-		submittedBy     string
+		instanceID       string
+		matrixEyeID      string
+		eyeStatus        string
+		approvalsReq     int
+		approvalsRcvd    int
+		currentPos       int
+		approvalOrder    string
+		recordID         string
+		recordTable      string
+		auditTable       string
+		transactionType  string
+		actionType       string
+		instanceStatus   string
+		submittedBy      string
+		submittedByEmail string
 	)
 	err = tx.QueryRow(ctx, `
 		SELECT
@@ -104,7 +129,7 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 		  ie.approvals_required, ie.approvals_received,  ie.position,
 		  mm.approval_order,     inst.record_id,         inst.record_table,
 		  inst.audit_table,      inst.transaction_type,  inst.action_type,
-		  inst.status,           COALESCE(inst.submitted_by, '')
+		  inst.status,           COALESCE(inst.submitted_by, ''), COALESCE(inst.submitted_by_email, '')
 		FROM uam.approval_instance_eye ie
 		JOIN uam.approval_instance      inst ON inst.instance_id = ie.instance_id
 		JOIN uam.approval_matrix_master mm   ON mm.matrix_id     = inst.matrix_id
@@ -116,7 +141,7 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 		&approvalsReq, &approvalsRcvd, &currentPos,
 		&approvalOrder, &recordID, &recordTable,
 		&auditTable, &transactionType, &actionType,
-		&instanceStatus, &submittedBy,
+		&instanceStatus, &submittedBy, &submittedByEmail,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -136,7 +161,9 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 	if instanceStatus != InstStatusPending {
 		return fmt.Errorf("instance is not pending (current status: %s)", instanceStatus)
 	}
-	_ = submittedBy // maker may also act; kept from the lock query for audit context
+	if !selfApprovalAllowed() && (isSubmitter(submittedBy, req.ActorUserID, req.ActorEmail) || isSubmitter(submittedByEmail, req.ActorUserID, req.ActorEmail)) {
+		return fmt.Errorf("unauthorized: you cannot approve or reject a request you submitted")
+	}
 
 	// Step 3: Validate actor eligibility.
 	allowed, err := canUserActOnEye(ctx, tx, req.ActorUserID, matrixEyeID, req.InstanceEyeID)
@@ -167,7 +194,16 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 	// Step 5: INSERT action record.
 	var actorRoleID *string
 	if req.ActorRoleID != "" {
-		actorRoleID = &req.ActorRoleID
+		var held int
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM public.user_roles WHERE role_id::text = $1 AND user_id::text = $2`,
+			req.ActorRoleID, req.ActorUserID,
+		).Scan(&held); err != nil {
+			return fmt.Errorf("RecordAction role check: %w", err)
+		}
+		if held > 0 {
+			actorRoleID = &req.ActorRoleID
+		}
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO uam.approval_instance_action (

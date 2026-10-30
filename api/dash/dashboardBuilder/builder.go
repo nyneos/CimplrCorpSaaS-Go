@@ -13,10 +13,14 @@ package dashboardbuilder
 // Each user can have multiple named dashboards.
 
 import (
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
@@ -73,6 +77,16 @@ func SaveDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			respondBuilderError(w, http.StatusBadRequest, "config is required")
 			return
 		}
+		if len(body.Config) > maxDashboardConfigBytes || !json.Valid(body.Config) {
+			respondBuilderError(w, http.StatusBadRequest, "config must be valid JSON of at most 1 MB")
+			return
+		}
+		if id := strings.TrimSpace(body.ID); id != "" {
+			if _, err := uuid.Parse(id); err != nil {
+				respondBuilderError(w, http.StatusBadRequest, "id must be a valid dashboard id")
+				return
+			}
+		}
 		name := strings.TrimSpace(body.Name)
 		if name == "" {
 			name = "My Dashboard"
@@ -96,14 +110,16 @@ func SaveDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			if tag.RowsAffected() == 0 {
-				// Dashboard not found for this user — fall through to create
-			} else {
-				respondSuccess(w, http.StatusOK, "Dashboard saved successfully", map[string]any{
-					"id":      body.ID,
-					"updated": true,
-				})
+				// An unknown id (or someone else's dashboard) is an error, not a create:
+				// falling through would turn retries and stale ids into duplicates.
+				respondBuilderError(w, http.StatusNotFound, "dashboard not found")
 				return
 			}
+			respondSuccess(w, http.StatusOK, "Dashboard saved successfully", map[string]any{
+				"id":      body.ID,
+				"updated": true,
+			})
+			return
 		}
 
 		// ── create new ────────────────────────────────────────────────────────
@@ -125,6 +141,9 @@ func SaveDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
+
+// maxDashboardConfigBytes caps a saved dashboard config.
+const maxDashboardConfigBytes = 1 << 20
 
 // ─── ListDashboards ────────────────────────────────────────────────────────────
 //
@@ -175,9 +194,16 @@ func ListDashboards(pool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var s summary
 			if err := rows.Scan(&s.ID, &s.Name, &s.UserID, &s.IsDefault, &s.CreatedAt, &s.UpdatedAt, &s.IsShared); err != nil {
-				continue
+				logger.LogError("dashboard-builder ListDashboards scan: %v", err)
+				respondBuilderError(w, http.StatusInternalServerError, "failed to list dashboards")
+				return
 			}
 			list = append(list, s)
+		}
+		if err := rows.Err(); err != nil {
+			logger.LogError("dashboard-builder ListDashboards rows: %v", err)
+			respondBuilderError(w, http.StatusInternalServerError, "failed to list dashboards")
+			return
 		}
 		if list == nil {
 			list = []summary{}
@@ -315,9 +341,15 @@ func GetDashboardAssignees(pool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var assignedUserID string
 			if err := rows.Scan(&assignedUserID); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			assignees = append(assignees, assignedUserID)
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		respondSuccess(w, http.StatusOK, "Dashboard assignees fetched successfully", map[string]any{

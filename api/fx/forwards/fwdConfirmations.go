@@ -1,8 +1,10 @@
 package forwards
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/fx/auditutil"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
@@ -44,6 +46,14 @@ func normalizeForwardSystemTransactionID(value interface{}) string {
 	}
 }
 
+// forwardBookingEditableColumns is the set of forward_bookings columns a user may edit
+// through UpdateForwardBookingFields; it mirrors editableKeys in the confirmation screen.
+var forwardBookingEditableColumns = map[string]bool{
+	"entity_level_0": true, "entity_level_1": true, "entity_level_2": true, "entity_level_3": true,
+	"local_currency": true, "order_type": true, "counterparty": true,
+	"spot_rate": true, "forward_points": true, "bank_margin": true, "total_rate": true,
+}
+
 func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Accept system_transaction_id and fields in the JSON body
@@ -64,33 +74,18 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusNotFound, "No matching forward booking found")
 			return
 		}
-		// Get valid columns for forward_bookings
-		colRows, err := pool.Query(r.Context(), `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'forward_bookings'`)
-		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, "Failed to fetch columns")
-			return
-		}
-		validCols := map[string]bool{}
-		for colRows.Next() {
-			var col string
-			if err := colRows.Scan(&col); err == nil {
-				validCols[col] = true
-			}
-		}
-		colRows.Close()
-		// Filter fields to only valid columns (ignore system_transaction_id)
 		updateFields := map[string]interface{}{}
 		for k, v := range req.Fields {
-			if validCols[k] && k != "system_transaction_id" {
+			if forwardBookingEditableColumns[k] {
 				updateFields[k] = v
 			}
 		}
-		// Edits require checker approval before becoming approved again.
-		updateFields["processing_status"] = constants.FwdProcessingStatusPendingEditApproval
 		if len(updateFields) == 0 {
 			respondEnvelopeError(w, http.StatusBadRequest, "No valid fields to update")
 			return
 		}
+		// Edits require checker approval before becoming approved again.
+		updateFields["processing_status"] = constants.FwdProcessingStatusPendingEditApproval
 		oldValues := auditutil.FetchRowSnapshotPGX(r.Context(), pool, "public.forward_bookings", "system_transaction_id", req.SystemTransactionID)
 		// Policy check sees the post-edit view (old row + patch), matching the FD booking edit pattern.
 		mergedFields := map[string]interface{}{}
@@ -155,6 +150,11 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 		triggerForwardBookingNotif(r.Context(), pool, routeForwardUpdateFields, "UPDATE", requestedBy, constants.FwdProcessingStatusPendingEditApproval, []string{req.SystemTransactionID})
 
 		go func(id, email, matrixID string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("goroutine panic: %v", rec)
+				}
+			}()
 			bgCtx := context.Background()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 			_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
@@ -299,7 +299,7 @@ func applyForwardBookingDecision(
 		constants.FwdProcessingStatusPendingDeleteApproval,
 	)
 	if err != nil {
-		respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
+		respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 		return
 	}
 	var deletedIds []string
@@ -340,7 +340,7 @@ func applyForwardBookingDecision(
 			RETURNING *
 		`, deletedIds, req.UserID, constants.FwdProcessingStatusApproved)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		deletedRows = append(deletedRows, scanForwardBookingReturningRows(rows)...)
@@ -363,7 +363,7 @@ func applyForwardBookingDecision(
 			RETURNING *
 		`, deletedIds, constants.FwdProcessingStatusRejected)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		deletedRows = append(deletedRows, scanForwardBookingReturningRows(rows)...)
@@ -390,7 +390,7 @@ func applyForwardBookingDecision(
 				WHERE system_transaction_id = ANY($1)
 			`, updateIds)
 		if statusErr != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, statusErr.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, statusErr))
 			return
 		}
 		for statusRows.Next() {
@@ -404,7 +404,7 @@ func applyForwardBookingDecision(
 	if len(updateIds) > 0 {
 		rows, err := pool.Query(r.Context(), `SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, updateIds)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		var eligibleIds []string
@@ -584,7 +584,7 @@ func BulkDeleteForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 		// Only update those belonging to accessible business units
 		rows, err := pool.Query(r.Context(), `SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, req.SystemTransactionIDs)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		var eligibleIds []string
@@ -610,7 +610,7 @@ func BulkDeleteForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range eligibleIds {
 			row, err := loadForwardBookingRow(r.Context(), pool, id)
 			if err != nil {
-				respondEnvelopeError(w, http.StatusInternalServerError, "Failed to load forward booking for policy check: "+err.Error())
+				respondEnvelopeError(w, http.StatusInternalServerError, "Failed to load forward booking for policy check: "+errtext.Detail(w, err))
 				return
 			}
 			var tID string
@@ -644,7 +644,7 @@ func BulkDeleteForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 		`
 		resultRows, err := pool.Query(r.Context(), updateQuery, eligibleIds, constants.FwdProcessingStatusPendingDeleteApproval)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		fieldDescs := resultRows.FieldDescriptions()
@@ -687,6 +687,11 @@ func BulkDeleteForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		go func(ids []string, email string, matrices map[string]string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("goroutine panic: %v", rec)
+				}
+			}()
 			bgCtx := context.Background()
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
@@ -758,7 +763,7 @@ func AddForwardConfirmationManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		bookingRow, err := loadForwardBookingRow(r.Context(), pool, systemTransactionID)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, "Failed to load forward booking for policy check: "+err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, "Failed to load forward booking for policy check: "+errtext.Detail(w, err))
 			return
 		}
 		bookingRow.Status = constants.FwdStatusPendingConfirmation

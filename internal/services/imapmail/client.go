@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,19 +45,46 @@ func (a *xoauth2Client) Next(_ []byte) ([]byte, error) {
 
 var _ sasl.Client = (*xoauth2Client)(nil)
 
-func (c *Client) dial(cfg Config) (*client.Client, error) {
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+func plainIMAPAllowed(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+func (c *Client) dial(ctx context.Context, cfg Config) (*client.Client, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	dialer := &net.Dialer{Timeout: 20 * time.Second}
+	tlsConfig := &tls.Config{ServerName: cfg.Host, MinVersion: tls.VersionTLS12}
 	var (
 		imapClient *client.Client
 		err        error
 	)
 	if cfg.UseTLS {
-		imapClient, err = client.DialTLS(addr, &tls.Config{ServerName: cfg.Host})
+		imapClient, err = client.DialWithDialerTLS(dialer, addr, tlsConfig)
 	} else {
-		imapClient, err = client.Dial(addr)
+		imapClient, err = client.DialWithDialer(dialer, addr)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("imap dial %s: %w", addr, err)
+	}
+	imapClient.Timeout = 30 * time.Second
+	if !cfg.UseTLS {
+		ok, supportErr := imapClient.SupportStartTLS()
+		if supportErr != nil {
+			_ = imapClient.Terminate()
+			return nil, fmt.Errorf("imap starttls probe %s: %w", addr, supportErr)
+		}
+		if ok {
+			if err := imapClient.StartTLS(tlsConfig); err != nil {
+				_ = imapClient.Terminate()
+				return nil, fmt.Errorf("imap starttls %s: %w", addr, err)
+			}
+		} else if !plainIMAPAllowed(cfg.Host) {
+			_ = imapClient.Terminate()
+			return nil, fmt.Errorf("imap server %s does not support TLS", addr)
+		}
 	}
 	var authErr error
 	if strings.EqualFold(strings.TrimSpace(cfg.AuthMode), "oauth") {
@@ -67,10 +96,36 @@ func (c *Client) dial(cfg Config) (*client.Client, error) {
 		authErr = imapClient.Login(cfg.Username, cfg.Password)
 	}
 	if authErr != nil {
-		_ = imapClient.Logout()
+		_ = imapClient.Terminate()
 		return nil, fmt.Errorf("imap login: %w", authErr)
 	}
 	return imapClient, nil
+}
+
+// run executes fn on one IMAP connection. Cancelling ctx closes the connection
+// so the command goroutine cannot outlive the caller.
+func (c *Client) run(ctx context.Context, cfg Config, fn func(*client.Client) error) error {
+	imapClient, err := c.dial(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				done <- fmt.Errorf("imap panic: %v", rec)
+			}
+		}()
+		done <- fn(imapClient)
+	}()
+	select {
+	case <-ctx.Done():
+		_ = imapClient.Terminate()
+		return ctx.Err()
+	case err := <-done:
+		_ = imapClient.Logout()
+		return err
+	}
 }
 
 // TestConnection verifies IMAP credentials and folder access.
@@ -78,79 +133,45 @@ func (c *Client) TestConnection(ctx context.Context, cfg Config, mailboxAddress 
 	if err := cfg.Resolve(mailboxAddress); err != nil {
 		return err
 	}
-	imapClient, err := c.dial(cfg)
-	if err != nil {
-		return err
-	}
-	defer imapClient.Logout()
-
-	done := make(chan error, 1)
-	go func() {
+	return c.run(ctx, cfg, func(imapClient *client.Client) error {
 		if _, err := imapClient.Select(cfg.InboxFolder, true); err != nil {
-			done <- fmt.Errorf("select inbox folder %q: %w", cfg.InboxFolder, err)
-			return
+			return fmt.Errorf("select inbox folder %q: %w", cfg.InboxFolder, err)
 		}
 		if cfg.SentFolder != "" {
 			if _, err := imapClient.Select(cfg.SentFolder, true); err != nil {
-				done <- fmt.Errorf("select sent folder %q: %w", cfg.SentFolder, err)
-				return
+				return fmt.Errorf("select sent folder %q: %w", cfg.SentFolder, err)
 			}
 		}
-		done <- nil
-	}()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-done:
-		return err
-	}
+		return nil
+	})
 }
 
 // MaxUID returns the highest UID in folder (0 if empty).
 func (c *Client) MaxUID(ctx context.Context, cfg Config, folder string) (uint32, error) {
-	imapClient, err := c.dial(cfg)
-	if err != nil {
-		return 0, err
-	}
-	defer imapClient.Logout()
-
-	type result struct {
-		uid uint32
-		err error
-	}
-	ch := make(chan result, 1)
-	go func() {
+	var max uint32
+	err := c.run(ctx, cfg, func(imapClient *client.Client) error {
 		mbox, err := imapClient.Select(folder, true)
 		if err != nil {
-			ch <- result{err: err}
-			return
+			return err
 		}
 		if mbox.Messages == 0 {
-			ch <- result{uid: 0}
-			return
+			return nil
 		}
-		criteria := imap.NewSearchCriteria()
-		uids, err := imapClient.UidSearch(criteria)
+		uids, err := imapClient.UidSearch(imap.NewSearchCriteria())
 		if err != nil {
-			ch <- result{err: err}
-			return
+			return err
 		}
-		var max uint32
 		for _, u := range uids {
 			if u > max {
 				max = u
 			}
 		}
-		ch <- result{uid: max}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	case res := <-ch:
-		return res.uid, res.err
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
+	return max, nil
 }
 
 // FetchSinceUID fetches messages with UID > afterUID up to limit.
@@ -158,23 +179,11 @@ func (c *Client) FetchSinceUID(ctx context.Context, cfg Config, folder string, a
 	if limit <= 0 {
 		limit = 25
 	}
-	imapClient, err := c.dial(cfg)
-	if err != nil {
-		return nil, err
-	}
-	defer imapClient.Logout()
-
-	type result struct {
-		msgs []FetchedMessage
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
+	var out []FetchedMessage
+	err := c.run(ctx, cfg, func(imapClient *client.Client) error {
 		if _, err := imapClient.Select(folder, false); err != nil {
-			ch <- result{err: fmt.Errorf("select %q: %w", folder, err)}
-			return
+			return fmt.Errorf("select %q: %w", folder, err)
 		}
-
 		criteria := imap.NewSearchCriteria()
 		if afterUID > 0 {
 			criteria.Uid = new(imap.SeqSet)
@@ -182,27 +191,21 @@ func (c *Client) FetchSinceUID(ctx context.Context, cfg Config, folder string, a
 		}
 		uids, err := imapClient.UidSearch(criteria)
 		if err != nil {
-			ch <- result{err: err}
-			return
+			return err
 		}
 		if len(uids) == 0 {
-			ch <- result{msgs: nil}
-			return
+			return nil
 		}
 		if len(uids) > limit {
 			uids = uids[:limit]
 		}
-
 		seqset := new(imap.SeqSet)
 		seqset.AddNum(uids...)
-
 		section := &imap.BodySectionName{}
 		items := []imap.FetchItem{section.FetchItem(), imap.FetchUid, imap.FetchInternalDate, imap.FetchEnvelope}
 		messages := make(chan *imap.Message, len(uids))
-		done := make(chan error, 1)
-		go func() { done <- imapClient.UidFetch(seqset, items, messages) }()
-
-		var out []FetchedMessage
+		fetchDone := make(chan error, 1)
+		go func() { fetchDone <- imapClient.UidFetch(seqset, items, messages) }()
 		for msg := range messages {
 			if msg == nil {
 				continue
@@ -211,9 +214,9 @@ func (c *Client) FetchSinceUID(ctx context.Context, cfg Config, folder string, a
 			if body == nil {
 				continue
 			}
-			raw, err := io.ReadAll(body)
+			raw, err := io.ReadAll(io.LimitReader(body, 25<<20))
 			if err != nil {
-				continue
+				return fmt.Errorf("read imap message %d: %w", msg.Uid, err)
 			}
 			fm := FetchedMessage{
 				UID:      msg.Uid,
@@ -226,17 +229,10 @@ func (c *Client) FetchSinceUID(ctx context.Context, cfg Config, folder string, a
 			}
 			out = append(out, fm)
 		}
-		if err := <-done; err != nil {
-			ch <- result{err: err}
-			return
-		}
-		ch <- result{msgs: out}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case res := <-ch:
-		return res.msgs, res.err
+		return <-fetchDone
+	})
+	if err != nil {
+		return nil, err
 	}
+	return out, nil
 }

@@ -114,7 +114,8 @@ func HandleTransformExecutionLogList(pool *pgxpool.Pool) http.HandlerFunc {
 
 		var totalCount int
 		if err := pool.QueryRow(r.Context(), `SELECT COUNT(*) `+baseFrom, args...).Scan(&totalCount); err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email transform execution log count failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 			return
 		}
 
@@ -142,7 +143,8 @@ func HandleTransformExecutionLogList(pool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, limit, offset)
 		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email transform execution log query failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 			return
 		}
 		defer rows.Close()
@@ -178,7 +180,8 @@ func HandleTransformExecutionLogList(pool *pgxpool.Pool) http.HandlerFunc {
 				&item.RuleName, &item.DestinationType, &item.RunStatus, &item.ErrorMessage,
 				&item.OutputLocation, &item.MailboxAddress,
 			); err != nil {
-				emailcommon.RespondInternal(w, err.Error())
+				api.LogErrorForResponse(w, "email transform execution log scan failed: %v", err)
+				emailcommon.RespondInternal(w, "database operation failed")
 				return
 			}
 			item.CreatedAt = api.FormatAuditTimestampIST(createdAt)

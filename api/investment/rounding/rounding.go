@@ -5,6 +5,8 @@ package rounding
 import (
 	"math"
 	"strings"
+
+	"github.com/shopspring/decimal"
 )
 
 // DefaultDecimals is used when bank config does not specify interest_rounding_decimals.
@@ -27,6 +29,8 @@ func NormalizeMethod(method string) string {
 		return "ROUND_UP"
 	case "ROUND_DOWN", "FLOOR":
 		return "ROUND_DOWN"
+	case "BANKERS", "HALF_EVEN", "ROUND_HALF_EVEN":
+		return "BANKERS"
 	default:
 		return "ROUND"
 	}
@@ -43,37 +47,39 @@ func NormalizeFrequency(frequency string) string {
 	}
 }
 
-// RoundByMethod rounds value to the given decimal places using method.
+// maxDecimals bounds the precision so a bad configuration cannot ask for absurd scales.
+const maxDecimals = 12
+
+// noiseDigits is how many places past the target scale are kept before rounding.
+const noiseDigits = 6
+
+// RoundByMethod rounds value to the given decimal places using method. The value is
+// converted to its shortest decimal form first, so 1.15 rounds as 1.15 and not as
+// the binary 1.1499999...
 func RoundByMethod(value float64, decimals int, method string) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return value
+	}
 	decimals = NormalizeDecimals(decimals)
-	if decimals == 0 {
-		// Whole currency units (legacy workbook / rupee rounding).
-		switch NormalizeMethod(method) {
-		case "TRUNCATE":
-			return math.Trunc(value)
-		case "ROUND_UP":
-			sign := math.Copysign(1, value)
-			return sign * math.Ceil(math.Abs(value))
-		case "ROUND_DOWN":
-			sign := math.Copysign(1, value)
-			return sign * math.Floor(math.Abs(value))
-		default:
-			return math.Round(value)
-		}
+	if decimals > maxDecimals {
+		decimals = maxDecimals
 	}
-	pow := math.Pow(10, float64(decimals))
+	places := int32(decimals)
+	// Drop binary noise well below the target scale (114.99999999999999 is 115) so the
+	// directed modes do not move a whole unit at the last place.
+	d := decimal.NewFromFloat(value).Round(places + noiseDigits)
+	var out decimal.Decimal
 	switch NormalizeMethod(method) {
-	case "TRUNCATE":
-		return math.Trunc(value*pow) / pow
+	case "TRUNCATE", "ROUND_DOWN":
+		out = d.RoundDown(places)
 	case "ROUND_UP":
-		sign := math.Copysign(1, value)
-		return sign * math.Ceil(math.Abs(value)*pow) / pow
-	case "ROUND_DOWN":
-		sign := math.Copysign(1, value)
-		return sign * math.Floor(math.Abs(value)*pow) / pow
+		out = d.RoundUp(places)
+	case "BANKERS":
+		out = d.RoundBank(places)
 	default:
-		return math.Round(value*pow) / pow
+		out = d.Round(places)
 	}
+	return out.InexactFloat64()
 }
 
 // Apply rounds according to method and frequency.

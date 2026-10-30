@@ -247,7 +247,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(mba.country, '')                    AS country
 				FROM public.masterbankaccount mba
 				JOIN cimplrcorpsaas.bank_statements bs
-					ON bs.account_number = mba.account_number AND bs.is_deleted = false AND bs.current_status = 'APPROVED'
+					ON bs.account_number = mba.account_number AND bs.is_deleted = false AND UPPER(TRIM(bs.current_status)) = 'APPROVED'
 				JOIN cimplrcorpsaas.bank_statement_transactions tx
 					ON tx.bank_statement_id = bs.bank_statement_id
 				WHERE mba.is_deleted = false
@@ -290,7 +290,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM public.bank_balances_manual bbm
 				JOIN public.auditactionbankbalances  a   ON a.balance_id   = bbm.balance_id
 				JOIN masterbankaccount               mba ON mba.account_number = bbm.account_no
-				WHERE a.processing_status = 'APPROVED'
+				WHERE UPPER(TRIM(a.processing_status)) = 'APPROVED'
 				  AND mba.is_deleted = false
 				  AND COALESCE(mba.status, 'Active') = 'Active'
 				  AND ($1 = '' OR LOWER(TRIM(mba.bank_name))                              = LOWER(TRIM($1)))
@@ -343,9 +343,14 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var a, n, cur, bank, ent, country string
 			var bal float64
 			if err := rows.Scan(&a, &n, &cur, &bal, &bank, &ent, &country); err != nil {
-				continue
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				return
 			}
 			balRows = append(balRows, balRow{Account: a, Nickname: n, Currency: cur, Balance: bal, Bank: bank, Entity: ent, Country: country})
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+			return
 		}
 		logger.LogInfo("[TIMING] cash/1-balance: %v (rows=%d)", time.Since(t0Balance), len(balRows))
 
@@ -438,7 +443,7 @@ LEFT JOIN LATERAL (
 	WHERE a.proposal_id = cp.proposal_id ORDER BY a.requested_at DESC LIMIT 1
 ) aa ON TRUE
 WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
-  AND aa.processing_status = 'APPROVED'
+  AND UPPER(TRIM(aa.processing_status)) = 'APPROVED'
   AND ($3 = '' OR me.entity_id::text = $3)
   AND ($4 = '' OR UPPER(TRIM(COALESCE(cp.base_currency_code,''))) = UPPER(TRIM($4)))
   AND me.entity_id::text = ANY($5)
@@ -452,12 +457,19 @@ GROUP BY COALESCE(NULLIF(cpi.currency_code,''), COALESCE(cp.base_currency_code,'
 			for aggRows.Next() {
 				var si, so float64
 				var cur string
-				if err := aggRows.Scan(&si, &so, &cur); err == nil {
-					projectedInflowsINR += toINR(si, cur)
-					projectedOutflowsINR += toINR(so, cur)
+				if err := aggRows.Scan(&si, &so, &cur); err != nil {
+					aggRows.Close()
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+					return
 				}
+				projectedInflowsINR += toINR(si, cur)
+				projectedOutflowsINR += toINR(so, cur)
 			}
 			aggRows.Close()
+			if err := aggRows.Err(); err != nil {
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				return
+			}
 		}
 
 		// Daily distribution of projections (for weekwise report)
@@ -472,7 +484,7 @@ LEFT JOIN LATERAL (
 	WHERE a.proposal_id = cp.proposal_id ORDER BY a.requested_at DESC LIMIT 1
 ) aa ON TRUE
 WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
-  AND aa.processing_status = 'APPROVED'
+  AND UPPER(TRIM(aa.processing_status)) = 'APPROVED'
   AND ($3 = '' OR me.entity_id::text = $3)
   AND ($4 = '' OR UPPER(TRIM(COALESCE(cp.base_currency_code,''))) = UPPER(TRIM($4)))
   AND me.entity_id::text = ANY($5)
@@ -488,7 +500,9 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 				var amt float64
 				var ctype, cur string
 				if err := projRows.Scan(&yr, &mon, &amt, &ctype, &cur); err != nil {
-					continue
+					projRows.Close()
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+					return
 				}
 				daysInMonth := time.Date(yr, time.Month(mon)+1, 0, 0, 0, 0, 0, time.UTC).Day()
 				if daysInMonth <= 0 {
@@ -509,6 +523,10 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 				}
 			}
 			projRows.Close()
+			if err := projRows.Err(); err != nil {
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				return
+			}
 		}
 		logger.LogInfo("[TIMING] cash/3-projection: %v", time.Since(t0Proj))
 
@@ -613,7 +631,7 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
     COALESCE(SUM(COALESCE(t.withdrawal_amount, 0)), 0)::float8 AS withdrawal_sum
 FROM cimplrcorpsaas.bank_statement_transactions t
 JOIN cimplrcorpsaas.bank_statements bs
-     ON t.bank_statement_id = bs.bank_statement_id AND bs.is_deleted = false AND bs.current_status = 'APPROVED'
+     ON t.bank_statement_id = bs.bank_statement_id AND bs.is_deleted = false AND UPPER(TRIM(bs.current_status)) = 'APPROVED'
 LEFT JOIN public.masterbankaccount m ON bs.account_number = m.account_number
 WHERE t.value_date BETWEEN $1 AND $2
   AND ($3 = '' OR LOWER(TRIM(m.bank_name))                      = LOWER(TRIM($3)))
@@ -636,21 +654,28 @@ GROUP BY t.value_date::date`
 			for bwRows.Next() {
 				var txnDate time.Time
 				var dep, wdl float64
-				if err := bwRows.Scan(&txnDate, &dep, &wdl); err == nil {
-					// Assign to the week-start that contains this date.
-					for _, wb := range weekSlots {
-						if !txnDate.Before(wb.ws) && !txnDate.After(wb.we) {
-							key := wb.ws.Format(constants.DateFormat)
-							v := weekActuals[key]
-							v[0] += dep
-							v[1] += wdl
-							weekActuals[key] = v
-							break
-						}
+				if err := bwRows.Scan(&txnDate, &dep, &wdl); err != nil {
+					bwRows.Close()
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+					return
+				}
+				// Assign to the week-start that contains this date.
+				for _, wb := range weekSlots {
+					if !txnDate.Before(wb.ws) && !txnDate.After(wb.we) {
+						key := wb.ws.Format(constants.DateFormat)
+						v := weekActuals[key]
+						v[0] += dep
+						v[1] += wdl
+						weekActuals[key] = v
+						break
 					}
 				}
 			}
 			bwRows.Close()
+			if err := bwRows.Err(); err != nil {
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				return
+			}
 		}
 		logger.LogInfo("[TIMING] weekwise batch query: %v", time.Since(t0Week))
 
@@ -693,4 +718,3 @@ GROUP BY t.value_date::date`
 		})
 	}
 }
-

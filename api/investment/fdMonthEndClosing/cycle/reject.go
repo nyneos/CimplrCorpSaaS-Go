@@ -1,6 +1,7 @@
 package cycle
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,6 +35,9 @@ func RejectCycle(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ids := mergeCycleIDs(req.CycleID, req.CycleIDs)
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `SELECT entity_id::text FROM investment.fd_closing_cycle WHERE cycle_id::text = ANY($1)`, ids) {
+			return
+		}
 		if len(ids) == 0 {
 			fdclosingcommon.RespondError(w, http.StatusBadRequest, "cycle_id or cycle_ids is required")
 			return
@@ -58,7 +62,7 @@ func RejectCycle(pool *pgxpool.Pool) http.HandlerFunc {
 			})
 			if actionErr != nil {
 				api.LogError("[FDClosingCycle] ActOnPendingOrDiagnose reject failed for %s: %v", cycleID, actionErr)
-				errs = append(errs, cycleID+": "+actionErr.Error())
+				errs = append(errs, cycleID+": "+errtext.Text(actionErr))
 				continue
 			}
 
@@ -75,7 +79,7 @@ func RejectCycle(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := directRejectCycle(ctx, pool, cycleID, actor.Email, req.Comment); err != nil {
-				errs = append(errs, cycleID+": "+err.Error())
+				errs = append(errs, cycleID+": "+errtext.Text(err))
 				continue
 			}
 			directActed++

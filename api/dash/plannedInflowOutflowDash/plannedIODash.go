@@ -1,6 +1,8 @@
 package plannedinflowoutflowdash
 
 import (
+	"CimplrCorpSaas/api/dash/fxrates"
+	"CimplrCorpSaas/api/errtext"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -16,26 +18,14 @@ import (
 )
 
 // Currency conversion rates to USD
-var rates = map[string]float64{
-	"USD": 1.0,
-	"AUD": 0.68,
-	"CAD": 0.75,
-	"CHF": 1.1,
-	"CNY": 0.14,
-	"RMB": 0.14,
-	"EUR": 1.09,
-	"GBP": 1.28,
-	"JPY": 0.0067,
-	"SEK": 0.095,
-	"INR": 0.0117,
-}
+var rates = fxrates.USDPerUnit()
 
 func getCurrencyRate(currency string) float64 {
 	if rate, ok := rates[currency]; ok {
 		return rate
 	}
-	logger.LogInfo("Unknown currency encountered: %s, using default rate 1.0", currency)
-	return 1.0
+	logger.LogError("no USD rate for currency %q; amount excluded", currency)
+	return 0
 }
 
 func normalizeLower(values []string) []string {
@@ -103,7 +93,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}{
 			{"Next 30 Days", today, today.AddDate(0, 0, 30)},
 			{"Next 60 Days", today, today.AddDate(0, 0, 60)},
-			{"This Quarter", qStart, today.AddDate(0, 0, 90)},
+			{"This Quarter", qStart, qStart.AddDate(0, 3, -1)},
 		}
 		out := make([]PlannedInflowOutflowData, 0, len(ranges))
 		for _, dr := range ranges {
@@ -139,7 +129,9 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var entity, currency string
 				var inflow, outflow float64
 				if err := rows.Scan(&entity, &currency, &inflow, &outflow); err != nil {
-					continue
+					rows.Close()
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+					return
 				}
 
 				// Get conversion rate with better error handling
@@ -158,6 +150,10 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				entityMap[entity].Inflow += inflowUSD
 				entityMap[entity].Outflow += outflowUSD
+			}
+			if err := rows.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			rows.Close()
 
@@ -198,7 +194,9 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var nature, currency string
 				var inflow, outflow float64
 				if err := rows2.Scan(&nature, &currency, &inflow, &outflow); err != nil {
-					continue
+					rows2.Close()
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+					return
 				}
 
 				// Get conversion rate with better error handling
@@ -217,6 +215,10 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				cashflowMap[nature].Inflow += inflowUSD
 				cashflowMap[nature].Outflow += outflowUSD
+			}
+			if err := rows2.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			rows2.Close()
 

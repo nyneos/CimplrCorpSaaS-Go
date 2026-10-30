@@ -1,6 +1,7 @@
 package fdReceipt
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -38,6 +39,12 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT rr.entity_id::text FROM investment.fd_receipt_exception e
+			JOIN investment.fd_receipt_reconcile_run rr ON rr.reconcile_run_id = e.reconcile_run_id
+			WHERE e.exception_id::text = $1`, req.ExceptionID) {
 			return
 		}
 		if req.ExceptionID == "" {
@@ -116,11 +123,11 @@ func EditVariance(pool *pgxpool.Pool) http.HandlerFunc {
 			ActionType: "EDIT", ProcessingStatus: constants.StatusPendingEditApproval,
 			Reason: req.Comment, RequestedBy: userEmail, Old: auditOld,
 		}); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+errtext.Detail(w, err))
 			return
 		}
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -184,6 +191,12 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT rr.entity_id::text FROM investment.fd_receipt_exception e
+			JOIN investment.fd_receipt_reconcile_run rr ON rr.reconcile_run_id = e.reconcile_run_id
+			WHERE e.exception_id::text = $1`, req.ExceptionID) {
 			return
 		}
 		if req.ExceptionID == "" {
@@ -256,11 +269,11 @@ func resolveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			ActionType: "EDIT", ProcessingStatus: constants.StatusPendingApproval,
 			Reason: req.ResolutionRemarks, RequestedBy: userEmail, Old: auditOld,
 		}); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+errtext.Detail(w, err))
 			return
 		}
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -323,6 +336,12 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT rr.entity_id::text FROM investment.fd_receipt_exception e
+			JOIN investment.fd_receipt_reconcile_run rr ON rr.reconcile_run_id = e.reconcile_run_id
+			WHERE e.exception_id::text = ANY($1)`, normalizeExceptionIDs(req.ExceptionID, req.ExceptionIDs)) {
 			return
 		}
 		ids := normalizeExceptionIDs(req.ExceptionID, req.ExceptionIDs)
@@ -417,12 +436,12 @@ func approveVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				Old: auditOldFromHeader(hdr),
 			}); err != nil {
 				tx.Rollback(ctx) //nolint:errcheck
-				res["error"] = err.Error()
+				res["error"] = errtext.Text(err)
 				results = append(results, res)
 				continue
 			}
 			if err = tx.Commit(ctx); err != nil {
-				res["error"] = err.Error()
+				res["error"] = errtext.Text(err)
 				results = append(results, res)
 				continue
 			}
@@ -521,7 +540,7 @@ func closeOneVariance(ctx context.Context, r *http.Request, pool *pgxpool.Pool, 
 		caseType, outcome, exceptionID)
 	if err != nil {
 		tx.Rollback(ctx) //nolint:errcheck
-		res["error"] = err.Error()
+		res["error"] = errtext.Text(err)
 		return res
 	}
 	auditOld := auditOldFromHeader(hdr)
@@ -530,11 +549,11 @@ func closeOneVariance(ctx context.Context, r *http.Request, pool *pgxpool.Pool, 
 		Old: auditOld,
 	}); err != nil {
 		tx.Rollback(ctx) //nolint:errcheck
-		res["error"] = err.Error()
+		res["error"] = errtext.Text(err)
 		return res
 	}
 	if err = tx.Commit(ctx); err != nil {
-		res["error"] = err.Error()
+		res["error"] = errtext.Text(err)
 		return res
 	}
 
@@ -613,6 +632,12 @@ func closeVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT rr.entity_id::text FROM investment.fd_receipt_exception e
+			JOIN investment.fd_receipt_reconcile_run rr ON rr.reconcile_run_id = e.reconcile_run_id
+			WHERE e.exception_id::text = ANY($1)`, normalizeExceptionIDs(req.ExceptionID, req.ExceptionIDs)) {
+			return
+		}
 		ids := normalizeExceptionIDs(req.ExceptionID, req.ExceptionIDs)
 		if len(ids) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ExceptionIDsRequired)
@@ -651,6 +676,12 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT rr.entity_id::text FROM investment.fd_receipt_exception e
+			JOIN investment.fd_receipt_reconcile_run rr ON rr.reconcile_run_id = e.reconcile_run_id
+			WHERE e.exception_id::text = ANY($1)`, normalizeExceptionIDs(req.ExceptionID, req.ExceptionIDs)) {
 			return
 		}
 		ids := normalizeExceptionIDs(req.ExceptionID, req.ExceptionIDs)
@@ -749,7 +780,7 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE exception_id=$1 AND exception_status IN ('OPEN','IN_REVIEW')`, eid)
 			if err != nil {
 				tx.Rollback(ctx) //nolint:errcheck
-				res["error"] = err.Error()
+				res["error"] = errtext.Text(err)
 				results = append(results, res)
 				continue
 			}
@@ -758,12 +789,12 @@ func rejectVarianceHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				RequestedBy: userEmail, CheckerBy: userEmail, CheckerComment: req.Reason, Old: auditOld,
 			}); err != nil {
 				tx.Rollback(ctx) //nolint:errcheck
-				res["error"] = err.Error()
+				res["error"] = errtext.Text(err)
 				results = append(results, res)
 				continue
 			}
 			if err = tx.Commit(ctx); err != nil {
-				res["error"] = err.Error()
+				res["error"] = errtext.Text(err)
 				results = append(results, res)
 				continue
 			}

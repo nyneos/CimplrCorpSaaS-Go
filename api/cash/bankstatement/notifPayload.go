@@ -300,7 +300,7 @@ func BuildBankStatementNotifPayload(
 			s.entity_id
 		FROM cimplrcorpsaas.bank_statements s
 		JOIN public.masterentitycash e ON s.entity_id = e.entity_id
-		LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.is_deleted = false
+		LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.entity_id::text = s.entity_id::text AND mba.is_deleted = false
 		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 		LEFT JOIN latest_audit la ON la.bankstatementid = s.bank_statement_id
 		WHERE s.bank_statement_id = ANY($1)

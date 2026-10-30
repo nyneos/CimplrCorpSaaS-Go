@@ -275,9 +275,20 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 		return 0, fmt.Errorf("error bulk copying NAV data: %v", err)
 	}
 
+	// New schemes and NAV rows load atomically, and concurrent NAV loads (manual
+	// trigger and scheduled job) are serialised on one advisory lock.
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin NAV load transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('amfi-nav-load'))`); err != nil {
+		return 0, fmt.Errorf("NAV load lock: %w", err)
+	}
+
 	// STEP 1: Check for new schemes and insert them into amfi_scheme_master_staging
 	var newSchemesCount int
-	err = conn.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT t.scheme_code)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.scheme_code::bigint = s.scheme_code
@@ -288,7 +299,7 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 
 	if newSchemesCount > 0 {
 		// Insert new schemes into amfi_scheme_master_staging
-		schemeResult, err := conn.Exec(ctx, `
+		schemeResult, err := tx.Exec(ctx, `
 			INSERT INTO investment.amfi_scheme_master_staging
 			(amc_name, scheme_code, scheme_name, isin_div_payout_growth, isin_div_reinvestment, file_date)
 			SELECT DISTINCT
@@ -309,24 +320,19 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 				file_date = EXCLUDED.file_date`)
 
 		if err != nil {
+			return 0, fmt.Errorf("error inserting new schemes: %w", err)
+		}
+		if addedSchemes := schemeResult.RowsAffected(); addedSchemes > 0 {
 			*logs = append(*logs, LogEntry{
-				Level:   "WARN",
-				Message: fmt.Sprintf("Failed to insert new schemes: %v", err),
+				Level:   "SUCCESS",
+				Message: fmt.Sprintf("Created %d new scheme records in Global Lookups.", addedSchemes),
 			})
-		} else {
-			addedSchemes := schemeResult.RowsAffected()
-			if addedSchemes > 0 {
-				*logs = append(*logs, LogEntry{
-					Level:   "SUCCESS",
-					Message: fmt.Sprintf("Created %d new scheme records in Global Lookups.", addedSchemes),
-				})
-			}
 		}
 	}
 
 	// Count distinct AMCs for reporting (but they're stored in scheme master, not separate table)
 	var newAmcCount int
-	err = conn.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT t.amc_name)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.amc_name = s.amc_name
@@ -344,7 +350,7 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 
 	// STEP 2: Now process NAV data for all schemes (existing + newly added)
 	// Insert NAV records for all schemes that now exist in the master (including newly added ones)
-	result, err := conn.Exec(ctx, `
+	result, err := tx.Exec(ctx, `
 		INSERT INTO investment.amfi_nav_staging
 		(scheme_code, isin_div_payout_growth, isin_div_reinvestment,
 		scheme_name, nav_value, nav_date, amc_name, file_date)
@@ -354,7 +360,7 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 			   t.isin_div_reinvestment,
 			   t.scheme_name,
 			   CASE
-				   WHEN t.nav_value ~ '^-?[0-9]+(\.[0-9]+)?$' THEN t.nav_value::numeric(18,4)
+				   WHEN t.nav_value ~ '^[0-9]+(\.[0-9]+)?$' AND t.nav_value::numeric > 0 THEN t.nav_value::numeric(18,4)
 				   ELSE NULL
 			   END,
 			   t.nav_date,
@@ -369,7 +375,7 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 			isin_div_payout_growth = EXCLUDED.isin_div_payout_growth,
 			isin_div_reinvestment = EXCLUDED.isin_div_reinvestment,
 			scheme_name = EXCLUDED.scheme_name,
-			nav_value = EXCLUDED.nav_value,
+			nav_value = COALESCE(EXCLUDED.nav_value, investment.amfi_nav_staging.nav_value),
 			amc_name = EXCLUDED.amc_name,
 			file_date = EXCLUDED.file_date`)
 
@@ -381,13 +387,17 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 
 	// Count unmatched records (should be minimal or zero now)
 	var unmatchedCount int
-	err = conn.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT COUNT(*)
 		FROM temp_nav_staging t
 		LEFT JOIN investment.amfi_scheme_master_staging s ON t.scheme_code::bigint = s.scheme_code
 		WHERE t.scheme_code ~ '^[0-9]+$' AND s.scheme_code IS NULL`).Scan(&unmatchedCount)
 	if err != nil {
 		unmatchedCount = 0 // If query fails, just set to 0
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit NAV load: %w", err)
 	}
 
 	// Log results in expected format

@@ -1,6 +1,7 @@
 package auditutil
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -60,7 +61,7 @@ func execFirstSuccess(ctx context.Context, exec ExecContext, attempts []execAtte
 			return nil
 		} else {
 			lastErr = err
-			errors = append(errors, err.Error())
+			errors = append(errors, errtext.Text(err))
 		}
 	}
 	if len(errors) > 0 {

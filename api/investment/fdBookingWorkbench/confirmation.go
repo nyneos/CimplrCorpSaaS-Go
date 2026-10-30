@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/investment/uploadutil"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -139,7 +140,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		isMultipart := strings.Contains(strings.ToLower(r.Header.Get(constants.ContentTypeText)), "multipart/form-data")
 		if isMultipart {
 			if err := r.ParseMultipartForm(32 << 20); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Invalid multipart form: "+err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid multipart form: "+errtext.Detail(w, err))
 				return
 			}
 			req = fdConfirmationCaptureRequestFromForm(r)
@@ -181,13 +182,13 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.RespondWithError(w, http.StatusConflict, "This file was already uploaded earlier. Please upload a different file.")
 					return
 				}
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to check duplicate upload: "+errtext.Detail(w, err))
 				return
 			}
 			var uploadErr error
 			uploadS3Key, uploadErr = s3storage.UploadFirstMultipartFile(ctx, "fd-bank-confirmation-capture", userEmail, s3storage.CollectMultipartFiles(r.MultipartForm, "attachment", "bank_statement", "file", "files"))
 			if uploadErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "S3 upload failed: "+uploadErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "S3 upload failed: "+errtext.Detail(w, uploadErr))
 				return
 			}
 		}
@@ -233,7 +234,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"Booking not found or was deleted — cannot capture confirmation without a valid booking_id")
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, "Fetch booking failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Fetch booking failed: "+errtext.Detail(w, err))
 			return
 		}
 		// When linked to rate negotiation, variance baseline is the selected negotiated rate.
@@ -672,7 +673,7 @@ func GetFDConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ConfirmationID string `json:"confirmation_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			api.RespondWithResult(w, false, "Invalid JSON: "+errtext.Detail(w, err))
 			return
 		}
 		confirmationID := strings.TrimSpace(req.ConfirmationID)
@@ -706,7 +707,7 @@ func GetFDConfirmationDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			api.RespondWithResult(w, false, "Failed to generate download url: "+errtext.Detail(w, err))
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
@@ -723,7 +724,7 @@ func GetFDConfirmationBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ConfirmationIDs []string `json:"confirmation_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			api.RespondWithResult(w, false, "Invalid JSON: "+errtext.Detail(w, err))
 			return
 		}
 		if len(req.ConfirmationIDs) == 0 {
@@ -816,6 +817,12 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `
+			SELECT b.entity_id::text FROM investment.fd_booking_request b
+			WHERE b.booking_id::text = $1
+			   OR b.booking_id = (SELECT c.booking_id FROM investment.fd_confirmation c WHERE c.confirmation_id::text = $2)`, req.BookingID, req.ConfirmationID) {
+			return
+		}
 		if req.BookingID == "" && req.ConfirmationID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "booking_id or confirmation_id is required")
 			return
@@ -891,7 +898,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					fmt.Sprintf("Booking %s not found or was deleted — resolve-variance needs an active booking row", bookingID))
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, "Fetch booking failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Fetch booking failed: "+errtext.Detail(w, err))
 			return
 		}
 		bookedRate = resolveConfirmationRateBaseline(ctx, pgxPool, bookingID, bookedRate)
@@ -1878,6 +1885,12 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `
+			SELECT b.entity_id::text FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE c.confirmation_id::text = $1`, req.ConfirmationID) {
+			return
+		}
 		if req.ConfirmationID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmationIDsRequired)
 			return
@@ -1928,7 +1941,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.ConfirmationID,
 		).Scan(&currentStatus, &bookingID, &entityID, &confPrincipal)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Fetch confirmation failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Fetch confirmation failed: "+errtext.Detail(w, err))
 			return
 		}
 		if currentStatus == constants.StatusApproved {
@@ -1992,7 +2005,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		varIDs, hasVarianceFlag, err := ensureOpenVarianceLogForException(ctx, pgxPool, req.ConfirmationID, bookingID, entityID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Prepare variance exception failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Prepare variance exception failed: "+errtext.Detail(w, err))
 			return
 		}
 		if !hasVarianceFlag {
@@ -2134,6 +2147,12 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `
+			SELECT b.entity_id::text FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE c.confirmation_id::text = ANY($1)`, req.ConfirmationIDs) {
+			return
+		}
 		if len(req.ConfirmationIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmationIDsRequired)
 			return
@@ -2150,6 +2169,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		directActed := 0
 		var errors []string
 
+		var notifyIDs []string
 		for _, cID := range req.ConfirmationIDs {
 			// ── Load current confirmation status ─────────────────────────────────
 			var confStatus string
@@ -2203,11 +2223,12 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: cID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionApproved, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDConfirmation] RecordAction approve failed for %s: %v", cID, actionErr)
-				errors = append(errors, cID+": "+actionErr.Error())
+				errors = append(errors, cID+": "+errtext.Text(actionErr))
 				continue
 			}
 			if actionRes.Acted {
 				engineActed++
+				notifyIDs = append(notifyIDs, cID)
 				// If the instance is now fully APPROVED, flip statuses.
 				if actionRes.InstanceStatus == constants.StatusApproved {
 					if _, execErr := pgxPool.Exec(ctx,
@@ -2309,7 +2330,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							userEmail, cID,
 						); execErr != nil {
 							_ = tx.Rollback(ctx)
-							errors = append(errors, cID+": confirm after exception failed: "+execErr.Error())
+							errors = append(errors, cID+": confirm after exception failed: "+errtext.Text(execErr))
 							continue
 						}
 						if _, execErr := pgxPool.Exec(ctx,
@@ -2323,6 +2344,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							continue
 						}
 						directActed++
+						notifyIDs = append(notifyIDs, cID)
 						continue
 					}
 					_ = tx.Rollback(ctx)
@@ -2334,6 +2356,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				directActed++
+				notifyIDs = append(notifyIDs, cID)
 			}
 		}
 		totalActed := engineActed + directActed
@@ -2346,7 +2369,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
-		for _, cID := range req.ConfirmationIDs {
+		for _, cID := range notifyIDs {
 			go func(id, uEmail string) {
 				defer func() {
 					if rec := recover(); rec != nil {
@@ -2394,6 +2417,12 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `
+			SELECT b.entity_id::text FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE c.confirmation_id::text = ANY($1)`, req.ConfirmationIDs) {
+			return
+		}
 		if len(req.ConfirmationIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmationIDsRequired)
 			return
@@ -2410,6 +2439,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		directActed := 0
 		var errors []string
 
+		var notifyIDs []string
 		for _, cID := range req.ConfirmationIDs {
 			// ── APPROVED guard — already approved, skip silently ─────────────────
 			var rejectConfStatus string
@@ -2444,7 +2474,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			actionRes, actionErr := approvalengine.ActOnPendingOrDiagnose(ctx, pgxPool, approvalengine.ActOnPendingRequest{ModuleCode: "FIXED_DEPOSIT", RecordID: cID, UserID: req.UserID, UserEmail: userEmail, RoleID: "", Action: approvalengine.ActionRejected, Comment: req.Comment})
 			if actionErr != nil {
 				api.LogError("[FDConfirmation] RecordAction reject failed for %s: %v", cID, actionErr)
-				errors = append(errors, cID+": "+actionErr.Error())
+				errors = append(errors, cID+": "+errtext.Text(actionErr))
 				continue
 			}
 			if actionRes.Acted {
@@ -2463,6 +2493,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.LogError("[FDConfirmation] booking_status→SENT_TO_BANK failed for %s: %v", cID, execErr)
 				}
 				engineActed++
+				notifyIDs = append(notifyIDs, cID)
 			} else {
 				if actionRes.CancelledStale {
 					api.LogInfo("[FDConfirmation] Cancelled stale approval instance for confirmation=%s: %s", cID, actionRes.Reason)
@@ -2502,6 +2533,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				directActed++
+				notifyIDs = append(notifyIDs, cID)
 			}
 		}
 		totalActed := engineActed + directActed
@@ -2514,7 +2546,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
-		for _, cID := range req.ConfirmationIDs {
+		for _, cID := range notifyIDs {
 			go func(id, uEmail string) {
 				defer func() {
 					if rec := recover(); rec != nil {
@@ -2719,7 +2751,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l ON l.confirmation_id = c.confirmation_id
 			LEFT JOIN history h      ON h.confirmation_id = c.confirmation_id
 			LEFT JOIN LATERAL (
-				SELECT ai.* FROM uam.approval_instance ai
+				SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 				WHERE ai.record_id = c.confirmation_id
 				  AND ai.module_code = 'FIXED_DEPOSIT'
 				  AND ai.status = 'PENDING'
@@ -2728,7 +2760,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) ai ON true
 			LEFT JOIN LATERAL (
-				SELECT aie.* FROM uam.approval_instance_eye aie
+				SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 				WHERE aie.instance_id = ai.instance_id
 				  AND aie.status = 'ACTIVE'
 				ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -2743,7 +2775,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, scopeArgs...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2764,7 +2796,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Row iteration error: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -2858,7 +2890,7 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2878,7 +2910,7 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, err))
 			return
 		}
 
@@ -3000,7 +3032,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, baseQ, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -3020,7 +3052,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, err))
 			return
 		}
 
@@ -3297,7 +3329,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`,
 			confirmationID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer auditRows.Close()
@@ -3317,7 +3349,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			auditHistory = append(auditHistory, row)
 		}
 		if err := auditRows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit row error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Audit row error: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -3413,6 +3445,12 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `
+			SELECT b.entity_id::text FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE c.confirmation_id::text = ANY($1)`, req.ConfirmationIDs) {
+			return
+		}
 		if len(req.ConfirmationIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmationIDsRequired)
 			return
@@ -3466,13 +3504,13 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var cm confMeta
 			if err := rows.Scan(&cm.id, &cm.entity, &cm.amount); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+errtext.Detail(w, err))
 				return
 			}
 			validConfs = append(validConfs, cm)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, err))
 			return
 		}
 		rows.Close()
@@ -3727,7 +3765,7 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		bookingRows, err := pgxPool.Query(ctx, bookingSQL, bookingArgs...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Booking query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Booking query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer bookingRows.Close()

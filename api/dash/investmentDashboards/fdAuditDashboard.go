@@ -20,6 +20,7 @@ package investmentdashboards
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -141,7 +143,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'MASTER',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_master
@@ -151,7 +153,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'BOOKING',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_booking_request
@@ -161,7 +163,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'CONFIRMATION',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_confirmation
@@ -171,7 +173,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'CASHFLOW',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_cashflow_schedule
@@ -181,7 +183,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'CLOSURE',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_closure_request
@@ -191,7 +193,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'BANK_CONFIG',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_bank_config
@@ -200,7 +202,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'BANK_RATE_CARD',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_bank_rate_card
@@ -209,7 +211,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'TDS_PLAN',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_tds_plan
@@ -218,7 +220,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'PENALTY_STRUCTURE',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_penalty_structure
@@ -227,7 +229,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'INTEREST_TYPE',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_interest_type
@@ -236,7 +238,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'DAY_COUNT_CONVENTION',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_day_count_convention
@@ -245,7 +247,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'COMPOUNDING_FREQUENCY',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_compounding_frequency
@@ -254,7 +256,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'TDS_RECEIPT',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_tds_receipt_audit
@@ -264,7 +266,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'ACCRUAL_SCHEDULE',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_accrual_schedule_config_audit
@@ -273,7 +275,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'ACCRUAL_RUN',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_accrual_run_audit
@@ -283,7 +285,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'CLOSING_CYCLE',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_closing_cycle_audit
@@ -293,7 +295,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'RATE_NEGOTIATION',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_rate_negotiation
@@ -303,7 +305,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'RATE_OFFER',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_rate_offer_audit
@@ -313,7 +315,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					SELECT 'ACCOUNTING_JOURNAL',
 					  COUNT(*),
 					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
-					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN UPPER(TRIM(processing_status)) = 'APPROVED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.auditaction_fd_accounting_journal
@@ -328,8 +330,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				sr.Source = q.Source
 				if err2 := pool.QueryRow(ctx, q.Query, startDate, endDate, entityFilter).
 					Scan(&sr.Source, &sr.Total, &sr.Pending, &sr.Approved, &sr.Rejected, &sr.Checked); err2 != nil {
-					api.LogError("[AuditDash] audit_summary query error (%s): %v", q.Source, err2)
-					continue
+					return nil, err2
 				}
 				totalAll += sr.Total
 				totalChecked += sr.Checked
@@ -389,8 +390,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				) t
 				WHERE requested_at >= $1::date AND requested_at < $2::date`, startDate, endDate).Scan(&checked, &total)
 			if err != nil {
-				api.LogError("[AuditDash] maker_checker_rate query error: %v", err)
-				return map[string]interface{}{"checked": 0, "total": 0, "rate_pct": 0}, nil
+				return nil, err
 			}
 			ratePct := 0.0
 			if total > 0 {
@@ -851,9 +851,12 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&lr.OldValue, &lr.NewValue,
 				); err2 != nil {
 					api.LogError("[AuditDash] audit_log scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				out = append(out, lr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -921,7 +924,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&or.ProposedAt, &or.LedgerRowStatus,
 				); err2 != nil {
 					api.LogError("[AuditDash] overrides scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				or.OverrideAmount = fdRound(or.OverrideAmount, 2)
 				or.OriginalAmount = fdRound(or.OriginalAmount, 2)
@@ -930,6 +933,9 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					missingEvidence++
 				}
 				out = append(out, or)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{
 				"rows":                   out,
@@ -1049,11 +1055,14 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				if err2 := rows.Scan(&pr.CycleID, &pr.EntityID, &pr.EntityName, &pr.FinancialPeriod,
 					&pr.UnlockedAt, &pr.UnlockedBy, &pr.UnlockReason, &pr.RequestID, &pr.Status); err2 != nil {
 					api.LogError("[AuditDash] period_reopens scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				pr.LockID = pr.RequestID
 				pr.ReopenedAt, pr.ReopenedBy = pr.UnlockedAt, pr.UnlockedBy
 				out = append(out, pr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -1352,7 +1361,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&reqAt, &chkAt, &ar.CheckerComment,
 				); err2 != nil {
 					api.LogError("[AuditDash] approvals_register scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				if reqAt != nil {
 					ar.RequestedAt = reqAt.Format(time.RFC3339)
@@ -1361,6 +1370,9 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					ar.CheckerAt = chkAt.Format(time.RFC3339)
 				}
 				out = append(out, ar)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -1413,7 +1425,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&er.GeneratedBy, &er.GeneratedTime, &er.DownloadCount,
 					&inc[0], &inc[1], &inc[2], &inc[3], &inc[4], &inc[5], &inc[6], &inc[7]); err2 != nil {
 					api.LogError("[AuditDash] evidence_packs scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				er.ContentsIncluded = []string{}
 				for i, on := range inc {
@@ -1422,6 +1434,9 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				out = append(out, er)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -1439,6 +1454,8 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    WHERE b.booking_id=fd_confirmation.booking_id AND b.entity_id = ANY(string_to_array($1, ','))
 				  )`, entityFilter).Scan(&openVariance); err != nil {
 				logger.LogError("policy exceptions open variance: query row failed: %v", err)
+
+				return nil, err
 			}
 
 			if err := pool.QueryRow(ctx, `
@@ -1449,6 +1466,8 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    SELECT 1 FROM investment.fd_master m WHERE m.fd_id=ae.fd_id AND m.entity_id = ANY(string_to_array($1, ','))
 				  )`, entityFilter).Scan(&openAccrualExc); err != nil {
 				logger.LogError("policy exceptions open accrual exceptions: query row failed: %v", err)
+
+				return nil, err
 			}
 
 			// FD policy breaches recorded by the policy engine
@@ -1476,13 +1495,16 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					var code, name, crit string
 					var cnt int64
 					if err2 := brRows.Scan(&code, &name, &crit, &cnt); err2 != nil {
-						continue
+						return nil, err2
 					}
 					breachTotal += cnt
 					breachedPolicies++
 					byPolicy = append(byPolicy, map[string]interface{}{
 						"policy_code": code, "policy_name": name, "criticality": crit, "count": cnt,
 					})
+				}
+				if err := brRows.Err(); err != nil {
+					return nil, err
 				}
 			}
 
@@ -1607,7 +1629,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&actionID, &actorEmail, &actionTaken, &actionComment, &actedAt, &isSystem,
 				); err2 != nil {
 					api.LogError("[AuditDash] approval_matrix scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 
 				if _, ok := instanceMap[instID]; !ok {
@@ -1664,6 +1686,9 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 			}
+			if err := instRows.Err(); err != nil {
+				return nil, err
+			}
 
 			out := make([]instanceRow, 0, len(instanceOrder))
 			for _, id := range instanceOrder {
@@ -1690,6 +1715,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    AND i.module_code = 'FIXED_DEPOSIT'
 				    AND i.submitted_at >= $1::timestamptz
 				    AND i.submitted_at <  $2::timestamptz
+				    AND i.entity_code = ANY(string_to_array($3, ','))
 				  UNION
 				  SELECT DISTINCT i.resolved_by_email
 				  FROM uam.approval_instance i
@@ -1697,6 +1723,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    AND i.module_code = 'FIXED_DEPOSIT'
 				    AND i.submitted_at >= $1::timestamptz
 				    AND i.submitted_at <  $2::timestamptz
+				    AND i.entity_code = ANY(string_to_array($3, ','))
 				    AND i.resolved_by_email IS NOT NULL
 				  UNION
 				  -- all actors who took actions on those instances
@@ -1708,6 +1735,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    AND i.module_code = 'FIXED_DEPOSIT'
 				    AND i.submitted_at >= $1::timestamptz
 				    AND i.submitted_at <  $2::timestamptz
+				    AND i.entity_code = ANY(string_to_array($3, ','))
 				    AND ia.actor_email IS NOT NULL
 				    AND ia.actor_email NOT IN ('SYSTEM','system@cimplr.in')
 				)
@@ -1734,7 +1762,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN public.user_roles ur ON ur.user_id = u.id
 				LEFT JOIN public.roles r       ON r.id       = ur.role_id
 				ORDER BY u.email, r.name
-			`, startDate, endDate)
+			`, startDate, endDate, entityFilter)
 			if err != nil {
 				api.LogError("[AuditDash] user_directory query error: %v", err)
 				return map[string]interface{}{}, nil
@@ -1774,7 +1802,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&roleID, &roleName, &roleCode, &roleDesc, &roleStatus,
 				); err2 != nil {
 					api.LogError("[AuditDash] user_directory scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				if _, ok := profileMap[email]; !ok {
 					profileMap[email] = &userProfile{
@@ -1800,6 +1828,9 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					})
 				}
 			}
+			if err := rows.Err(); err != nil {
+				return nil, err
+			}
 			rows.Close()
 
 			// Return as a map keyed by email for O(1) frontend lookup
@@ -1824,13 +1855,15 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					MaturityDate string  `json:"maturity_date"`
 				}
 				var fs fdState
-				pool.QueryRow(ctx, `
+				if err := pool.QueryRow(ctx, `
 					SELECT fd_id, COALESCE(bank_name,''), COALESCE(entity_name,''),
 					  COALESCE(principal_amount,0), COALESCE(interest_rate,0),
 					  COALESCE(fd_status,''), COALESCE(TO_CHAR(maturity_date,'YYYY-MM-DD'),'')
 					FROM investment.fd_master WHERE fd_id=$1 AND is_deleted=false`, fdFilter).
 					Scan(&fs.FDID, &fs.Bank, &fs.Entity, &fs.Principal,
-						&fs.InterestRate, &fs.Status, &fs.MaturityDate)
+						&fs.InterestRate, &fs.Status, &fs.MaturityDate); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+					return nil, err
+				}
 				fs.Principal = fdRound(fs.Principal, 2)
 				fs.InterestRate = fdRound(fs.InterestRate, 4)
 
@@ -1855,8 +1888,13 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 						var br bRow
 						if err := bookingRows.Scan(&br.ID, &br.Status, &br.Date, &br.By); err != nil {
 							logger.LogError("transaction trace bookings: scan failed: %v", err)
+
+							return nil, err
 						}
 						bookings = append(bookings, br)
+					}
+					if err := bookingRows.Err(); err != nil {
+						return nil, err
 					}
 				}
 
@@ -1886,11 +1924,16 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 						if err := cfRows.Scan(&cr.ID, &cr.EventType, &cr.EventDate,
 							&cr.InterestAcc, &cr.NetCashFlow, &cr.TDSAmount, &cr.PostingStatus); err != nil {
 							logger.LogError("transaction trace cashflows: scan failed: %v", err)
+
+							return nil, err
 						}
 						cr.InterestAcc = fdRound(cr.InterestAcc, 2)
 						cr.NetCashFlow = fdRound(cr.NetCashFlow, 2)
 						cr.TDSAmount = fdRound(cr.TDSAmount, 2)
 						cashflows = append(cashflows, cr)
+					}
+					if err := cfRows.Err(); err != nil {
+						return nil, err
 					}
 				}
 
@@ -1926,8 +1969,13 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 						if err := auditRows.Scan(&ar.Source, &ar.AuditID, &ar.ActionType,
 							&ar.Status, &ar.RequestedBy, &ar.RequestedAt, &ar.CheckerBy); err != nil {
 							logger.LogError("transaction trace audit trail: scan failed: %v", err)
+
+							return nil, err
 						}
 						auditTrail = append(auditTrail, ar)
+					}
+					if err := auditRows.Err(); err != nil {
+						return nil, err
 					}
 				}
 
@@ -1958,10 +2006,15 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 						if err := overrideRows.Scan(&or.LedgerID, &or.Period, &or.OverrideAmt, &or.OriginalAmt,
 							&or.ReasonCode, &or.Status, &or.ProposedBy, &or.HasEvidence); err != nil {
 							logger.LogError("transaction trace overrides: scan failed: %v", err)
+
+							return nil, err
 						}
 						or.OverrideAmt = fdRound(or.OverrideAmt, 2)
 						or.OriginalAmt = fdRound(or.OriginalAmt, 2)
 						overrides = append(overrides, or)
+					}
+					if err := overrideRows.Err(); err != nil {
+						return nil, err
 					}
 				}
 
@@ -1976,6 +2029,14 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		wg.Wait()
+
+		for _, sub := range results {
+			if sub.err != nil {
+				api.LogErrorForResponse(w, "investment dashboard query failed: %v", sub.err)
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDB)
+				return
+			}
+		}
 
 		get := func(key string) interface{} {
 			if res, ok := results[key]; ok && res.err == nil {

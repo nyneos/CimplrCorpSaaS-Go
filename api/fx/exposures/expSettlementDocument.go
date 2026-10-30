@@ -1,8 +1,10 @@
 package exposures
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -20,6 +22,8 @@ import (
 	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 	"CimplrCorpSaas/internal/logger"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -55,7 +59,7 @@ type settlementLineInput struct {
 // booking's system_transaction_id + order_type + total_rate. The settlement
 // forms only know the reference, but hedge links and the booking ledger are
 // keyed by system_transaction_id.
-func resolveForwardBooking(ctx context.Context, pool *pgxpool.Pool, bookingID, forwardRef string) (id, orderType string, bookedRate float64) {
+func resolveForwardBooking(ctx context.Context, pool settlementDB, bookingID, forwardRef string) (id, orderType string, bookedRate float64) {
 	bookingID = strings.TrimSpace(bookingID)
 	forwardRef = strings.TrimSpace(forwardRef)
 	if bookingID == "" && forwardRef == "" {
@@ -523,12 +527,20 @@ func replaceSettlementLines(ctx context.Context, pool *pgxpool.Pool, settlementI
 	return err
 }
 
-func reduceExposureOpenAmount(ctx context.Context, pool *pgxpool.Pool, exposureHeaderID string, amount float64) error {
+// settlementDB is satisfied by both *pgxpool.Pool and pgx.Tx so the settlement
+// effects can run inside the approval transaction.
+type settlementDB interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func reduceExposureOpenAmount(ctx context.Context, db settlementDB, exposureHeaderID string, amount float64) error {
 	exposureHeaderID = strings.TrimSpace(exposureHeaderID)
 	if exposureHeaderID == "" || amount == 0 {
 		return nil
 	}
-	_, err := pool.Exec(ctx, `
+	_, err := db.Exec(ctx, `
 		UPDATE public.exposure_headers
 		SET total_open_amount = CASE
 		      WHEN COALESCE(total_open_amount, 0) >= 0
@@ -547,22 +559,26 @@ func reduceExposureOpenAmount(ctx context.Context, pool *pgxpool.Pool, exposureH
 // just been reduced by an approval. A pending draft that no longer fits within the
 // exposure's remaining open amount can never be approved as drafted, so it is bounced
 // back to the maker instead of sitting in the approval queue forever. A draft that still
-// fits within what's left is untouched and stays pending.
-func invalidateStalePendingSettlements(ctx context.Context, pool *pgxpool.Pool, exposureHeaderID, approvedSettlementID, actor string) {
+// fits within what's left is untouched and stays pending. It returns the rejected ids so
+// the caller can cancel their approval instances after the transaction commits.
+func invalidateStalePendingSettlements(ctx context.Context, db settlementDB, exposureHeaderID, approvedSettlementID, actor string) ([]string, error) {
 	exposureHeaderID = strings.TrimSpace(exposureHeaderID)
 	if exposureHeaderID == "" {
-		return
+		return nil, nil
 	}
 	var remainingOpen float64
-	if err := pool.QueryRow(ctx, `
+	if err := db.QueryRow(ctx, `
 		SELECT ABS(COALESCE(total_open_amount, 0))
 		FROM public.exposure_headers
 		WHERE exposure_header_id::text = $1 AND COALESCE(is_deleted, false) = false
 	`, exposureHeaderID).Scan(&remainingOpen); err != nil {
-		return
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
 	}
 
-	rows, err := pool.Query(ctx, `
+	rows, err := db.Query(ctx, `
 		SELECT DISTINCT esd.settlement_id::text, COALESCE(esd.total_settled_amount, 0)
 		FROM public.exposure_settlement_document esd
 		JOIN public.exposure_settlement_line esl ON esl.settlement_id = esd.settlement_id
@@ -572,39 +588,43 @@ func invalidateStalePendingSettlements(ctx context.Context, pool *pgxpool.Pool, 
 		  AND UPPER(TRIM(COALESCE(esd.processing_status, ''))) IN ($3, $4)
 	`, exposureHeaderID, approvedSettlementID, constants.StatusPendingApproval, constants.StatusPendingEditApproval)
 	if err != nil {
-		return
+		return nil, err
 	}
-	type staleCandidate struct {
-		ID     string
-		Amount float64
-	}
-	var stale []staleCandidate
+	var stale []string
 	for rows.Next() {
-		var c staleCandidate
-		if scanErr := rows.Scan(&c.ID, &c.Amount); scanErr != nil {
-			continue
+		var id string
+		var amount float64
+		if err := rows.Scan(&id, &amount); err != nil {
+			rows.Close()
+			return nil, err
 		}
 		// Still fits within what's left of the exposure — leave it pending.
-		if math.Abs(c.Amount) <= remainingOpen+1e-6 {
+		if math.Abs(amount) <= remainingOpen+1e-6 {
 			continue
 		}
-		stale = append(stale, c)
+		stale = append(stale, id)
 	}
 	rows.Close()
-
-	for _, c := range stale {
-		_, _ = pool.Exec(ctx, `
-			UPDATE public.exposure_settlement_document
-			SET processing_status = $1,
-			    comments = 'Auto-rejected: exposure open amount no longer covers this drafted settlement after settlement '
-			      || $2 || ' was approved.',
-			    updated_by = $3,
-			    updated_at = NOW()
-			WHERE settlement_id = $4::uuid
-			  AND UPPER(TRIM(COALESCE(processing_status, ''))) IN ($5, $6)
-		`, constants.StatusRejected, approvedSettlementID, actor, c.ID, constants.StatusPendingApproval, constants.StatusPendingEditApproval)
-		_ = approvalengine.CancelPendingInstances(ctx, pool, "FX", c.ID, "")
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
+	if len(stale) == 0 {
+		return nil, nil
+	}
+
+	if _, err := db.Exec(ctx, `
+		UPDATE public.exposure_settlement_document
+		SET processing_status = $1,
+		    comments = 'Auto-rejected: exposure open amount no longer covers this drafted settlement after settlement '
+		      || $2 || ' was approved.',
+		    updated_by = $3,
+		    updated_at = NOW()
+		WHERE settlement_id = ANY($4::uuid[])
+		  AND UPPER(TRIM(COALESCE(processing_status, ''))) IN ($5, $6)
+	`, constants.StatusRejected, approvedSettlementID, actor, stale, constants.StatusPendingApproval, constants.StatusPendingEditApproval); err != nil {
+		return nil, err
+	}
+	return stale, nil
 }
 
 // syncExposureLifecycleStatus marks an exposure terminal once its open amount is fully
@@ -612,18 +632,21 @@ func invalidateStalePendingSettlements(ctx context.Context, pool *pgxpool.Pool, 
 // so the frontend's Exposure Status column (OPEN, PAYMENT, ROLLOVER, CANCELLED) can show
 // which one — a settled exposure is done: no further hedging, payment, rollover, or
 // cancellation can be applied to it.
-func syncExposureLifecycleStatus(ctx context.Context, pool *pgxpool.Pool, exposureHeaderID, method string) {
+func syncExposureLifecycleStatus(ctx context.Context, db settlementDB, exposureHeaderID, method string) error {
 	exposureHeaderID = strings.TrimSpace(exposureHeaderID)
 	if exposureHeaderID == "" {
-		return
+		return nil
 	}
 	var open float64
-	if err := pool.QueryRow(ctx, `
+	if err := db.QueryRow(ctx, `
 		SELECT COALESCE(total_open_amount, 0)
 		FROM public.exposure_headers
 		WHERE exposure_header_id::text = $1 AND COALESCE(is_deleted, false) = false
 	`, exposureHeaderID).Scan(&open); err != nil {
-		return
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
 	}
 	// The settlement method is stamped as soon as it is approved, even for a
 	// partial amount: from this point the exposure can no longer be linked to a
@@ -640,7 +663,7 @@ func syncExposureLifecycleStatus(ctx context.Context, pool *pgxpool.Pool, exposu
 		next = "Payment"
 	}
 	fullySettled := math.Abs(open) <= 0.0001
-	if _, err := pool.Exec(ctx, `
+	if _, err := db.Exec(ctx, `
 		UPDATE public.exposure_headers
 		SET status = $1,
 		    is_active = CASE WHEN $3 THEN false ELSE is_active END,
@@ -648,16 +671,17 @@ func syncExposureLifecycleStatus(ctx context.Context, pool *pgxpool.Pool, exposu
 		WHERE exposure_header_id::text = $2
 		  AND COALESCE(is_deleted, false) = false
 	`, next, exposureHeaderID, fullySettled); err != nil {
-		logger.LogError("[Settlement] exposure lifecycle status %s → %s: %v", exposureHeaderID, next, err)
+		return fmt.Errorf("exposure lifecycle status %s -> %s: %w", exposureHeaderID, next, err)
 	}
 	// Any hedge link still waiting for approval on this exposure is void now.
-	if _, err := pool.Exec(ctx, `
+	if _, err := db.Exec(ctx, `
 		UPDATE public.exposure_hedge_links
 		SET is_active = false
 		WHERE exposure_header_id::text = $1 AND COALESCE(is_active, false) = false
 	`, exposureHeaderID); err != nil {
-		logger.LogError("[Settlement] void pending hedge links %s: %v", exposureHeaderID, err)
+		return fmt.Errorf("void pending hedge links %s: %w", exposureHeaderID, err)
 	}
+	return nil
 }
 
 func parseSettlementDate(s string) (time.Time, error) {
@@ -840,22 +864,27 @@ func validateSettlementBusinessRules(
 	return nil
 }
 
-func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlementID, actor string) error {
+// applySettlementOnApprove applies the financial effects of an approved settlement
+// (open-amount reduction, hedge-link consumption, forward ledger, rollover exposure)
+// on db, which the caller runs inside the approval transaction. Any failure is
+// returned so the whole approval rolls back. It returns settlement ids that were
+// auto-rejected so their approval instances can be cancelled after commit.
+func applySettlementOnApprove(ctx context.Context, db settlementDB, settlementID, actor string) ([]string, error) {
 	var method, entity, currency string
 	var newExpType *string
 	var newMaturity *time.Time
 	var newQty, newPrice, newAmt *float64
-	err := pool.QueryRow(ctx, `
+	err := db.QueryRow(ctx, `
 		SELECT settlement_method, entity, currency,
 		       new_exposure_type, new_maturity_date, new_quantity, new_price, new_amount
 		FROM public.exposure_settlement_document
 		WHERE settlement_id = $1::uuid AND COALESCE(is_deleted, false) = false
 	`, settlementID).Scan(&method, &entity, &currency, &newExpType, &newMaturity, &newQty, &newPrice, &newAmt)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	rows, err := pool.Query(ctx, `
+	rows, err := db.Query(ctx, `
 		SELECT exposure_header_id, COALESCE(booking_id,''), COALESCE(forward_ref,''),
 		       leg_type, settlement_amount, COALESCE(partial_amount, 0)
 		FROM public.exposure_settlement_line
@@ -863,9 +892,8 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 		ORDER BY line_id
 	`, settlementID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer rows.Close()
 
 	type lineRow struct {
 		ExposureID string
@@ -879,9 +907,29 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 	for rows.Next() {
 		var lr lineRow
 		if err := rows.Scan(&lr.ExposureID, &lr.BookingID, &lr.ForwardRef, &lr.LegType, &lr.Amount, &lr.Partial); err != nil {
-			continue
+			rows.Close()
+			return nil, fmt.Errorf("read settlement line: %w", err)
 		}
 		lines = append(lines, lr)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	finish := func(touched map[string]struct{}, method string) ([]string, error) {
+		var autoRejected []string
+		for id := range touched {
+			if err := syncExposureLifecycleStatus(ctx, db, id, method); err != nil {
+				return nil, err
+			}
+			stale, err := invalidateStalePendingSettlements(ctx, db, id, settlementID, actor)
+			if err != nil {
+				return nil, fmt.Errorf("invalidate stale settlements for %s: %w", id, err)
+			}
+			autoRejected = append(autoRejected, stale...)
+		}
+		return autoRejected, nil
 	}
 
 	switch method {
@@ -908,7 +956,9 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 				shouldReduce = !hasExposureLeg
 			}
 			if shouldReduce {
-				_ = reduceExposureOpenAmount(ctx, pool, lr.ExposureID, amt)
+				if err := reduceExposureOpenAmount(ctx, db, lr.ExposureID, amt); err != nil {
+					return nil, fmt.Errorf("reduce exposure %s: %w", lr.ExposureID, err)
+				}
 				if strings.TrimSpace(lr.ExposureID) != "" {
 					touched[strings.TrimSpace(lr.ExposureID)] = struct{}{}
 				}
@@ -917,53 +967,57 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 			// the hedge link and write the booking ledger. Lines saved before the
 			// booking_id backfill only carry forward_ref, so resolve it here too.
 			if lr.BookingID == "" && lr.ForwardRef != "" {
-				lr.BookingID, _, _ = resolveForwardBooking(ctx, pool, "", lr.ForwardRef)
+				lr.BookingID, _, _ = resolveForwardBooking(ctx, db, "", lr.ForwardRef)
 			}
-			if strings.TrimSpace(lr.BookingID) != "" && lr.LegType != "EXPOSURE" && lr.LegType != "CANCELLATION" && amt != 0 {
-				if strings.TrimSpace(lr.ExposureID) != "" {
-					if _, lerr := pool.Exec(ctx, `
-						UPDATE public.exposure_hedge_links
-						SET hedged_amount = GREATEST(0, COALESCE(hedged_amount, 0) - $1),
-						    is_active = CASE WHEN GREATEST(0, COALESCE(hedged_amount, 0) - $1) <= 0 THEN false ELSE is_active END
-						WHERE exposure_header_id::text = $2
-						  AND booking_id::text = $3
-					`, math.Abs(amt), lr.ExposureID, lr.BookingID); lerr != nil {
-						logger.LogError("[Settlement] hedge link update %s/%s: %v", lr.ExposureID, lr.BookingID, lerr)
-					}
-				}
-				// Both PAYMENT (utilisation) and CANCELLATION consume the forward's
-				// open amount; the ledger keeps the sign of the movement.
-				var openAmt float64
-				var seq int
-				lerr := pool.QueryRow(ctx, `
-					SELECT COALESCE(running_open_amount, 0), COALESCE(ledger_sequence, 0)
-					FROM public.forward_booking_ledger
-					WHERE booking_id::text = $1
-					ORDER BY ledger_sequence DESC LIMIT 1
-				`, lr.BookingID).Scan(&openAmt, &seq)
-				if lerr != nil {
-					// no ledger yet → start from the booking amount
-					_ = pool.QueryRow(ctx, `SELECT COALESCE(booking_amount,0) FROM public.forward_bookings WHERE system_transaction_id::text = $1`, lr.BookingID).Scan(&openAmt)
-					seq = 0
-				}
-				actionType := "UTILIZATION"
-				if method == "CANCELLATION" {
-					actionType = "CANCELLATION"
-				}
-				newOpen := math.Max(0, math.Abs(openAmt)-math.Abs(amt))
-				if _, lerr := pool.Exec(ctx, `
-					INSERT INTO public.forward_booking_ledger
-						(booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount)
-					VALUES ($1::uuid, $2, $3, $4, CURRENT_DATE, $5, $6)
-				`, lr.BookingID, seq+1, actionType, settlementID, -math.Abs(amt), newOpen); lerr != nil {
-					logger.LogError("[Settlement] forward ledger insert %s: %v", lr.BookingID, lerr)
+			if strings.TrimSpace(lr.BookingID) == "" || lr.LegType == "EXPOSURE" || lr.LegType == "CANCELLATION" || amt == 0 {
+				continue
+			}
+			if strings.TrimSpace(lr.ExposureID) != "" {
+				if _, err := db.Exec(ctx, `
+					UPDATE public.exposure_hedge_links
+					SET hedged_amount = GREATEST(0, COALESCE(hedged_amount, 0) - $1),
+					    is_active = CASE WHEN GREATEST(0, COALESCE(hedged_amount, 0) - $1) <= 0 THEN false ELSE is_active END
+					WHERE exposure_header_id::text = $2
+					  AND booking_id::text = $3
+				`, math.Abs(amt), lr.ExposureID, lr.BookingID); err != nil {
+					return nil, fmt.Errorf("hedge link update %s/%s: %w", lr.ExposureID, lr.BookingID, err)
 				}
 			}
+			// Both PAYMENT (utilisation) and CANCELLATION consume the forward's
+			// open amount; the ledger keeps the sign of the movement. The booking
+			// row is locked first so concurrent settlements cannot reuse a sequence.
+			var bookingAmount float64
+			if err := db.QueryRow(ctx, `SELECT COALESCE(booking_amount,0) FROM public.forward_bookings WHERE system_transaction_id::text = $1 FOR UPDATE`, lr.BookingID).Scan(&bookingAmount); err != nil {
+				return nil, fmt.Errorf("lock forward booking %s: %w", lr.BookingID, err)
+			}
+			openAmt := bookingAmount
+			seq := 0
+			err := db.QueryRow(ctx, `
+				SELECT COALESCE(running_open_amount, 0), COALESCE(ledger_sequence, 0)
+				FROM public.forward_booking_ledger
+				WHERE booking_id::text = $1
+				ORDER BY ledger_sequence DESC LIMIT 1
+			`, lr.BookingID).Scan(&openAmt, &seq)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("read forward ledger %s: %w", lr.BookingID, err)
+			}
+			if errors.Is(err, pgx.ErrNoRows) {
+				openAmt, seq = bookingAmount, 0
+			}
+			actionType := "UTILIZATION"
+			if method == "CANCELLATION" {
+				actionType = "CANCELLATION"
+			}
+			newOpen := math.Max(0, math.Abs(openAmt)-math.Abs(amt))
+			if _, err := db.Exec(ctx, `
+				INSERT INTO public.forward_booking_ledger
+					(booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount)
+				VALUES ($1::uuid, $2, $3, $4, CURRENT_DATE, $5, $6)
+			`, lr.BookingID, seq+1, actionType, settlementID, -math.Abs(amt), newOpen); err != nil {
+				return nil, fmt.Errorf("forward ledger insert %s: %w", lr.BookingID, err)
+			}
 		}
-		for id := range touched {
-			syncExposureLifecycleStatus(ctx, pool, id, method)
-			invalidateStalePendingSettlements(ctx, pool, id, settlementID, actor)
-		}
+		return finish(touched, method)
 
 	case "ROLLOVER":
 		// Reduce old exposures + create one new exposure from form fields
@@ -981,7 +1035,9 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 			if lr.LegType != "" && lr.LegType != "ROLLOVER" && lr.LegType != "EXPOSURE" {
 				continue
 			}
-			_ = reduceExposureOpenAmount(ctx, pool, lr.ExposureID, amt)
+			if err := reduceExposureOpenAmount(ctx, db, lr.ExposureID, amt); err != nil {
+				return nil, fmt.Errorf("reduce exposure %s: %w", lr.ExposureID, err)
+			}
 			if id := strings.TrimSpace(lr.ExposureID); id != "" {
 				touched[id] = struct{}{}
 				if primaryOldID == "" {
@@ -1012,13 +1068,15 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 		}
 
 		// Copy basics from primary old exposure when available
-		var oldEntity, oldCurrency, oldCP, oldCompany string
+		var oldEntity, oldCurrency, oldCP, oldCompany, oldExpType string
 		if primaryOldID != "" {
-			_ = pool.QueryRow(ctx, `
-				SELECT COALESCE(entity,''), COALESCE(currency,''), COALESCE(counterparty_name,''), COALESCE(company_code,'')
+			if err := db.QueryRow(ctx, `
+				SELECT COALESCE(entity,''), COALESCE(currency,''), COALESCE(counterparty_name,''), COALESCE(company_code,''), COALESCE(exposure_type,'')
 				FROM public.exposure_headers
 				WHERE exposure_header_id::text = $1
-			`, primaryOldID).Scan(&oldEntity, &oldCurrency, &oldCP, &oldCompany)
+			`, primaryOldID).Scan(&oldEntity, &oldCurrency, &oldCP, &oldCompany, &oldExpType); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("read rollover source exposure %s: %w", primaryOldID, err)
+			}
 		}
 		if entity == "" {
 			entity = oldEntity
@@ -1027,11 +1085,11 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 			currency = oldCurrency
 		}
 		if expType == "" {
-			_ = pool.QueryRow(ctx, `SELECT COALESCE(exposure_type,'') FROM public.exposure_headers WHERE exposure_header_id::text = $1`, primaryOldID).Scan(&expType)
+			expType = oldExpType
 		}
 
 		var newHeaderID string
-		err = pool.QueryRow(ctx, `
+		err = db.QueryRow(ctx, `
 			INSERT INTO public.exposure_headers (
 				entity, currency, exposure_type, company_code, counterparty_name,
 				total_original_amount, total_open_amount, value_date,
@@ -1043,60 +1101,55 @@ func applySettlementOnApprove(ctx context.Context, pool *pgxpool.Pool, settlemen
 			) RETURNING exposure_header_id::text
 		`, entity, currency, expType, oldCompany, oldCP, totalRoll, maturity).Scan(&newHeaderID)
 		if err != nil {
-			return fmt.Errorf("create rollover exposure: %w", err)
+			return nil, fmt.Errorf("create rollover exposure: %w", err)
 		}
-		_, _ = pool.Exec(ctx, `
+		if _, err := db.Exec(ctx, `
 			INSERT INTO public.exposure_line_items (
 				exposure_header_id, line_number, quantity, unit_price, line_item_amount, delivery_date, created_at
 			) VALUES ($1::uuid, 1, $2, $3, $4, COALESCE($5::date, CURRENT_DATE), NOW())
-		`, newHeaderID, qty, price, totalRoll, maturity)
-
-		// Move hedge links from old exposures to new exposure
-		for _, lr := range lines {
-			oldID := strings.TrimSpace(lr.ExposureID)
-			if oldID == "" {
-				continue
-			}
-			linkRows, lerr := pool.Query(ctx, `
-				SELECT booking_id::text, COALESCE(hedged_amount, 0)
-				FROM public.exposure_hedge_links
-				WHERE exposure_header_id::text = $1 AND COALESCE(is_active, true) = true
-			`, oldID)
-			if lerr != nil {
-				continue
-			}
-			for linkRows.Next() {
-				var bid string
-				var hamt float64
-				if linkRows.Scan(&bid, &hamt) != nil {
-					continue
-				}
-				_, _ = pool.Exec(ctx, `
-					UPDATE public.exposure_hedge_links SET is_active = false
-					WHERE exposure_header_id::text = $1 AND booking_id::text = $2
-				`, oldID, bid)
-				_, _ = pool.Exec(ctx, `
-					INSERT INTO public.exposure_hedge_links (exposure_header_id, booking_id, hedged_amount, is_active)
-					VALUES ($1::uuid, $2, $3, true)
-					ON CONFLICT (exposure_header_id, booking_id)
-					DO UPDATE SET hedged_amount = EXCLUDED.hedged_amount, is_active = true
-				`, newHeaderID, bid, hamt)
-			}
-			linkRows.Close()
+		`, newHeaderID, qty, price, totalRoll, maturity); err != nil {
+			return nil, fmt.Errorf("create rollover exposure line: %w", err)
 		}
 
-		_, _ = pool.Exec(ctx, `
+		// Move active hedge links from the old exposures to the new exposure in two
+		// set-based statements; inside the transaction a failure cannot leave a hedge
+		// deactivated without its replacement.
+		oldIDs := make([]string, 0, len(touched))
+		for _, lr := range lines {
+			if id := strings.TrimSpace(lr.ExposureID); id != "" {
+				oldIDs = append(oldIDs, id)
+			}
+		}
+		if len(oldIDs) > 0 {
+			if _, err := db.Exec(ctx, `
+				INSERT INTO public.exposure_hedge_links (exposure_header_id, booking_id, hedged_amount, is_active)
+				SELECT $1::uuid, booking_id, SUM(COALESCE(hedged_amount, 0)), true
+				FROM public.exposure_hedge_links
+				WHERE exposure_header_id::text = ANY($2) AND COALESCE(is_active, true) = true
+				GROUP BY booking_id
+				ON CONFLICT (exposure_header_id, booking_id)
+				DO UPDATE SET hedged_amount = EXCLUDED.hedged_amount, is_active = true
+			`, newHeaderID, oldIDs); err != nil {
+				return nil, fmt.Errorf("move hedge links to rollover exposure: %w", err)
+			}
+			if _, err := db.Exec(ctx, `
+				UPDATE public.exposure_hedge_links SET is_active = false
+				WHERE exposure_header_id::text = ANY($1) AND COALESCE(is_active, true) = true
+			`, oldIDs); err != nil {
+				return nil, fmt.Errorf("deactivate old hedge links: %w", err)
+			}
+		}
+
+		if _, err := db.Exec(ctx, `
 			UPDATE public.exposure_settlement_document
 			SET new_exposure_header_id = $1
 			WHERE settlement_id = $2::uuid
-		`, newHeaderID, settlementID)
-
-		for id := range touched {
-			syncExposureLifecycleStatus(ctx, pool, id, "ROLLOVER")
-			invalidateStalePendingSettlements(ctx, pool, id, settlementID, actor)
+		`, newHeaderID, settlementID); err != nil {
+			return nil, fmt.Errorf("link rollover exposure: %w", err)
 		}
+		return finish(touched, "ROLLOVER")
 	}
-	return nil
+	return nil, nil
 }
 
 // SaveExposureSettlementDocument creates/updates a settlement (submit → PENDING_APPROVAL).
@@ -1141,7 +1194,7 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 		if err := validateSettlementBusinessRules(
 			ctx, pool, method, req.SettlementDate, req.Lines, req.NewAmount, req.NewMaturityDate,
 		); err != nil {
-			respondWithError(w, http.StatusBadRequest, err.Error())
+			respondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -1230,7 +1283,7 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 			strings.TrimSpace(req.NewExposureType), nullDate(req.NewMaturityDate), req.NewQuantity, req.NewPrice, req.NewAmount,
 			actor, strings.TrimSpace(req.Comments)).Scan(&settlementID)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "failed to create settlement: "+err.Error())
+			respondWithError(w, http.StatusInternalServerError, "failed to create settlement: "+errtext.Detail(w, err))
 			return
 		}
 		if req.Submit {
@@ -1238,7 +1291,7 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := replaceSettlementLines(ctx, pool, settlementID, req.Lines); err != nil {
-			respondWithError(w, http.StatusInternalServerError, "failed to save settlement lines: "+err.Error())
+			respondWithError(w, http.StatusInternalServerError, "failed to save settlement lines: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -1274,6 +1327,11 @@ func SaveExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 				txnType = "FX_SETTLEMENT_CANCELLATION"
 			}
 			go func(id, email, tType, tID string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("goroutine panic: %v", rec)
+					}
+				}()
 				bgCtx := context.Background()
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
@@ -1361,7 +1419,7 @@ func EditExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 		if err := validateSettlementBusinessRules(
 			ctx, pool, method, req.SettlementDate, req.Lines, req.NewAmount, req.NewMaturityDate,
 		); err != nil {
-			respondWithError(w, http.StatusBadRequest, err.Error())
+			respondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -1395,7 +1453,7 @@ func EditExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.Submit {
 			policyRow, loadErr := LoadExposureSettlementRow(ctx, pool, settlementID)
 			if loadErr != nil {
-				respondWithError(w, http.StatusInternalServerError, loadErr.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, loadErr))
 				return
 			}
 			policyRow.SettlementMethod = method
@@ -1461,7 +1519,7 @@ func EditExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := replaceSettlementLines(ctx, pool, settlementID, req.Lines); err != nil {
-			respondWithError(w, http.StatusInternalServerError, "failed to save settlement lines: "+err.Error())
+			respondWithError(w, http.StatusInternalServerError, "failed to save settlement lines: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -1489,6 +1547,11 @@ func EditExposureSettlementDocument(pool *pgxpool.Pool) http.HandlerFunc {
 				txnType = "FX_SETTLEMENT_CANCELLATION"
 			}
 			go func(id, email, tType, tID string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("goroutine panic: %v", rec)
+					}
+				}()
 				bgCtx := context.Background()
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)
 				_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
@@ -1589,7 +1652,7 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				JOIN public.exposure_headers eh ON eh.exposure_header_id::text = ids.exposure_header_id
 			) expd ON true
 			LEFT JOIN LATERAL (
-				SELECT ai.* FROM uam.approval_instance ai
+				SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 				WHERE ai.record_id = esd.settlement_id::text
 				  AND ai.module_code = 'FX'
 				  AND ai.transaction_type LIKE 'FX_SETTLEMENT_%'
@@ -1599,7 +1662,7 @@ func ListExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) ai ON true
 			LEFT JOIN LATERAL (
-				SELECT aie.* FROM uam.approval_instance_eye aie
+				SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 				WHERE aie.instance_id = ai.instance_id
 				  AND aie.status = 'ACTIVE'
 				ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -1735,7 +1798,10 @@ func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p
 		}
 		oldSnap := settlementSnapshot(ctx, pool, id)
 		var prevStatus string
-		_ = pool.QueryRow(ctx, `SELECT processing_status FROM public.exposure_settlement_document WHERE settlement_id = $1::uuid`, id).Scan(&prevStatus)
+		if err := pool.QueryRow(ctx, `SELECT COALESCE(processing_status, '') FROM public.exposure_settlement_document WHERE settlement_id = $1::uuid`, id).Scan(&prevStatus); err != nil {
+			logger.LogError("[Settlement] read status %s: %v", id, err)
+			continue
+		}
 
 		var engineActed bool
 		if actionType == "CONFIRM" {
@@ -1811,6 +1877,16 @@ func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p
 				continue
 			}
 			deletedIDs = append(deletedIDs, id)
+		} else if actionType == "CONFIRM" &&
+			(strings.EqualFold(prevStatus, constants.StatusPendingApproval) || strings.EqualFold(prevStatus, constants.StatusPendingEditApproval)) {
+			autoRejected, err := approveAndApplySettlement(ctx, pool, id, prevStatus, status, comments, actor)
+			if err != nil {
+				logger.LogError("[Settlement] approve %s rolled back: %v", id, err)
+				continue
+			}
+			for _, staleID := range autoRejected {
+				_ = approvalengine.CancelPendingInstances(ctx, pool, "FX", staleID, "")
+			}
 		} else {
 			tag, err := pool.Exec(ctx, `
 				UPDATE public.exposure_settlement_document
@@ -1823,13 +1899,6 @@ func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p
 			`, status, comments, actor, id)
 			if err != nil || tag.RowsAffected() == 0 {
 				continue
-			}
-			if actionType == "CONFIRM" &&
-				(strings.EqualFold(prevStatus, constants.StatusPendingApproval) || strings.EqualFold(prevStatus, constants.StatusPendingEditApproval)) {
-				if applyErr := applySettlementOnApprove(ctx, pool, id, actor); applyErr != nil {
-					// keep approved status but report via audit new values
-					_ = applyErr
-				}
 			}
 		}
 
@@ -1888,6 +1957,41 @@ func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p
 	return settlementStatusResult{Count: count, Awaiting: awaiting}, nil
 }
 
+// approveAndApplySettlement flips a pending settlement to the approved status and
+// applies its financial effects in one transaction. The status update only matches
+// while the row is still in prevStatus, so two concurrent approvals cannot both apply.
+func approveAndApplySettlement(ctx context.Context, pool *pgxpool.Pool, id, prevStatus, status, comments, actor string) ([]string, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `
+		UPDATE public.exposure_settlement_document
+		SET processing_status = $1,
+		    comments = COALESCE(NULLIF($2, ''), comments),
+		    updated_by = $3,
+		    updated_at = NOW()
+		WHERE settlement_id = $4::uuid
+		  AND COALESCE(is_deleted, false) = false
+		  AND UPPER(TRIM(COALESCE(processing_status, ''))) = UPPER(TRIM($5))
+	`, status, comments, actor, id, prevStatus)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, fmt.Errorf("settlement %s is no longer %s", id, prevStatus)
+	}
+	autoRejected, err := applySettlementOnApprove(ctx, tx, id, actor)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return autoRejected, nil
+}
+
 func excludeSettlementIDs(ids []string, exclude []string) []string {
 	if len(exclude) == 0 {
 		return ids
@@ -1926,7 +2030,7 @@ func ApproveExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.SettlementIDs {
 			policyRow, loadErr := LoadExposureSettlementRow(ctx, pool, id)
 			if loadErr != nil {
-				respondWithError(w, http.StatusInternalServerError, loadErr.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, loadErr))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
@@ -1985,7 +2089,7 @@ func RejectExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.SettlementIDs {
 			policyRow, loadErr := LoadExposureSettlementRow(ctx, pool, id)
 			if loadErr != nil {
-				respondWithError(w, http.StatusInternalServerError, loadErr.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, loadErr))
 				return
 			}
 			if ok, msg := runtime.EnforceInline(ctx, r, pool, runtime.EnforceInput{
@@ -2045,7 +2149,7 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range req.SettlementIDs {
 			policyRow, loadErr := LoadExposureSettlementRow(ctx, pool, id)
 			if loadErr != nil {
-				respondWithError(w, http.StatusInternalServerError, loadErr.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, loadErr))
 				return
 			}
 			if ok, msg, tID := runtime.EnforceInlineWithMatrix(ctx, r, pool, runtime.EnforceInput{
@@ -2087,6 +2191,11 @@ func DeleteExposureSettlementDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		go func(ids []string, email string, matrices map[string]string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("goroutine panic: %v", rec)
+				}
+			}()
 			bgCtx := context.Background()
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)

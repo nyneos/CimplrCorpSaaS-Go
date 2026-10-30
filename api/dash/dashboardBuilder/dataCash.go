@@ -745,6 +745,10 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 	args = append(args, bfArgs...)
 	df, dfArgs := dateRangeFilter(ctx, "b", "as_of_date", len(args)+1)
 	args = append(args, dfArgs...)
+	if !api.IsAdminOverride(ctx) && api.GetUserIDFromCtx(ctx) != "" {
+		df += fmt.Sprintf(" AND b.account_no = ANY($%d::text[])", len(args)+1)
+		args = append(args, api.CtxApprovedAccountNumbers(ctx))
+	}
 
 	q := fmt.Sprintf(`
 		WITH latest_audit AS (

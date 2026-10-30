@@ -1,6 +1,7 @@
 package fdReceipt
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"errors"
 	"net/http"
 	"strings"
@@ -119,5 +120,5 @@ func respondExceptionWriteError(w http.ResponseWriter, err error) {
 			return
 		}
 	}
-	api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+	api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+errtext.Detail(w, err))
 }

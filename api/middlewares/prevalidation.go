@@ -4,9 +4,11 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	usersession "CimplrCorpSaas/internal/session"
 	"CimplrCorpSaas/internal/validation"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -40,19 +42,17 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
 
 			lightDashboardRequest := isLightDashboardPrevalidationPath(r.URL.Path)
-			userID, err := validation.ExtractUserID(r)
+			session, body, err := usersession.Identify(r, body)
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
-				return
-			}
-
-			r.Body = io.NopCloser(bytes.NewBuffer(body))
-
-			session := validation.ValidateSession(userID)
-			if session == nil {
+				if errors.Is(err, usersession.ErrUserIDRequired) {
+					api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+					return
+				}
 				api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 				return
 			}
+			userID := session.UserID
+			r.Body = io.NopCloser(bytes.NewBuffer(body))
 			// Reset the idle timer — see SessionMiddleware.
 			session.Touch()
 

@@ -1,6 +1,7 @@
 package cashflowforecast
 
 import (
+	"CimplrCorpSaas/internal/logger"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,12 +16,20 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// toUSD returns how many USD equal 1 unit of cur, using live rates from rate.json.
-// Falls back to 1.0 (i.e. treats the currency as USD) if the rate is unavailable.
+// maxDashboardHorizonDays bounds client-supplied horizons that drive per-day loops.
+const maxDashboardHorizonDays = 3650
+
+// forecastItemCurrencyFilter filters on the line item's currency, falling back to the
+// proposal currency when the item has none.
+const forecastItemCurrencyFilter = " AND UPPER(TRIM(COALESCE(NULLIF(cpi.currency_code, ''), cp.currency_code, ''))) = ANY($%d)"
+
+// toUSD returns how many USD equal 1 unit of cur, using rates from rate.json.
+// A currency without a rate returns 0, so its amounts are left out rather than valued as USD.
 func toUSD(cur string) float64 {
 	rate, err := ticker.RateBetween(cur, "USD")
 	if err != nil || rate == 0 {
-		return 1.0
+		logger.LogError("no USD rate for currency %q; amount excluded", cur)
+		return 0
 	}
 	return rate
 }
@@ -130,6 +139,9 @@ func GetCashflowForecastHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 90
 		}
+		if req.Horizon > maxDashboardHorizonDays {
+			req.Horizon = maxDashboardHorizonDays
+		}
 		scope, msg := resolveForecastScope(r.Context(), req.EntityName, req.Currency)
 		if msg != "" {
 			http.Error(w, msg, http.StatusForbidden)
@@ -178,13 +190,16 @@ func getStartingBalanceUSD(ctx context.Context, pgxPool *pgxpool.Pool, asOf time
 		rate := toUSD(cur)
 		startingUSD += amt * rate
 	}
+	if err := openingRows.Err(); err != nil {
+		return 0, err
+	}
 	return startingUSD, nil
 }
 
 // GetForecastKPIs computes the KPI summary for the given horizon and optional filters
 func GetForecastKPIs(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope forecastScope) (ForecastKPIs, error) {
 	var k ForecastKPIs
-	today := time.Now().UTC()
+	today := time.Now().UTC().Truncate(24 * time.Hour)
 	start := today
 	end := today.AddDate(0, 0, horizon-1)
 
@@ -199,22 +214,22 @@ func GetForecastKPIs(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, sc
 	endKey := end.Year()*12 + int(end.Month())
 
 	aggQ := `
-		SELECT cpi.cashflow_type, cp.currency_code, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount
+		SELECT cpi.cashflow_type, COALESCE(NULLIF(cpi.currency_code, ''), cp.currency_code) AS currency_code, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount
 		FROM cashflow_projection_monthly cpm
 		JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
-		JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
+		JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id AND COALESCE(cp.is_deleted, false) = false
 		LEFT JOIN LATERAL (
-			SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
+			SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY GREATEST(COALESCE(a2.requested_at, '1970-01-01'::timestamp), COALESCE(a2.checker_at, '1970-01-01'::timestamp)) DESC, a2.action_id DESC LIMIT 1
 		) aa ON TRUE
 		WHERE (cpm.year * 12 + cpm.month) BETWEEN $1 AND $2
-		  AND aa.processing_status = 'APPROVED'
+		  AND UPPER(TRIM(aa.processing_status)) = 'APPROVED'
 	`
 	// append GROUP BY after optional filters to ensure WHERE clause is complete
-	aggGroup := ` GROUP BY cpi.cashflow_type, cp.currency_code`
+	aggGroup := ` GROUP BY cpi.cashflow_type, COALESCE(NULLIF(cpi.currency_code, ''), cp.currency_code)`
 	args := []interface{}{startKey, endKey}
 	aggQ += fmt.Sprintf(constants.ErrEntityNameFilter, len(args)+1)
 	args = append(args, scope.Entities)
-	aggQ += fmt.Sprintf(constants.ErrCurrencyCodeFilter, len(args)+1)
+	aggQ += fmt.Sprintf(forecastItemCurrencyFilter, len(args)+1)
 	args = append(args, scope.Currencies)
 
 	// finalize query
@@ -240,6 +255,9 @@ func GetForecastKPIs(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, sc
 			outflowsUSD += n
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return ForecastKPIs{}, err
+	}
 
 	k.TotalInflows = inflowsUSD
 	k.TotalOutflows = outflowsUSD
@@ -251,29 +269,29 @@ func GetForecastKPIs(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, sc
 // GetForecastRows returns detailed monthly projection rows (one row per year-month/type/category/description)
 func GetForecastRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope forecastScope) ([]ForecastRow, error) {
 	var rowsOut []ForecastRow
-	today := time.Now().UTC()
+	today := time.Now().UTC().Truncate(24 * time.Hour)
 	start := today
 	end := today.AddDate(0, 0, horizon-1)
 	startKey := start.Year()*12 + int(start.Month())
 	endKey := end.Year()*12 + int(end.Month())
 
 	fetchQ := `
-        SELECT cpm.year, cpm.month, cpi.cashflow_type, cpi.category_id, cpi.description, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount, cp.currency_code
+        SELECT cpm.year, cpm.month, cpi.cashflow_type, cpi.category_id, cpi.description, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount, COALESCE(NULLIF(cpi.currency_code, ''), cp.currency_code) AS currency_code
         FROM cashflow_projection_monthly cpm
         JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
-        JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
+        JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id AND COALESCE(cp.is_deleted, false) = false
         LEFT JOIN LATERAL (
-            SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
+            SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY GREATEST(COALESCE(a2.requested_at, '1970-01-01'::timestamp), COALESCE(a2.checker_at, '1970-01-01'::timestamp)) DESC, a2.action_id DESC LIMIT 1
         ) aa ON TRUE
         WHERE (cpm.year * 12 + cpm.month) BETWEEN $1 AND $2
-          AND aa.processing_status = 'APPROVED'
+          AND UPPER(TRIM(aa.processing_status)) = 'APPROVED'
     `
 	args := []interface{}{startKey, endKey}
 	fetchQ += fmt.Sprintf(constants.ErrEntityNameFilter, len(args)+1)
 	args = append(args, scope.Entities)
-	fetchQ += fmt.Sprintf(constants.ErrCurrencyCodeFilter, len(args)+1)
+	fetchQ += fmt.Sprintf(forecastItemCurrencyFilter, len(args)+1)
 	args = append(args, scope.Currencies)
-	fetchGroup := ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cpi.category_id, cpi.description, cp.currency_code ORDER BY cpm.year, cpm.month;`
+	fetchGroup := ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cpi.category_id, cpi.description, COALESCE(NULLIF(cpi.currency_code, ''), cp.currency_code) ORDER BY cpm.year, cpm.month;`
 
 	finalFetchQ := fetchQ + fetchGroup
 
@@ -304,13 +322,16 @@ func GetForecastRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, sc
 			NormalizedUSD: n,
 		})
 	}
+	if err := prow.Err(); err != nil {
+		return nil, err
+	}
 	return rowsOut, nil
 }
 
 // GetForecastDailyRows computes daily opening/net/closing balances (USD-normalized)
 func GetForecastDailyRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope forecastScope) ([]DailyRow, error) {
 	var out []DailyRow
-	today := time.Now().UTC()
+	today := time.Now().UTC().Truncate(24 * time.Hour)
 	end := today.AddDate(0, 0, horizon-1)
 
 	// 1) find most recent balance date <= today
@@ -351,28 +372,31 @@ func GetForecastDailyRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon in
 		rate := toUSD(cur)
 		baseClosingUSD += amt * rate
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	// 3) fetch monthly projections (approved) between base month and end month and distribute evenly across days in month
 	startKey := baseDate.Year()*12 + int(baseDate.Month())
 	endKey := end.Year()*12 + int(end.Month())
 
 	monthlyQ := `
-        SELECT cpm.year, cpm.month, cpi.cashflow_type, cp.currency_code, cpi.start_date, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount
+        SELECT cpm.year, cpm.month, cpi.cashflow_type, COALESCE(NULLIF(cpi.currency_code, ''), cp.currency_code) AS currency_code, cpi.maturity_date, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount
         FROM cashflow_projection_monthly cpm
         JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
-        JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
+        JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id AND COALESCE(cp.is_deleted, false) = false
         LEFT JOIN LATERAL (
-            SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
+            SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY GREATEST(COALESCE(a2.requested_at, '1970-01-01'::timestamp), COALESCE(a2.checker_at, '1970-01-01'::timestamp)) DESC, a2.action_id DESC LIMIT 1
         ) aa ON TRUE
-        WHERE aa.processing_status = 'APPROVED'
+        WHERE UPPER(TRIM(aa.processing_status)) = 'APPROVED'
           AND (cpm.year * 12 + cpm.month) BETWEEN $1 AND $2
     `
 	margs := []interface{}{startKey, endKey}
 	monthlyQ += fmt.Sprintf(constants.ErrEntityNameFilter, len(margs)+1)
 	margs = append(margs, scope.Entities)
-	monthlyQ += fmt.Sprintf(constants.ErrCurrencyCodeFilter, len(margs)+1)
+	monthlyQ += fmt.Sprintf(forecastItemCurrencyFilter, len(margs)+1)
 	margs = append(margs, scope.Currencies)
-	monthlyGroup := ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cp.currency_code, cpi.start_date ORDER BY cpm.year, cpm.month;`
+	monthlyGroup := ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, COALESCE(NULLIF(cpi.currency_code, ''), cp.currency_code), cpi.maturity_date ORDER BY cpm.year, cpm.month;`
 
 	finalMonthlyQ := monthlyQ + monthlyGroup
 
@@ -388,18 +412,18 @@ func GetForecastDailyRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon in
 		var year int
 		var month int
 		var ctype, cur string
-		var startDate *time.Time
+		var maturityDate *time.Time
 		var amt float64
-		if err := mrows.Scan(&year, &month, &ctype, &cur, &startDate, &amt); err != nil {
+		if err := mrows.Scan(&year, &month, &ctype, &cur, &maturityDate, &amt); err != nil {
 			return out, err
 		}
-		// If the item has a start_date, use its day-of-month as the effective date for that projection (e.g., 16 => 16th of each month)
+		// If the item has a maturity_date, use its day-of-month as the effective date for that projection (e.g., 16 => 16th of each month)
 		// Otherwise fall back to distributing evenly across the month (legacy behaviour).
 		firstOfMonth := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
 		daysInMonth := time.Date(year, time.Month(month)+1, 0, 0, 0, 0, 0, time.UTC).Day()
 
-		if startDate != nil {
-			effDay := startDate.Day()
+		if maturityDate != nil {
+			effDay := maturityDate.Day()
 			if effDay > daysInMonth {
 				effDay = daysInMonth
 			}
@@ -433,6 +457,9 @@ func GetForecastDailyRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon in
 				}
 			}
 		}
+	}
+	if err := mrows.Err(); err != nil {
+		return nil, err
 	}
 
 	// 4) simulate day-by-day from baseDate+1 to end
@@ -522,6 +549,9 @@ func GetForecastDailyHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 30
 		}
+		if req.Horizon > maxDashboardHorizonDays {
+			req.Horizon = maxDashboardHorizonDays
+		}
 		scope, msg := resolveForecastScope(r.Context(), req.EntityName, req.Currency)
 		if msg != "" {
 			http.Error(w, msg, http.StatusForbidden)
@@ -558,6 +588,9 @@ func GetForecastKPIsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 90
 		}
+		if req.Horizon > maxDashboardHorizonDays {
+			req.Horizon = maxDashboardHorizonDays
+		}
 		scope, msg := resolveForecastScope(r.Context(), req.EntityName, req.Currency)
 		if msg != "" {
 			http.Error(w, msg, http.StatusForbidden)
@@ -593,6 +626,9 @@ func GetForecastRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 90
 		}
+		if req.Horizon > maxDashboardHorizonDays {
+			req.Horizon = maxDashboardHorizonDays
+		}
 		scope, msg := resolveForecastScope(r.Context(), req.EntityName, req.Currency)
 		if msg != "" {
 			http.Error(w, msg, http.StatusForbidden)
@@ -611,14 +647,14 @@ func GetForecastRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetForecastCategorySums(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope forecastScope) (map[string]float64, error) {
 	// We're summing per-item expected_amount (not monthly projections) and normalizing to USD.
 	baseQ := `
-		SELECT cpi.category_id, cpi.cashflow_type, COALESCE(cp.currency_code, 'USD') AS currency_code, COALESCE(SUM(cpi.expected_amount),0)::float8 AS amount
+		SELECT cpi.category_id, cpi.cashflow_type, COALESCE(NULLIF(cpi.currency_code, ''), cp.currency_code, 'USD') AS currency_code, COALESCE(SUM(cpi.expected_amount),0)::float8 AS amount
 		FROM cashflow_proposal_item cpi
-		JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
+		JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id AND COALESCE(cp.is_deleted, false) = false
 		LEFT JOIN LATERAL (
-			SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
+			SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY GREATEST(COALESCE(a2.requested_at, '1970-01-01'::timestamp), COALESCE(a2.checker_at, '1970-01-01'::timestamp)) DESC, a2.action_id DESC LIMIT 1
 		) aa ON TRUE
 		WHERE COALESCE(cpi.is_deleted, false) = false
-		  AND aa.processing_status = 'APPROVED'
+		  AND UPPER(TRIM(aa.processing_status)) = 'APPROVED'
 	`
 
 	whereClauses := ""
@@ -626,9 +662,9 @@ func GetForecastCategorySums(ctx context.Context, pgxPool *pgxpool.Pool, horizon
 	args = append(args, scope.Entities)
 	whereClauses += fmt.Sprintf(constants.ErrEntityNameFilter, len(args))
 	args = append(args, scope.Currencies)
-	whereClauses += fmt.Sprintf(constants.ErrCurrencyCodeFilter, len(args))
+	whereClauses += fmt.Sprintf(forecastItemCurrencyFilter, len(args))
 
-	q := baseQ + whereClauses + " GROUP BY cpi.category_id, cpi.cashflow_type, cp.currency_code"
+	q := baseQ + whereClauses + " GROUP BY cpi.category_id, cpi.cashflow_type, COALESCE(NULLIF(cpi.currency_code, ''), cp.currency_code, 'USD')"
 
 	rows, err := pgxPool.Query(ctx, q, args...)
 	if err != nil {
@@ -646,6 +682,9 @@ func GetForecastCategorySums(ctx context.Context, pgxPool *pgxpool.Pool, horizon
 		rate := toUSD(cur)
 		key := fmt.Sprintf("%s-(%s)", cat, ctype)
 		out[key] += amt * rate
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -670,6 +709,9 @@ func GetForecastCategorySumsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.Horizon <= 0 {
 			req.Horizon = 90
+		}
+		if req.Horizon > maxDashboardHorizonDays {
+			req.Horizon = maxDashboardHorizonDays
 		}
 		scope, msg := resolveForecastScope(r.Context(), req.EntityName, req.Currency)
 		if msg != "" {

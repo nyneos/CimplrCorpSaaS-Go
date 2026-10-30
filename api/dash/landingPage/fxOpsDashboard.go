@@ -121,12 +121,21 @@ func GetFXOpsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 		alerts = append(alerts, settlementAlert)
 
 		// Alert 3: High Unhedged Exposure (always show)
-		highExposureAlert := getHighUnhedgedAlert(ctx, db, entities, currencies)
+		_, alertUnhedged, err := getUnhedgedExposuresChecked(ctx, db, entities, currencies, 0)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		highExposureAlert := highUnhedgedAlert(alertUnhedged)
 		alerts = append(alerts, highExposureAlert)
 
 		// 2. KPI CARDS SECTION
 		// KPI 1: Exposures Requiring Attention (Unhedged & Approaching)
-		unhedgedCount, unhedgedAmount := getUnhedgedExposures(ctx, db, entities, currencies, days)
+		unhedgedCount, unhedgedAmount, err := getUnhedgedExposuresChecked(ctx, db, entities, currencies, days)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 
 		kpis := []KPICard{
 			{
@@ -145,7 +154,11 @@ func GetFXOpsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		// KPI 3: Overall Unhedged (Spot exposure)
-		_, overallUnhedgedUSD := getUnhedgedExposures(ctx, db, entities, currencies, 0) // All time
+		_, overallUnhedgedUSD, err := getUnhedgedExposuresChecked(ctx, db, entities, currencies, 0) // All time
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		kpis = append(kpis, KPICard{
 			Title:    "Overall Unhedged",
 			Value:    formatAmount(overallUnhedgedUSD),
@@ -161,13 +174,25 @@ func GetFXOpsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		// 3. EXPOSURE MATURITIES
-		exposures := getExposureMaturities(ctx, db, entities, currencies)
+		exposures, err := getExposureMaturitiesChecked(ctx, db, entities, currencies)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 
 		// 4. SETTLEMENT PERFORMANCE (Daily)
-		settlementSummary := getSettlementPerformance(ctx, db, entities)
+		settlementSummary, err := getSettlementPerformanceChecked(ctx, db, entities)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 
 		// 5. TOP 5 CURRENCY NET POSITIONS
-		netPositions := getTopCurrencyPositions(ctx, db, entities, 5)
+		netPositions, err := getTopCurrencyPositionsChecked(ctx, db, entities, 5)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 
 		// 6. BANK LIMITS USAGE (placeholder - no table yet)
 		bankLimits := []BankLimit{} // Empty array for now
@@ -292,7 +317,7 @@ func getMaturingExposuresAlert(ctx context.Context, db *pgxpool.Pool, entities [
 		WHERE eh.value_date <= $1
 			AND eh.value_date >= CURRENT_DATE
 			%s
-			AND LOWER(eh.approval_status) = 'approved'
+			AND LOWER(TRIM(COALESCE(eh.approval_status, ''))) = 'approved'
 			AND eh.exposure_header_id NOT IN (
 				SELECT DISTINCT exposure_header_id 
 				FROM exposure_hedge_links 
@@ -378,7 +403,16 @@ func getSettlementFailedAlert(ctx context.Context, db *pgxpool.Pool, entities []
 }
 
 // Helper: Get unhedged exposures count and amount
+// getUnhedgedExposures keeps the previous signature for landingPage/homePage.go.
 func getUnhedgedExposures(ctx context.Context, db *pgxpool.Pool, entities []string, currencies []string, days int) (int, float64) {
+	count, total, err := getUnhedgedExposuresChecked(ctx, db, entities, currencies, days)
+	if err != nil {
+		logger.LogError("Error in getUnhedgedExposures: %v", err)
+	}
+	return count, total
+}
+
+func getUnhedgedExposuresChecked(ctx context.Context, db *pgxpool.Pool, entities []string, currencies []string, days int) (int, float64, error) {
 	entityFilter := ""
 	currencyFilter := ""
 	dateFilter := ""
@@ -410,7 +444,7 @@ func getUnhedgedExposures(ctx context.Context, db *pgxpool.Pool, entities []stri
 			COALESCE(SUM(ABS(eh.total_open_amount)), 0) as total_amount,
 			eh.currency
 		FROM exposure_headers eh
-		WHERE LOWER(eh.approval_status) = 'approved'
+		WHERE LOWER(TRIM(COALESCE(eh.approval_status, ''))) = 'approved'
 			%s
 			%s
 			AND eh.exposure_header_id NOT IN (
@@ -425,7 +459,7 @@ func getUnhedgedExposures(ctx context.Context, db *pgxpool.Pool, entities []stri
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		logger.LogError("Error in getUnhedgedExposures: %v", err)
-		return 0, 0
+		return 0, 0, nil
 	}
 	defer rows.Close()
 
@@ -438,8 +472,7 @@ func getUnhedgedExposures(ctx context.Context, db *pgxpool.Pool, entities []stri
 		var currency string
 
 		if err := rows.Scan(&count, &totalAmount, &currency); err != nil {
-			logger.LogError("Error scanning unhedged exposures: %v", err)
-			continue
+			return totalCount, totalUSD, err
 		}
 
 		totalCount += count
@@ -447,8 +480,11 @@ func getUnhedgedExposures(ctx context.Context, db *pgxpool.Pool, entities []stri
 		usdAmount := convertToINR(totalAmount, currency)
 		totalUSD += usdAmount
 	}
+	if err := rows.Err(); err != nil {
+		return totalCount, totalUSD, err
+	}
 
-	return totalCount, totalUSD
+	return totalCount, totalUSD, nil
 }
 
 // Helper: Get trades maturing today from forward bookings
@@ -522,7 +558,19 @@ func getPendingSettlementToday(ctx context.Context, db *pgxpool.Pool, entities [
 }
 
 // Helper: Get exposure maturities (Next 7 days, Next 30 days, Total)
+// getExposureMaturities keeps the previous signature for landingPage/homePage.go.
 func getExposureMaturities(ctx context.Context, db *pgxpool.Pool, entities []string, currencies []string) []ExposureBlock {
+	blocks, err := getExposureMaturitiesChecked(ctx, db, entities, currencies)
+	if err != nil {
+		logger.LogError("Error in getExposureMaturities: %v", err)
+		if blocks == nil {
+			return []ExposureBlock{}
+		}
+	}
+	return blocks
+}
+
+func getExposureMaturitiesChecked(ctx context.Context, db *pgxpool.Pool, entities []string, currencies []string) ([]ExposureBlock, error) {
 	now := time.Now()
 
 	entityFilter := ""
@@ -549,7 +597,7 @@ func getExposureMaturities(ctx context.Context, db *pgxpool.Pool, entities []str
 			eh.exposure_header_id
 		FROM exposure_headers eh
 		WHERE eh.value_date IS NOT NULL
-			AND LOWER(eh.approval_status) = 'approved'
+			AND LOWER(TRIM(COALESCE(eh.approval_status, ''))) = 'approved'
 			%s
 			%s
 	`, entityFilter, currencyFilter)
@@ -557,7 +605,7 @@ func getExposureMaturities(ctx context.Context, db *pgxpool.Pool, entities []str
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		logger.LogError("Error in getExposureMaturities: %v", err)
-		return []ExposureBlock{}
+		return []ExposureBlock{}, nil
 	}
 	defer rows.Close()
 
@@ -575,9 +623,12 @@ func getExposureMaturities(ctx context.Context, db *pgxpool.Pool, entities []str
 		for hedgeRows.Next() {
 			var expID string
 			if err := hedgeRows.Scan(&expID); err != nil {
-				logger.LogError("fx ops hedged exposures: scan failed: %v", err)
+				return nil, err
 			}
 			hedgedMap[expID] = true
+		}
+		if err := hedgeRows.Err(); err != nil {
+			return nil, err
 		}
 	}
 
@@ -586,7 +637,7 @@ func getExposureMaturities(ctx context.Context, db *pgxpool.Pool, entities []str
 		var currency, valueDate, expID string
 
 		if err := rows.Scan(&amount, &currency, &valueDate, &expID); err != nil {
-			continue
+			return nil, err
 		}
 
 		maturityDate, err := time.Parse(constants.DateFormat, valueDate)
@@ -612,6 +663,9 @@ func getExposureMaturities(ctx context.Context, db *pgxpool.Pool, entities []str
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	return []ExposureBlock{
 		{
@@ -626,11 +680,20 @@ func getExposureMaturities(ctx context.Context, db *pgxpool.Pool, entities []str
 			Label: "Total Upcoming",
 			Value: formatAmount(sumTotal),
 		},
-	}
+	}, nil
 }
 
 // Helper: Get settlement performance summary - FIXED SQL INTERVAL SYNTAX
+// getSettlementPerformance keeps the previous signature for landingPage/homePage.go.
 func getSettlementPerformance(ctx context.Context, db *pgxpool.Pool, entities []string) SettlementSummary {
+	summary, err := getSettlementPerformanceChecked(ctx, db, entities)
+	if err != nil {
+		logger.LogError("Error in getSettlementPerformance: %v", err)
+	}
+	return summary
+}
+
+func getSettlementPerformanceChecked(ctx context.Context, db *pgxpool.Pool, entities []string) (SettlementSummary, error) {
 	today := time.Now().Format(constants.DateFormat)
 
 	summary := SettlementSummary{
@@ -664,7 +727,7 @@ func getSettlementPerformance(ctx context.Context, db *pgxpool.Pool, entities []
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		logger.LogError("Error in getSettlementPerformance: %v", err)
-		return summary
+		return summary, nil
 	}
 	defer rows.Close()
 
@@ -673,8 +736,7 @@ func getSettlementPerformance(ctx context.Context, db *pgxpool.Pool, entities []
 		var count int
 
 		if err := rows.Scan(&status, &count); err != nil {
-			logger.LogError("Error scanning settlement performance: %v", err)
-			continue
+			return summary, err
 		}
 
 		switch status {
@@ -683,6 +745,9 @@ func getSettlementPerformance(ctx context.Context, db *pgxpool.Pool, entities []
 		case "pending":
 			summary.Pending = count
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return summary, err
 	}
 
 	// Upcoming (future dates)
@@ -711,11 +776,23 @@ func getSettlementPerformance(ctx context.Context, db *pgxpool.Pool, entities []
 		summary.ReconciledPct = float64(summary.Confirmed) / float64(total) * 100
 	}
 
-	return summary
+	return summary, nil
 }
 
 // Helper: Get top N currency net positions
+// getTopCurrencyPositions keeps the previous signature for landingPage/homePage.go.
 func getTopCurrencyPositions(ctx context.Context, db *pgxpool.Pool, entities []string, topN int) []NetPosition {
+	positions, err := getTopCurrencyPositionsChecked(ctx, db, entities, topN)
+	if err != nil {
+		logger.LogError("Error in getTopCurrencyPositions: %v", err)
+		if positions == nil {
+			return []NetPosition{}
+		}
+	}
+	return positions
+}
+
+func getTopCurrencyPositionsChecked(ctx context.Context, db *pgxpool.Pool, entities []string, topN int) ([]NetPosition, error) {
 	entityFilter := ""
 	args := []interface{}{}
 	argPos := 1
@@ -733,7 +810,7 @@ func getTopCurrencyPositions(ctx context.Context, db *pgxpool.Pool, entities []s
 			eh.currency,
 			SUM(eh.total_open_amount) as net_position
 		FROM exposure_headers eh
-		%s LOWER(eh.approval_status) = 'approved'
+		%s LOWER(TRIM(COALESCE(eh.approval_status, ''))) = 'approved'
 		GROUP BY eh.currency
 		ORDER BY ABS(SUM(eh.total_open_amount)) DESC
 		LIMIT $%d
@@ -744,7 +821,7 @@ func getTopCurrencyPositions(ctx context.Context, db *pgxpool.Pool, entities []s
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		logger.LogError("Error in getTopCurrencyPositions: %v", err)
-		return []NetPosition{}
+		return []NetPosition{}, nil
 	}
 	defer rows.Close()
 
@@ -754,8 +831,7 @@ func getTopCurrencyPositions(ctx context.Context, db *pgxpool.Pool, entities []s
 		var netPosition float64
 
 		if err := rows.Scan(&currency, &netPosition); err != nil {
-			logger.LogError("Error scanning net positions: %v", err)
-			continue
+			return positions, err
 		}
 
 		usdAmount := convertToINR(math.Abs(netPosition), currency)
@@ -769,8 +845,11 @@ func getTopCurrencyPositions(ctx context.Context, db *pgxpool.Pool, entities []s
 			Amount:   sign + formatAmount(usdAmount),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return positions, err
+	}
 
-	return positions
+	return positions, nil
 }
 
 // Helper: Format amount in INR with M/K suffix and rupee symbol
@@ -796,9 +875,12 @@ func convertToINR(amount float64, currency string) float64 {
 	cur := strings.ToUpper(strings.TrimSpace(currency))
 	// Use ticker.RateBetween to get INR per 1 unit of currency (i.e., amount * rate -> INR)
 	rate, err := ticker.RateBetween(cur, "INR")
-	if err != nil || rate == 0 {
-		// fallback: assume amount is already INR
+	if cur == "INR" {
 		return amount
+	}
+	if err != nil || rate == 0 {
+		// No rate for this currency: leave it out instead of treating it as INR.
+		return 0
 	}
 	return amount * rate
 }
@@ -808,9 +890,8 @@ func getTopTradeCurrencies() []NetPosition {
 	// Request full-rate map relative to INR
 	rates, err := ticker.RatesForBase("INR")
 	if err != nil || len(rates) == 0 {
-		// fallback to a small static list to avoid empty responses
-		fallback := []NetPosition{{Currency: "INR", Amount: "₹1.0000"}, {Currency: "USD", Amount: "₹83.1000"}, {Currency: "EUR", Amount: "₹90.2000"}}
-		return fallback
+		// No rates loaded: show nothing rather than invented rates.
+		return []NetPosition{}
 	}
 
 	// Pick a stable ordering (common trade currencies) if present, else use all
@@ -846,7 +927,10 @@ func getTopTradeCurrencies() []NetPosition {
 // Helper: Get high unhedged exposure alert - always returns exactly one alert
 func getHighUnhedgedAlert(ctx context.Context, db *pgxpool.Pool, entities []string, currencies []string) Alert {
 	_, totalUnhedged := getUnhedgedExposures(ctx, db, entities, currencies, 0)
+	return highUnhedgedAlert(totalUnhedged)
+}
 
+func highUnhedgedAlert(totalUnhedged float64) Alert {
 	if totalUnhedged > 1000000 { // > $1M
 		return Alert{
 			Title:       constants.QuerryHighUnhedgedExposure,

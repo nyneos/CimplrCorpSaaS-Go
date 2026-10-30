@@ -1,6 +1,7 @@
 package api
 
 import (
+	usersession "CimplrCorpSaas/internal/session"
 	"bytes"
 	"context"
 	"errors"
@@ -785,19 +786,17 @@ func SessionMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			r.Body.Close()
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
 
-			userID, err := validation.ExtractUserID(r)
+			session, body, err := usersession.Identify(r, body)
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
-				return
-			}
-
-			r.Body = io.NopCloser(bytes.NewBuffer(body))
-
-			session := validation.ValidateSession(userID)
-			if session == nil {
+				if errors.Is(err, usersession.ErrUserIDRequired) {
+					api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+					return
+				}
 				api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 				return
 			}
+			userID := session.UserID
+			r.Body = io.NopCloser(bytes.NewBuffer(body))
 			// Reset the idle timer: the session cleaner expires sessions that have
 			// gone quiet, not ones that have merely been open a long time.
 			session.Touch()

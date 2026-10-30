@@ -72,7 +72,7 @@ func RunCategorizationScheduler(cfg *CategorizationConfig, db *pgxpool.Pool) err
 		auditLog(fmt.Sprintf("Invalid timezone %s, falling back to UTC: %v", cfg.TimeZone, err))
 	}
 
-	c := cron.New(cron.WithLocation(loc))
+	c := cron.New(cron.WithLocation(loc), cron.WithChain(cron.Recover(cron.DefaultLogger), cron.SkipIfStillRunning(cron.DefaultLogger)))
 	_, err = c.AddFunc(cfg.Schedule, func() {
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("Starting auto-categorization job at %s", time.Now().In(loc).Format(time.RFC3339)))
 		err := ProcessUncategorizedTransactions(db, cfg.BatchSize)

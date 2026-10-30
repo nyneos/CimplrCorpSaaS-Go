@@ -3,6 +3,7 @@ package fdMaturityAndRollover
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
@@ -96,7 +97,7 @@ func GetClosureAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY created_at ASC
 		`, req.ClosureRequestID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -127,7 +128,7 @@ func GetClosureAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND (cf.file_id IS NOT NULL OR rf.file_id IS NOT NULL)
 			ORDER BY a.requested_at DESC`, req.ClosureRequestID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		uploadPayload, err := collectClosurePgxRows(uploadRows)

@@ -1,6 +1,8 @@
 package exposures
 
 import (
+	"CimplrCorpSaas/api/dash/fxrates"
+	"CimplrCorpSaas/api/errtext"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -83,19 +85,7 @@ type NormalizedExposure struct {
 
 // --------------------- UTILITIES -----------------------
 
-var rates = map[string]float64{
-	"USD": 1.0,
-	"AUD": 0.68,
-	"CAD": 0.75,
-	"CHF": 1.1,
-	"CNY": 0.14,
-	"RMB": 0.14,
-	"EUR": 1.09,
-	"GBP": 1.28,
-	"JPY": 0.0067,
-	"SEK": 0.095,
-	"INR": 0.0117,
-}
+var rates = fxrates.USDPerUnit()
 
 func timeToString(t *time.Time) string {
 	if t == nil {
@@ -199,16 +189,17 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		query += ` AND file_hash = $` + strconv.Itoa(len(args)+1)
 		args = append(args, payload.FileHash)
 
-		// enforce middleware-approved entity names when available
-		if allowed := api.GetEntityNamesFromCtx(ctx); len(allowed) > 0 {
-			query += ` AND entity = ANY($` + strconv.Itoa(len(args)+1) + `)`
-			args = append(args, allowed)
-			logger.LogInfo("[FB-DASH] applying entity filter from prevalidation: %d allowed", len(allowed))
+		allowed := api.GetEntityNamesFromCtx(ctx)
+		if len(allowed) == 0 {
+			respondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit, v91ErrorCode(http.StatusForbidden))
+			return
 		}
+		query += ` AND entity = ANY($` + strconv.Itoa(len(args)+1) + `)`
+		args = append(args, allowed)
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error(), v91ErrorCode(http.StatusInternalServerError))
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		defer rows.Close()
@@ -301,9 +292,6 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 
 			cur := strings.ToUpper(strings.TrimSpace(e.Currency))
 			rate := rates[cur]
-			if rate == 0 {
-				rate = 1.0
-			}
 			amt := e.TotalOpenAmount
 			switch strings.ToLower(e.ExposureType) {
 			case "debitor", "debtor", "debitors":
@@ -439,19 +427,20 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, year)
 		}
 
-		// enforce middleware-approved entity names when available
-		if allowed := api.GetEntityNamesFromCtx(ctx); len(allowed) > 0 {
-			query += ` AND entity = ANY($` + strconv.Itoa(argIndex) + `)`
-			args = append(args, allowed)
-			argIndex++
-			logger.LogInfo("[FB-DASH] applying entity filter (by year) from prevalidation: %d allowed", len(allowed))
+		allowed := api.GetEntityNamesFromCtx(ctx)
+		if len(allowed) == 0 {
+			respondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit, v91ErrorCode(http.StatusForbidden))
+			return
 		}
+		query += ` AND entity = ANY($` + strconv.Itoa(argIndex) + `)`
+		args = append(args, allowed)
+		argIndex++
 
 		query += " ORDER BY value_date DESC"
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error(), v91ErrorCode(http.StatusInternalServerError))
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		defer rows.Close()
@@ -546,9 +535,6 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 				e.Currency = "USD"
 			}
 			rate := rates[strings.ToUpper(strings.TrimSpace(e.Currency))]
-			if rate == 0 {
-				rate = 1.0
-			}
 			amt := e.TotalOpenAmount
 			switch strings.ToLower(e.ExposureType) {
 			case "debitor", "debtor", "debitors":
@@ -657,7 +643,7 @@ func GetExposureUploadBatchesMinimal(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error(), v91ErrorCode(http.StatusInternalServerError))
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		defer rows.Close()

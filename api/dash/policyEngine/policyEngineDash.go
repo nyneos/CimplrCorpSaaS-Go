@@ -168,7 +168,7 @@ WHERE started_at BETWEEN $1 AND $2
 	}
 	activeRow := pool.QueryRow(ctx, `
 SELECT COUNT(*) FROM policyengine_svc.policy_master
-WHERE COALESCE(is_deleted,false) = false AND status = 'Active' AND processing_status = 'APPROVED'`)
+WHERE COALESCE(is_deleted,false) = false AND status = 'Active' AND UPPER(TRIM(processing_status)) = 'APPROVED'`)
 	_ = activeRow.Scan(&kpi.ActivePolicies)
 	return kpi, nil
 }
@@ -234,6 +234,9 @@ ORDER BY 1
 			return resp, err
 		}
 		resp.Points = append(resp.Points, p)
+	}
+	if err := rows.Err(); err != nil {
+		return resp, err
 	}
 	return resp, nil
 }
@@ -303,6 +306,9 @@ ORDER BY breach DESC, total_runs DESC
 			return resp, err
 		}
 		resp.Rows = append(resp.Rows, m)
+	}
+	if err := rows.Err(); err != nil {
+		return resp, err
 	}
 	return resp, nil
 }
@@ -376,6 +382,9 @@ LIMIT $6
 		}
 		resp.Rows = append(resp.Rows, tp)
 	}
+	if err := rows.Err(); err != nil {
+		return resp, err
+	}
 	return resp, nil
 }
 
@@ -440,6 +449,9 @@ ORDER BY breach_count DESC
 			return resp, err
 		}
 		resp.Rows = append(resp.Rows, c)
+	}
+	if err := rows.Err(); err != nil {
+		return resp, err
 	}
 	return resp, nil
 }
@@ -510,6 +522,9 @@ GROUP BY module_code
 		}
 		resp.Cells = append(resp.Cells, c)
 	}
+	if err := rows.Err(); err != nil {
+		return resp, err
+	}
 	return resp, nil
 }
 
@@ -579,6 +594,9 @@ GROUP BY 1
 			return LatencyDistributionResponse{}, err
 		}
 		counts[b.Bucket] = b.Count
+	}
+	if err := rows.Err(); err != nil {
+		return LatencyDistributionResponse{}, err
 	}
 	buckets := make([]LatencyBucket, len(latencyBucketOrder))
 	for i, k := range latencyBucketOrder {
@@ -680,6 +698,9 @@ ORDER BY l.evaluated_at DESC
 		}
 		l.EvaluatedAt = evaluatedAt.Format(time.RFC3339)
 		resp.Rows = append(resp.Rows, l)
+	}
+	if err := rows.Err(); err != nil {
+		return resp, err
 	}
 	resp.TotalCount = int64(len(resp.Rows))
 	return resp, nil

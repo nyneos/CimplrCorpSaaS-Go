@@ -390,6 +390,10 @@ func runTransformation(pool *pgxpool.Pool, messageID, attachmentID, ruleID, mapp
 	}
 
 	baseURL := transformtool.BaseURL()
+	if baseURL == "" {
+		saveTransformFailureByRuleID(ctx, pool, messageID, attachmentID, ruleID, "transformation tool is not configured (TRANSFORM_TOOL_URL)")
+		return
+	}
 	apiURL := baseURL + "/tftoolapi/transform"
 
 	ext := strings.ToLower(filepath.Ext(s3Key))

@@ -1,8 +1,10 @@
 package approvalengine
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -287,8 +289,21 @@ func RegisterPostFinalizeHook(transactionType string, fn PostFinalizeFunc) {
 }
 
 // RunPostFinalizeHook executes the registered hook (if any) for transactionType.
+// It is safe to run in its own goroutine: panics are recovered and the work is
+// bounded by postFinalizeTimeout regardless of the caller's context.
 func RunPostFinalizeHook(ctx context.Context, pool *pgxpool.Pool, transactionType, recordID, finalStatus, actorEmail, comment string) {
-	if fn, ok := postFinalizeRegistry[transactionType]; ok {
-		fn(ctx, pool, recordID, transactionType, finalStatus, actorEmail, comment)
+	fn, ok := postFinalizeRegistry[transactionType]
+	if !ok {
+		return
 	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			api.LogError("[ApprovalEngine] post-finalize hook panic tx=%s record=%s: %v", transactionType, recordID, rec)
+		}
+	}()
+	hookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), postFinalizeTimeout)
+	defer cancel()
+	fn(hookCtx, pool, recordID, transactionType, finalStatus, actorEmail, comment)
 }
+
+const postFinalizeTimeout = 5 * time.Minute

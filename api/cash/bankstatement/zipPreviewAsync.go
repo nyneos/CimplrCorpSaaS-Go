@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -82,6 +81,10 @@ func handleZipBankStatementUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *
 	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
 		respondWithError(w, err, "Invalid zip file", http.StatusBadRequest)
+		return
+	}
+	if err := checkZipEntryCount(zr); err != nil {
+		respondWithError(w, err, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -172,6 +175,7 @@ func handleZipDirectIngest(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Re
 	results := []fileResult{}
 	successCount, failureCount := 0, 0
 
+	directBudget := newZipReadBudget()
 	for _, zf := range zr.File {
 		if zf.FileInfo().IsDir() {
 			continue
@@ -204,14 +208,7 @@ func handleZipDirectIngest(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Re
 			}
 			continue
 		}
-		rc, oErr := zf.Open()
-		if oErr != nil {
-			results = append(results, fileResult{FileName: zf.Name, Success: false, Error: oErr.Error()})
-			failureCount++
-			continue
-		}
-		data, rErr := io.ReadAll(rc)
-		rc.Close()
+		data, rErr := directBudget.read(zf)
 		if rErr != nil {
 			results = append(results, fileResult{FileName: zf.Name, Success: false, Error: rErr.Error()})
 			failureCount++
@@ -315,6 +312,11 @@ func handleZipDirectIngest(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Re
 			capturedResult := fres.Result
 			capturedZip := zipName
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						logger.LogError("goroutine panic: %v", rec)
+					}
+				}()
 				notifPayload := BuildBankStatementPayloadFromV2Result(
 					capturedResult, userID, capturedZip, constants.StatusPendingApproval,
 				)
@@ -420,6 +422,7 @@ func handleZipStagingUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *http.R
 	skippedCount := 0
 	immediateFail := 0
 
+	stagingBudget := newZipReadBudget()
 	for _, zf := range zr.File {
 		if zf.FileInfo().IsDir() {
 			continue
@@ -443,17 +446,7 @@ func handleZipStagingUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *http.R
 			continue
 		}
 
-		rc, err := zf.Open()
-		if err != nil {
-			immediateFail++
-			_, _ = insertStagingStatement(ctx, pool, insertStagingStatementParams{
-				BatchID: batchID, Filename: filename, Status: "failed", ErrMsg: err.Error(), FileIndex: fileIdx,
-			})
-			fileIdx++
-			continue
-		}
-		fileBytes, err := io.ReadAll(rc)
-		rc.Close()
+		fileBytes, err := stagingBudget.read(zf)
 		if err != nil {
 			immediateFail++
 			_, _ = insertStagingStatement(ctx, pool, insertStagingStatementParams{
@@ -506,23 +499,29 @@ func handleZipStagingUpload(pool *pgxpool.Pool, w http.ResponseWriter, r *http.R
 	}
 
 	if skippedCount > 0 {
-		_, _ = pool.Exec(ctx, `
+		if _, execErr := pool.Exec(ctx, `
 			UPDATE cimplrcorpsaas.pdf_staging_batch
 			   SET skipped_files = $1, updated_at = now()
 			 WHERE batch_id = $2
-		`, skippedCount, batchID)
+		`, skippedCount, batchID); execErr != nil {
+			logger.LogError("[bank-statement] staging bookkeeping write failed: %v", execErr)
+		}
 	}
 
 	if immediateFail > 0 {
-		_, _ = pool.Exec(ctx, `
+		if _, execErr := pool.Exec(ctx, `
 			UPDATE cimplrcorpsaas.pdf_staging_batch
 			   SET failed_files = failed_files + $1, updated_at = now()
 			 WHERE batch_id = $2
-		`, immediateFail, batchID)
+		`, immediateFail, batchID); execErr != nil {
+			logger.LogError("[bank-statement] staging bookkeeping write failed: %v", execErr)
+		}
 	}
 
 	if len(workItems) == 0 {
-		_, _ = pool.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1`, batchID)
+		if _, execErr := pool.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_batch WHERE batch_id = $1`, batchID); execErr != nil {
+			logger.LogError("[bank-statement] staging bookkeeping write failed: %v", execErr)
+		}
 		respondWithError(w, nil, fmt.Sprintf(
 			"Could not queue any files from zip (%d failed during setup). Check server logs.",
 			immediateFail+skippedCount,
@@ -582,7 +581,9 @@ func processSinglePDFAsync(pool *pgxpool.Pool, j singlePDFJob) {
 	}
 
 	// Remove the queued placeholder; processPDFViaPDFCo inserts the parsed staged statement rows.
-	_, _ = pool.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1`, j.stagingID)
+	if _, execErr := pool.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1`, j.stagingID); execErr != nil {
+		logger.LogError("[bank-statement] staging bookkeeping write failed: %v", execErr)
+	}
 
 	stagingIDs, err := processPDFViaPDFCo(ctx, pool, pdfConvertParams{
 		pdfBytes:        j.pdfBytes,
@@ -640,6 +641,11 @@ func processZipBatchAsync(pool *pgxpool.Pool, job zipBatchJob) {
 		wg.Add(1)
 		it := item
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("goroutine panic: %v", rec)
+				}
+			}()
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -686,7 +692,9 @@ func processOneZipFile(ctx context.Context, pool *pgxpool.Pool, batchID, uploade
 
 	if item.Ext == ".pdf" {
 		// Remove queued placeholder; processPDFViaPDFCo inserts parsed rows.
-		_, _ = pool.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1`, item.StagingID)
+		if _, execErr := pool.Exec(ctx, `DELETE FROM cimplrcorpsaas.pdf_staging_statement WHERE staging_id = $1`, item.StagingID); execErr != nil {
+			logger.LogError("[bank-statement] staging bookkeeping write failed: %v", execErr)
+		}
 		stagingIDs, err := processPDFViaPDFCo(ctx, pool, pdfConvertParams{
 			pdfBytes:        item.Data,
 			filename:        item.Filename,

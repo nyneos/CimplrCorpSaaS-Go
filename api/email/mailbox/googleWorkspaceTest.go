@@ -1,10 +1,12 @@
 package emailmailbox
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"encoding/json"
 	"net/http"
 	"strings"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/internal/services/mailruntime"
@@ -37,7 +39,7 @@ func HandleGoogleWorkspaceTest(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			merged, mergeErr := MergeGoogleWorkspaceFields(stored, fields)
 			if mergeErr != nil {
-				emailcommon.RespondBadRequest(w, mergeErr.Error())
+				emailcommon.RespondBadRequest(w, errtext.Detail(w, mergeErr))
 				return
 			}
 			fields = merged
@@ -51,7 +53,7 @@ func HandleGoogleWorkspaceTest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		payload, err := ResolveGoogleWorkspaceForMailbox(r.Context(), pool, fields)
 		if err != nil {
-			emailcommon.RespondBadRequest(w, err.Error())
+			emailcommon.RespondBadRequest(w, errtext.Detail(w, err))
 			return
 		}
 		rt := mailruntime.NewRuntime()
@@ -60,7 +62,8 @@ func HandleGoogleWorkspaceTest(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := rt.VerifyGmailDWD(r.Context(), mailbox, payload); err != nil {
-			emailcommon.RespondFailPayload(w, constants.RouteGoogleWorkspaceTest, err.Error(), map[string]interface{}{"ok": false})
+			api.LogErrorForResponse(w, "email google workspace test failed: %v", err)
+			emailcommon.RespondFailPayload(w, constants.RouteGoogleWorkspaceTest, "request failed", map[string]interface{}{"ok": false})
 			return
 		}
 		label := strings.TrimSpace(payload.TenantLabel)

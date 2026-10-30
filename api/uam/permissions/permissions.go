@@ -3,6 +3,8 @@ package permissions
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -91,7 +93,7 @@ func GetRolePermissionsJsonByRoleName(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusNotFound, "role not found", "")
 			return
 		} else if err != nil {
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 			return
 		}
 
@@ -102,10 +104,10 @@ func GetRolePermissionsJsonByRoleName(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// UpsertRolePermissions — original logic UNCHANGED, only adds diff-staging
-// at the end of the transaction to populate role_permission_requests.
-// ---------------------------------------------------------------------------
+// UpsertRolePermissions stages permission changes for approval. Live
+// role_permissions rows are only written when a checker approves. The body may
+// carry the full "pages" tree or a "changes" list; only differences from the
+// live values become requests.
 
 func UpsertRolePermissions(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -114,9 +116,22 @@ func UpsertRolePermissions(pool *pgxpool.Pool) http.HandlerFunc {
 			UserID   string                 `json:"user_id"`
 			RoleName string                 `json:"roleName"`
 			Pages    map[string]interface{} `json:"pages"`
+			Changes  []struct {
+				Page    string      `json:"page"`
+				Tab     string      `json:"tab"`
+				Action  string      `json:"action"`
+				Allowed interface{} `json:"allowed"`
+			} `json:"changes"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || req.RoleName == "" || req.Pages == nil {
-			respondWithError(w, http.StatusBadRequest, "user_id, roleName and pages required")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RoleName == "" || (req.Pages == nil && len(req.Changes) == 0) {
+			respondWithError(w, http.StatusBadRequest, "roleName and pages or changes required")
+			return
+		}
+		if ctxUser := api.GetUserIDFromCtx(ctx); ctxUser != "" {
+			req.UserID = ctxUser
+		}
+		if req.UserID == "" {
+			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -182,6 +197,23 @@ func UpsertRolePermissions(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		for _, c := range req.Changes {
+			page, action := strings.TrimSpace(c.Page), strings.TrimSpace(c.Action)
+			if page == "" || action == "" {
+				continue
+			}
+			tab := strings.TrimSpace(c.Tab)
+			key := fmt.Sprintf(constants.FormatPipelineTripleAlt, page, tab, action)
+			if _, exists := permSet[key]; exists {
+				continue
+			}
+			perms = append(perms, permData{
+				Key:     permKey{Page: page, Tab: sql.NullString{String: tab, Valid: tab != ""}, Action: action},
+				Allowed: parseAllowed(c.Allowed),
+			})
+			permSet[key] = struct{}{}
+		}
+
 		if len(perms) == 0 {
 			respondWithError(w, http.StatusBadRequest, "no valid permissions found")
 			return
@@ -230,7 +262,7 @@ func UpsertRolePermissions(pool *pgxpool.Pool) http.HandlerFunc {
 			)
 		`, pageNames, nullStringToText(tabNames), actions)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "permission sync failed: "+err.Error())
+			respondWithError(w, http.StatusInternalServerError, "permission sync failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -241,7 +273,9 @@ func UpsertRolePermissions(pool *pgxpool.Pool) http.HandlerFunc {
 			var page, action string
 			var tab sql.NullString
 			if err := rows.Scan(&id, &page, &tab, &action); err != nil {
-				logger.LogError("permissions.go UpsertRolePermissions: scan permission id row failed: %v", err)
+				rows.Close()
+				respondWithError(w, http.StatusInternalServerError, "permission sync failed: "+errtext.Detail(w, err))
+				return
 			}
 			key := fmt.Sprintf(constants.FormatPipelineTripleAlt, page, tab.String, action)
 			permissionIdMap[key] = id
@@ -266,86 +300,102 @@ func UpsertRolePermissions(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Step 4a: Snapshot current allowed values BEFORE upsert (for diff)
+		// Step 4a: Snapshot live allowed values (for diff)
 		existingAllowed := make(map[int]sql.NullBool)
 		if len(permIDs) > 0 {
 			exRows, exErr := tx.Query(ctx,
 				`SELECT permission_id, allowed FROM public.role_permissions WHERE role_id = $1 AND permission_id = ANY($2)`,
 				roleID, permIDs,
 			)
-			if exErr == nil {
-				for exRows.Next() {
-					var pid int
-					var allowed sql.NullBool
-					if err := exRows.Scan(&pid, &allowed); err != nil {
-						logger.LogError("permissions.go UpsertRolePermissions: scan existing allowed row failed: %v", err)
-					}
-					existingAllowed[pid] = allowed
-				}
-				exRows.Close()
+			if exErr != nil {
+				respondWithError(w, http.StatusInternalServerError, "permission snapshot failed: "+errtext.Detail(w, exErr))
+				return
 			}
-		}
-
-		// Step 4b: Upsert role_permissions (original logic unchanged)
-		if len(roleIDs) > 0 {
-			_, err = tx.Exec(ctx, `
-				INSERT INTO public.role_permissions (role_id, permission_id, allowed, status)
-				SELECT UNNEST($1::text[]), UNNEST($2::int[]), UNNEST($3::bool[]), 'pending'
-				ON CONFLICT (role_id, permission_id)
-				DO UPDATE SET
-					allowed = EXCLUDED.allowed,
-					status = CASE
-						WHEN role_permissions.allowed IS DISTINCT FROM EXCLUDED.allowed THEN 'pending'
-						ELSE role_permissions.status
-					END
-			`, roleIDs, permIDs, alloweds)
-			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, "role_permissions upsert failed: "+err.Error())
+			for exRows.Next() {
+				var pid int
+				var allowed sql.NullBool
+				if err := exRows.Scan(&pid, &allowed); err != nil {
+					exRows.Close()
+					respondWithError(w, http.StatusInternalServerError, "permission snapshot failed: "+errtext.Detail(w, err))
+					return
+				}
+				existingAllowed[pid] = allowed
+			}
+			exRows.Close()
+			if err := exRows.Err(); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "permission snapshot failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
 
-		// Step 4c: Stage ONLY changed rows into role_permission_requests
-		var hasPendingRequests bool
-		for i, pid := range permIDs {
-			oldNullBool := existingAllowed[pid]
-			newVal := alloweds[i]
-
-			// Only insert if value actually changed or permission is brand new
-			if !oldNullBool.Valid || oldNullBool.Bool != newVal {
-				hasPendingRequests = true
-				var oldValArg interface{}
-				if oldNullBool.Valid {
-					oldValArg = oldNullBool.Bool
-				} // else nil → SQL NULL (brand new permission)
-
-				_, insErr := tx.Exec(ctx, `
-					INSERT INTO public.role_permission_requests
-						(role_id, permission_id, old_value, new_value, status, submitted_by)
-					VALUES ($1, $2, $3, $4, 'Pending', $5)
-				`, roleIDs[i], pid, oldValArg, newVal, req.UserID)
-				if insErr != nil {
-					// Non-fatal: log but don't fail the whole upsert
-					logger.LogError("warn: failed to stage permission request role=%s perm=%d: %v", roleIDs[i], pid, insErr)
-				}
+		// Step 4b: earlier pending requests for these permissions are replaced by this submission.
+		if len(permIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE public.role_permission_requests
+				SET status = 'Rejected', actioned_by = $3, actioned_at = now(),
+				    comment = 'Superseded by a newer request'
+				WHERE role_id = $1 AND permission_id = ANY($2) AND LOWER(status) = 'pending'
+			`, roleID, permIDs, req.UserID); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "permission staging failed: "+errtext.Detail(w, err))
+				return
 			}
 		}
 
-		// Mark role as Pending if any requests were staged
-		if hasPendingRequests {
-			_, _ = tx.Exec(ctx,
-				`UPDATE public.roles SET roles_permission_status = 'Pending' WHERE id = $1`,
-				roleID,
-			)
+		// Step 4c: stage only changed rows; the live table is untouched until approval.
+		reqPermIDs := []int{}
+		reqOld := []*bool{}
+		reqNew := []bool{}
+		for i, pid := range permIDs {
+			oldNullBool := existingAllowed[pid]
+			newVal := alloweds[i]
+			if oldNullBool.Valid && oldNullBool.Bool == newVal {
+				continue
+			}
+			var oldVal *bool
+			if oldNullBool.Valid {
+				v := oldNullBool.Bool
+				oldVal = &v
+			}
+			reqPermIDs = append(reqPermIDs, pid)
+			reqOld = append(reqOld, oldVal)
+			reqNew = append(reqNew, newVal)
+		}
+		if len(reqPermIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO public.role_permission_requests
+					(role_id, permission_id, old_value, new_value, status, submitted_by)
+				SELECT $1, UNNEST($2::int[]), UNNEST($3::bool[]), UNNEST($4::bool[]), 'Pending', $5
+			`, roleID, reqPermIDs, reqOld, reqNew, req.UserID); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "permission staging failed: "+errtext.Detail(w, err))
+				return
+			}
+		}
+
+		var pendingCount int
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*) FROM public.role_permission_requests
+			WHERE role_id = $1 AND LOWER(status) = 'pending'
+		`, roleID).Scan(&pendingCount); err != nil {
+			respondWithError(w, http.StatusInternalServerError, "permission staging failed: "+errtext.Detail(w, err))
+			return
+		}
+		roleStatus := "Approved"
+		if pendingCount > 0 {
+			roleStatus = "Pending"
+		}
+		if _, err := tx.Exec(ctx, `UPDATE public.roles SET roles_permission_status = $1 WHERE id = $2`, roleStatus, roleID); err != nil {
+			respondWithError(w, http.StatusInternalServerError, "permission staging failed: "+errtext.Detail(w, err))
+			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			respondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
-			"count": len(perms),
+			"count":   len(perms),
+			"pending": len(reqPermIDs),
 		})
 	}
 }
@@ -388,7 +438,7 @@ func GetRolePermissionsJson(pool *pgxpool.Pool) http.HandlerFunc {
 			if errors.Is(err, pgx.ErrNoRows) {
 				api.RespondEnvelopeError(w, http.StatusNotFound, "Role not found", "")
 			} else {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 			}
 			return
 		}
@@ -437,7 +487,7 @@ func GetRolePermissionsJson(pool *pgxpool.Pool) http.HandlerFunc {
 
 		var pagesJSON sql.NullString
 		if err := pool.QueryRow(r.Context(), query, roleID).Scan(&pagesJSON); err != nil {
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 			return
 		}
 
@@ -516,44 +566,59 @@ func UpdateRolePermissionsStatusByName(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Fetch pending target rows
 		type targetRow struct {
-			ID       int
-			RoleID   string
-			PermID   int
-			NewValue bool
+			ID          int
+			RoleID      string
+			PermID      int
+			NewValue    bool
+			SubmittedBy string
 		}
 		var targets []targetRow
 		var fetchRows pgx.Rows
 
 		if len(req.RequestIDs) > 0 {
 			fetchRows, err = tx.Query(ctx, `
-				SELECT id, role_id, permission_id, new_value
+				SELECT id, role_id, permission_id, new_value, COALESCE(submitted_by, '')
 				FROM public.role_permission_requests
 				WHERE id = ANY($1) AND LOWER(status) = 'pending'
+				FOR UPDATE
 			`, req.RequestIDs)
 		} else {
 			fetchRows, err = tx.Query(ctx, `
-				SELECT rpr.id, rpr.role_id, rpr.permission_id, rpr.new_value
+				SELECT rpr.id, rpr.role_id, rpr.permission_id, rpr.new_value, COALESCE(rpr.submitted_by, '')
 				FROM public.role_permission_requests rpr
 				JOIN public.roles r ON r.id = rpr.role_id
 				WHERE LOWER(r.name) = LOWER($1) AND LOWER(rpr.status) = 'pending'
+				FOR UPDATE OF rpr
 			`, req.RoleName)
 		}
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		for fetchRows.Next() {
 			var t targetRow
-			if err := fetchRows.Scan(&t.ID, &t.RoleID, &t.PermID, &t.NewValue); err != nil {
-				logger.LogError("permissions.go UpdateRolePermissionsStatusByName: scan target row failed: %v", err)
+			if err := fetchRows.Scan(&t.ID, &t.RoleID, &t.PermID, &t.NewValue, &t.SubmittedBy); err != nil {
+				fetchRows.Close()
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
 			}
 			targets = append(targets, t)
 		}
 		fetchRows.Close()
+		if err := fetchRows.Err(); err != nil {
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
 
 		if len(targets) == 0 {
 			respondWithError(w, http.StatusNotFound, "no pending requests found")
 			return
+		}
+		for _, t := range targets {
+			if governance.IsSelfApprovalCtx(ctx, t.SubmittedBy) || governance.IsSelfApproval(req.UserID, t.SubmittedBy) {
+				respondWithError(w, http.StatusForbidden, errtext.Detail(w, governance.ErrSelfApproval))
+				return
+			}
 		}
 
 		ids := make([]int, len(targets))
@@ -571,7 +636,7 @@ func UpdateRolePermissionsStatusByName(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE id = ANY($4)
 		`, action, req.UserID, req.Comment, ids)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "request update failed: "+err.Error())
+			respondWithError(w, http.StatusInternalServerError, "request update failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -610,7 +675,7 @@ func UpdateRolePermissionsStatusByName(pool *pgxpool.Pool) http.HandlerFunc {
 					approved_at = EXCLUDED.approved_at
 			`, rIDs, pIDs, nVals, req.UserID)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, "role_permissions apply failed: "+err.Error())
+				respondWithError(w, http.StatusInternalServerError, "role_permissions apply failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -639,7 +704,7 @@ func UpdateRolePermissionsStatusByName(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			respondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 
@@ -750,7 +815,7 @@ func GetRolesStatus(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -876,7 +941,7 @@ func GetSidebarPermissions(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, query, req.UserID)
 		if err != nil {
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 			return
 		}
 		defer rows.Close()
@@ -1058,7 +1123,7 @@ func GetAllPermissionRequests(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1273,7 +1338,7 @@ func GetRolePermissionAuditTable(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()

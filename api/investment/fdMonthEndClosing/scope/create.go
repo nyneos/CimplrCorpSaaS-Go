@@ -8,6 +8,7 @@
 package scope
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"errors"
@@ -203,7 +204,7 @@ func CreateScope(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if err := validateEligibleStatus(meta.status); err != nil {
-				errs = append(errs, fdID+": "+err.Error())
+				errs = append(errs, fdID+": "+errtext.Text(err))
 				continue
 			}
 			eligible = append(eligible, eligibleFD{fdID: fdID})

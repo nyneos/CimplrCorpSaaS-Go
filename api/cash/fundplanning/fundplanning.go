@@ -128,6 +128,10 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
 			return
 		}
+		if req.EntityID != "" && !api.EntityInScope(r.Context(), req.EntityID) {
+			api.RespondEntityOutOfScope(w)
+			return
+		}
 		if req.HorizonDays == 0 {
 			req.HorizonDays = 30
 		}
@@ -200,6 +204,10 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				q += ` AND p.entity_name = $` + fmt.Sprint(argI)
 				args = append(args, req.EntityID)
 				argI++
+			} else if !api.IsAdminOverride(r.Context()) {
+				q += ` AND p.entity_name = ANY($` + fmt.Sprint(argI) + `::text[])`
+				args = append(args, api.GetEntityNamesFromCtx(r.Context()))
+				argI++
 			}
 
 			if req.Currency != "" {
@@ -256,6 +264,10 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				q += ` AND r.entity_name = $` + fmt.Sprint(argI)
 				args = append(args, req.EntityID)
 				argI++
+			} else if !api.IsAdminOverride(r.Context()) {
+				q += ` AND r.entity_name = ANY($` + fmt.Sprint(argI) + `::text[])`
+				args = append(args, api.GetEntityNamesFromCtx(r.Context()))
+				argI++
 			}
 
 			if req.Currency != "" {
@@ -276,6 +288,10 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if req.EntityID != "" {
 				q += ` AND cpi.entity_name = $` + fmt.Sprint(argI)
 				args = append(args, req.EntityID)
+				argI++
+			} else if !api.IsAdminOverride(r.Context()) {
+				q += ` AND cpi.entity_name = ANY($` + fmt.Sprint(argI) + `::text[])`
+				args = append(args, api.GetEntityNamesFromCtx(r.Context()))
 				argI++
 			}
 

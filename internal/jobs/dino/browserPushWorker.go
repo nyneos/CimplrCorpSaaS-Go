@@ -6,10 +6,13 @@ package jobs
 // ────────────────────
 //
 // A) EVENT PUSH (every BROWSER_PUSH_POLL_SECS = 15s)
-//    Polls notification_svc.outbox WHERE channel='PUSH' AND status='PENDING'
+//    Polls notification_svc.outbox WHERE channel='PUSH' AND processing_status='PENDING'.
+//    The claim is conditional and runs inside the SKIP LOCKED transaction.
+//    Rows stuck in PROCESSING longer than the 15s send timeout plus 60s are reaped.
+//    An ambiguous send timeout stays PROCESSING until that reaper and is not resent.
 //    For each row → lookup user's active push subscriptions → send VAPID push.
 //    On 410/404 from push service → permanently deactivate that subscription.
-//    Success/failure follows same retry+backoff pattern as email outbox worker.
+//    Success/failure follows the same retry, backoff, and lease rules as the email outbox worker.
 //
 // B) DIGEST PUSH (every BROWSER_PUSH_DIGEST_MINS = 30 min)
 //    For each user with active push subscriptions AND unread in_app_notification rows:
@@ -35,8 +38,11 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -137,7 +143,22 @@ type bpwOutboxRow struct {
 	CorrelationID   string
 	RetryCount      int
 	PriorityLevel   int
+	LeaseToken      string
 }
+
+const (
+	// Written immediately before the VAPID call. A stale row still carrying this
+	// may already have been accepted, so the reaper must not send it again.
+	bpwLastErrDispatching = "dispatching:"
+	// Written after a push is accepted, before the SENT status update.
+	// The reaper finishes SENT from this marker and does not send again.
+	bpwLastErrSendAccepted = "send accepted"
+	bpwAmbiguousSendPrefix = "ambiguous send:"
+	// Same 15s budget as the HTTP client in bpwSendVAPID.
+	bpwSendTimeout = 15 * time.Second
+	// Added to the send timeout before a PROCESSING row is treated as stale.
+	bpwStaleMargin = 60 * time.Second
+)
 
 type bpwSubscription struct {
 	ID       string
@@ -146,8 +167,44 @@ type bpwSubscription struct {
 	AuthKey  string
 }
 
+func bpwProcessingStaleAfter() time.Duration {
+	return bpwSendTimeout + bpwStaleMargin
+}
+
+func bpwIsAmbiguousSendErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := err.Error()
+	return msg == "push service HTTP 408" || msg == "push service HTTP 504"
+}
+
+func bpwAmbiguousReason(err error) string {
+	if err == nil {
+		return bpwAmbiguousSendPrefix + " outcome unknown"
+	}
+	msg := err.Error()
+	if errors.Is(err, context.Canceled) || strings.Contains(msg, "context cancelled") || strings.Contains(msg, "context canceled") {
+		return bpwAmbiguousSendPrefix + " context cancelled; outcome unknown"
+	}
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) || strings.Contains(strings.ToLower(msg), "timeout") {
+		return bpwAmbiguousSendPrefix + " timeout; outcome unknown"
+	}
+	return bpwAmbiguousSendPrefix + " incomplete response; outcome unknown"
+}
+
 func bpwProcessOutbox(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig, batchSize int) {
-	// Fetch PENDING PUSH rows using FOR UPDATE SKIP LOCKED to prevent double-delivery
+	bpwReapStaleProcessing(ctx, pool, batchSize)
+
+	// Fetch PENDING PUSH rows using FOR UPDATE SKIP LOCKED to prevent double-delivery.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		logger.LogError("[browser-push] begin tx: %v", err)
@@ -187,79 +244,156 @@ func bpwProcessOutbox(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig,
 		}
 		batch = append(batch, r)
 	}
+	if rows.Err() != nil {
+		logger.LogError("[browser-push] rows iteration error: %v", rows.Err())
+	}
 	rows.Close()
-	if err := tx.Commit(ctx); err != nil {
-		logger.LogError("[browser-push] commit: %v", err)
-		return
-	}
 
-	if len(batch) == 0 {
-		return
-	}
-	logger.LogInfo("[browser-push] processing %d PUSH outbox rows", len(batch))
-
+	// Claim while the SKIP LOCKED row locks are still held. The status predicate
+	// stays conditional so a second worker cannot send the same row.
+	var toSend []bpwOutboxRow
 	for _, row := range batch {
-		// Claim as PROCESSING (optimistic lock — skip if already taken)
-		n, err := bpwExecRowsAffected(ctx, pool,
+		row.LeaseToken = "claimed:" + row.OutboxID + ":" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		ct, err := tx.Exec(ctx,
 			`UPDATE notification_svc.outbox
-			    SET processing_status = 'PROCESSING', processed_at = NOW()
+			    SET processing_status = 'PROCESSING', processed_at = NOW(), last_error = $2
 			  WHERE outbox_id = $1 AND processing_status = 'PENDING'`,
-			row.OutboxID)
-		if err != nil || n == 0 {
-			continue
-		}
-
-		if row.RecipientUserID == "" {
-			// No user to deliver to — mark sent and move on
-			bpwMarkSent(ctx, pool, row)
-			continue
-		}
-
-		subs, err := bpwFetchSubscriptions(ctx, pool, row.RecipientUserID)
+			row.OutboxID, row.LeaseToken)
 		if err != nil {
-			logger.LogError("[browser-push] fetch subs userID=%s: %v", row.RecipientUserID, err)
-			bpwMarkFailed(ctx, pool, row, "db error fetching subscriptions")
+			logger.LogError("[browser-push] outbox=%s claim: %v", row.OutboxID, err)
+			return
+		}
+		if ct.RowsAffected() == 0 {
+			logger.LogError("[browser-push] outbox=%s already claimed", row.OutboxID)
 			continue
 		}
-		if len(subs) == 0 {
-			// User has no registered browser push subscription — mark SENT (not an error)
-			bpwMarkSent(ctx, pool, row)
-			logger.LogInfo("[browser-push] no subscriptions for userID=%s — SENT (skipped)", row.RecipientUserID)
-			continue
-		}
+		toSend = append(toSend, row)
+	}
 
-		title := bpwPushTitle(row.RenderedSubject)
-		body := bpwPushBody(title, row.RenderedBody)
-		payload := bpwEventPayload{
-			Title:         title,
-			Body:          bpwTruncate(bpwStripHTML(body), 200),
-			Tag:           row.EventID,
-			URL:           "/notifications",
-			CorrelationID: row.CorrelationID,
-			EventID:       row.EventID,
-		}
-		payloadBytes, _ := json.Marshal(payload)
+	if err := tx.Commit(ctx); err != nil {
+		logger.LogError("[browser-push] commit claim tx: %v", err)
+		return
+	}
 
-		deliveredToAtLeastOne := false
-		for _, sub := range subs {
-			if err := bpwSendVAPID(cfg, sub, payloadBytes); err != nil {
-				logger.LogError("[browser-push] VAPID error outbox=%s sub=%s: %v", row.OutboxID, sub.ID, err)
-				if bpwIsExpiredSub(err) {
-					bpwDeactivateSubscription(ctx, pool, sub.ID)
+	if len(toSend) == 0 {
+		return
+	}
+	logger.LogInfo("[browser-push] processing %d PUSH outbox rows", len(toSend))
+
+	for _, row := range toSend {
+		bpwDeliverClaimed(ctx, pool, cfg, row)
+	}
+}
+
+func bpwDeliverClaimed(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig, row bpwOutboxRow) {
+	if row.RecipientUserID == "" {
+		bpwMarkSent(ctx, pool, row)
+		return
+	}
+
+	subs, err := bpwFetchSubscriptions(ctx, pool, row.RecipientUserID)
+	if err != nil {
+		logger.LogError("[browser-push] fetch subs userID=%s: %v", row.RecipientUserID, err)
+		bpwMarkFailed(ctx, pool, row, "db error fetching subscriptions")
+		return
+	}
+	if len(subs) == 0 {
+		logger.LogInfo("[browser-push] no subscriptions for userID=%s", row.RecipientUserID)
+		bpwMarkSent(ctx, pool, row)
+		return
+	}
+
+	if !bpwMarkDispatching(ctx, pool, &row) {
+		return
+	}
+
+	title := bpwPushTitle(row.RenderedSubject)
+	body := bpwPushBody(title, row.RenderedBody)
+	payload := bpwEventPayload{
+		Title:         title,
+		Body:          bpwTruncate(bpwStripHTML(body), 200),
+		Tag:           row.EventID,
+		URL:           "/notifications",
+		CorrelationID: row.CorrelationID,
+		EventID:       row.EventID,
+	}
+	payloadBytes, _ := json.Marshal(payload)
+
+	deliveredToAtLeastOne := false
+	var ambiguousErr error
+	for _, sub := range subs {
+		err := bpwSendVAPID(cfg, sub, payloadBytes)
+		if err != nil {
+			logger.LogError("[browser-push] VAPID error outbox=%s sub=%s: %v", row.OutboxID, sub.ID, err)
+			if bpwIsAmbiguousSendErr(err) {
+				if ambiguousErr == nil {
+					ambiguousErr = err
 				}
 				continue
 			}
-			deliveredToAtLeastOne = true
-			logger.LogInfo("[browser-push] delivered outbox=%s sub=%s userID=%s",
-				row.OutboxID, sub.ID, row.RecipientUserID)
+			if bpwIsExpiredSub(err) {
+				bpwDeactivateSubscription(ctx, pool, sub.ID)
+			}
+			continue
 		}
-
-		if deliveredToAtLeastOne {
-			bpwMarkSent(ctx, pool, row)
-		} else {
-			bpwMarkFailed(ctx, pool, row, "all VAPID deliveries failed")
-		}
+		deliveredToAtLeastOne = true
+		logger.LogInfo("[browser-push] delivered outbox=%s sub=%s userID=%s",
+			row.OutboxID, sub.ID, row.RecipientUserID)
 	}
+
+	if deliveredToAtLeastOne {
+		bpwMarkSent(ctx, pool, row)
+		return
+	}
+	if ambiguousErr != nil {
+		bpwRecordAmbiguous(ctx, pool, row, bpwAmbiguousReason(ambiguousErr))
+		return
+	}
+	bpwMarkFailed(ctx, pool, row, "all VAPID deliveries failed")
+}
+
+func bpwMarkDispatching(ctx context.Context, pool *pgxpool.Pool, row *bpwOutboxRow) bool {
+	if !strings.HasPrefix(row.LeaseToken, "claimed:") {
+		logger.LogError("[browser-push] outbox=%s missing claim lease; not dispatching", row.OutboxID)
+		return false
+	}
+	marker := bpwLastErrDispatching + strings.TrimPrefix(row.LeaseToken, "claimed:")
+	n, err := bpwExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET last_error = $2, processed_at = NOW()
+		  WHERE outbox_id = $1
+		    AND processing_status = 'PROCESSING'
+		    AND last_error = $3`,
+		row.OutboxID, marker, row.LeaseToken)
+	if err != nil || n == 0 {
+		logger.LogError("[browser-push] outbox=%s dispatch lease not taken: %v", row.OutboxID, err)
+		return false
+	}
+	row.LeaseToken = marker
+	return true
+}
+
+func bpwRecordAmbiguous(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow, reason string) {
+	if !strings.HasPrefix(reason, bpwAmbiguousSendPrefix) {
+		reason = bpwAmbiguousSendPrefix + " " + reason
+	}
+	if row.LeaseToken == "" {
+		logger.LogError("[browser-push] ambiguous outcome not recorded outbox=%s: missing lease", row.OutboxID)
+		return
+	}
+	n, err := bpwExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET last_error = $2
+		  WHERE outbox_id = $1
+		    AND processing_status = 'PROCESSING'
+		    AND last_error = $3`,
+		row.OutboxID, bpwLimit(reason, 400), row.LeaseToken)
+	if err != nil || n == 0 {
+		logger.LogError("[browser-push] ambiguous outcome not recorded outbox=%s: %v", row.OutboxID, err)
+		return
+	}
+	logger.LogError("[browser-push] ambiguous send outbox=%s left PROCESSING (no immediate retry): %s",
+		row.OutboxID, bpwLimit(reason, 200))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -410,6 +544,10 @@ func bpwSendDigestToUser(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConf
 // ─────────────────────────────────────────────────────────────────────────────
 
 func bpwSendVAPID(cfg *vapidConfig, sub bpwSubscription, payload []byte) error {
+	endpoint, err := url.Parse(strings.TrimSpace(sub.Endpoint))
+	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" {
+		return fmt.Errorf("push endpoint must be https")
+	}
 	resp, err := webpush.SendNotification(payload, &webpush.Subscription{
 		Endpoint: sub.Endpoint,
 		Keys: webpush.Keys{
@@ -417,6 +555,7 @@ func bpwSendVAPID(cfg *vapidConfig, sub bpwSubscription, payload []byte) error {
 			Auth:   sub.AuthKey,
 		},
 	}, &webpush.Options{
+		HTTPClient:      pushHTTPClient,
 		VAPIDPublicKey:  cfg.public,
 		VAPIDPrivateKey: cfg.private,
 		Subscriber:      cfg.subject,
@@ -464,45 +603,224 @@ func bpwFetchSubscriptions(ctx context.Context, pool *pgxpool.Pool, userID strin
 }
 
 func bpwMarkSent(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow) {
-	if _, err := pool.Exec(ctx, `
-		UPDATE notification_svc.outbox
-		   SET processing_status = 'SENT', sent_at = NOW()
-		 WHERE outbox_id = $1
-	`, row.OutboxID); err != nil {
-		logger.LogError("[browser-push] mark sent exec failed for outbox=%s: %v", row.OutboxID, err)
+	if row.LeaseToken == "" {
+		logger.LogError("[browser-push] SENT update skipped outbox=%s: missing lease", row.OutboxID)
+		return
 	}
+	if _, err := bpwExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET last_error = $2
+		  WHERE outbox_id = $1
+		    AND processing_status = 'PROCESSING'
+		    AND last_error = $3`,
+		row.OutboxID, bpwLastErrSendAccepted, row.LeaseToken); err != nil {
+		logger.LogError("[browser-push] record send accepted failed outbox=%s: %v", row.OutboxID, err)
+	}
+
+	n, err := bpwExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET processing_status = 'SENT', sent_at = NOW(), last_error = NULL
+		  WHERE outbox_id = $1
+		    AND (
+		          (processing_status = 'PROCESSING' AND last_error IN ($2, $3))
+		       OR (processing_status = 'DEAD' AND last_error LIKE 'stale PROCESSING after dispatch%')
+		    )`,
+		row.OutboxID, bpwLastErrSendAccepted, row.LeaseToken)
+	if err != nil {
+		logger.LogError("[browser-push] SENT update failed outbox=%s: %v", row.OutboxID, err)
+		return
+	}
+	if n == 0 {
+		var status string
+		qerr := pool.QueryRow(ctx,
+			`SELECT processing_status FROM notification_svc.outbox WHERE outbox_id = $1`,
+			row.OutboxID).Scan(&status)
+		if qerr != nil || status != "SENT" {
+			logger.LogError("[browser-push] SENT update matched no row outbox=%s status=%q err=%v; not treating as done",
+				row.OutboxID, status, qerr)
+			return
+		}
+	}
+	logger.LogInfo("[browser-push] SENT outbox=%s", row.OutboxID)
 }
 
 func bpwMarkFailed(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow, errMsg string) {
+	if strings.HasPrefix(errMsg, bpwAmbiguousSendPrefix) || strings.HasPrefix(errMsg, "dispatching") {
+		bpwRecordAmbiguous(ctx, pool, row, errMsg)
+		return
+	}
+	if row.LeaseToken == "" {
+		logger.LogError("[browser-push] outbox=%s failure not applied; missing lease", row.OutboxID)
+		return
+	}
+
 	retryMax, retryBackoffSecs := bpwFetchRetryConfig(ctx, pool, row.EventID)
 	if row.RetryCount < retryMax {
 		backoffSecs := float64(retryBackoffSecs) * math.Pow(2, float64(row.RetryCount))
 		nextAt := time.Now().Add(time.Duration(backoffSecs) * time.Second)
-		if _, err := pool.Exec(ctx, `
+		n, err := bpwExecRowsAffected(ctx, pool, `
 			UPDATE notification_svc.outbox
 			   SET processing_status = 'PENDING',
 			       retry_count       = retry_count + 1,
 			       last_error        = $2,
 			       scheduled_at      = $3
 			 WHERE outbox_id = $1
-		`, row.OutboxID, errMsg, nextAt); err != nil {
-			logger.LogError("[browser-push] mark retry exec failed for outbox=%s: %v", row.OutboxID, err)
+			   AND processing_status = 'PROCESSING'
+			   AND last_error = $4
+		`, row.OutboxID, errMsg, nextAt, row.LeaseToken)
+		if err != nil {
+			logger.LogError("[browser-push] retry update failed outbox=%s: %v", row.OutboxID, err)
+			return
+		}
+		if n == 0 {
+			logger.LogError("[browser-push] retry update matched no row outbox=%s; not treating as retried", row.OutboxID)
+			return
 		}
 		logger.LogInfo("[browser-push] RETRY outbox=%s attempt=%d next=%s",
 			row.OutboxID, row.RetryCount+1, nextAt.Format(time.RFC3339))
 	} else {
-		if _, err := pool.Exec(ctx, `
+		n, err := bpwExecRowsAffected(ctx, pool, `
 			UPDATE notification_svc.outbox
 			   SET processing_status = 'DEAD',
 			       retry_count       = retry_count + 1,
 			       last_error        = $2
 			 WHERE outbox_id = $1
-		`, row.OutboxID, errMsg); err != nil {
-			logger.LogError("[browser-push] mark dead exec failed for outbox=%s: %v", row.OutboxID, err)
+			   AND processing_status = 'PROCESSING'
+			   AND last_error = $3
+		`, row.OutboxID, errMsg, row.LeaseToken)
+		if err != nil {
+			logger.LogError("[browser-push] DEAD update failed outbox=%s: %v", row.OutboxID, err)
+			return
+		}
+		if n == 0 {
+			logger.LogError("[browser-push] DEAD update matched no row outbox=%s; not treating as failed", row.OutboxID)
+			return
 		}
 		logger.LogInfo("[browser-push] DEAD outbox=%s after %d attempts",
 			row.OutboxID, row.RetryCount+1)
 	}
+}
+
+func bpwReapStaleProcessing(ctx context.Context, pool *pgxpool.Pool, limit int) {
+	if limit < 1 {
+		limit = 1
+	}
+	staleSecs := int(bpwProcessingStaleAfter() / time.Second)
+	rows, err := pool.Query(ctx, `
+		SELECT o.outbox_id,
+		       COALESCE(o.recipient_user_id, ''),
+		       o.event_id,
+		       COALESCE(o.retry_count, 0),
+		       COALESCE(o.last_error, ''),
+		       EXISTS (
+		           SELECT 1 FROM notification_svc.send_history h
+		            WHERE h.outbox_id = o.outbox_id AND h.processing_status = 'SENT'
+		       )
+		FROM   notification_svc.outbox o
+		WHERE  o.processing_status = 'PROCESSING'
+		  AND  o.channel = 'PUSH'
+		  AND  (o.processed_at IS NULL OR o.processed_at < now() - make_interval(secs => $1))
+		ORDER  BY o.processed_at ASC NULLS FIRST
+		LIMIT  $2`, staleSecs, limit)
+	if err != nil {
+		logger.LogError("[browser-push] reap stale PROCESSING: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var row bpwOutboxRow
+		var lastErr string
+		var sendAccepted bool
+		if err := rows.Scan(
+			&row.OutboxID, &row.RecipientUserID, &row.EventID, &row.RetryCount,
+			&lastErr, &sendAccepted,
+		); err != nil {
+			logger.LogError("[browser-push] reap scan: %v", err)
+			continue
+		}
+		bpwReconcileStale(ctx, pool, row, strings.TrimSpace(lastErr), sendAccepted)
+	}
+	if rows.Err() != nil {
+		logger.LogError("[browser-push] reap rows: %v", rows.Err())
+	}
+}
+
+func bpwReconcileStale(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow, lastErr string, sendAccepted bool) {
+	if sendAccepted || lastErr == bpwLastErrSendAccepted {
+		bpwReconcileAccepted(ctx, pool, row)
+		return
+	}
+	if lastErr == "" || strings.HasPrefix(lastErr, "claimed:") {
+		bpwRequeueBeforeDispatch(ctx, pool, row, lastErr)
+		return
+	}
+	if strings.HasPrefix(lastErr, "dispatching") || strings.HasPrefix(lastErr, bpwAmbiguousSendPrefix) {
+		msg := lastErr
+		if strings.HasPrefix(lastErr, "dispatching") {
+			msg = "stale PROCESSING after dispatch; send outcome unknown, not resent"
+		}
+		bpwFailStaleProcessing(ctx, pool, row, lastErr, msg)
+		return
+	}
+	row.LeaseToken = lastErr
+	bpwMarkFailed(ctx, pool, row, lastErr)
+}
+
+func bpwReconcileAccepted(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow) {
+	n, err := bpwExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET processing_status = 'SENT', sent_at = COALESCE(sent_at, now()), last_error = NULL
+		  WHERE outbox_id = $1 AND processing_status = 'PROCESSING'`,
+		row.OutboxID)
+	if err != nil {
+		logger.LogError("[browser-push] reconcile SENT failed outbox=%s: %v", row.OutboxID, err)
+		return
+	}
+	if n == 0 {
+		return
+	}
+	logger.LogInfo("[browser-push] reconciled SENT outbox=%s (no resend)", row.OutboxID)
+}
+
+func bpwRequeueBeforeDispatch(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow, observed string) {
+	msg := "reaped stale PROCESSING before dispatch"
+	n, err := bpwExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET processing_status = 'PENDING',
+		        last_error = $2,
+		        scheduled_at = now()
+		  WHERE outbox_id = $1
+		    AND processing_status = 'PROCESSING'
+		    AND COALESCE(last_error, '') = $3`,
+		row.OutboxID, msg, observed)
+	if err != nil {
+		logger.LogError("[browser-push] requeue stale outbox=%s: %v", row.OutboxID, err)
+		return
+	}
+	if n == 0 {
+		return
+	}
+	logger.LogInfo("[browser-push] requeued stale outbox=%s (never dispatched)", row.OutboxID)
+}
+
+func bpwFailStaleProcessing(ctx context.Context, pool *pgxpool.Pool, row bpwOutboxRow, observed, msg string) {
+	n, err := bpwExecRowsAffected(ctx, pool,
+		`UPDATE notification_svc.outbox
+		    SET processing_status = 'DEAD',
+		        last_error = $2
+		  WHERE outbox_id = $1
+		    AND processing_status = 'PROCESSING'
+		    AND last_error = $3`,
+		row.OutboxID, bpwLimit(msg, 400), observed)
+	if err != nil {
+		logger.LogError("[browser-push] stale PROCESSING fail update outbox=%s: %v", row.OutboxID, err)
+		return
+	}
+	if n == 0 {
+		return
+	}
+	logger.LogError("[browser-push] DEAD stale outbox=%s err=%s", row.OutboxID, bpwLimit(msg, 200))
 }
 
 func bpwFetchRetryConfig(ctx context.Context, pool *pgxpool.Pool, eventID string) (int, int) {
@@ -566,6 +884,13 @@ func bpwTruncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+func bpwLimit(s string, max int) string {
+	if max < 0 || len(s) <= max {
+		return s
+	}
+	return s[:max]
 }
 
 func bpwPushTitle(subject string) string {

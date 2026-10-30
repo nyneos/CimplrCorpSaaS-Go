@@ -79,7 +79,7 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 			ON m.fd_id = e.fd_id
 			AND COALESCE(m.is_deleted,false) = false
 		LEFT JOIN LATERAL (
-			SELECT ai.* FROM uam.approval_instance ai
+			SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 			WHERE ai.record_id = e.exception_id
 			  AND ai.module_code = 'FIXED_DEPOSIT'
 			  AND ai.status = 'PENDING'
@@ -88,7 +88,7 @@ func loadVarianceListRows(ctx context.Context, pool *pgxpool.Pool, f varianceLis
 			LIMIT 1
 		) ai ON true
 		LEFT JOIN LATERAL (
-			SELECT aie.* FROM uam.approval_instance_eye aie
+			SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 			WHERE aie.instance_id = ai.instance_id
 			  AND aie.status = 'ACTIVE'
 			ORDER BY aie.position ASC, aie.instance_eye_id ASC

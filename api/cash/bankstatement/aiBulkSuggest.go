@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"CimplrCorpSaas/api"
@@ -60,7 +61,22 @@ func AiBulkSuggestHandler(pool *pgxpool.Pool) http.Handler {
 			req.UserID = sessionUID
 		}
 
+		if _, busy := aiBulkJobsRunning.LoadOrStore(sessionUID, struct{}{}); busy {
+			http.Error(w, "an AI analysis is already running for this user", http.StatusConflict)
+			return
+		}
+		started := false
+		defer func() {
+			if !started {
+				aiBulkJobsRunning.Delete(sessionUID)
+			}
+		}()
+
 		ctx := r.Context()
+		if req.EntityID != "" && !api.EntityInScope(ctx, req.EntityID) {
+			api.RespondEntityOutOfScope(w)
+			return
+		}
 		inputs, totalTxns, err := loadBulkSuggestInputs(ctx, pool, req.EntityID)
 		if err != nil {
 			http.Error(w, "failed to query review queue", http.StatusInternalServerError)
@@ -78,14 +94,18 @@ func AiBulkSuggestHandler(pool *pgxpool.Pool) http.Handler {
 			return
 		}
 
-		go runAiBulkSuggestJob(pool, jobID, sessionUID, inputs, totalTxns)
+		started = true
+		go func() {
+			defer aiBulkJobsRunning.Delete(sessionUID)
+			runAiBulkSuggestJob(pool, jobID, sessionUID, inputs, totalTxns)
+		}()
 
 		api.RespondEnvelopeSuccessCompat(w, "AI analysis started. You will be notified when suggestions are ready.", map[string]interface{}{
-			"status":              "processing",
-			"job_id":              jobID,
-			"total_patterns":      len(inputs),
-			"total_transactions":  totalTxns,
-			"ai_configured":       true,
+			"status":             "processing",
+			"job_id":             jobID,
+			"total_patterns":     len(inputs),
+			"total_transactions": totalTxns,
+			"ai_configured":      true,
 		})
 	})
 }
@@ -148,7 +168,9 @@ func loadBulkSuggestInputs(ctx context.Context, pool *pgxpool.Pool, entityID str
 			WHERE q.status = 'PENDING'
 			  AND q.step = 'UNALLOCATED'
 			  AND COALESCE(bs.is_deleted, false) = false
+			  AND ($1::boolean OR bs.entity_id = ANY($2::text[]))
 			ORDER BY t.narration_clean`
+		args = []interface{}{api.IsAdminOverride(ctx), api.GetEntityIDsFromCtx(ctx)}
 	}
 
 	rows, err := pool.Query(ctx, query, args...)
@@ -195,8 +217,27 @@ func loadBulkSuggestInputs(ctx context.Context, pool *pgxpool.Pool, entityID str
 	return inputs, totalTxns, nil
 }
 
+// aiBulkJobsRunning holds the users with a bulk-suggest job running in this process.
+var aiBulkJobsRunning sync.Map
+
+const aiBulkJobTimeout = 30 * time.Minute
+
 func runAiBulkSuggestJob(pool *pgxpool.Pool, jobID, userID string, inputs []cat.BulkNarrationInput, totalTxns int) {
-	bgCtx := context.Background()
+	bgCtx, cancel := context.WithTimeout(context.Background(), aiBulkJobTimeout)
+	defer cancel()
+	defer func() {
+		if rec := recover(); rec != nil {
+			logger.LogError("[AI-BULK-JOB] job %s panic: %v", jobID, rec)
+			failCtx, failCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer failCancel()
+			if _, err := pool.Exec(failCtx, `
+				UPDATE cimplrcorpsaas.smartcat_ai_suggest_job
+				   SET status = 'failed', error_message = 'internal error', completed_at = now()
+				 WHERE job_id = $1 AND status = 'processing'`, jobID); err != nil {
+				logger.LogError("[AI-BULK-JOB] job %s fail mark: %v", jobID, err)
+			}
+		}
+	}()
 	status := "ready"
 	var errMsg string
 	var suggestions []cat.BulkSuggestion
@@ -214,11 +255,13 @@ func runAiBulkSuggestJob(pool *pgxpool.Pool, jobID, userID string, inputs []cat.
 			if err != nil {
 				return
 			}
-			_, _ = pool.Exec(bgCtx, `
+			if _, execErr := pool.Exec(bgCtx, `
 				UPDATE cimplrcorpsaas.smartcat_ai_suggest_job
 				   SET suggestions = suggestions || $2::jsonb
 				 WHERE job_id = $1
-			`, jobID, string(chunkJSON))
+			`, jobID, string(chunkJSON)); execErr != nil {
+				logger.LogError("[bank-statement] staging bookkeeping write failed: %v", execErr)
+			}
 		}
 
 		var err error
@@ -232,7 +275,9 @@ func runAiBulkSuggestJob(pool *pgxpool.Pool, jobID, userID string, inputs []cat.
 
 	// Final write: replace suggestions with the fully ordered slice and mark done.
 	suggJSON, _ := json.Marshal(suggestions)
-	_, dbErr := pool.Exec(bgCtx, `
+	storeCtx, storeCancel := context.WithTimeout(context.WithoutCancel(bgCtx), 30*time.Second)
+	defer storeCancel()
+	_, dbErr := pool.Exec(storeCtx, `
 		UPDATE cimplrcorpsaas.smartcat_ai_suggest_job
 		   SET status = $2,
 		       suggestions = $3::jsonb,
@@ -245,7 +290,7 @@ func runAiBulkSuggestJob(pool *pgxpool.Pool, jobID, userID string, inputs []cat.
 		return
 	}
 
-	notifyAiSuggestReady(bgCtx, pool, aiSuggestReadyParams{
+	notifyAiSuggestReady(storeCtx, pool, aiSuggestReadyParams{
 		jobID:        jobID,
 		userID:       userID,
 		status:       status,
@@ -284,14 +329,14 @@ func loadAiSuggestJob(ctx context.Context, pool *pgxpool.Pool, jobID, userID str
 	}
 
 	out := map[string]interface{}{
-		"success":             status == "ready",
-		"status":              status,
-		"job_id":              jobID,
-		"suggestions":         suggestions,
-		"total_patterns":      totalPatterns,
-		"total_transactions":  totalTxns,
-		"processed_patterns":  processedPatterns,
-		"ai_configured":       true,
+		"success":            status == "ready",
+		"status":             status,
+		"job_id":             jobID,
+		"suggestions":        suggestions,
+		"total_patterns":     totalPatterns,
+		"total_transactions": totalTxns,
+		"processed_patterns": processedPatterns,
+		"ai_configured":      true,
 	}
 	if errMsg != "" {
 		out["error"] = errMsg

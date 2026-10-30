@@ -64,14 +64,14 @@ func GetSchemeDataHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if req.Limit == 0 {
+		if req.Limit <= 0 || req.Limit > 100000 {
 			req.Limit = 100000
 		}
-		if req.Limit > 100000 {
-			req.Limit = 100000
+		if req.Offset < 0 {
+			req.Offset = 0
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 		defer cancel()
 
 		// ── build WHERE clause for master staging filters ──────────────────────

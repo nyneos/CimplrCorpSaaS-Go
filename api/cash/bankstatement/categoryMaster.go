@@ -794,9 +794,15 @@ func DeleteMultipleTransactionCategoriesHandler(pool *pgxpool.Pool) http.Handler
 		// 4. Delete all rule scopes for these rules (if not used elsewhere)
 		for _, scopeID := range scopeIDs {
 			var count int
-			err = tx.QueryRow(r.Context(), `SELECT COUNT(*) FROM cimplrcorpsaas.category_rules WHERE scope_id = $1`, scopeID).Scan(&count)
-			if err == nil && count == 0 {
-				_, _ = tx.Exec(r.Context(), `DELETE FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, scopeID)
+			if err := tx.QueryRow(r.Context(), `SELECT COUNT(*) FROM cimplrcorpsaas.category_rules WHERE scope_id = $1`, scopeID).Scan(&count); err != nil {
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if count == 0 {
+				if _, err := tx.Exec(r.Context(), `DELETE FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, scopeID); err != nil {
+					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 		}
 
@@ -1460,9 +1466,15 @@ func DeleteTransactionCategoryHandler(pool *pgxpool.Pool) http.Handler {
 		// 4. Delete all rule scopes for these rules (if not used elsewhere)
 		for _, scopeID := range scopeIDs {
 			var count int
-			err = tx.QueryRow(r.Context(), `SELECT COUNT(*) FROM cimplrcorpsaas.category_rules WHERE scope_id = $1`, scopeID).Scan(&count)
-			if err == nil && count == 0 {
-				_, _ = tx.Exec(r.Context(), `DELETE FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, scopeID)
+			if err := tx.QueryRow(r.Context(), `SELECT COUNT(*) FROM cimplrcorpsaas.category_rules WHERE scope_id = $1`, scopeID).Scan(&count); err != nil {
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if count == 0 {
+				if _, err := tx.Exec(r.Context(), `DELETE FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, scopeID); err != nil {
+					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 		}
 

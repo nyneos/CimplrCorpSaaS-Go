@@ -189,19 +189,20 @@ func setRuleFieldsNew(a *auditRow, rf ruleFields) {
 // pendingAudit is the minimal projection of a policy_master_audit row needed to
 // action a checker decision (approve/reject).
 type pendingAudit struct {
-	AuditID    string
-	ActionType string
+	AuditID     string
+	ActionType  string
+	RequestedBy string
 }
 
 func findPendingAudit(r *http.Request, tx pgx.Tx, policyID string) (pendingAudit, error) {
 	var pa pendingAudit
 	err := tx.QueryRow(r.Context(), `
-		SELECT audit_id::text, action_type
+		SELECT audit_id::text, action_type, COALESCE(requested_by, '')
 		FROM policyengine_svc.policy_master_audit
 		WHERE policy_id = $1::uuid AND processing_status = ANY($2::text[])
 		ORDER BY requested_at DESC
 		LIMIT 1
 		FOR UPDATE`, policyID, common.PendingProcessingStatuses,
-	).Scan(&pa.AuditID, &pa.ActionType)
+	).Scan(&pa.AuditID, &pa.ActionType, &pa.RequestedBy)
 	return pa, err
 }

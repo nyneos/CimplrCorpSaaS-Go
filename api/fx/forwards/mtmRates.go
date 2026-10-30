@@ -1,6 +1,7 @@
 package forwards
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/fx/auditutil"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -180,7 +181,7 @@ func UploadMTMFiles(pool *pgxpool.Pool) http.HandlerFunc {
 
 		results, err := processUploadMTMFiles(r.Context(), pool, r, buNames)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -232,7 +233,7 @@ func processUploadMTMFiles(ctx context.Context, pool *pgxpool.Pool, r *http.Requ
 		s3Key := s3storage.BuildUploadedS3Key("fx/mtm", "", fileHeader.Filename, uploadedBy, time.Now().UTC())
 
 		if err := ensureUniqueMTMUpload(ctx, pool, fileBytes); err != nil {
-			message := err.Error()
+			message := errtext.Text(err)
 			if errors.Is(err, ErrMTMFileAlreadyUploaded) {
 				message = duplicateMTMUploadMessage
 			}
@@ -552,7 +553,7 @@ func processUploadMTMFiles(ctx context.Context, pool *pgxpool.Pool, r *http.Requ
 		if fileError != nil {
 			results = append(results, map[string]interface{}{
 				"filename":           fileHeader.Filename,
-				constants.ValueError: fileError.Error(),
+				constants.ValueError: errtext.Text(fileError),
 				"row_errors":         rowErrors,
 				"valid_rows":         len(validRows),
 			})
@@ -583,7 +584,7 @@ func processUploadMTMFiles(ctx context.Context, pool *pgxpool.Pool, r *http.Requ
 				_ = tx.Rollback(ctx)
 				results = append(results, map[string]interface{}{
 					"filename":           fileHeader.Filename,
-					constants.ValueError: "Failed to upload file to S3: " + err.Error(),
+					constants.ValueError: "Failed to upload file to S3: " + errtext.Text(err),
 				})
 				continue
 			}
@@ -626,7 +627,7 @@ func processUploadMTMFiles(ctx context.Context, pool *pgxpool.Pool, r *http.Requ
 				}
 				results = append(results, map[string]interface{}{
 					"filename":           fileHeader.Filename,
-					constants.ValueError: "Failed to insert data: " + err.Error(),
+					constants.ValueError: "Failed to insert data: " + errtext.Text(err),
 				})
 				continue
 			}
@@ -640,7 +641,7 @@ func processUploadMTMFiles(ctx context.Context, pool *pgxpool.Pool, r *http.Requ
 			}
 			results = append(results, map[string]interface{}{
 				"filename":           fileHeader.Filename,
-				constants.ValueError: constants.ErrTxCommitFailed + err.Error(),
+				constants.ValueError: constants.ErrTxCommitFailed + errtext.Text(err),
 			})
 			continue
 		}
@@ -700,6 +701,11 @@ func processUploadMTMFiles(ctx context.Context, pool *pgxpool.Pool, r *http.Requ
 			}
 
 			go func(ids []string, email string, matrices map[string]string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						logger.LogError("goroutine panic: %v", rec)
+					}
+				}()
 				bgCtx := context.Background()
 				for _, id := range ids {
 					_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
@@ -771,7 +777,7 @@ func GetMTMDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			log.Printf("[ERROR] GetMTMDownloadURL: failed to fetch mtm record for mtm_id=%s, error=%v", mtmID, err)
-			respondWithError(w, http.StatusInternalServerError, "failed to fetch mtm record: "+err.Error())
+			respondWithError(w, http.StatusInternalServerError, "failed to fetch mtm record: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -1010,7 +1016,7 @@ func GetMTMData(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(aie.is_escalated,false)    AS is_escalated
 			FROM forward_mtm mtm
 			LEFT JOIN LATERAL (
-				SELECT ai.* FROM uam.approval_instance ai
+				SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 				WHERE ai.record_id = mtm.mtm_id::text
 				  AND ai.module_code = 'FX'
 				  AND ai.transaction_type = 'FX_MTM_UPDATE'
@@ -1020,7 +1026,7 @@ func GetMTMData(pool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) ai ON true
 			LEFT JOIN LATERAL (
-				SELECT aie.* FROM uam.approval_instance_eye aie
+				SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 				WHERE aie.instance_id = ai.instance_id
 				  AND aie.status = 'ACTIVE'
 				ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -1212,6 +1218,11 @@ func RequestDeleteMTMRecords(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(ids []string, email string, matrices map[string]string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("goroutine panic: %v", rec)
+				}
+			}()
 			bgCtx := context.Background()
 			for _, id := range ids {
 				_ = approvalengine.CancelPendingInstances(bgCtx, pool, "FX", id, email)

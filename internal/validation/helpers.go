@@ -64,13 +64,7 @@ func ExtractUserID(r *http.Request) (string, error) {
 // ValidateSession checks if the user has an active session (in-memory check, no DB)
 // Returns the session object or nil if not found
 func ValidateSession(userID string) *auth.UserSession {
-	sessions := auth.GetActiveSessions()
-	for _, s := range sessions {
-		if s.UserID == userID {
-			return s
-		}
-	}
-	return nil
+	return auth.LoggedInSessionForUser(userID)
 }
 
 // GetUserEntities retrieves all accessible entities for a user (lazy loaded when needed)

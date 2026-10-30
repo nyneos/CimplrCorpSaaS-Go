@@ -1046,7 +1046,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		   LEFT JOIN public.masterentitycash ec ON mba.entity_id = ec.entity_id
 		   LEFT JOIN public.masterentity me ON me.entity_id::text = mba.entity_id
 		   LEFT JOIN LATERAL (
-			   SELECT ai.* FROM uam.approval_instance ai
+			   SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 			   WHERE ai.record_id = b.balance_id::text
 			     AND ai.module_code = 'CASH'
 			     AND ai.is_deleted = false
@@ -1055,7 +1055,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			   LIMIT 1
 		   ) ai ON true
 		   LEFT JOIN LATERAL (
-			   SELECT aie.* FROM uam.approval_instance_eye aie
+			   SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 			   WHERE aie.instance_id = ai.instance_id
 			     AND aie.status = 'ACTIVE'
 			   ORDER BY aie.position ASC, aie.instance_eye_id ASC

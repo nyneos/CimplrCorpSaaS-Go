@@ -105,6 +105,26 @@ type Config struct {
 	// for files that are shown under multiple parents so they share ONE lifecycle
 	// across every screen. file_id must be globally unique for this to be safe.
 	AuditByFileIDOnly bool
+	// ParentAccess, when set, must allow the caller to act on the parent record.
+	ParentAccess func(ctx context.Context, pool *pgxpool.Pool, parentID string) (bool, error)
+}
+
+// parentAllowed writes a 403 (or 500) and returns false when ParentAccess denies the parent.
+func parentAllowed(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, cfg Config, parentID string) bool {
+	if cfg.ParentAccess == nil {
+		return true
+	}
+	ok, err := cfg.ParentAccess(r.Context(), pool, parentID)
+	if err != nil {
+		api.LogErrorForResponse(w, "additional files parent access: %v", err)
+		respondEnvelopeError(w, http.StatusInternalServerError, "Failed to verify record access")
+		return false
+	}
+	if !ok {
+		respondEnvelopeError(w, http.StatusForbidden, "You do not have access to this record")
+		return false
+	}
+	return true
 }
 
 type downloadRequest struct {
@@ -174,6 +194,9 @@ func NewListHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if !parentAllowed(w, r, pool, cfg, parentID) {
 			return
 		}
 		if strings.TrimSpace(body.UserID) == "" {
@@ -268,6 +291,9 @@ func NewUploadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusBadRequest, fmt.Sprintf("%s required", cfg.ParentIDField))
 			return
 		}
+		if !parentAllowed(w, r, pool, cfg, parentID) {
+			return
+		}
 
 		userID := strings.TrimSpace(r.FormValue("user_id"))
 		uploadedBy := strings.TrimSpace(api.RequestedByFromCtx(r.Context(), userID))
@@ -319,6 +345,9 @@ func NewDownloadHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if !parentAllowed(w, r, pool, cfg, parentID) {
 			return
 		}
 
@@ -408,6 +437,9 @@ func NewMainFileDownloadHandler(pool *pgxpool.Pool, cfg Config, loadMain func(ct
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if !parentAllowed(w, r, pool, cfg, parentID) {
 			return
 		}
 		if strings.TrimSpace(body.UserID) == "" {
@@ -551,6 +583,9 @@ func NewDownloadSelectedHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc
 			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if !parentAllowed(w, r, pool, cfg, parentID) {
+			return
+		}
 		if strings.TrimSpace(body.UserID) == "" {
 			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
@@ -635,6 +670,9 @@ func NewDeleteHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if !parentAllowed(w, r, pool, cfg, parentID) {
 			return
 		}
 
@@ -727,6 +765,9 @@ func NewAuditHandler(pool *pgxpool.Pool, cfg Config) http.HandlerFunc {
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if !parentAllowed(w, r, pool, cfg, parentID) {
 			return
 		}
 
@@ -1069,6 +1110,9 @@ func newDeleteDecisionHandler(pool *pgxpool.Pool, cfg Config, nextStatus string)
 		body, parentID, err := decodeParentJSON(r, cfg.ParentIDField)
 		if err != nil {
 			respondEnvelopeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if !parentAllowed(w, r, pool, cfg, parentID) {
 			return
 		}
 

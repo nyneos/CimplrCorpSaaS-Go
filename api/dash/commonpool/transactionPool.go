@@ -235,7 +235,7 @@ FROM cimplrcorpsaas.bank_statement_transactions t
 JOIN cimplrcorpsaas.bank_statements s
 	ON t.bank_statement_id = s.bank_statement_id
 	AND s.is_deleted = false
-	AND s.current_status = 'APPROVED'
+	AND UPPER(TRIM(s.current_status)) = 'APPROVED'
 LEFT JOIN public.masterbankaccount mba
 	ON mba.account_number = s.account_number
 	AND COALESCE(mba.is_deleted, false) = false

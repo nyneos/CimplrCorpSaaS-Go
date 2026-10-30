@@ -30,6 +30,7 @@ package investmentdashboards
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -39,6 +40,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -180,7 +182,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&mr.ExpectedInterest, &mr.ClosureInstruction, &mr.ClosureStatus,
 				); err2 != nil {
 					api.LogError("[BodEodDash] maturities_today scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				mr.Principal = fdRound(mr.Principal, 2)
 				mr.ExpectedInterest = fdRound(mr.ExpectedInterest, 2)
@@ -188,6 +190,9 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				totalPrincipal += mr.Principal
 				totalInterest += mr.ExpectedInterest
 				out = append(out, mr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{
 				"rows":            out,
@@ -242,12 +247,15 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				if err2 := rows.Scan(&mr.FDID, &mr.Bank, &mr.Entity, &mr.Principal,
 					&mr.InterestRate, &mr.MaturityDate, &mr.DaysToMaturity, &mr.FDStatus); err2 != nil {
 					api.LogError("[BodEodDash] maturities_3days scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				mr.Principal = fdRound(mr.Principal, 2)
 				mr.InterestRate = fdRound(mr.InterestRate, 4)
 				totalPrincipal += mr.Principal
 				out = append(out, mr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{
 				"rows":            out,
@@ -319,7 +327,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&cr.FDStatus,
 				); err2 != nil {
 					api.LogError("[BodEodDash] confirmations_due scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				cr.Principal = fdRound(cr.Principal, 2)
 				cr.InterestRate = fdRound(cr.InterestRate, 4)
@@ -334,6 +342,9 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					cr.SLAStatus = "OK"
 				}
 				out = append(out, cr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{
 				"rows":          out,
@@ -396,10 +407,13 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&rr.TotalInterestAccrued, &rr.PostingStatus, &rr.RunDate,
 				); err2 != nil {
 					api.LogError("[BodEodDash] accrual_scheduled scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				rr.TotalInterestAccrued = fdRound(rr.TotalInterestAccrued, 2)
 				out = append(out, rr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -456,12 +470,15 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&cr.PostingStatus, &cr.BankConfirmed, &cr.ReceiptCleared,
 				); err2 != nil {
 					api.LogError("[BodEodDash] expected_interest scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				cr.ExpectedAmount = fdRound(cr.ExpectedAmount, 2)
 				cr.TDSAmount = fdRound(cr.TDSAmount, 2)
 				totalExpected += cr.ExpectedAmount
 				out = append(out, cr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{
 				"rows":           out,
@@ -506,10 +523,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND COALESCE(cf.receipt_cleared, false) = false
 				  AND COALESCE(cf.posting_status,'') <> 'POSTED'`, entityFilter, bankFilter, fdTypeFilter).Scan(&total, &fdCount, &cfCount)
 			if err != nil {
-				api.LogError("[BodEodDash] active_interest_pipeline query error: %v", err)
-				return map[string]interface{}{
-					"total_interest": 0, "fd_count": 0, "cashflow_count": 0,
-				}, nil
+				return nil, err
 			}
 			return map[string]interface{}{
 				"total_interest": fdRound(total, 2),
@@ -597,12 +611,15 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&r.FDStatus, &r.UpcomingInterest, &r.CashflowEvents, &r.TenureDays,
 				); err2 != nil {
 					api.LogError("[BodEodDash] active_fd_list scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				r.Principal = fdRound(r.Principal, 2)
 				r.InterestRate = fdRound(r.InterestRate, 4)
 				r.UpcomingInterest = fdRound(r.UpcomingInterest, 2)
 				out = append(out, r)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -695,7 +712,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				if err2 := rows.Scan(&ar.RefID, &ar.TaskType, &ar.Entity, &ar.Bank,
 					&ar.Amount, &ar.Status, &ar.AgingDays, &ar.Owner); err2 != nil {
 					api.LogError("[BodEodDash] action_list scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				ar.Amount = fdRound(ar.Amount, 2)
 				switch {
@@ -707,6 +724,9 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					ar.Priority = "Low"
 				}
 				out = append(out, ar)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -746,9 +766,12 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				var sr slaRow
 				if err2 := rows.Scan(&sr.BookingID, &sr.Entity, &sr.Bank, &sr.Status, &sr.AgingDays); err2 != nil {
 					api.LogError("[BodEodDash] sla_breach scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				out = append(out, sr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return out, nil
 		})
@@ -795,11 +818,14 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				if err2 := rows.Scan(&br.BookingID, &br.Entity, &br.Bank, &br.Principal,
 					&br.Status, &br.CreatedAt, &br.CreatedBy); err2 != nil {
 					api.LogError("[BodEodDash] bookings_today scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				br.Principal = fdRound(br.Principal, 2)
 				totalAmt += br.Principal
 				out = append(out, br)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{
 				"rows":         out,
@@ -860,7 +886,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&cr.VarianceFlag, &cr.VarianceType,
 				); err2 != nil {
 					api.LogError("[BodEodDash] confirmations_today scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				cr.Principal = fdRound(cr.Principal, 2)
 				cr.ConfirmedRate = fdRound(cr.ConfirmedRate, 4)
@@ -868,6 +894,9 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					varianceCount++
 				}
 				out = append(out, cr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{
 				"rows":           out,
@@ -894,8 +923,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)
 				  AND ($4::text='' OR UPPER(COALESCE(m.interest_type_code,''))=UPPER($4))`, today, entityFilter, bankFilter, fdTypeFilter).Scan(&ingested, &matched, &unmatched, &totalIngested)
 			if err != nil {
-				api.LogError("[BodEodDash] receipts_today query error: %v", err)
-				return map[string]interface{}{"ingested": 0, "matched": 0, "unmatched": 0, "total_amount": 0, "match_rate_pct": 0}, nil
+				return nil, err
 			}
 			matchPct := 0.0
 			if ingested > 0 {
@@ -931,6 +959,8 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND ($2::text='' OR m.bank_id=$2 OR m.bank_name=$2)`,
 				entityFilter, bankFilter).Scan(&closed); err != nil {
 				api.LogError("[BodEodDash] exceptions_today closed-count query error: %v", err)
+
+				return nil, err
 			}
 
 			rows, err := pool.Query(ctx, `
@@ -969,7 +999,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				var varianceOutcome *string
 				if err2 := rows.Scan(&excID, &fdRef, &entity, &bank, &excType, &severity,
 					&varianceAmt, &varianceOutcome, &status, &auditStatus); err2 != nil {
-					continue
+					return nil, err2
 				}
 				opened++
 				outcome := ""
@@ -988,6 +1018,9 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					"exception_status":  status,
 					"processing_status": auditStatus,
 				})
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{"opened": opened, "closed": closed, "escalated": 0, "rows": out}, nil
 		})
@@ -1069,7 +1102,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				if err2 := rows.Scan(&entryID, &entryType, &sourceRef, &journalBatchID, &reference, &valueDate,
 					&postingPeriod, &periodStatus, &entity, &bank, &currency, &amt, &status, &approvalStatus,
 					&remarks, &createdBy, &ts, &errMsg); err2 != nil {
-					continue
+					return nil, err2
 				}
 				uiStatus := "Pending"
 				switch status {
@@ -1104,6 +1137,9 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					"timestamp":      ts,
 					"error":          errMsg,
 				})
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{
 				"posted":              posted,
@@ -1141,13 +1177,15 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				&fdsInScope, &fdsFailed, &totalInterest,
 				&postingStatus, &runDate, &completedAt,
 			)
-			if err != nil {
-				api.LogError("[BodEodDash] accrual_run_latest query error: %v", err)
+			if errors.Is(err, pgx.ErrNoRows) {
 				return map[string]interface{}{
 					"run_id": "", "run_type": "", "run_status": "Unknown",
 					"entity": "", "fds_in_scope": 0, "fds_failed": 0,
 					"total_interest_accrued": 0, "posting_status": "", "run_date": "", "completed_at": "",
 				}, nil
+			}
+			if err != nil {
+				return nil, err
 			}
 			return map[string]interface{}{
 				"run_id":                 runID,
@@ -1193,6 +1231,8 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				AND COALESCE(reconciliation_status,'UNMATCHED') IN ('UNMATCHED','PENDING','')
 				AND (entity_id = ANY(string_to_array($2, ',')))`, today, entityFilter).Scan(&unmatchedCount); err != nil {
 				logger.LogError("eod checklist C1 unmatched count: query row failed: %v", err)
+
+				return nil, err
 			}
 
 			// C2: high variance cases addressed
@@ -1204,6 +1244,8 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=fd_confirmation.booking_id AND (b.entity_id = ANY(string_to_array($1, ',')))
 				)`, entityFilter).Scan(&openVariance); err != nil {
 				logger.LogError("eod checklist C2 open variance: query row failed: %v", err)
+
+				return nil, err
 			}
 
 			// C3: GL postings clear
@@ -1213,6 +1255,8 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE cf.is_deleted=false AND cf.posting_status='FAILED'
 				AND (m.entity_id = ANY(string_to_array($1, ',')))`, entityFilter).Scan(&failedPostings); err != nil {
 				logger.LogError("eod checklist C3 failed postings: query row failed: %v", err)
+
+				return nil, err
 			}
 
 			// C4: no critical exceptions open
@@ -1224,14 +1268,18 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    SELECT 1 FROM investment.fd_master m WHERE m.fd_id=ae.fd_id AND m.entity_id = ANY(string_to_array($1, ','))
 				)`, entityFilter).Scan(&criticalExceptions); err != nil {
 				logger.LogError("eod checklist C4 critical exceptions: query row failed: %v", err)
+
+				return nil, err
 			}
 
 			// C5: latest accrual run completed
 			var latestRunStatus string
 			if err := pool.QueryRow(ctx, `SELECT COALESCE(run_status,'') FROM investment.fd_accrual_run
 				WHERE is_deleted=false AND (entity_id = ANY(string_to_array($1, ',')))
-				ORDER BY run_date DESC LIMIT 1`, entityFilter).Scan(&latestRunStatus); err != nil {
+				ORDER BY run_date DESC LIMIT 1`, entityFilter).Scan(&latestRunStatus); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				logger.LogError("eod checklist C5 latest run status: query row failed: %v", err)
+
+				return nil, err
 			}
 
 			// C6: maturities processed (closure requests completed for today maturities)
@@ -1242,6 +1290,8 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				AND NOT (`+sqlAnyClosureProcessed+`)
 				AND (m.entity_id = ANY(string_to_array($2, ',')))`, today, entityFilter).Scan(&pendingMaturities); err != nil {
 				logger.LogError("eod checklist C6 pending maturities: query row failed: %v", err)
+
+				return nil, err
 			}
 
 			accrualDone := latestRunStatus == "COMPLETED" || latestRunStatus == "POSTED"
@@ -1256,7 +1306,10 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Merge persisted manual sign-off state (if table exists). Failure is non-fatal.
-			persistedMap := loadEodChecklistPersistedState(ctx, pool, today, entityFilter)
+			persistedMap, persistedErr := loadEodChecklistPersistedState(ctx, pool, today, entityFilter)
+			if persistedErr != nil {
+				return nil, persistedErr
+			}
 			for i := range items {
 				if p, ok := persistedMap[items[i].ID]; ok {
 					items[i].PersistedDone = p.Done
@@ -1375,7 +1428,7 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&br.Maturing30D, &br.Maturing30DAmount,
 				); err2 != nil {
 					api.LogError("[BodEodDash] bank_concentration scan error: %v", err2)
-					continue
+					return nil, err2
 				}
 				br.TotalPrincipal = fdRound(br.TotalPrincipal, 2)
 				br.AvgRate = fdRound(br.AvgRate, 4)
@@ -1384,6 +1437,9 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				br.Maturing30DAmount = fdRound(br.Maturing30DAmount, 2)
 				grandTotal += br.TotalPrincipal
 				out = append(out, br)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			// compute concentration pct
 			if grandTotal > 0 {
@@ -1399,6 +1455,14 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── wait ──────────────────────────────────────────────────────────────
 		wg.Wait()
+
+		for _, sub := range results {
+			if sub.err != nil {
+				api.LogErrorForResponse(w, "investment dashboard query failed: %v", sub.err)
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDB)
+				return
+			}
+		}
 
 		get := func(key string) interface{} {
 			if r, ok := results[key]; ok && r.err == nil {
@@ -1646,7 +1710,7 @@ type persistedChecklistRow struct {
 // loadEodChecklistPersistedState looks up the latest user-toggled state of each
 // checklist item for the given as_of_date + entity scope. Returns empty map if
 // the table does not yet exist or any query error occurs (best-effort).
-func loadEodChecklistPersistedState(ctx context.Context, pool *pgxpool.Pool, today, entityID string) map[string]persistedChecklistRow {
+func loadEodChecklistPersistedState(ctx context.Context, pool *pgxpool.Pool, today, entityID string) (map[string]persistedChecklistRow, error) {
 	out := map[string]persistedChecklistRow{}
 	rows, err := pool.Query(ctx, `
 		SELECT
@@ -1662,21 +1726,24 @@ func loadEodChecklistPersistedState(ctx context.Context, pool *pgxpool.Pool, tod
 		ORDER BY updated_at DESC`, today, entityID)
 	if err != nil {
 		// Likely table missing — return empty silently.
-		return out
+		return out, nil
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id, comment, updatedBy, updatedAt string
 		var done bool
 		if scanErr := rows.Scan(&id, &done, &comment, &updatedBy, &updatedAt); scanErr != nil {
-			continue
+			return nil, scanErr
 		}
 		if _, exists := out[id]; exists {
 			continue // keep most-recent only
 		}
 		out[id] = persistedChecklistRow{Done: done, Comment: comment, UpdatedBy: updatedBy, UpdatedAt: updatedAt}
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func formatInt64(n int64) string {

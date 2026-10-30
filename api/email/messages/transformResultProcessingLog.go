@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/api"
+	emailcommon "CimplrCorpSaas/api/email/common"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -25,6 +25,9 @@ func HandleTransformResultProcessingLog(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			emailcommon.RespondBadRequest(w, "Invalid request body")
+			return
+		}
+		if !emailcommon.RequireMessageAccess(w, r, pool, emailcommon.MessageByResultQuery, req.ResultID) {
 			return
 		}
 		resultID := strings.TrimSpace(req.ResultID)
@@ -67,7 +70,8 @@ func HandleTransformResultProcessingLog(pool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY created_at ASC
 		`, messageID, attachmentID, ruleID, resultID)
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email transform processing log query failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 			return
 		}
 		defer rows.Close()
@@ -85,7 +89,8 @@ func HandleTransformResultProcessingLog(pool *pgxpool.Pool) http.HandlerFunc {
 			var rawDetail []byte
 			var createdAt time.Time
 			if err := rows.Scan(&row.LogID, &row.Step, &row.Status, &rawDetail, &createdAt); err != nil {
-				emailcommon.RespondInternal(w, err.Error())
+				api.LogErrorForResponse(w, "email transform processing log scan failed: %v", err)
+				emailcommon.RespondInternal(w, "database operation failed")
 				return
 			}
 			row.CreatedAt = api.FormatAuditTimestampIST(createdAt)

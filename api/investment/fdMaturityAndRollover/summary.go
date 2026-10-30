@@ -13,6 +13,7 @@ package fdMaturityAndRollover
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
@@ -87,7 +88,7 @@ func GetFDMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req maturitySummaryRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -281,7 +282,7 @@ func GetFDMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()

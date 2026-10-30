@@ -56,23 +56,37 @@ func readBankStatementZipBytes(file multipart.File, header *multipart.FileHeader
 	return data, nil
 }
 
+// pgErrorCodeConstraint extracts the SQLSTATE and constraint name from a Postgres error
+// raised through either pgx (pgconn.PgError) or lib/pq, including wrapped errors.
+func pgErrorCodeConstraint(err error) (code, constraint string, ok bool) {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code, pgErr.ConstraintName, true
+	}
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return string(pqErr.Code), pqErr.Constraint, true
+	}
+	return "", "", false
+}
+
 func pqUserFriendlyMessage(err error) string {
 	if err == nil {
 		return ""
 	}
-	pqErr, ok := err.(*pq.Error)
+	code, constraint, ok := pgErrorCodeConstraint(err)
 	if !ok {
 		return err.Error()
 	}
-	switch pqErr.Code {
+	switch code {
 	case "23505":
-		switch pqErr.Constraint {
+		switch constraint {
 		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
 			return constants.ErrBankStatementFileAlreadyUploaded
 		case "uniq_stmt", "uniq_stmt_active":
 			return msgStatementPeriodAlreadyUploaded
 		default:
-			if strings.HasPrefix(string(pqErr.Constraint), "uniq_stmt") {
+			if strings.HasPrefix(constraint, "uniq_stmt") {
 				return msgStatementPeriodAlreadyUploaded
 			}
 			return "A record with the same unique value already exists."

@@ -334,9 +334,9 @@ func SSOCallbackHandler(cfg *SSOConfig, pool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			LogSecurityEvent(r.Context(), pool, "", "sso_login_failed", email+": "+err.Error(), clientIP)
 			if isGET {
-				frontendRedirectError(w, r, err.Error())
+				frontendRedirectError(w, r, "SSO sign-in was not allowed for this account")
 			} else {
-				writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"success": false, "error": err.Error()})
+				writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"success": false, "error": "SSO sign-in was not allowed for this account"})
 			}
 			return
 		}
@@ -346,22 +346,22 @@ func SSOCallbackHandler(cfg *SSOConfig, pool *pgxpool.Pool) http.HandlerFunc {
 		// Return result
 		if isGET {
 			base := getFrontendURL()
+			issue := IssueStreamTicket
 			if mfaPending {
-				target := fmt.Sprintf("%s/sso/callback?mfa_pending=true&user_id=%s&provider=%s",
-					base, url.QueryEscape(session.UserID), providerName)
+				issue = IssueMFATicket
+			}
+			code, codeErr := issue(session.SessionID)
+			if codeErr != nil {
+				frontendRedirectError(w, r, "SSO authentication failed")
+				return
+			}
+			if mfaPending {
+				target := fmt.Sprintf("%s/sso/callback?mfa_pending=true&user_id=%s&code=%s&provider=%s",
+					base, url.QueryEscape(session.UserID), url.QueryEscape(code), providerName)
 				http.Redirect(w, r, target, http.StatusFound)
 			} else {
-				target := fmt.Sprintf(
-					"%s/sso/callback?success=true&user_id=%s&session_id=%s&name=%s&email=%s&role=%s&role_code=%s&provider=%s",
-					base,
-					url.QueryEscape(session.UserID),
-					url.QueryEscape(session.SessionID),
-					url.QueryEscape(session.Name),
-					url.QueryEscape(session.Email),
-					url.QueryEscape(session.Role),
-					url.QueryEscape(session.RoleCode),
-					providerName,
-				)
+				target := fmt.Sprintf("%s/sso/callback?success=true&code=%s&provider=%s",
+					base, url.QueryEscape(code), providerName)
 				http.Redirect(w, r, target, http.StatusFound)
 			}
 			return
@@ -425,11 +425,12 @@ func (a *AuthService) LoginViaSSO(ctx context.Context, email string, clientIP st
 
 	var dbUserID, dbName, dbEmail string
 	var dbStatus sql.NullString
+	var everApproved bool
 
 	err := a.pool.QueryRow(ctx,
-		`SELECT id, employee_name, email, status FROM users WHERE LOWER(email) = LOWER($1) AND COALESCE(is_deleted, false) = false LIMIT 1`,
+		`SELECT id, employee_name, email, status, approved_at IS NOT NULL FROM users WHERE LOWER(email) = LOWER($1) AND COALESCE(is_deleted, false) = false LIMIT 1`,
 		email,
-	).Scan(&dbUserID, &dbName, &dbEmail, &dbStatus)
+	).Scan(&dbUserID, &dbName, &dbEmail, &dbStatus, &everApproved)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, false, errors.New("no account linked to this identity")
@@ -437,8 +438,7 @@ func (a *AuthService) LoginViaSSO(ctx context.Context, email string, clientIP st
 		return nil, false, errors.New("internal error")
 	}
 
-	if dbStatus.Valid && !strings.EqualFold(dbStatus.String, constants.UserStatusApproved) &&
-		!strings.EqualFold(dbStatus.String, constants.UserStatusPending) {
+	if !loginStatusAllowed(dbStatus, everApproved) {
 		return nil, false, errors.New("Account is not active")
 	}
 
@@ -649,4 +649,26 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	}
 
 	authEnvelopeSuccessCompat(w, message, fields)
+}
+
+// SSOExchangeHandler trades the one-time code from the SSO redirect for the session.
+// POST /auth/sso/exchange { "code": "..." }
+func SSOExchangeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"success": false, "error": constants.ErrMethodNotAllowed})
+		return
+	}
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Code) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": "code is required"})
+		return
+	}
+	s := RedeemStreamTicket(strings.TrimSpace(req.Code))
+	if s == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{"success": false, "error": "Sign-in link expired. Please sign in again"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "session": s})
 }

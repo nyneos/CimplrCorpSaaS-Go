@@ -21,22 +21,22 @@ type documentListReq struct {
 }
 
 type documentListItem struct {
-	DocID              string  `json:"doc_id"`
-	RunID              string  `json:"run_id"`
-	RuleID             string  `json:"rule_id"`
-	RuleName           string  `json:"rule_name"`
-	DocumentTemplateID string  `json:"document_template_id"`
-	S3Key              string  `json:"s3_key"`
-	FileFormat         string  `json:"file_format"`
-	OutputFilename     string  `json:"output_filename"`
-	FileSize           *int64  `json:"file_size"`
-	Status             string  `json:"status"`
-	CreatedAt          string  `json:"created_at"`
-	RunStatus          string  `json:"run_status"`
-	TriggerType        string  `json:"trigger_type"`
-	DispatchPending    int     `json:"dispatch_pending"`
-	DispatchSent       int     `json:"dispatch_sent"`
-	DispatchFailed     int     `json:"dispatch_failed"`
+	DocID              string `json:"doc_id"`
+	RunID              string `json:"run_id"`
+	RuleID             string `json:"rule_id"`
+	RuleName           string `json:"rule_name"`
+	DocumentTemplateID string `json:"document_template_id"`
+	S3Key              string `json:"s3_key"`
+	FileFormat         string `json:"file_format"`
+	OutputFilename     string `json:"output_filename"`
+	FileSize           *int64 `json:"file_size"`
+	Status             string `json:"status"`
+	CreatedAt          string `json:"created_at"`
+	RunStatus          string `json:"run_status"`
+	TriggerType        string `json:"trigger_type"`
+	DispatchPending    int    `json:"dispatch_pending"`
+	DispatchSent       int    `json:"dispatch_sent"`
+	DispatchFailed     int    `json:"dispatch_failed"`
 }
 
 // HandleListDocuments is the Sent Box data source — generated documents newest first.
@@ -50,6 +50,12 @@ func HandleListDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 		if r.ContentLength != 0 {
 			if err := common.DecodeJSON(r, &req); err != nil {
 				api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+				return
+			}
+			if !common.RequireRecordsEntityAccess(w, r, pool, common.RuleEntityQuery, []string{req.RuleID}) {
+				return
+			}
+			if !common.RequireRecordsEntityAccess(w, r, pool, common.RunEntityQuery, []string{req.RunID}) {
 				return
 			}
 		}

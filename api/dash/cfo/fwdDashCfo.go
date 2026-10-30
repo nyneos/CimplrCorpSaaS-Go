@@ -2,6 +2,7 @@ package cfo
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -68,7 +69,9 @@ func GetAvgForwardMaturity(db *pgxpool.Pool) http.HandlerFunc {
 			var amount float64
 
 			if err := rows.Scan(&bookingID, &currency, &maturityDate, &daysToMaturity, &amount); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			// enforce prevalidated currency scope
@@ -77,13 +80,14 @@ func GetAvgForwardMaturity(db *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			rate := rates[strings.ToUpper(currency)]
-			if rate == 0 {
-				rate = 1.0
-			}
 
 			usdAmount := math.Abs(amount) * rate
 			weightedSum += usdAmount * float64(daysToMaturity)
 			totalAmount += usdAmount
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		avgMaturity := 0
 		if totalAmount > 0 {
@@ -141,7 +145,9 @@ func GetForwardBuySellTotals(db *pgxpool.Pool) http.HandlerFunc {
 			var currency, orderType string
 
 			if err := rows.Scan(&bookingID, &amount, &currency, &orderType); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			// enforce prevalidated currency scope
 			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency)) {
@@ -150,9 +156,6 @@ func GetForwardBuySellTotals(db *pgxpool.Pool) http.HandlerFunc {
 
 			// convert to USD using rates map
 			rate := rates[strings.ToUpper(currency)]
-			if rate == 0 {
-				rate = 1.0
-			}
 			usdAmount := math.Abs(amount) * rate
 
 			if strings.ToUpper(orderType) == "BUY" {
@@ -160,6 +163,10 @@ func GetForwardBuySellTotals(db *pgxpool.Pool) http.HandlerFunc {
 			} else if strings.ToUpper(orderType) == "SELL" {
 				sellTotal += usdAmount
 			}
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
@@ -175,8 +182,10 @@ func GetUserCurrency(db *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		req.UserID = api.GetUserIDFromCtx(r.Context())
+		if req.UserID == "" {
+			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 		var defaultCurrency string
@@ -185,6 +194,8 @@ func GetUserCurrency(db *pgxpool.Pool) http.HandlerFunc {
 			FROM user_entity_mappings uem
 			JOIN masterentitycash ec ON ec.entity_id::text = uem.entity_id
 			WHERE uem.user_id = $1
+			  AND COALESCE(ec.is_deleted, false) = false
+			ORDER BY ec.entity_level NULLS LAST, ec.entity_name
 			LIMIT 1`, req.UserID).Scan(&defaultCurrency)
 		if err != nil {
 			respondWithError(w, http.StatusNotFound, "No entity mapping found for this user")
@@ -284,7 +295,9 @@ func GetRecentTradesDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			var maturityDate time.Time
 
 			if err := rows.Scan(&bookingID, &amount, &currency, &pair, &bank, &maturityDate); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			// enforce prevalidated currency scope
@@ -295,9 +308,6 @@ func GetRecentTradesDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			amount = math.Abs(amount)
 			currency = strings.ToUpper(currency)
 			rate := rates[currency]
-			if rate == 0 {
-				rate = 1.0
-			}
 
 			amountUsd := amount * rate
 			totalTrades++
@@ -320,6 +330,10 @@ func GetRecentTradesDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			entry := bankMap[key]
 			entry.Amount += amountUsd
 			bankMap[key] = entry
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		formatAmount := func(amt float64) string {
@@ -414,7 +428,9 @@ func GetTotalUsdSumDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			var amount float64
 			var currency string
 			if err := rows.Scan(&amount, &currency); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			// enforce prevalidated currency scope
@@ -423,11 +439,12 @@ func GetTotalUsdSumDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			}
 			currency = strings.ToUpper(currency)
 			rate := rates[currency]
-			if rate == 0 {
-				rate = 1.0
-			}
 			usdAmount := math.Abs(amount) * rate
 			totalUsd += usdAmount
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
@@ -480,15 +497,18 @@ func GetOpenAmountToBookingRatioDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			var amount float64
 			var currency string
 			if err := openRows.Scan(&amount, &currency); err != nil {
-				continue
+				openRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			currency = strings.ToUpper(currency)
 			rate := rates[currency]
-			if rate == 0 {
-				rate = 1.0
-			}
 			usdAmount := math.Abs(amount) * rate
 			openUsd += usdAmount
+		}
+		if err := openRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		// -------- TOTAL BOOKED AMOUNT ----------
@@ -518,15 +538,18 @@ func GetOpenAmountToBookingRatioDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			var amount float64
 			var currency string
 			if err := totalRows.Scan(&amount, &currency); err != nil {
-				continue
+				totalRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			currency = strings.ToUpper(currency)
 			rate := rates[currency]
-			if rate == 0 {
-				rate = 1.0
-			}
 			usdAmount := math.Abs(amount) * rate
 			totalUsd += usdAmount
+		}
+		if err := totalRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		// -------- RATIO ----------
@@ -586,7 +609,9 @@ func GetTotalUsdSumByCurrencyDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			var amount float64
 			var currency string
 			if err := rows.Scan(&amount, &currency); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			// enforce prevalidated currency scope
@@ -596,12 +621,13 @@ func GetTotalUsdSumByCurrencyDashboard(db *pgxpool.Pool) http.HandlerFunc {
 
 			currency = strings.ToUpper(currency)
 			rate := rates[currency]
-			if rate == 0 {
-				rate = 1.0
-			}
 
 			usdAmount := math.Abs(amount) * rate
 			currencyTotals[currency] += usdAmount
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		// Prepare response
@@ -711,7 +737,9 @@ func GetForwardBookingMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFun
 			var amount float64
 			var currency, deliveryPeriod string
 			if err := rows.Scan(&amount, &currency, &deliveryPeriod); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			// enforce prevalidated currency scope
@@ -721,13 +749,14 @@ func GetForwardBookingMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFun
 
 			currency = strings.ToUpper(currency)
 			rate := rates[currency]
-			if rate == 0 {
-				rate = 1.0
-			}
 
 			usdAmount := math.Abs(amount) * rate
 			bucketKey := normalizeDeliveryPeriod(deliveryPeriod)
 			bucketTotals[bucketKey] += usdAmount
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		// Prepare response
@@ -774,7 +803,9 @@ func GetRolloverCountsByCurrency(db *pgxpool.Pool) http.HandlerFunc {
 			var currency string
 			var count int
 			if err := rows.Scan(&currency, &count); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			// enforce prevalidated currency scope
@@ -789,6 +820,10 @@ func GetRolloverCountsByCurrency(db *pgxpool.Pool) http.HandlerFunc {
 					"value": fmt.Sprintf("%d", count),
 				})
 			}
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		// Add total at the top
 		data = append([]map[string]string{{"label": "Total Rollovers:", "value": fmt.Sprintf("%d", total)}}, data...)
@@ -843,7 +878,9 @@ func GetBankTradesData(db *pgxpool.Pool) http.HandlerFunc {
 			var bank, orderType, baseCurrency string
 			var effectiveAmount float64
 			if err := rows.Scan(&bank, &orderType, &baseCurrency, &effectiveAmount); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			// enforce prevalidated currency scope
@@ -863,15 +900,16 @@ func GetBankTradesData(db *pgxpool.Pool) http.HandlerFunc {
 			// Convert to USD
 			currency := strings.ToUpper(baseCurrency)
 			rate := rates[currency]
-			if rate == 0 {
-				rate = 1.0
-			}
 			amountUsd := math.Abs(effectiveAmount) * rate
 
 			if bankMap[bank] == nil {
 				bankMap[bank] = map[string]float64{}
 			}
 			bankMap[bank][trade] += amountUsd
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		// Build response
@@ -951,7 +989,9 @@ func GetMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			var currency string
 			var maturityDate time.Time
 			if err := rows.Scan(&amount, &currency, &maturityDate); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			// enforce prevalidated currency scope
@@ -962,9 +1002,6 @@ func GetMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			amount = math.Abs(amount)
 			currency = strings.ToUpper(currency)
 			rate := rates[currency]
-			if rate == 0 {
-				rate = 1.0
-			}
 			amountUsd := amount * rate
 
 			diffDays := int(math.Ceil(maturityDate.Sub(now).Hours() / 24))
@@ -985,6 +1022,10 @@ func GetMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 				b.Contracts++
 				buckets[bucket] = b
 			}
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 
 		formatAmount := func(amt float64) string {
@@ -1034,7 +1075,9 @@ func GetTotalBankMarginFromForwardBookings(db *pgxpool.Pool) http.HandlerFunc {
 			var margin float64
 			var currency string
 			if err := rows.Scan(&margin, &currency); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			// enforce prevalidated currency scope
@@ -1043,10 +1086,11 @@ func GetTotalBankMarginFromForwardBookings(db *pgxpool.Pool) http.HandlerFunc {
 			}
 			currency = strings.ToUpper(currency)
 			rate := rates[currency]
-			if rate == 0 {
-				rate = 1.0
-			}
 			totalBankMargin += margin * rate
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]float64{"totalBankmargin": totalBankMargin})
 	}
@@ -1061,43 +1105,56 @@ func GetOpenAmountToBookingRatioSimple(db *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		var totalOpen, totalBooking float64
-
-		err := db.QueryRow(r.Context(), `
-			WITH booking_totals AS (
-				SELECT 
-					COALESCE(SUM(ABS(eh.total_open_amount)), 0) AS total_open
-				FROM exposure_headers eh
-				WHERE eh.entity = ANY($1)
-			),
-			booking_amounts AS (
-				SELECT 
-					COALESCE(SUM(ABS(
-						COALESCE(fbl.running_open_amount, fb.booking_amount)
-					)), 0) AS total_booking
-				FROM forward_bookings fb
-				LEFT JOIN LATERAL (
-					SELECT fbl.running_open_amount
-					FROM forward_booking_ledger fbl
-					WHERE fbl.booking_id = fb.system_transaction_id
-					ORDER BY fbl.ledger_sequence DESC
-					LIMIT 1
-				) fbl ON TRUE
-				WHERE fb.entity_level_0 = ANY($1)
-				  AND LOWER(fb.processing_status) = 'approved'
-			)
-			SELECT bt.total_open, ba.total_booking
-			FROM booking_totals bt, booking_amounts ba
-		`, buNames).Scan(&totalOpen, &totalBooking)
-
+		// Hedge ratio is hedged amount / open exposure, both in USD.
+		// Exposures and the bookings behind hedge links must be approved, and only
+		// currencies in the caller's approved set are included.
+		rows, err := db.Query(r.Context(), `
+			SELECT COALESCE(eh.currency, ''),
+			       COALESCE(eh.total_open_amount, 0)::float8,
+			       COALESCE((
+			           SELECT SUM(ehl.hedged_amount)
+			           FROM exposure_hedge_links ehl
+			           JOIN forward_bookings fb ON fb.system_transaction_id = ehl.booking_id
+			           WHERE ehl.exposure_header_id = eh.exposure_header_id
+			             AND COALESCE(ehl.is_active, true) = true
+			             AND COALESCE(fb.is_deleted, false) = false
+			             AND LOWER(COALESCE(fb.processing_status, '')) = 'approved'
+			       ), 0)::float8
+			FROM exposure_headers eh
+			WHERE eh.entity = ANY($1)
+			  AND LOWER(TRIM(COALESCE(eh.approval_status, ''))) = 'approved'
+			  AND COALESCE(eh.is_deleted, false) = false
+		`, buNames)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "Error calculating open amount to booking ratio")
+			respondWithError(w, http.StatusInternalServerError, "Error calculating hedge ratio")
+			return
+		}
+		defer rows.Close()
+
+		var openUSD, hedgedUSD float64
+		for rows.Next() {
+			var currency string
+			var openAmt, hedgedAmt float64
+			if err := rows.Scan(&currency, &openAmt, &hedgedAmt); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Error calculating hedge ratio")
+				return
+			}
+			currency = strings.ToUpper(strings.TrimSpace(currency))
+			if !api.CtxHasApprovedCurrency(r.Context(), currency) {
+				continue
+			}
+			rate := rates[currency]
+			openUSD += math.Abs(openAmt) * rate
+			hedgedUSD += math.Abs(hedgedAmt) * rate
+		}
+		if err := rows.Err(); err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Error calculating hedge ratio")
 			return
 		}
 
 		ratio := 0.0
-		if math.Abs(totalBooking) > 0 {
-			ratio = math.Abs(totalOpen) / math.Abs(totalBooking) * 100
+		if openUSD > 0 {
+			ratio = hedgedUSD / openUSD * 100
 		}
 
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{

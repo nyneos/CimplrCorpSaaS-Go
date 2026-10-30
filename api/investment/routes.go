@@ -3,16 +3,15 @@ package investment
 import (
 	"net/http"
 
-	"CimplrCorpSaas/api"
 	accountingworkbench "CimplrCorpSaas/api/investment/accountingWorkbench"
 	investmentfiles "CimplrCorpSaas/api/investment/additionalfiles"
 	amfisync "CimplrCorpSaas/api/investment/amfiSync"
+	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	fdAccrual "CimplrCorpSaas/api/investment/fdAccrual"
 	fdBooking "CimplrCorpSaas/api/investment/fdBookingWorkbench"
 	fdInterestWorkbench "CimplrCorpSaas/api/investment/fdInterestAndTdsWorkbench"
 	fdMaster "CimplrCorpSaas/api/investment/fdMaster"
 	fdMaturityAndRollover "CimplrCorpSaas/api/investment/fdMaturityAndRollover"
-	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	fdMonthEndClosing "CimplrCorpSaas/api/investment/fdMonthEndClosing"
 	fdRateNegotiation "CimplrCorpSaas/api/investment/fdRateNegotiation"
 	fdReceipt "CimplrCorpSaas/api/investment/fdReceipt"
@@ -68,7 +67,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/onboard/upload", mfMid(http.HandlerFunc(onboard.UploadInvestmentBulkk(pool))))
 	mux.Handle("/investment/onboard/download", mfMid(http.HandlerFunc(onboard.GetOnboardDownloadURL(pool))))
 	mux.Handle("/investment/onboard/download-bulk", mfMid(http.HandlerFunc(onboard.GetOnboardBulkDownloadURL(pool))))
-	mux.Handle("/investment/onboard/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadOnboardPackageZipHandler(pool))))
+	mux.Handle("/investment/onboard/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadOnboardPackageZipHandler(pool))))
 	mux.Handle("/investment/onboard/additional-files/list", mfMid(http.HandlerFunc(investmentfiles.ListOnboardAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/onboard/additional-files/upload", mfMid(http.HandlerFunc(investmentfiles.UploadOnboardAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/onboard/additional-files/download", mfMid(http.HandlerFunc(investmentfiles.DownloadOnboardAdditionalFileHandler(pool))))
@@ -98,7 +97,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/proposals/entity-holdings", mfMid(http.HandlerFunc(investmentsuite.GetEntitySchemeHoldings(pool))))
 	mux.Handle("/investment/proposals/entity-accounts", mfMid(http.HandlerFunc(investmentsuite.GetEntityAccounts(pool))))
 	mux.Handle("/investment/proposals/audit-history", mfMid(http.HandlerFunc(investmentsuite.GetProposalAuditHistory(pool))))
-	mux.Handle("/investment/proposals/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadProposalPackageZipHandler(pool))))
+	mux.Handle("/investment/proposals/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadProposalPackageZipHandler(pool))))
 	mux.Handle("/investment/proposals/additional-files/list", mfMid(http.HandlerFunc(investmentfiles.ListProposalAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/proposals/additional-files/upload", mfMid(http.HandlerFunc(investmentfiles.UploadProposalAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/proposals/additional-files/download", mfMid(http.HandlerFunc(investmentfiles.DownloadProposalAdditionalFileHandler(pool))))
@@ -121,7 +120,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/initiation/all", mfMid(http.HandlerFunc(investmentsuite.GetInitiationsWithAudit(pool))))
 	mux.Handle("/investment/initiation/detail", mfMid(http.HandlerFunc(investmentsuite.GetInitiationDetail(pool))))
 	mux.Handle("/investment/initiation/audit-history", mfMid(http.HandlerFunc(investmentsuite.GetInitiationAuditHistory(pool))))
-	mux.Handle("/investment/initiation/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadInitiationPackageZipHandler(pool))))
+	mux.Handle("/investment/initiation/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadInitiationPackageZipHandler(pool))))
 	mux.Handle("/investment/initiation/additional-files/list", mfMid(http.HandlerFunc(investmentfiles.ListInitiationAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/initiation/additional-files/upload", mfMid(http.HandlerFunc(investmentfiles.UploadInitiationAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/initiation/additional-files/download", mfMid(http.HandlerFunc(investmentfiles.DownloadInitiationAdditionalFileHandler(pool))))
@@ -135,7 +134,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/confirmation/create", mfMid(http.HandlerFunc(investmentsuite.CreateConfirmationSingle(pool))))
 	mux.Handle("/investment/confirmation/download", mfMid(http.HandlerFunc(investmentsuite.GetConfirmationDownloadURL(pool))))
 	mux.Handle("/investment/confirmation/download-bulk", mfMid(http.HandlerFunc(investmentsuite.GetConfirmationBulkDownloadURL(pool))))
-	mux.Handle("/investment/confirmation/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadConfirmationPackageZipHandler(pool))))
+	mux.Handle("/investment/confirmation/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadConfirmationPackageZipHandler(pool))))
 	mux.Handle("/investment/confirmation/create-bulk", mfMid(http.HandlerFunc(investmentsuite.CreateConfirmationBulk(pool))))
 	mux.Handle("/investment/confirmation/update", mfMid(http.HandlerFunc(investmentsuite.UpdateConfirmation(pool))))
 	mux.Handle("/investment/confirmation/update-bulk", mfMid(http.HandlerFunc(investmentsuite.UpdateConfirmationBulk(pool))))
@@ -177,7 +176,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/redemption/initiation/all", mfMid(http.HandlerFunc(redemption.GetRedemptionsWithAudit(pool))))
 	mux.Handle("/investment/redemption/initiation/approved", mfMid(http.HandlerFunc(redemption.GetApprovedRedemptions(pool))))
 	mux.Handle("/investment/redemption/initiation/audit-history", mfMid(http.HandlerFunc(redemption.GetRedemptionInitiationAuditHistory(pool))))
-	mux.Handle("/investment/redemption/initiation/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadRedemptionInitiationPackageZipHandler(pool))))
+	mux.Handle("/investment/redemption/initiation/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadRedemptionInitiationPackageZipHandler(pool))))
 	mux.Handle("/investment/redemption/initiation/additional-files/list", mfMid(http.HandlerFunc(investmentfiles.ListRedemptionInitiationAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/redemption/initiation/additional-files/upload", mfMid(http.HandlerFunc(investmentfiles.UploadRedemptionInitiationAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/redemption/initiation/additional-files/download", mfMid(http.HandlerFunc(investmentfiles.DownloadRedemptionInitiationAdditionalFileHandler(pool))))
@@ -191,7 +190,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/redemption/confirmation/create", mfMid(http.HandlerFunc(redemption.CreateRedemptionConfirmationSingle(pool))))
 	mux.Handle("/investment/redemption/confirmation/download", mfMid(http.HandlerFunc(redemption.GetRedemptionConfirmationDownloadURL(pool))))
 	mux.Handle("/investment/redemption/confirmation/download-bulk", mfMid(http.HandlerFunc(redemption.GetRedemptionConfirmationBulkDownloadURL(pool))))
-	mux.Handle("/investment/redemption/confirmation/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadRedemptionConfirmationPackageZipHandler(pool))))
+	mux.Handle("/investment/redemption/confirmation/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadRedemptionConfirmationPackageZipHandler(pool))))
 	mux.Handle("/investment/redemption/confirmation/create-bulk", mfMid(http.HandlerFunc(redemption.CreateRedemptionConfirmationBulk(pool))))
 	mux.Handle("/investment/redemption/confirmation/update", mfMid(http.HandlerFunc(redemption.UpdateRedemptionConfirmation(pool))))
 	mux.Handle("/investment/redemption/confirmation/update-bulk", mfMid(http.HandlerFunc(redemption.UpdateRedemptionConfirmationBulk(pool))))
@@ -222,7 +221,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/accounting/activity/all", mfMid(http.HandlerFunc(accountingworkbench.GetActivitiesWithAudit(pool))))
 	mux.Handle("/investment/accounting/activity/approved", mfMid(http.HandlerFunc(accountingworkbench.GetApprovedActivities(pool))))
 	mux.Handle("/investment/accounting/activity/audit-history", mfMid(http.HandlerFunc(accountingworkbench.GetAccountingActivityAuditHistory(pool))))
-	mux.Handle("/investment/accounting/activity/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadAccountingActivityPackageZipHandler(pool))))
+	mux.Handle("/investment/accounting/activity/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadAccountingActivityPackageZipHandler(pool))))
 	mux.Handle("/investment/accounting/activity/additional-files/list", mfMid(http.HandlerFunc(investmentfiles.ListAccountingActivityAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/accounting/activity/additional-files/upload", mfMid(http.HandlerFunc(investmentfiles.UploadAccountingActivityAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/accounting/activity/additional-files/download", mfMid(http.HandlerFunc(investmentfiles.DownloadAccountingActivityAdditionalFileHandler(pool))))
@@ -233,7 +232,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/accounting/activity/additional-files/delete/reject", mfMid(http.HandlerFunc(investmentfiles.RejectDeleteAccountingActivityAdditionalFileHandler(pool))))
 
 	// FD Booking & Creation additional files
-	mux.Handle("/investment/fd/booking/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDBookingPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/booking/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDBookingPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/booking/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDBookingAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/booking/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDBookingAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/booking/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDBookingAdditionalFileHandler(pool))))
@@ -251,7 +250,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/rate-negotiation/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDRateNegotiationAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/rate-negotiation/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDRateNegotiationAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/rate-negotiation/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDRateNegotiationAdditionalFileHandler(pool))))
-	mux.Handle("/investment/fd/confirmation/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDConfirmationPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/confirmation/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDConfirmationPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/confirmation/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDConfirmationAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/confirmation/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDConfirmationAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/confirmation/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDConfirmationAdditionalFileHandler(pool))))
@@ -260,7 +259,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/confirmation/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDConfirmationAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/confirmation/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDConfirmationAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/confirmation/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDConfirmationAdditionalFileHandler(pool))))
-	mux.Handle("/investment/fd/master/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDMasterPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/master/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDMasterPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/master/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDMasterAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/master/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDMasterAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/master/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDMasterAdditionalFileHandler(pool))))
@@ -269,7 +268,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/master/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDMasterAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/master/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDMasterAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/master/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDMasterAdditionalFileHandler(pool))))
-	mux.Handle("/investment/fd/closure/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDClosurePackageZipHandler(pool))))
+	mux.Handle("/investment/fd/closure/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDClosurePackageZipHandler(pool))))
 	mux.Handle("/investment/fd/closure/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDClosureAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/closure/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDClosureAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/closure/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDClosureAdditionalFileHandler(pool))))
@@ -278,7 +277,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/closure/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDClosureAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/closure/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDClosureAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/closure/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDClosureAdditionalFileHandler(pool))))
-	mux.Handle("/investment/fd/rollover/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDRolloverPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/rollover/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDRolloverPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/rollover/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDRolloverAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/rollover/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDRolloverAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/rollover/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDRolloverAdditionalFileHandler(pool))))
@@ -287,7 +286,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/rollover/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDRolloverAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/rollover/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDRolloverAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/rollover/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDRolloverAdditionalFileHandler(pool))))
-	mux.Handle("/investment/fd/master/cashflow/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDCashflowPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/master/cashflow/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDCashflowPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/master/cashflow/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDCashflowAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/master/cashflow/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDCashflowAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/master/cashflow/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDCashflowAdditionalFileHandler(pool))))
@@ -298,7 +297,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/master/cashflow/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDCashflowAdditionalFileHandler(pool))))
 
 	// FD Interest, TDS & Reconciliation additional files
-	mux.Handle("/investment/fd/receipt/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDInterestReceiptPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/receipt/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDInterestReceiptPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/receipt/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDInterestReceiptAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/receipt/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDInterestReceiptAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/receipt/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDInterestReceiptAdditionalFileHandler(pool))))
@@ -307,7 +306,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/receipt/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDInterestReceiptAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/receipt/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDInterestReceiptAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/receipt/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDInterestReceiptAdditionalFileHandler(pool))))
-	mux.Handle("/investment/fd/tds-register/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDTDSReceiptPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/tds-register/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDTDSReceiptPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDTDSReceiptAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDTDSReceiptAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/tds-reconciliation/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDTDSReceiptAdditionalFilesHandler(pool))))
@@ -317,7 +316,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/tds-register/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDTDSReceiptAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDTDSReceiptAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/tds-register/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDTDSReceiptAdditionalFileHandler(pool))))
-	mux.Handle("/investment/fd/reconcile/result/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDReconcileResultPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/reconcile/result/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDReconcileResultPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/reconcile/result/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDReconcileResultAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/reconcile/result/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDReconcileResultAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/reconcile/result/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDReconcileResultAdditionalFileHandler(pool))))
@@ -326,7 +325,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/reconcile/result/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDReconcileResultAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/reconcile/result/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDReconcileResultAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/reconcile/result/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDReconcileResultAdditionalFileHandler(pool))))
-	mux.Handle("/investment/fd/exception/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDReceiptExceptionPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/exception/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDReceiptExceptionPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/exception/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDReceiptExceptionAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/exception/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDReceiptExceptionAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/exception/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDReceiptExceptionAdditionalFileHandler(pool))))
@@ -335,7 +334,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/exception/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDReceiptExceptionAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/exception/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDReceiptExceptionAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/exception/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDReceiptExceptionAdditionalFileHandler(pool))))
-	mux.Handle("/investment/variance-exception/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadVarianceExceptionPackageZipHandler(pool))))
+	mux.Handle("/investment/variance-exception/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadVarianceExceptionPackageZipHandler(pool))))
 	mux.Handle("/investment/variance-exception/additional-files/list", mfMid(http.HandlerFunc(investmentfiles.ListVarianceExceptionAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/variance-exception/additional-files/upload", mfMid(http.HandlerFunc(investmentfiles.UploadVarianceExceptionAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/variance-exception/additional-files/download", mfMid(http.HandlerFunc(investmentfiles.DownloadVarianceExceptionAdditionalFileHandler(pool))))
@@ -346,7 +345,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/variance-exception/additional-files/delete/reject", mfMid(http.HandlerFunc(investmentfiles.RejectDeleteVarianceExceptionAdditionalFileHandler(pool))))
 
 	// FD Accrual & Accounting additional files
-	mux.Handle("/investment/fd/accrual/schedule/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDAccrualScheduleConfigPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/accrual/schedule/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDAccrualScheduleConfigPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/accrual/schedule/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDAccrualScheduleConfigAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/accrual/schedule/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDAccrualScheduleConfigAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/accrual/schedule/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDAccrualScheduleConfigAdditionalFileHandler(pool))))
@@ -355,7 +354,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/accrual/schedule/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDAccrualScheduleConfigAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/accrual/schedule/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDAccrualScheduleConfigAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/accrual/schedule/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDAccrualScheduleConfigAdditionalFileHandler(pool))))
-	mux.Handle("/investment/fd/accrual/run/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDAccrualRunPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/accrual/run/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDAccrualRunPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/accrual/run/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDAccrualRunAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/accrual/run/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDAccrualRunAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/accrual/run/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDAccrualRunAdditionalFileHandler(pool))))
@@ -364,7 +363,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/accrual/run/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDAccrualRunAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/accrual/run/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDAccrualRunAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/accrual/run/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDAccrualRunAdditionalFileHandler(pool))))
-	mux.Handle("/investment/fd/accrual/ledger/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDAccrualLedgerPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/accrual/ledger/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDAccrualLedgerPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/accrual/ledger/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDAccrualLedgerAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/accrual/ledger/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDAccrualLedgerAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/accrual/ledger/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDAccrualLedgerAdditionalFileHandler(pool))))
@@ -373,7 +372,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/fd/accrual/ledger/additional-files/audit", fdMid(http.HandlerFunc(investmentfiles.AuditFDAccrualLedgerAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/accrual/ledger/additional-files/delete/approve", fdMid(http.HandlerFunc(investmentfiles.ApproveDeleteFDAccrualLedgerAdditionalFileHandler(pool))))
 	mux.Handle("/investment/fd/accrual/ledger/additional-files/delete/reject", fdMid(http.HandlerFunc(investmentfiles.RejectDeleteFDAccrualLedgerAdditionalFileHandler(pool))))
-	mux.Handle("/investment/fd/accounting/journal/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFDAccountingJournalPackageZipHandler(pool))))
+	mux.Handle("/investment/fd/accounting/journal/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFDAccountingJournalPackageZipHandler(pool))))
 	mux.Handle("/investment/fd/accounting/journal/additional-files/list", fdMid(http.HandlerFunc(investmentfiles.ListFDAccountingJournalAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/accounting/journal/additional-files/upload", fdMid(http.HandlerFunc(investmentfiles.UploadFDAccountingJournalAdditionalFilesHandler(pool))))
 	mux.Handle("/investment/fd/accounting/journal/additional-files/download", fdMid(http.HandlerFunc(investmentfiles.DownloadFDAccountingJournalAdditionalFileHandler(pool))))
@@ -410,7 +409,7 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/accounting/fvo/create", mfMid(http.HandlerFunc(accountingworkbench.CreateFVOSingle(pool))))
 	mux.Handle("/investment/accounting/fvo/download", mfMid(http.HandlerFunc(accountingworkbench.GetFVODownloadURL(pool))))
 	mux.Handle("/investment/accounting/fvo/download-bulk", mfMid(http.HandlerFunc(accountingworkbench.GetFVOBulkDownloadURL(pool))))
-	mux.Handle("/investment/accounting/fvo/package-zip", api.BusinessUnitMiddleware(pool)(http.HandlerFunc(investmentfiles.DownloadFVOPackageZipHandler(pool))))
+	mux.Handle("/investment/accounting/fvo/package-zip", mfMid(http.HandlerFunc(investmentfiles.DownloadFVOPackageZipHandler(pool))))
 	mux.Handle("/investment/accounting/fvo/create-bulk", mfMid(http.HandlerFunc(accountingworkbench.CreateFVOBulk(pool))))
 	mux.Handle("/investment/accounting/fvo/update", mfMid(http.HandlerFunc(accountingworkbench.UpdateFVO(pool))))
 	mux.Handle("/investment/accounting/fvo/all", mfMid(http.HandlerFunc(accountingworkbench.GetFVOsWithAudit(pool))))
@@ -419,16 +418,15 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/accounting/scheme-data-as-of", mfMid(http.HandlerFunc(accountingworkbench.GetSchemeDataAsOf(pool))))
 	mux.Handle("/investment/accounting/mtm-report-as-of", mfMid(http.HandlerFunc(accountingworkbench.GetMTMReportAsOf(pool))))
 
-	// Temporal Query Test & Validation endpoints
-	mux.Handle("/investment/accounting/test-temporal", mfMid(http.HandlerFunc(accountingworkbench.TestTemporalQueriesHandler(pool))))
-	mux.Handle("/investment/accounting/verify-queries", mfMid(http.HandlerFunc(accountingworkbench.VerifyAllQueriesHandler(pool))))
+	// Temporal Query Test & Validation endpoints are not registered in production.
 
 	// AMFI sync endpoints
-	mux.HandleFunc("/investment/amfi/sync-schemes", amfisync.SyncSchemesHandler(pool))
-	mux.HandleFunc("/investment/amfi/update-nav", amfisync.UpdateNAVHandler(pool))
+	amfiMid := middlewares.SessionMiddleware(pool)
+	mux.Handle("/investment/amfi/sync-schemes", amfiMid(amfisync.SyncSchemesHandler(pool)))
+	mux.Handle("/investment/amfi/update-nav", amfiMid(amfisync.UpdateNAVHandler(pool)))
 
 	// AMFI data retrieval endpoints
-	mux.HandleFunc("/investment/amfi/get-schemes", amfisync.GetSchemeDataHandler(pool))
+	mux.Handle("/investment/amfi/get-schemes", amfiMid(amfisync.GetSchemeDataHandler(pool)))
 
 	// FD Booking Workbench (booking + confirmation)
 	fdBooking.RegisterFDBookingRoutes(mux, pool)

@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -197,7 +198,7 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to start tx: " + err.Error()})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to start tx: " + errtext.Text(err)})
 				continue
 			}
 
@@ -281,13 +282,13 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			auditQ := `INSERT INTO auditactioncounterparty (counterparty_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
 			if _, err := tx.Exec(ctx, auditQ, id, nil, createdBy); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "id": id})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + errtext.Text(err), "id": id})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "id": id})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + errtext.Text(err), "id": id})
 				continue
 			}
 			entry := map[string]interface{}{constants.ValueSuccess: true, "counterparty_id": id, "counterparty_name": rrow.CounterpartyName}
@@ -345,7 +346,7 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, mainQ)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -643,7 +644,7 @@ func GetApprovedActiveCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -657,7 +658,7 @@ func GetApprovedActiveCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, map[string]interface{}{"counterparty_id": id, "counterparty_name": ifaceToString(name), "counterparty_code": ifaceToString(code), "counterparty_type": ifaceToString(ctype)})
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
@@ -696,7 +697,7 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + errtext.Text(err)})
 				continue
 			}
 			committed := false
@@ -709,7 +710,7 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				sel := `SELECT counterparty_name, counterparty_code, counterparty_type, address, status, country, contact, email, eff_from, eff_to, tags FROM mastercounterparty WHERE counterparty_id=$1 FOR UPDATE`
 				var existingName, existingCode, existingType, existingAddr, existingStatus, existingCountry, existingContact, existingEmail, existingEffFrom, existingEffTo, existingTags interface{}
 				if err := tx.QueryRow(ctx, sel, row.CounterpartyID).Scan(&existingName, &existingCode, &existingType, &existingAddr, &existingStatus, &existingCountry, &existingContact, &existingEmail, &existingEffFrom, &existingEffTo, &existingTags); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "counterparty_id": row.CounterpartyID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + errtext.Text(err), "counterparty_id": row.CounterpartyID})
 					return
 				}
 
@@ -801,12 +802,12 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				auditQ := `INSERT INTO auditactioncounterparty (counterparty_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
 				if _, err := tx.Exec(ctx, auditQ, updatedID, row.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "audit failed: " + err.Error(), "counterparty_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "audit failed: " + errtext.Text(err), "counterparty_id": updatedID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "counterparty_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + errtext.Text(err), "counterparty_id": updatedID})
 					return
 				}
 				committed = true
@@ -870,7 +871,7 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error(), "bank_id": row.BankID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + errtext.Text(err), "bank_id": row.BankID})
 				continue
 			}
 			committed := false
@@ -886,7 +887,7 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var counterpartyID string
 				var exBank, exCountry, exBranch, exAccount, exSwift, exRel, exCurrency, exCategory, exStatus interface{}
 				if err := tx.QueryRow(ctx, sel, row.BankID).Scan(&counterpartyID, &exBank, &exCountry, &exBranch, &exAccount, &exSwift, &exRel, &exCurrency, &exCategory, &exStatus); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "bank_id": row.BankID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + errtext.Text(err), "bank_id": row.BankID})
 					return
 				}
 
@@ -950,12 +951,12 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// insert audit action for parent counterparty to mark edit pending
 				auditQ := `INSERT INTO auditactioncounterparty (counterparty_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
 				if _, err := tx.Exec(ctx, auditQ, counterpartyID, row.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "bank_id": updatedBankID, "counterparty_id": counterpartyID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + errtext.Text(err), "bank_id": updatedBankID, "counterparty_id": counterpartyID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "bank_id": updatedBankID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + errtext.Text(err), "bank_id": updatedBankID})
 					return
 				}
 				committed = true
@@ -997,7 +998,7 @@ func DeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		committed := false
@@ -1011,13 +1012,13 @@ func DeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, id := range body.CounterpartyIDs {
 			if _, err := tx.Exec(ctx, q, id, body.Reason, requestedBy); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 		committed = true
@@ -1049,7 +1050,7 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1057,7 +1058,7 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY counterparty_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.CounterpartyIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1067,7 +1068,7 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var aid, cid, pstatus string
 			if err := rows.Scan(&aid, &cid, &pstatus); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan audit rows: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan audit rows: "+errtext.Detail(w, err))
 				return
 			}
 			found[cid] = true
@@ -1094,10 +1095,10 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		upd := `UPDATE auditactioncounterparty SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id, counterparty_id`
+		upd := `UPDATE auditactioncounterparty SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, counterparty_id`
 		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, actionIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to update audit rows: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to update audit rows: "+errtext.Detail(w, err))
 			return
 		}
 		defer urows.Close()
@@ -1113,7 +1114,7 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"updated": updated})
@@ -1142,7 +1143,7 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1150,7 +1151,7 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `SELECT DISTINCT ON (counterparty_id) action_id, counterparty_id, actiontype, processing_status FROM auditactioncounterparty WHERE counterparty_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY counterparty_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.CounterpartyIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1164,7 +1165,7 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var aid, cid, atype, pstatus string
 			if err := rows.Scan(&aid, &cid, &atype, &pstatus); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan audit rows: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan audit rows: "+errtext.Detail(w, err))
 				return
 			}
 			foundTypes[cid] = true
@@ -1211,10 +1212,10 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		upd := `UPDATE auditactioncounterparty SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id, counterparty_id, actiontype`
+		upd := `UPDATE auditactioncounterparty SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, counterparty_id, actiontype`
 		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, actionIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to update audit rows: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to update audit rows: "+errtext.Detail(w, err))
 			return
 		}
 		defer urows.Close()
@@ -1240,12 +1241,12 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// perform soft delete by setting is_deleted = true
 			delQ := `UPDATE mastercounterparty SET is_deleted = true WHERE counterparty_id = ANY($1)`
 			if _, err := tx.Exec(ctx, delQ, deleteIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to soft-delete master rows: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to soft-delete master rows: "+errtext.Detail(w, err))
 				return
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated, "blocked": blockedRecords})
@@ -1349,14 +1350,14 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 				return
 			}
 			committed := false
@@ -1371,7 +1372,7 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_counterparty_table"}, columns, pgx.CopyFromRows(copyRows))
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1422,7 +1423,7 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			rows, err := tx.Query(ctx, insertSQL, batchID, s3KeyPtr)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+errtext.Detail(w, err))
 				return
 			}
 			var newIDs []string
@@ -1436,13 +1437,13 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if len(newIDs) > 0 {
 				auditSQL := `INSERT INTO auditactioncounterparty (counterparty_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT counterparty_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM mastercounterparty WHERE counterparty_id = ANY($2)`
 				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+errtext.Detail(w, err))
 					return
 				}
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 				return
 			}
 			committed = true
@@ -1492,7 +1493,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// === Step 2: Parse uploaded CSV ===
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+errtext.Detail(w, err))
 			return
 		}
 		files := r.MultipartForm.File["file"]
@@ -1609,7 +1610,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -1625,7 +1626,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// === Step 5: Transaction (sync all inserts) ===
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+errtext.Detail(w, err))
 				return
 			}
 			committed := false
@@ -1665,7 +1666,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Final commit (sync)
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 				return
 			}
 			committed = true
@@ -1724,7 +1725,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// --- parse multipart ---
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+errtext.Detail(w, err))
 			return
 		}
 		files := r.MultipartForm.File["file"]
@@ -1825,7 +1826,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -1841,7 +1842,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// --- Sync transaction: COPY + single audit INSERT ---
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+errtext.Detail(w, err))
 				return
 			}
 			committed := false
@@ -1859,7 +1860,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// COPY into mastercounterpartybanks
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"mastercounterpartybanks"}, validCols, pgx.CopyFromRows(copyRows)); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1926,13 +1927,13 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, now())
 			`
 			if _, err := tx.Exec(ctx, auditSQL, counterpartyID, userName); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit record: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit record: "+errtext.Detail(w, err))
 				return
 			}
 
 			// commit
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 				return
 			}
 			committed = true

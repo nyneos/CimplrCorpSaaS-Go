@@ -92,7 +92,7 @@ func queryFDJournalEntry(ctx context.Context, pool *pgxpool.Pool, entityIDs []st
 			CASE WHEN ABS(COALESCE(je.total_debit, 0) - COALESCE(je.total_credit, 0)) > 0.005 THEN 1 ELSE 0 END AS is_unbalanced,
 			CASE WHEN je.status = 'POSTED' THEN 1 ELSE 0 END AS is_posted,
 			CASE WHEN je.status = 'PENDING_APPROVAL' THEN 1 ELSE 0 END AS is_pending_approval,
-			CASE WHEN je.status = 'APPROVED' THEN 1 ELSE 0 END AS is_ready_to_post,
+			CASE WHEN UPPER(TRIM(je.status)) = 'APPROVED' THEN 1 ELSE 0 END AS is_ready_to_post,
 			CASE WHEN je.status = 'FAILED' THEN 1 ELSE 0 END AS is_failed,
 			1 AS journal_count,
 			COALESCE(je.posted_at::date - je.created_at::date, 0) AS days_to_post

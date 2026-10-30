@@ -523,17 +523,9 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				  AND aa.processing_status = 'APPROVED'
 				  AND p.proposal_id = ANY($1)
 			`
-			var err error
-			for retries := 0; retries < 3; retries++ {
-				if _, err = tx.Exec(ctx, delQ, deleteProposalIDs); err == nil {
-					break
-				}
-				if retries < 2 {
-					time.Sleep(time.Duration(retries+1) * 100 * time.Millisecond) // Wait 100ms, 200ms
-				}
-			}
-			if err != nil {
-				api.RespondWithResult(w, false, "Failed to delete proposals after retries: "+err.Error())
+			// A failed statement aborts the transaction, so retrying inside it can never succeed.
+			if _, err := tx.Exec(ctx, delQ, deleteProposalIDs); err != nil {
+				api.RespondWithResult(w, false, "Failed to delete proposals: "+err.Error())
 				return
 			}
 		}

@@ -7,6 +7,7 @@ import (
 	dinojobs "CimplrCorpSaas/internal/jobs/dino"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/observability"
+	usersession "CimplrCorpSaas/internal/session"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -127,40 +128,139 @@ func withCORS(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
-	if authService == nil {
-		http.Error(w, errAuthServiceUnavailable, http.StatusInternalServerError)
-		return
-	}
-	sessions := authService.GetActiveSessions()
-	RespondEnvelopeSuccess(w, "Success", sessions)
-}
-
-// GetSessionByUserIDHandler returns session info for a specific user_id
+// GetSessionByUserIDHandler returns the caller's own session.
 func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
-	var req struct {
-		UserID string `json:"user_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-		RespondEnvelopeError(w, http.StatusBadRequest, "Missing user_id in body", "")
-		return
-	}
 	if authService == nil {
 		http.Error(w, errAuthServiceUnavailable, http.StatusInternalServerError)
 		return
 	}
-	sessions := authService.GetActiveSessions()
-	var found []interface{}
-	for _, s := range sessions {
-		if s.UserID == req.UserID {
-			found = append(found, s)
-		}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		RespondEnvelopeError(w, http.StatusBadRequest, "Failed to read request body", "")
+		return
 	}
-	RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"sessions": found})
+	s, _, idErr := usersession.Identify(r, body)
+	if idErr != nil {
+		RespondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, "")
+		return
+	}
+	fields, err := sessionFields(s)
+	if err != nil {
+		LogErrorForResponse(w, "session: marshal failed: %v", err)
+		RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to load session", "")
+		return
+	}
+	if _, fromHeader := usersession.HeaderSession(r); !fromHeader {
+		delete(fields, "SessionID")
+	}
+	RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"sessions": []interface{}{fields}})
+}
+
+// StreamTicketHandler issues a single-use ticket for opening /events.
+func StreamTicketHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
+		return
+	}
+	s, _ := usersession.HeaderSession(r)
+	if s == nil {
+		RespondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, "")
+		return
+	}
+	ticket, err := auth.IssueStreamTicket(s.SessionID)
+	if err != nil {
+		LogErrorForResponse(w, "stream ticket: %v", err)
+		RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to issue ticket", "")
+		return
+	}
+	RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"ticket": ticket})
+}
+
+func sessionFields(s *auth.UserSession) (map[string]interface{}, error) {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// withSessionIdentity binds proxied requests to the session named by the
+// X-Session-Id header: the session's user replaces any user_id the client sent.
+func withSessionIdentity(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions || isPublicProxyPath(r.URL.Path) {
+			h(w, r)
+			return
+		}
+		s, present := usersession.HeaderSession(r)
+		if !present {
+			if usersession.RequireToken() {
+				writeJSONError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+				return
+			}
+			h(w, r)
+			return
+		}
+		if s == nil {
+			writeJSONError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+		ct := strings.ToLower(r.Header.Get(headerContentType))
+		if r.Body != nil && r.Body != http.NoBody && !strings.Contains(ct, constants.ContentTypeMultipart) {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "Failed to read request body")
+				return
+			}
+			body = usersession.BindUserID(r, body, s.UserID)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		} else {
+			usersession.BindUserID(r, nil, s.UserID)
+		}
+		h(w, r)
+	}
+}
+
+func authenticateStream(r *http.Request) (string, bool) {
+	if ticket := strings.TrimSpace(r.URL.Query().Get("ticket")); ticket != "" {
+		if s := auth.RedeemStreamTicket(ticket); s != nil {
+			return s.UserID, true
+		}
+		return "", false
+	}
+	if usersession.RequireToken() {
+		return "", false
+	}
+	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+	if auth.LoggedInSessionForUser(userID) == nil {
+		return "", false
+	}
+	return userID, true
+}
+
+func streamAllowedOrigin() string {
+	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("SSE_ALLOWED_ORIGIN")), "/"); v != "" {
+		return v
+	}
+	return allowOriginAll
+}
+
+func isPublicProxyPath(p string) bool {
+	switch {
+	case strings.HasSuffix(p, "/health"),
+		p == "/email/oauth/callback",
+		p == "/notification/push-subscription/vapid-public-key":
+		return true
+	}
+	return false
 }
 
 // LoginHandler handles POST /auth/login
@@ -195,6 +295,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		RespondEnvelopeSuccessCompat(w, "MFA verification required", map[string]interface{}{
 			"mfa_pending": true,
 			"user_id":     session.UserID,
+			"mfa_token":   session.SessionID,
 		})
 		return
 	}
@@ -219,15 +320,39 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // LogoutHandler handles POST /auth/logout
-// LogoutHandler handles POST /auth/logout
 func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
+	if authService == nil {
+		http.Error(w, errAuthServiceUnavailable, http.StatusInternalServerError)
+		return
+	}
 	var raw map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-		http.Error(w, constants.ErrInvalidJSONShort, http.StatusBadRequest)
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &raw); err != nil {
+			http.Error(w, constants.ErrInvalidJSONShort, http.StatusBadRequest)
+			return
+		}
+	}
+	sid := strings.TrimSpace(r.Header.Get(usersession.HeaderSessionID))
+	if sid == "" {
+		if v, ok := raw["session_id"].(string); ok {
+			sid = strings.TrimSpace(v)
+		}
+	}
+	if sid != "" {
+		if err := authService.LogoutSession(r.Context(), sid); err != nil {
+			RespondWithError(w, http.StatusUnauthorized, "Logout failed")
+			return
+		}
+		RespondEnvelopeSuccess(w, "Logout successful", nil)
+		return
+	}
+	if usersession.RequireToken() || raw == nil {
+		RespondWithError(w, http.StatusUnauthorized, "Logout failed")
 		return
 	}
 	userID := ""
@@ -243,10 +368,6 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		http.Error(w, constants.ErrUserIDRequired, http.StatusBadRequest)
-		return
-	}
-	if authService == nil {
-		http.Error(w, errAuthServiceUnavailable, http.StatusInternalServerError)
 		return
 	}
 	err := authService.Logout(r.Context(), userID)
@@ -545,53 +666,26 @@ func hexDecode(s string) ([]byte, error) {
 	return hex.DecodeString(s)
 }
 
-// LoggingMiddleware is a middleware for logging HTTP requests
+// LoggingMiddleware logs each request line without its body.
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/events" {
-			// SSE endpoints don't need wrapped response writers
-			// Just log the connection and pass through
-			logger.LogInfoCtx(r.Context(), "[GATEWAY] Incoming SSE connection from %s query=%s", r.RemoteAddr, r.URL.RawQuery)
+			logger.LogInfoCtx(r.Context(), "[GATEWAY] Incoming SSE connection from %s", r.RemoteAddr)
 			next.ServeHTTP(w, r)
 			return
 		}
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: w, statusCode: 200}
-		var body string
-		if r.Method == "POST" || r.Method == "PUT" {
-			b, _ := io.ReadAll(r.Body)
-			body = string(b)
-			r.Body = io.NopCloser(bytes.NewBuffer(b))
-			// If there is a user_id field, call authService to log different-IP requests
-			if authService != nil && len(b) > 0 {
-				var raw map[string]interface{}
-				if err := json.Unmarshal(b, &raw); err == nil {
-					if uid, ok := raw["user_id"]; ok && uid != nil {
-						var userID string
-						switch v := uid.(type) {
-						case string:
-							userID = v
-						case float64:
-							userID = fmt.Sprintf("%.0f", v)
-						}
-						if userID != "" {
-							clientIP := extractClientIP(r)
-							go authService.LogDifferentIPRequest(userID, clientIP)
-						}
-					}
-				}
-				// restore body for downstream handlers
-				r.Body = io.NopCloser(bytes.NewBuffer(b))
-				body = string(b)
+		clientIP := extractClientIP(r)
+		if authService != nil {
+			if s, _ := usersession.HeaderSession(r); s != nil {
+				go authService.LogDifferentIPRequest(s.UserID, clientIP)
 			}
 		}
 		next.ServeHTTP(rw, r)
-		duration := time.Since(start)
-		clientIP := extractClientIP(r)
-		userAgent := r.Header.Get("User-Agent")
 		logger.LogInfoCtx(r.Context(),
-			"[REQ] %s %s status=%d ip=%s ua=%s duration=%v body=%s resp_size=%d",
-			r.Method, r.URL.Path, rw.statusCode, clientIP, userAgent, duration, body, rw.body.Len(),
+			"[REQ] %s %s status=%d ip=%s ua=%s duration=%v req_size=%d resp_size=%d",
+			r.Method, r.URL.Path, rw.statusCode, clientIP, r.Header.Get("User-Agent"), time.Since(start), r.ContentLength, rw.body.Len(),
 		)
 	})
 }
@@ -609,36 +703,9 @@ func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, str
 			}
 		}
 	}
+	sseServer.Authenticate = authenticateStream
+	sseServer.AllowedOrigin = streamAllowedOrigin()
 	mux.HandleFunc("/events", sseServer.HandleSSE)
-
-	// Debug endpoint to force logout a user via SSE (for testing only)
-	mux.HandleFunc("/debug/force-logout", withCORS(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			UserID string `json:"user_id"`
-			Reason string `json:"reason"`
-			NewIP  string `json:"new_ip"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			http.Error(w, "invalid body, require {user_id}", http.StatusBadRequest)
-			return
-		}
-		dashboard.SendForceLogout(req.UserID, req.Reason, req.NewIP)
-		w.Header().Set(headerContentType, contentTypeJSON)
-		w.Write([]byte(`{"ok":true}`))
-	}))
-
-	// Debug endpoint to list connected SSE clients
-	mux.HandleFunc("/debug/sse-clients", withCORS(func(w http.ResponseWriter, r *http.Request) {
-		clients := dashboard.GetClients()
-		RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
-			"clients": clients,
-			"count":   dashboard.GetClientCount(),
-		})
-	}))
 
 	// Debug endpoint — POST only; allowed when DEVEL_MODE=true or ENV=uat
 	mux.HandleFunc("/debug/env", withCORS(DebugEnvHandler))
@@ -646,13 +713,14 @@ func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, str
 	// Auth endpoints
 	mux.HandleFunc("/auth/login", withCORS(LoginHandler))
 	mux.HandleFunc("/auth/logout", withCORS(LogoutHandler))
-	mux.HandleFunc("/get-sessions", withCORS(GetSessionsHandler))
 	mux.HandleFunc("/auth/session", withCORS(GetSessionByUserIDHandler))
+	mux.HandleFunc("/auth/stream-ticket", withCORS(StreamTicketHandler))
 
 	// SSO (Multi-provider: Microsoft Azure AD + Google)
 	if ssoConfig != nil && ssoConfig.HasAnyProvider() {
 		mux.HandleFunc("/auth/sso/providers", withCORS(auth.SSOProvidersHandler(ssoConfig)))
 		mux.HandleFunc("/auth/sso/login", withCORS(auth.SSOLoginRedirect(ssoConfig)))
+		mux.HandleFunc("/auth/sso/exchange", withCORS(auth.SSOExchangeHandler))
 		if authService != nil {
 			mux.HandleFunc("/auth/sso/callback/", withCORS(auth.SSOCallbackHandler(ssoConfig, authService.Pool())))
 			mux.HandleFunc("/auth/sso/logout", withCORS(auth.SSOLogoutHandler(ssoConfig, authService.Pool())))
@@ -682,17 +750,17 @@ func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, str
 		logger.LogInfo("Password reset endpoints enabled")
 	}
 
-	mux.HandleFunc("/fx/", createReverseProxy("http://localhost:3143"))
-	mux.HandleFunc("/dash/", createReverseProxy("http://localhost:4143"))
-	mux.HandleFunc("/uam/", createReverseProxy("http://localhost:5143"))
-	mux.HandleFunc("/cash/", createReverseProxy("http://localhost:6143"))
-	mux.HandleFunc("/master/", createReverseProxy("http://localhost:2143"))
-	mux.HandleFunc("/investment/", createReverseProxy("http://localhost:7143"))
-	mux.HandleFunc("/notification/", createReverseProxy("http://localhost:9111"))
-	mux.HandleFunc("/email/", createReverseProxy("http://localhost:8183"))
-	mux.HandleFunc("/policy-engine/", createReverseProxy("http://localhost:8185"))
-	mux.HandleFunc("/domain-catalog/", createReverseProxy("http://localhost:8185"))
-	mux.HandleFunc("/dms/", createReverseProxy("http://localhost:8186"))
+	mux.HandleFunc("/fx/", withSessionIdentity(createReverseProxy("http://localhost:3143")))
+	mux.HandleFunc("/dash/", withSessionIdentity(createReverseProxy("http://localhost:4143")))
+	mux.HandleFunc("/uam/", withSessionIdentity(createReverseProxy("http://localhost:5143")))
+	mux.HandleFunc("/cash/", withSessionIdentity(createReverseProxy("http://localhost:6143")))
+	mux.HandleFunc("/master/", withSessionIdentity(createReverseProxy("http://localhost:2143")))
+	mux.HandleFunc("/investment/", withSessionIdentity(createReverseProxy("http://localhost:7143")))
+	mux.HandleFunc("/notification/", withSessionIdentity(createReverseProxy("http://localhost:9111")))
+	mux.HandleFunc("/email/", withSessionIdentity(createReverseProxy("http://localhost:8183")))
+	mux.HandleFunc("/policy-engine/", withSessionIdentity(createReverseProxy("http://localhost:8185")))
+	mux.HandleFunc("/domain-catalog/", withSessionIdentity(createReverseProxy("http://localhost:8185")))
+	mux.HandleFunc("/dms/", withSessionIdentity(createReverseProxy("http://localhost:8186")))
 
 	mux.HandleFunc("/health", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -760,8 +828,10 @@ func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, str
 	cert := os.Getenv("TLS_CERT")
 	key := os.Getenv("TLS_KEY")
 	server := &http.Server{
-		Addr:    ":" + port,
-		Handler: handler,
+		Addr:              ":" + port,
+		Handler:           handler,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	return server, cert, key
 }

@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/varianceengine"
+	"CimplrCorpSaas/internal/schemacache"
 	"context"
 	"encoding/json"
 	"errors"
@@ -237,7 +238,15 @@ type fdSchemaQueryExecutor interface {
 	QueryRow(ctx context.Context, sql string, arguments ...interface{}) pgx.Row
 }
 
+// loadFDTableColumns returns the column set of schema.table, cached for a few minutes.
+// Callers must treat the returned map as read-only.
 func loadFDTableColumns(ctx context.Context, exec fdSchemaQueryExecutor, schemaName string, tableName string) (map[string]bool, error) {
+	return schemacache.Columns(schemaName+"."+tableName, func() (map[string]bool, error) {
+		return queryFDTableColumns(ctx, exec, schemaName, tableName)
+	})
+}
+
+func queryFDTableColumns(ctx context.Context, exec fdSchemaQueryExecutor, schemaName string, tableName string) (map[string]bool, error) {
 	rows, err := exec.Query(ctx, `
 		SELECT column_name
 		FROM information_schema.columns

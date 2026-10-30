@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -206,7 +207,7 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -295,7 +296,7 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -693,7 +694,7 @@ func UpdateDPBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.masterdepositoryparticipant WHERE dp_id=$1 FOR UPDATE`
 			var oldVals [4]interface{}
 			if err := tx.QueryRow(ctx, sel, row.DPID).Scan(&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3]); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "dp_id": row.DPID, constants.ValueError: "fetch failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "dp_id": row.DPID, constants.ValueError: "fetch failed: " + errtext.Text(err)})
 				continue
 			}
 
@@ -741,7 +742,7 @@ func UpdateDPBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			q := fmt.Sprintf("UPDATE investment.masterdepositoryparticipant SET %s WHERE dp_id=$%d", strings.Join(sets, ", "), pos)
 			args = append(args, row.DPID)
 			if _, err := tx.Exec(ctx, q, args...); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "dp_id": row.DPID, constants.ValueError: constants.ErrUpdateFailed + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "dp_id": row.DPID, constants.ValueError: constants.ErrUpdateFailed + errtext.Text(err)})
 				continue
 			}
 
@@ -752,12 +753,12 @@ func UpdateDPBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, auditCols, auditPlaceholders)
 			execArgs := append([]interface{}{row.DPID, row.Reason, userEmail}, auditArgs...)
 			if _, err := tx.Exec(ctx, auditQuery, execArgs...); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "dp_id": row.DPID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "dp_id": row.DPID, constants.ValueError: constants.ErrAuditInsertFailed + errtext.Text(err)})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "dp_id": row.DPID, constants.ValueError: constants.ErrCommitFailed + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "dp_id": row.DPID, constants.ValueError: constants.ErrCommitFailed + errtext.Text(err)})
 				continue
 			}
 
@@ -919,7 +920,7 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.auditactiondp
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id = ANY($3)
+				WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 			`, checkerBy, req.Comment, toApprove); err != nil {
 				msg, status := getUserFriendlyDPError(err, "approve update failed")
 				api.RespondWithError(w, status, msg)
@@ -1079,7 +1080,7 @@ func BulkRejectDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err := tx.Exec(ctx, `
 			UPDATE investment.auditactiondp
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE action_id = ANY($3)
+			WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, checkerBy, req.Comment, actionIDs); err != nil {
 			msg, status := getUserFriendlyDPError(err, constants.ErrUpdateFailed)
 			api.RespondWithError(w, status, msg)
@@ -1238,7 +1239,7 @@ func GetDPsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+errtext.Detail(w, rows.Err()))
 			return
 		}
 
@@ -1300,7 +1301,7 @@ func CreateDPBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + errtext.Text(err)})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -1326,7 +1327,7 @@ func CreateDPBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RETURNING dp_id
 			`, name, code, dep, defaultIfEmpty(row.Status, "Active")).Scan(&dpID); err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, "dp_code": code, constants.ValueError: "Insert failed: " + err.Error(),
+					constants.ValueSuccess: false, "dp_code": code, constants.ValueError: "Insert failed: " + errtext.Text(err),
 				})
 				continue
 			}
@@ -1336,14 +1337,14 @@ func CreateDPBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 			`, dpID, userEmail); err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, "dp_id": dpID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(),
+					constants.ValueSuccess: false, "dp_id": dpID, constants.ValueError: constants.ErrAuditInsertFailed + errtext.Text(err),
 				})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, "dp_id": dpID, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error(),
+					constants.ValueSuccess: false, "dp_id": dpID, constants.ValueError: constants.ErrCommitFailedCapitalized + errtext.Text(err),
 				})
 				continue
 			}

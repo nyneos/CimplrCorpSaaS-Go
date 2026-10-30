@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -56,10 +57,15 @@ func callConvertXLSX(ctx context.Context, docBytes []byte, filename, password st
 	return callConvertEndpoint(ctx, docBytes, filename, password, "/convert/xlsx")
 }
 
+var errConverterKeyMissing = errors.New("statement converter is not configured (CONVERT_SVC_KEY)")
+
 func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, password, path string) ([]byte, error) {
 	target := r0() + path
 
 	tok := strings.TrimSpace(bindref.BrE1())
+	if tok == "" {
+		return nil, errConverterKeyMissing
+	}
 	tokMasked := ""
 	if len(tok) >= 6 {
 		tokMasked = tok[:6] + "***"

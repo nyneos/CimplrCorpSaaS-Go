@@ -102,121 +102,63 @@ func (a *AuthService) Stop() error {
 }
 
 // Login authenticates a user by email and password, returning the session and
-// an mfaPending flag. Passwords are compared using bcrypt; if the stored hash
-// is a legacy plaintext value that matches, it is automatically upgraded to bcrypt.
+// an mfaPending flag. Passwords are compared using bcrypt. Database and bcrypt
+// work runs outside the service lock; only session and attempt state is locked.
 func (a *AuthService) Login(ctx context.Context, username, password string, clientIP string) (*UserSession, bool, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	logger.LogInfo("[AUTH DEBUG] login start username=%q ip=%s", strings.TrimSpace(username), clientIP)
-
 	var dbUserID, dbName, dbEmail string
 	var dbPassword sql.NullString
 	var dbStatus sql.NullString
+	var everApproved bool
 
-	logger.LogInfo("[AUTH DEBUG] querying users row by email username=%q", strings.TrimSpace(username))
 	err := a.pool.QueryRow(ctx,
-		`SELECT id, employee_name, email, password, status FROM users WHERE email = $1 AND COALESCE(is_deleted, false) = false LIMIT 1`, username,
-	).Scan(&dbUserID, &dbName, &dbEmail, &dbPassword, &dbStatus)
+		`SELECT id, employee_name, email, password, status, approved_at IS NOT NULL FROM users WHERE email = $1 AND COALESCE(is_deleted, false) = false LIMIT 1`, username,
+	).Scan(&dbUserID, &dbName, &dbEmail, &dbPassword, &dbStatus, &everApproved)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			logger.LogInfo("[AUTH DEBUG] user not found username=%q", strings.TrimSpace(username))
-			LogSecurityEvent(ctx, a.pool, "", "login_failed", "unknown user: "+username, clientIP)
+			LogSecurityEvent(ctx, a.pool, "", "login_failed", "unknown user", clientIP)
 			return nil, false, errors.New("Invalid Username or Password")
 		}
-		logger.LogError("[AUTH DEBUG] users lookup failed username=%q err=%v", strings.TrimSpace(username), err)
+		logger.LogError("[auth] users lookup failed: %v", err)
 		return nil, false, errors.New("internal error")
 	}
-	logger.LogInfo("[AUTH DEBUG] users row loaded user_id=%s email=%q status_valid=%v status=%q pass_present=%v", dbUserID, dbEmail, dbStatus.Valid, dbStatus.String, dbPassword.Valid && dbPassword.String != "")
 
-	// Reject disabled/non-approved accounts before any password check
-	if dbStatus.Valid && !strings.EqualFold(dbStatus.String, constants.UserStatusApproved) &&
-		!strings.EqualFold(dbStatus.String, constants.UserStatusPending) {
-		logger.LogInfo("[AUTH DEBUG] login blocked: account status=%q user_id=%s", dbStatus.String, dbUserID)
+	if !loginStatusAllowed(dbStatus, everApproved) {
 		LogSecurityEvent(ctx, a.pool, dbUserID, "login_failed", "account not active: "+dbStatus.String, clientIP)
 		return nil, false, errors.New("Account is not active")
 	}
 
-	// Account lock check
-	if a.MaxLoginAttempts > 0 {
-		if fa, ok := a.failedAttempts[dbUserID]; ok {
-			if fa.isLocked && time.Now().Before(fa.unlockAt) {
-				logger.LogInfo("[AUTH DEBUG] login blocked: account locked user_id=%s unlock_at=%s", dbUserID, fa.unlockAt.Format(time.RFC3339))
-				LogSecurityEvent(ctx, a.pool, dbUserID, "login_blocked", "account locked", clientIP)
-				return nil, false, errors.New("Account has been locked due to multiple failed login attempts")
-			}
-			if fa.isLocked && time.Now().After(fa.unlockAt) {
-				logger.LogError("[AUTH DEBUG] lock expired; resetting failed attempts user_id=%s", dbUserID)
-				fa.isLocked = false
-				fa.count = 0
-			}
-		}
+	if locked := a.loginLocked(dbUserID); locked {
+		LogSecurityEvent(ctx, a.pool, dbUserID, "login_blocked", "account locked", clientIP)
+		return nil, false, errors.New("Account has been locked due to multiple failed login attempts")
 	}
 
-	// Password verification: bcrypt first, then plaintext fallback with auto-upgrade
-	passwordValid := false
-	if dbPassword.Valid && dbPassword.String != "" {
-		if bcrypt.CompareHashAndPassword([]byte(dbPassword.String), []byte(password)) == nil {
-			passwordValid = true
-			logger.LogInfo("[AUTH DEBUG] password check passed via bcrypt user_id=%s", dbUserID)
-		} else if dbPassword.String == password && (dbEmail == "admin@example.com" || dbEmail == "dev1@dev.com") {
-			passwordValid = true
-			logger.LogInfo("[AUTH DEBUG] password matched legacy plaintext for exception user %q", dbEmail)
-		}
-	} else {
-		logger.LogInfo("[AUTH DEBUG] stored password missing/empty user_id=%s", dbUserID)
-	}
+	passwordValid := dbPassword.Valid && dbPassword.String != "" &&
+		bcrypt.CompareHashAndPassword([]byte(dbPassword.String), []byte(password)) == nil
 
 	if !passwordValid {
-		logger.LogError("[AUTH DEBUG] password validation failed user_id=%s", dbUserID)
 		LogSecurityEvent(ctx, a.pool, dbUserID, "login_failed", "wrong password", clientIP)
-		if a.MaxLoginAttempts > 0 {
-			fa, ok := a.failedAttempts[dbUserID]
-			if !ok {
-				fa = &failedAttempt{count: 0}
-				a.failedAttempts[dbUserID] = fa
-			}
-			fa.count++
-			fa.lastTry = time.Now()
-			logger.LogError("[AUTH DEBUG] failed attempt incremented user_id=%s count=%d/%d", dbUserID, fa.count, a.MaxLoginAttempts)
-			if fa.count >= a.MaxLoginAttempts {
-				fa.isLocked = true
-				if a.AccountLockDuration > 0 {
-					fa.unlockAt = time.Now().Add(time.Duration(a.AccountLockDuration) * time.Minute)
-				} else {
-					fa.unlockAt = time.Now().Add(100 * 365 * 24 * time.Hour)
-				}
-				logger.LogInfo("[AUTH DEBUG] account locked user_id=%s unlock_at=%s", dbUserID, fa.unlockAt.Format(time.RFC3339))
-				LogSecurityEvent(ctx, a.pool, dbUserID, "account_locked", "", clientIP)
-				return nil, false, errors.New("Account has been locked due to multiple failed login attempts")
-			}
-			attemptsLeft := a.MaxLoginAttempts - fa.count
-			if attemptsLeft < 0 {
-				attemptsLeft = 0
-			}
-			return nil, false, fmt.Errorf("Invalid credentials, %d/%d attempts left", attemptsLeft, a.MaxLoginAttempts)
-		}
-		return nil, false, errors.New("Invalid credentials")
-	}
-
-	// Force-logout existing sessions
-	logger.LogInfo("[AUTH DEBUG] forcing old sessions logout user_id=%s", dbUserID)
-	a.forceLogoutUser(dbUserID)
-
-	if a.maxUsers > 0 && len(a.users) >= a.maxUsers {
-		logger.LogInfo("[AUTH DEBUG] max concurrent users reached current=%d max=%d", len(a.users), a.maxUsers)
-		return nil, false, errors.New("maximum concurrent users reached")
+		return nil, false, a.recordLoginFailure(ctx, dbUserID, clientIP)
 	}
 
 	var roleName, roleCode sql.NullString
-	_ = a.pool.QueryRow(ctx,
-		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 LIMIT 1`,
+	if err := a.pool.QueryRow(ctx,
+		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 ORDER BY ur.id ASC LIMIT 1`,
 		dbUserID,
-	).Scan(&roleName, &roleCode)
-	logger.LogInfo("[AUTH DEBUG] role lookup user_id=%s role=%q role_code=%q", dbUserID, roleName.String, roleCode.String)
+	).Scan(&roleName, &roleCode); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		logger.LogError("[auth] role lookup failed for user %s: %v", dbUserID, err)
+		return nil, false, errors.New("internal error")
+	}
+
+	var mfaEnabled sql.NullBool
+	var mfaSecret sql.NullString
+	if err := a.pool.QueryRow(ctx, `SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, dbUserID).Scan(&mfaEnabled, &mfaSecret); err != nil {
+		logger.LogError("[auth] mfa lookup failed for user %s: %v", dbUserID, err)
+		return nil, false, errors.New("internal error")
+	}
+	mfaPending := mfaEnabled.Valid && mfaEnabled.Bool && mfaSecret.Valid && mfaSecret.String != ""
 
 	sessionID, err := generateSessionID()
 	if err != nil {
-		logger.LogError("[AUTH DEBUG] session ID generation failed user_id=%s err=%v", dbUserID, err)
 		return nil, false, errors.New("internal error")
 	}
 	session := &UserSession{
@@ -229,34 +171,93 @@ func (a *AuthService) Login(ctx context.Context, username, password string, clie
 		LastLoginTime:    time.Now().Format(time.RFC3339),
 		lastActivityUnix: time.Now().Unix(),
 		ClientIP:         clientIP,
-		IsLoggedIn:       true,
+		IsLoggedIn:       !mfaPending,
 		CreatedEntities:  a.loadCreatedEntities(ctx, dbUserID, roleName.String, roleCode.String),
 	}
 
-	// Check MFA — only gate login if BOTH enabled AND secret is configured
-	var mfaEnabled sql.NullBool
-	var mfaSecret sql.NullString
-	_ = a.pool.QueryRow(ctx, `SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, dbUserID).Scan(&mfaEnabled, &mfaSecret)
-	logger.LogInfo("[AUTH DEBUG] mfa state user_id=%s enabled=%v secret_present=%v", dbUserID, mfaEnabled.Valid && mfaEnabled.Bool, mfaSecret.Valid && strings.TrimSpace(mfaSecret.String) != "")
-	if mfaEnabled.Valid && mfaEnabled.Bool && mfaSecret.Valid && mfaSecret.String != "" {
-		session.IsLoggedIn = false
-		a.users[sessionID] = session
-		a.userPointers[dbUserID] = session
-		logger.LogInfo("[AUTH DEBUG] login requires MFA user_id=%s session_id=%s", dbUserID, sessionID)
+	a.mu.Lock()
+	a.forceLogoutUser(dbUserID)
+	if a.maxUsers > 0 && len(a.users) >= a.maxUsers {
+		a.mu.Unlock()
+		return nil, false, errors.New("maximum concurrent users reached")
+	}
+	a.users[sessionID] = session
+	a.userPointers[dbUserID] = session
+	if !mfaPending && a.MaxLoginAttempts > 0 {
+		delete(a.failedAttempts, dbUserID)
+	}
+	a.mu.Unlock()
+
+	if mfaPending {
 		LogSecurityEvent(ctx, a.pool, dbUserID, "login_mfa_pending", username, clientIP)
 		return session, true, nil
 	}
-
-	a.users[sessionID] = session
-	a.userPointers[dbUserID] = session
-
-	if a.MaxLoginAttempts > 0 {
-		delete(a.failedAttempts, dbUserID)
-	}
-
-	logger.LogInfo("[AUTH DEBUG] login success user_id=%s session_id=%s", dbUserID, sessionID)
 	LogSecurityEvent(ctx, a.pool, dbUserID, "login_success", username, clientIP)
 	return session, false, nil
+}
+
+// loginStatusAllowed admits approved users, and previously approved users whose
+// edit or deletion is still waiting for a checker.
+func loginStatusAllowed(status sql.NullString, everApproved bool) bool {
+	if !status.Valid || strings.EqualFold(status.String, constants.UserStatusApproved) {
+		return true
+	}
+	if !everApproved {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(status.String)) {
+	case strings.ToLower(constants.UserStatusPending), "awaiting-approval", "delete-approval":
+		return true
+	}
+	return false
+}
+
+func (a *AuthService) loginLocked(userID string) bool {
+	if a.MaxLoginAttempts <= 0 {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	fa, ok := a.failedAttempts[userID]
+	if !ok || !fa.isLocked {
+		return false
+	}
+	if time.Now().Before(fa.unlockAt) {
+		return true
+	}
+	fa.isLocked = false
+	fa.count = 0
+	return false
+}
+
+func (a *AuthService) recordLoginFailure(ctx context.Context, userID, clientIP string) error {
+	if a.MaxLoginAttempts <= 0 {
+		return errors.New("Invalid credentials")
+	}
+	a.mu.Lock()
+	fa, ok := a.failedAttempts[userID]
+	if !ok {
+		fa = &failedAttempt{}
+		a.failedAttempts[userID] = fa
+	}
+	fa.count++
+	fa.lastTry = time.Now()
+	count := fa.count
+	if count >= a.MaxLoginAttempts {
+		fa.isLocked = true
+		if a.AccountLockDuration > 0 {
+			fa.unlockAt = time.Now().Add(time.Duration(a.AccountLockDuration) * time.Minute)
+		} else {
+			fa.unlockAt = time.Now().Add(100 * 365 * 24 * time.Hour)
+		}
+	}
+	a.mu.Unlock()
+	if count >= a.MaxLoginAttempts {
+		LogSecurityEvent(ctx, a.pool, userID, "account_locked", "", clientIP)
+		return errors.New("Account has been locked due to multiple failed login attempts")
+	}
+	left := a.MaxLoginAttempts - count
+	return fmt.Errorf("Invalid credentials, %d/%d attempts left", left, a.MaxLoginAttempts)
 }
 
 func (a *AuthService) Logout(ctx context.Context, UserID string) error {

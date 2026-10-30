@@ -8,6 +8,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/dms/common"
+	"CimplrCorpSaas/api/governance"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,6 +28,9 @@ func HandleReject(pool *pgxpool.Pool) http.HandlerFunc {
 		var req decisionReq
 		if err := common.DecodeJSON(r, &req); err != nil {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
+			return
+		}
+		if !common.RequireRecordsEntityAccess(w, r, pool, common.TemplateEntityQuery, req.IDs) {
 			return
 		}
 		if len(req.IDs) == 0 {
@@ -50,8 +54,9 @@ func HandleReject(pool *pgxpool.Pool) http.HandlerFunc {
 			if id == "" {
 				continue
 			}
-			if err := applyRejection(r.Context(), tx, id, actor, ip, req.CheckerComment); err != nil {
-				errs = append(errs, id+": "+err.Error())
+			if err := common.RunInSavepoint(r.Context(), tx, func(sp pgx.Tx) error { return applyRejection(r.Context(), sp, id, actor, ip, req.CheckerComment) }); err != nil {
+				api.LogErrorForResponse(w, "dms template reject %s: %v", id, err)
+				errs = append(errs, id+": failed to reject template")
 				continue
 			}
 			rejected = append(rejected, id)
@@ -84,6 +89,14 @@ func applyRejection(ctx context.Context, tx pgx.Tx, templateID, actor, ip, check
 			return markTemplateRejected(ctx, tx, templateID, actor)
 		}
 		return err
+	}
+
+	maker, err := common.AuditMaker(ctx, tx, "dms_svc.template_audit", pa.AuditID)
+	if err != nil {
+		return err
+	}
+	if governance.IsSelfApprovalCtx(ctx, maker) || governance.IsSelfApproval(actor, maker) {
+		return governance.ErrSelfApproval
 	}
 
 	switch pa.ActionType {

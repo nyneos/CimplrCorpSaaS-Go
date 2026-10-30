@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	emailjobs "CimplrCorpSaas/internal/jobs/email"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -41,11 +42,12 @@ func OnInboxApproved(pool *pgxpool.Pool, inboxID string) {
 				WHERE inbox_id = $1::uuid
 			`, inboxID, now)
 			if err := emailjobs.TriggerIMAPPoll(bgCtx, pool); err != nil {
+				api.LogError("imap poll after approve inbox=%s: %v", inboxID, err)
 				_, _ = pool.Exec(bgCtx, `
 					UPDATE email_svc.inbox_config
 					SET ses_last_error = $2, updated_at = now()
 					WHERE inbox_id = $1::uuid
-				`, inboxID, "imap poll after approve: "+err.Error())
+				`, inboxID, "imap poll after approve failed")
 			}
 			return
 		case "GOOGLE_WORKSPACE":
@@ -59,11 +61,12 @@ func OnInboxApproved(pool *pgxpool.Pool, inboxID string) {
 				WHERE inbox_id = $1::uuid
 			`, inboxID, now)
 			if err := emailjobs.TriggerGoogleWorkspacePoll(bgCtx, pool); err != nil {
+				api.LogError("google workspace poll after approve inbox=%s: %v", inboxID, err)
 				_, _ = pool.Exec(bgCtx, `
 					UPDATE email_svc.inbox_config
 					SET ses_last_error = $2, updated_at = now()
 					WHERE inbox_id = $1::uuid
-				`, inboxID, "google workspace poll after approve: "+err.Error())
+				`, inboxID, "google workspace poll after approve failed")
 			}
 			return
 		case "OAUTH":
@@ -79,11 +82,12 @@ func OnInboxApproved(pool *pgxpool.Pool, inboxID string) {
 				WHERE inbox_id = $1::uuid
 			`, inboxID, now)
 			if err := emailjobs.TriggerOAuthPoll(bgCtx, pool); err != nil {
+				api.LogError("oauth poll after approve inbox=%s: %v", inboxID, err)
 				_, _ = pool.Exec(bgCtx, `
 					UPDATE email_svc.inbox_config
 					SET ses_last_error = $2, updated_at = now()
 					WHERE inbox_id = $1::uuid
-				`, inboxID, "oauth poll after approve: "+err.Error())
+				`, inboxID, "oauth poll after approve failed")
 			}
 			return
 		default:
@@ -97,11 +101,12 @@ func OnInboxApproved(pool *pgxpool.Pool, inboxID string) {
 				WHERE inbox_id = $1::uuid
 			`, inboxID, now)
 			if err := emailjobs.TriggerGraphPoll(bgCtx, pool); err != nil {
+				api.LogError("graph poll after approve inbox=%s: %v", inboxID, err)
 				_, _ = pool.Exec(bgCtx, `
 					UPDATE email_svc.inbox_config
 					SET ses_last_error = $2, updated_at = now()
 					WHERE inbox_id = $1::uuid
-				`, inboxID, "graph poll after approve: "+err.Error())
+				`, inboxID, "graph poll after approve failed")
 			}
 		}
 	}()

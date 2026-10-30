@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -419,7 +420,7 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -569,7 +570,7 @@ func UploadAMCSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -872,7 +873,7 @@ func CreateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error(),
+					constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailedCapitalized + errtext.Text(err),
 				})
 				continue
 			}
@@ -925,7 +926,7 @@ func CreateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rollback()
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrAuditInsertFailed + err.Error(),
+					constants.ValueError:   constants.ErrAuditInsertFailed + errtext.Text(err),
 				})
 				continue
 			}
@@ -933,7 +934,7 @@ func CreateAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.Commit(ctx); err != nil {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrCommitFailedCapitalized + err.Error(),
+					constants.ValueError:   constants.ErrCommitFailedCapitalized + errtext.Text(err),
 				})
 				continue
 			}
@@ -986,7 +987,7 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, constants.ValueError: "Begin TX failed: " + err.Error(),
+					constants.ValueSuccess: false, constants.ValueError: "Begin TX failed: " + errtext.Text(err),
 				})
 				continue
 			}
@@ -1013,7 +1014,7 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				); err != nil {
 
 					results = append(results, map[string]interface{}{
-						constants.ValueSuccess: false, "amc_id": row.AmcID, constants.ValueError: "Fetch failed: " + err.Error(),
+						constants.ValueSuccess: false, "amc_id": row.AmcID, constants.ValueError: "Fetch failed: " + errtext.Text(err),
 					})
 					return
 				}
@@ -1066,7 +1067,7 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				if _, err := tx.Exec(ctx, q, args...); err != nil {
 					results = append(results, map[string]interface{}{
-						constants.ValueSuccess: false, "amc_id": row.AmcID, constants.ValueError: constants.ErrUpdateFailed + err.Error(),
+						constants.ValueSuccess: false, "amc_id": row.AmcID, constants.ValueError: constants.ErrUpdateFailed + errtext.Text(err),
 					})
 					return
 				}
@@ -1080,14 +1081,14 @@ func UpdateAMCBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				execArgs := append([]interface{}{row.AmcID, row.Reason, userEmail}, auditArgs...)
 				if _, err := tx.Exec(ctx, audit, execArgs...); err != nil {
 					results = append(results, map[string]interface{}{
-						constants.ValueSuccess: false, "amc_id": row.AmcID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(),
+						constants.ValueSuccess: false, "amc_id": row.AmcID, constants.ValueError: constants.ErrAuditInsertFailed + errtext.Text(err),
 					})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
 					results = append(results, map[string]interface{}{
-						constants.ValueSuccess: false, "amc_id": row.AmcID, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error(),
+						constants.ValueSuccess: false, "amc_id": row.AmcID, constants.ValueError: constants.ErrCommitFailedCapitalized + errtext.Text(err),
 					})
 					return
 				}
@@ -1710,7 +1711,7 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+errtext.Detail(w, rows.Err()))
 			return
 		}
 

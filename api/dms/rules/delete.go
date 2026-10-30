@@ -27,6 +27,9 @@ func HandleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
 			return
 		}
+		if !common.RequireRecordsEntityAccess(w, r, pool, common.RuleEntityQuery, req.IDs) {
+			return
+		}
 		if len(req.IDs) == 0 {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "ids is required", "VALIDATION_ERROR")
 			return
@@ -58,7 +61,8 @@ func HandleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 				UPDATE dms_svc.generation_rule SET processing_status = 'PENDING_DELETE_APPROVAL',
 					last_modified_by = $1, last_modified_at = now()
 				WHERE rule_id = $2::uuid`, actor, id); err != nil {
-				errs = append(errs, id+": "+err.Error())
+				api.LogErrorForResponse(w, "dms rule delete %s: %v", id, err)
+				errs = append(errs, id+": failed to request rule delete")
 				continue
 			}
 			a := &auditRow{}
@@ -71,7 +75,8 @@ func HandleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			a.set("old_is_deleted", false)
 			a.set("new_is_deleted", true)
 			if err := a.exec(r.Context(), tx); err != nil {
-				errs = append(errs, id+": "+err.Error())
+				api.LogErrorForResponse(w, "dms rule delete audit %s: %v", id, err)
+				errs = append(errs, id+": failed to request rule delete")
 				continue
 			}
 			requested = append(requested, id)

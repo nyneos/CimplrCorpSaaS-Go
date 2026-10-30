@@ -1,6 +1,7 @@
 package fdAccounting
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -279,7 +280,7 @@ func CreateGlMapping(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -301,7 +302,7 @@ func CreateGlMapping(pool *pgxpool.Pool) http.HandlerFunc {
 			version, req.EntityID, strings.TrimSpace(req.EntityName), strings.TrimSpace(req.BankID), strings.TrimSpace(req.BankName),
 			req.EventType, strings.TrimSpace(req.NarrationTemplate), req.RoundingDecimals, rm, strings.TrimSpace(req.Remarks),
 			api.SystemIfBlank(actor.Email)).Scan(&mappingID); err != nil {
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "insert mapping: "+err.Error())
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "insert mapping: "+errtext.Detail(w, err))
 			return
 		}
 		for i, l := range req.Lines {
@@ -316,7 +317,7 @@ func CreateGlMapping(pool *pgxpool.Pool) http.HandlerFunc {
 				VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),NULLIF($12,''))`,
 				mappingID, lineNo, strings.ToUpper(strings.TrimSpace(l.Leg)), strings.TrimSpace(l.GLAccountCode), strings.TrimSpace(l.GLAccountName),
 				strings.TrimSpace(l.AccountType), basis, l.CostCenter, l.ProfitCenter, l.ProjectCode, l.TaxCode, l.LineNarration); err != nil {
-				fdclosingcommon.RespondError(w, http.StatusInternalServerError, "insert mapping line: "+err.Error())
+				fdclosingcommon.RespondError(w, http.StatusInternalServerError, "insert mapping line: "+errtext.Detail(w, err))
 				return
 			}
 			for j, a := range l.CostAllocations {
@@ -328,7 +329,7 @@ func CreateGlMapping(pool *pgxpool.Pool) http.HandlerFunc {
 					INSERT INTO `+glMappingAllocTable+` (mapping_id, line_number, cost_center, allocation_pct, sort_order)
 					VALUES ($1,$2,$3,$4,$5)`,
 					mappingID, lineNo, strings.TrimSpace(a.CostCenter), a.AllocationPct, sortOrd); err != nil {
-					fdclosingcommon.RespondError(w, http.StatusInternalServerError, "insert cost allocation: "+err.Error())
+					fdclosingcommon.RespondError(w, http.StatusInternalServerError, "insert cost allocation: "+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -338,11 +339,11 @@ func CreateGlMapping(pool *pgxpool.Pool) http.HandlerFunc {
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now(),$4)`,
 			mappingID, "Version "+strconv.Itoa(version)+" for "+req.EventType, api.SystemIfBlank(actor.Email),
 			api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+errtext.Detail(w, err))
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 		fdclosingcommon.RespondSuccess(w, "GL mapping submitted for approval", map[string]interface{}{
@@ -442,7 +443,7 @@ func glAct(pool *pgxpool.Pool, action string) http.HandlerFunc {
 				ModuleCode: moduleCode, RecordID: id, UserID: actor.UserID, UserEmail: actor.Email, Action: action, Comment: req.Comment,
 			})
 			if err != nil {
-				errs = append(errs, id+": "+err.Error())
+				errs = append(errs, id+": "+errtext.Text(err))
 				continue
 			}
 			if !res.Acted {
@@ -498,7 +499,7 @@ func glTransition(pool *pgxpool.Pool, actionType, from, to string) http.HandlerF
 		ctx := r.Context()
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -511,7 +512,7 @@ func glTransition(pool *pgxpool.Pool, actionType, from, to string) http.HandlerF
 			return
 		}
 		if err != nil {
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		if status != from {
@@ -528,7 +529,7 @@ func glTransition(pool *pgxpool.Pool, actionType, from, to string) http.HandlerF
 				RETURNING mapping_id`,
 				entityID, bankID, eventType, email)
 			if err != nil {
-				fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+				fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+errtext.Detail(w, err))
 				return
 			}
 			retiredIDs := []string{}
@@ -544,17 +545,17 @@ func glTransition(pool *pgxpool.Pool, actionType, from, to string) http.HandlerF
 					INSERT INTO `+glMappingAudit+` (mapping_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip)
 					VALUES ($1,'RETIRE','COMPLETED',$2,$3,now(),$4,$3,now(),$4)`,
 					id, "Superseded by "+req.MappingID, email, api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
-					fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+					fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+errtext.Detail(w, err))
 					return
 				}
 			}
 			if _, err := tx.Exec(ctx, `UPDATE `+glMappingTable+` SET status = 'ACTIVE', activated_by = $2, activated_at = now() WHERE mapping_id = $1`, req.MappingID, email); err != nil {
-				fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+				fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+errtext.Detail(w, err))
 				return
 			}
 		} else {
 			if _, err := tx.Exec(ctx, `UPDATE `+glMappingTable+` SET status = 'RETIRED', retired_by = $2, retired_at = now() WHERE mapping_id = $1`, req.MappingID, email); err != nil {
-				fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+				fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -562,11 +563,11 @@ func glTransition(pool *pgxpool.Pool, actionType, from, to string) http.HandlerF
 			INSERT INTO `+glMappingAudit+` (mapping_id, actiontype, processing_status, reason, requested_by, requested_at, requested_ip, checker_by, checker_at, checker_ip)
 			VALUES ($1,$2,'COMPLETED',NULLIF($3,''),$4,now(),$5,$4,now(),$5)`,
 			req.MappingID, actionType, req.Comment, email, api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+errtext.Detail(w, err))
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 		fdclosingcommon.RespondSuccess(w, "Mapping "+strings.ToLower(to), map[string]interface{}{"mapping_id": req.MappingID, "status": to})

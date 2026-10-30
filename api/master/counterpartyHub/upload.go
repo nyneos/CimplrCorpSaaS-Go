@@ -3,6 +3,7 @@ package counterpartyHub
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"bytes"
@@ -68,7 +69,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -79,7 +80,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			storedFileName = s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -97,7 +98,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse file: %s", err.Error()))
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Failed to parse file: %s", errtext.Detail(w, err)))
 			return
 		}
 		if len(rows) == 0 {
@@ -117,11 +118,11 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			case "BANK":
 				cpInp, bankInp := bankRowFromCSV(row)
 				if err := validateCounterpartyInput(cpInp); err != nil {
-					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 					continue
 				}
 				if err := validateBankFields(bankInp); err != nil {
-					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 					continue
 				}
 				id, insertErr = insertCounterpartyWithBankInTx(ctx, pgxPool, cpInp, bankInp, userEmail)
@@ -129,7 +130,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			case "EXCHANGE":
 				inp := exchangeInputFromRow(row)
 				if err := validateExchangeInput(inp); err != nil {
-					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 					continue
 				}
 				id, insertErr = insertExchangeInTx(ctx, pgxPool, inp, userEmail)
@@ -137,7 +138,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			case "DATA_PROVIDER":
 				inp := dataProviderInputFromRow(row)
 				if err := validateDataProviderInput(inp); err != nil {
-					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 					continue
 				}
 				id, insertErr = insertDataProviderInTx(ctx, pgxPool, inp, userEmail)
@@ -145,7 +146,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			case "CCP_CSD":
 				inp := ccpCsdInputFromRow(row)
 				if err := validateCcpCsdInput(inp); err != nil {
-					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 					continue
 				}
 				id, insertErr = insertCcpCsdInTx(ctx, pgxPool, inp, userEmail)
@@ -153,7 +154,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			case "PAYMENT_NETWORK":
 				inp := paymentNetworkInputFromRow(row)
 				if err := validatePaymentNetworkInput(inp); err != nil {
-					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 					continue
 				}
 				id, insertErr = insertPaymentNetworkInTx(ctx, pgxPool, inp, userEmail)
@@ -161,7 +162,7 @@ func UploadCounterpartyHub(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			case "ERP_SYSTEM":
 				inp := erpSystemInputFromRow(row)
 				if err := validateERPSystemInput(inp); err != nil {
-					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+					errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 					continue
 				}
 				id, insertErr = insertERPSystemInTx(ctx, pgxPool, inp, userEmail)
@@ -560,7 +561,7 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -571,7 +572,7 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			storedFileName = s3storage.BuildUploadedFilename(header.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -588,7 +589,7 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+errtext.Detail(w, err))
 			return
 		}
 		if len(rows) == 0 {
@@ -605,7 +606,7 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				if err := validateHubCreateRequest(req); err != nil {
 					errList = append(errList, map[string]interface{}{
-						"row_index": i, "success": false, "error": err.Error(),
+						"row_index": i, "success": false, "error": errtext.Text(err),
 						"counterparty_code": req.CounterpartyCode,
 					})
 					return
@@ -671,7 +672,7 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				if err := tx.Commit(ctx); err != nil {
 					errList = append(errList, map[string]interface{}{
-						"row_index": i, "success": false, "error": constants.ErrCommitFailed + err.Error(),
+						"row_index": i, "success": false, "error": constants.ErrCommitFailed + errtext.Text(err),
 					})
 					return
 				}

@@ -3,6 +3,7 @@ package allMaster
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -534,7 +535,7 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if anyError != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, anyError))
 			return
 		}
 		if banks == nil {
@@ -610,7 +611,7 @@ func GetBankNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if anyError != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, anyError))
 			return
 		}
 		if results == nil {
@@ -734,7 +735,7 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -1244,7 +1245,7 @@ func BulkRejectBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.Exec(ctx, `
 				UPDATE auditactionbank
 				SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id = ANY($3)`, checkerBy, req.Comment, actionIDs); err != nil {
+				WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`, checkerBy, req.Comment, actionIDs); err != nil {
 				errMsg, statusCode := getUserFriendlyBankError(err, "Failed to reject audit actions")
 				api.RespondWithError(w, statusCode, errMsg)
 				return
@@ -1318,7 +1319,7 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			checkerBy = session.Name
 		}
 		// Handle records with PENDING_DELETE_APPROVAL — blockers were enforced at delete-request time.
-		delQuery := `UPDATE auditactionbank SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2 WHERE bank_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, bank_id`
+		delQuery := `UPDATE auditactionbank SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2 WHERE (bank_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, bank_id`
 		delRows, delErr := pgxPool.Query(r.Context(), delQuery, checkerBy, req.Comment, pq.Array(req.BankIDs))
 		var deleted []string
 		var bankIDsToDelete []string
@@ -1345,7 +1346,7 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Then, approve the rest by bank_ids
-		query := `UPDATE auditactionbank SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE bank_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,bank_id`
+		query := `UPDATE auditactionbank SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (bank_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id,bank_id`
 		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.BankIDs))
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyBankError(err, "Failed to approve audit actions")

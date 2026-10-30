@@ -1354,10 +1354,15 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 	var schedCFIDs []string
 	includePeriodEndCashflows := sameAccrualDate(effectiveEnd, fd.FdMaturityDate) ||
 		sameAccrualDate(effectiveEnd, fd.EffectiveCloseDate)
-	if schedInterest, ids, hasSched := fdMaster.PeriodInterestFromScheduleWithEnd(
+	schedInterest, ids, hasSched, schedErr := fdMaster.PeriodInterestFromScheduleWithEnd(
 		ctx, pool, fd.FDID, effectiveStart, effectiveEnd, fd.InterestTypeCode,
 		includePeriodEndCashflows,
-	); hasSched {
+	)
+	if schedErr != nil {
+		excluded.CalculationError = "cashflow schedule could not be read: " + schedErr.Error()
+		return excluded
+	}
+	if hasSched {
 		configPeriodInterest = schedInterest
 		schedCFIDs = ids
 		interestSource = "cashflow_schedule"

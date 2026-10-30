@@ -7,6 +7,7 @@ import (
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -962,10 +963,16 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// emails/pushes never fired until some later unrelated notification run (felt "batched").
 			pool, uID, notifRows := pgxPool, req.UserID, updated
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("goroutine panic: %v", rec)
+					}
+				}()
 				if pool == nil {
 					return
 				}
-				nctx := r.Context()
+				nctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Minute)
+				defer cancel()
 				for _, row := range notifRows {
 					bid, _ := row["bankstatementid"].(string)
 					atype, _ := row["action_type"].(string)
@@ -1126,10 +1133,16 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("goroutine panic: %v", rec)
+					}
+				}()
 				if pool == nil || len(rejectedIDs) == 0 {
 					return
 				}
-				nctx := r.Context()
+				nctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Minute)
+				defer cancel()
 				payload := BuildBankStatementNotifPayload(nctx, pool, rejectedIDs, "REJECT", uID)
 				payload["Comment"] = comment
 				catalog.TriggerNotification(nctx, pool, "/cash/bank-statements/v2/reject",

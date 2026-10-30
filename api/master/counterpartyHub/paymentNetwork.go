@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
@@ -78,7 +79,7 @@ func CreatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := validatePaymentNetworkInput(req.PaymentNetworkInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -129,22 +130,32 @@ func CreatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(id, uID, uEmail string) {
-			defer func() { recover() }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
-			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "PAYMENT_NETWORK_CREATE",
 				RecordID: id, RecordTable: "apibox.payment_network_master",
 				AuditTable: "apibox.audit_payment_network", AuditIDColumn: "payment_network_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 				RequirePinnedMatrix: true,
 				AutoApplyIfUnpinned: true,
-			})
+			}); err != nil {
+				logger.LogError("[CounterpartyHub] approval instance creation failed: %v", err)
+			}
 		}(pnID, req.UserID, userEmail)
 
 		go func(id, uEmail string) {
-			defer func() { recover() }()
-			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 				"/master/counterparty-hub/payment-network/create", id,
 				map[string]interface{}{"record_id": id, "event": "PAYMENT_NETWORK_CREATED", "actor_email": uEmail},
 			)
@@ -186,7 +197,7 @@ func CreatePaymentNetworkBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for i, row := range req.Rows {
 			if err := validatePaymentNetworkInput(row); err != nil {
-				errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 				continue
 			}
 			id, err := insertPaymentNetworkInTx(ctx, pgxPool, row, userEmail)
@@ -299,7 +310,7 @@ func UpdatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if k == "api_endpoint_kms_ref" {
 				if s, ok := v.(string); ok {
 					if err := validateKMSPath("api_endpoint_kms_ref", s); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 						return
 					}
 				}
@@ -429,8 +440,8 @@ func BulkApprovePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					logger.LogError("approvePaymentNetwork: delete payment_network_master exec failed: %v", err)
 				}
 			}
-			if _, err := tx.Exec(ctx, `UPDATE apibox.audit_payment_network SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE audit_id=$3`, userEmail, req.Comment, a.AuditID); err != nil {
-				errList = append(errList, map[string]interface{}{"payment_network_id": a.ID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			if _, err := tx.Exec(ctx, `UPDATE apibox.audit_payment_network SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (audit_id=$3) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`, userEmail, req.Comment, a.AuditID); err != nil {
+				errList = append(errList, map[string]interface{}{"payment_network_id": a.ID, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 				continue
 			}
 			success = append(success, map[string]interface{}{constants.ValueSuccess: true, "payment_network_id": a.ID})
@@ -480,7 +491,7 @@ func BulkRejectPaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		res, err := tx.Exec(ctx, `
 			UPDATE apibox.audit_payment_network SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE payment_network_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'`,
+			WHERE (payment_network_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`,
 			userEmail, req.Comment, req.PaymentNetworkIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")

@@ -3,6 +3,7 @@ package portfolio
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,17 +43,28 @@ func ComputeMonthlyPortfolioAUMForChart(
 	schemeCodes := uniqueSchemeCodes(schemeUnits)
 	firstDate, _ := time.Parse(constants.DateFormat, monthDates[0])
 	lastDate, _ := time.Parse(constants.DateFormat, monthDates[len(monthDates)-1])
-	// Load NAV history from 1 year before first month for month-end lookback.
 	navFrom := firstDate.AddDate(-1, 0, 0)
 
 	navHistory := make(map[string]map[string]float64, len(schemeCodes))
+	var navMu sync.Mutex
+	var navWG sync.WaitGroup
+	navSlots := make(chan struct{}, 4)
 	for _, code := range schemeCodes {
-		hist, fetchErr := FetchMFAPINAVHistory(ctx, code, navFrom, lastDate)
-		if fetchErr != nil || len(hist) == 0 {
-			hist = queryStagingNAVHistory(ctx, pool, code, navFrom, lastDate)
-		}
-		navHistory[code] = hist
+		navWG.Add(1)
+		navSlots <- struct{}{}
+		go func(code string) {
+			defer navWG.Done()
+			defer func() { <-navSlots }()
+			hist, fetchErr := FetchMFAPINAVHistory(ctx, code, navFrom, lastDate)
+			if fetchErr != nil || len(hist) == 0 {
+				hist = queryStagingNAVHistory(ctx, pool, code, navFrom, lastDate)
+			}
+			navMu.Lock()
+			navHistory[code] = hist
+			navMu.Unlock()
+		}(code)
 	}
+	navWG.Wait()
 
 	aumByMonth = make(map[int]float64, len(monthDates))
 	for _, su := range schemeUnits {

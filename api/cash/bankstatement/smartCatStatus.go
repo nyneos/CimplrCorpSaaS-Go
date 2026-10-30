@@ -69,8 +69,15 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 		entityFilter := ""
 		entityArgs := []interface{}{}
 		if req.EntityID != "" {
+			if !api.EntityInScope(r.Context(), req.EntityID) {
+				api.RespondEntityOutOfScope(w)
+				return
+			}
 			entityFilter = ` AND bs.entity_id = $1`
 			entityArgs = append(entityArgs, req.EntityID)
+		} else if !api.IsAdminOverride(r.Context()) {
+			entityFilter = ` AND bs.entity_id = ANY($1::text[])`
+			entityArgs = append(entityArgs, api.GetEntityIDsFromCtx(r.Context()))
 		}
 
 		txnScopeJoin := `

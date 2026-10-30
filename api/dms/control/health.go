@@ -28,7 +28,8 @@ func HandleServiceHealth(w http.ResponseWriter, r *http.Request) {
 	available := err == nil
 	message := "document service reachable"
 	if !available {
-		message = err.Error()
+		api.LogErrorForResponse(w, "dms document service health: %v", err)
+		message = "document service unreachable"
 	}
 	api.RespondEnvelopeSuccess(w, "document service health", map[string]interface{}{
 		"available": available,

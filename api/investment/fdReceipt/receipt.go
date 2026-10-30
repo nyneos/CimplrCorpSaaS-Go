@@ -1,10 +1,13 @@
 package fdReceipt
 
 import (
+	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/internal/schemacache"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -48,14 +51,18 @@ func nullStr(v string) interface{} {
 	return v
 }
 
-// formFloat parses a multipart form numeric value, treating blank as zero.
-func formFloat(v string) float64 {
+// formFloat parses a multipart form numeric value, treating blank as zero. Text that
+// is not a finite number (including NaN and Inf) is an error rather than zero.
+func formFloat(field, v string) (float64, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
-		return 0
+		return 0, nil
 	}
-	f, _ := strconv.ParseFloat(v, 64)
-	return f
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, fmt.Errorf("%s must be a valid number", field)
+	}
+	return f, nil
 }
 
 type receiptScopeFilter struct {
@@ -123,7 +130,7 @@ func requireFDReceiptIDScope(ctx context.Context, pool *pgxpool.Pool, w http.Res
 		receiptIDs, tdsIDs,
 	)
 	if err != nil {
-		api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+		api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 		return false
 	}
 	defer rows.Close()
@@ -132,7 +139,7 @@ func requireFDReceiptIDScope(ctx context.Context, pool *pgxpool.Pool, w http.Res
 	for rows.Next() {
 		var entityID, bankID string
 		if err := rows.Scan(&entityID, &bankID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, err))
 			return false
 		}
 		if !scope.HasEntityAccess(entityID) {
@@ -145,7 +152,7 @@ func requireFDReceiptIDScope(ctx context.Context, pool *pgxpool.Pool, w http.Res
 		}
 	}
 	if rows.Err() != nil {
-		api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+rows.Err().Error())
+		api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, rows.Err()))
 		return false
 	}
 	return true
@@ -155,7 +162,15 @@ type receiptSchemaQueryer interface {
 	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
 }
 
+// fdReceiptTableColumns returns the column set of investment.<tableName>, cached for a few minutes.
+// Callers must treat the returned map as read-only.
 func fdReceiptTableColumns(ctx context.Context, q receiptSchemaQueryer, tableName string) (map[string]bool, error) {
+	return schemacache.Columns("investment."+tableName, func() (map[string]bool, error) {
+		return queryFDReceiptTableColumns(ctx, q, tableName)
+	})
+}
+
+func queryFDReceiptTableColumns(ctx context.Context, q receiptSchemaQueryer, tableName string) (map[string]bool, error) {
 	var raw []byte
 	err := q.QueryRow(ctx, `
 		SELECT COALESCE(jsonb_object_agg(column_name, true), '{}'::jsonb)
@@ -383,7 +398,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		contentType := r.Header.Get(constants.ContentTypeText)
 		if strings.Contains(strings.ToLower(contentType), constants.ContentTypeMultipart) {
 			if err := r.ParseMultipartForm(64 << 20); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
 				return
 			}
 			req.UserID = strings.TrimSpace(r.FormValue("user_id"))
@@ -391,9 +406,21 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			req.ReceiptDate = strings.TrimSpace(r.FormValue("receipt_date"))
 			req.PeriodStart = strings.TrimSpace(r.FormValue("period_start"))
 			req.PeriodEnd = strings.TrimSpace(r.FormValue("period_end"))
-			req.GrossInterestReceived = formFloat(r.FormValue("gross_interest_received"))
-			req.TdsAmountDeducted = formFloat(r.FormValue("tds_amount_deducted"))
-			req.OtherCharges = formFloat(r.FormValue("other_charges"))
+			for _, f := range []struct {
+				name string
+				dst  *float64
+			}{
+				{"gross_interest_received", &req.GrossInterestReceived},
+				{"tds_amount_deducted", &req.TdsAmountDeducted},
+				{"other_charges", &req.OtherCharges},
+			} {
+				v, ferr := formFloat(f.name, r.FormValue(f.name))
+				if ferr != nil {
+					api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, ferr))
+					return
+				}
+				*f.dst = v
+			}
 			req.CashflowID = strings.TrimSpace(r.FormValue("cashflow_id"))
 			req.BankReferenceNo = strings.TrimSpace(r.FormValue("bank_reference_no"))
 			req.Narration = strings.TrimSpace(r.FormValue("narration"))
@@ -402,7 +429,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				defer file.Close()
 				bytesRead, rerr := io.ReadAll(file)
 				if rerr != nil {
-					api.RespondWithError(w, http.StatusBadRequest, "failed to read attachment: "+rerr.Error())
+					api.RespondWithError(w, http.StatusBadRequest, "failed to read attachment: "+errtext.Detail(w, rerr))
 					return
 				}
 				mainFileBytes = bytesRead
@@ -469,7 +496,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusNotFound, constants.ErrFDNotFound)
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, "FD lookup failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "FD lookup failed: "+errtext.Detail(w, err))
 			return
 		}
 		if fdStatus != constants.StatusActive && fdStatus != "MATURED" {
@@ -553,8 +580,8 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		// receipt, audit and TDS inserts.
 		var receiptID string
 		if err = pool.QueryRow(ctx,
-			`SELECT 'IREC-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7))`).Scan(&receiptID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Receipt ID generation failed: "+err.Error())
+			fmt.Sprintf(`SELECT %s`, freeShortIDExpr("IREC-", "investment.fd_interest_receipt", "receipt_id"))).Scan(&receiptID); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Receipt ID generation failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -575,7 +602,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			mainFolder := strings.TrimRight(s3storage.GetStoragePrefix(fdInterestReceiptStorageModule), "/") + "/main"
 			uploadS3Key = s3storage.BuildNamedS3Key(mainFolder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, uploadS3Key, mainFileBytes, s3storage.DetectContentType(mainFileBytes)); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Attachment upload failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Attachment upload failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -618,7 +645,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -648,7 +675,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			nullStr(req.BankReferenceNo), nullStr(req.Narration), nullStr(req.Attachment), nullStr(uploadS3Key),
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Receipt insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Receipt insert failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -658,7 +685,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				receipt_id, action_type, processing_status, requested_by, requested_at, requested_ip
 			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, receiptID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -684,7 +711,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 					tds_plan_id, has_pan, tds_section,
 					tds_status, exception_raised, is_active, is_deleted
 				) VALUES (
-					'TDSR-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
+					`+freeShortIDExpr("TDSR-", "investment.fd_tds_receipt", "tds_id")+`,
 					$1,$2,$3,$4,$5,
 					'INTEREST_RECEIPT',
 					$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
@@ -697,7 +724,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				tdsPlanIDStr, hasPAN, nullStr(tdsSection),
 			).Scan(&tdsID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "TDS receipt insert failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "TDS receipt insert failed: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -706,13 +733,13 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 					tds_id, action_type, processing_status, requested_by, requested_at, requested_ip
 				) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, tdsID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "TDS audit insert failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "TDS audit insert failed: "+errtext.Detail(w, err))
 				return
 			}
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 		committed = true
@@ -898,7 +925,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			if scanErr := pool.QueryRow(ctx,
 				`SELECT start_date, maturity_date FROM investment.fd_master WHERE fd_id=$1 AND is_deleted=false`,
 				fdIDForReceipt).Scan(&fdStartU, &fdMaturityU); scanErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "FD date lookup failed: "+scanErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "FD date lookup failed: "+errtext.Detail(w, scanErr))
 				return
 			}
 			receiptDateForValidation := ""
@@ -956,7 +983,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		existingReceiptRow, rowErr := loadFDReceiptRow(ctx, pool, req.ReceiptID)
 		if rowErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Receipt load for policy failed: "+rowErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Receipt load for policy failed: "+errtext.Detail(w, rowErr))
 			return
 		}
 		mergedReceiptRow := applyFDReceiptEdits(existingReceiptRow, req.Fields)
@@ -995,7 +1022,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			&oldGross, &oldTds, &oldOther, &oldNet,
 			&oldBankRef, &oldNarration, &oldIsActive)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Snapshot failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Snapshot failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -1052,7 +1079,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			strings.Join(setClauses, ","), idx)
 
 		if _, err = tx.Exec(ctx, updateSQL, args...); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -1071,12 +1098,12 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			oldGross, oldTds, oldOther, oldNet,
 			oldBankRef, oldNarration, oldIsActive)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+errtext.Detail(w, err))
 			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -1127,6 +1154,9 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if !requireFDReceiptIDScope(r.Context(), pool, w, req.ReceiptIDs, nil) {
 			return
 		}
 		userEmail := resolveUserEmail(r.Context())
@@ -1199,13 +1229,13 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 						receipt_id, action_type, processing_status, reason, requested_by, requested_at, requested_ip
 					) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now(),$4)`, rid, req.Reason, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 				if err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+errtext.Detail(w, err))
 					return
 				}
 			}
 
 			if err = tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 				return
 			}
 
@@ -1268,6 +1298,9 @@ func SubmitReceiptForApproval(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !requireFDReceiptIDScope(r.Context(), pool, w, []string{req.ReceiptID}, nil) {
+			return
+		}
 		if req.ReceiptID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrReceiptIDRequired)
 			return
@@ -1309,6 +1342,9 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !requireFDReceiptIDScope(r.Context(), pool, w, req.ReceiptIDs, nil) {
+			return
+		}
 		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
@@ -1317,6 +1353,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		directReceiptIDs := make([]string, 0, len(req.ReceiptIDs))
+		engineReceiptIDs := make([]string, 0, len(req.ReceiptIDs))
 		engineActed := 0
 		var approvalErrors []string
 		for _, receiptID := range req.ReceiptIDs {
@@ -1350,6 +1387,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if actionRes.Acted {
 				engineActed++
+				engineReceiptIDs = append(engineReceiptIDs, receiptID)
 				continue
 			}
 			if actionRes.CancelledStale {
@@ -1375,7 +1413,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				msg := api.BulkActionErrorMessage("No receipts were approved", approvalErrors)
 				api.RespondEnvelopeFailureCompat(w, http.StatusUnprocessableEntity, msg, "", fields)
 			}
-			for _, rID := range req.ReceiptIDs {
+			for _, rID := range engineReceiptIDs {
 				go func(id, uEmail string) {
 					notifcatalog.TriggerNotification(context.Background(), pool, fdReceiptBulkApprovePath, id, map[string]interface{}{
 						"record_id":   id,
@@ -1415,7 +1453,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM latest_pending lp
 			WHERE a.audit_id = lp.audit_id`, api.SystemIfBlank(userEmail), req.Comment, directReceiptIDs, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Audit update failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -1442,7 +1480,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			  AND la.processing_status = 'APPROVED'
 			  AND r.receipt_status='CAPTURED'`, directReceiptIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Receipt update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Receipt update failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -1469,7 +1507,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM latest_pending_tds lp
 			WHERE a.audit_id = lp.audit_id`, api.SystemIfBlank(userEmail), req.Comment, directReceiptIDs, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TDS audit update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "TDS audit update failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -1497,7 +1535,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			  AND lta.processing_status = 'APPROVED'
 			  AND t.tds_status='CAPTURED'`, directReceiptIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TDS status update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "TDS status update failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -1510,12 +1548,12 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND a.processing_status='APPROVED'
 			)`, directReceiptIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Delete flip failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Delete flip failed: "+errtext.Detail(w, err))
 			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -1528,7 +1566,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			"errors":         approvalErrors,
 			"checker":        userEmail,
 		})
-		for _, rID := range req.ReceiptIDs {
+		for _, rID := range append(engineReceiptIDs, directReceiptIDs...) {
 			go func(id, uEmail string) {
 				notifcatalog.TriggerNotification(context.Background(), pool, fdReceiptBulkApprovePath, id, map[string]interface{}{
 					"record_id":   id,
@@ -1569,6 +1607,9 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !requireFDReceiptIDScope(r.Context(), pool, w, req.ReceiptIDs, nil) {
+			return
+		}
 		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
@@ -1577,6 +1618,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		directReceiptIDs := make([]string, 0, len(req.ReceiptIDs))
+		engineReceiptIDs := make([]string, 0, len(req.ReceiptIDs))
 		engineActed := 0
 		var approvalErrors []string
 		for _, receiptID := range req.ReceiptIDs {
@@ -1610,6 +1652,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if actionRes.Acted {
 				engineActed++
+				engineReceiptIDs = append(engineReceiptIDs, receiptID)
 				continue
 			}
 			if actionRes.CancelledStale {
@@ -1635,7 +1678,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				msg := api.BulkActionErrorMessage("No receipts were rejected", approvalErrors)
 				api.RespondEnvelopeFailureCompat(w, http.StatusUnprocessableEntity, msg, "", fields)
 			}
-			for _, rID := range req.ReceiptIDs {
+			for _, rID := range engineReceiptIDs {
 				go func(id, uEmail string) {
 					notifcatalog.TriggerNotification(context.Background(), pool, fdReceiptBulkRejectPath, id, map[string]interface{}{
 						"record_id":   id,
@@ -1674,7 +1717,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM latest_pending lp
 			WHERE a.audit_id = lp.audit_id`, api.SystemIfBlank(userEmail), req.Comment, directReceiptIDs, api.SystemIfBlank(api.ClientIPFromContext(ctx)))
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Audit update failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -1700,12 +1743,12 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			  AND la.processing_status = 'REJECTED'
 			  AND r.receipt_status='CAPTURED'`, directReceiptIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Receipt update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Receipt update failed: "+errtext.Detail(w, err))
 			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -1716,7 +1759,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			"errors":         approvalErrors,
 			"checker":        userEmail,
 		})
-		for _, rID := range req.ReceiptIDs {
+		for _, rID := range append(engineReceiptIDs, directReceiptIDs...) {
 			go func(id, uEmail string) {
 				notifcatalog.TriggerNotification(context.Background(), pool, fdReceiptBulkRejectPath, id, map[string]interface{}{
 					"record_id":   id,
@@ -1841,7 +1884,7 @@ FROM investment.fd_interest_receipt r
 LEFT JOIN latest_audit l ON l.receipt_id = r.receipt_id
 LEFT JOIN history h ON h.receipt_id = r.receipt_id
 LEFT JOIN LATERAL (
-	SELECT ai.* FROM uam.approval_instance ai
+	SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 	WHERE ai.record_id = r.receipt_id
 	  AND ai.module_code = 'FIXED_DEPOSIT'
 	  AND ai.status = 'PENDING'
@@ -1850,7 +1893,7 @@ LEFT JOIN LATERAL (
 	LIMIT 1
 ) ai ON true
 LEFT JOIN LATERAL (
-	SELECT aie.* FROM uam.approval_instance_eye aie
+	SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 	WHERE aie.instance_id = ai.instance_id
 	  AND aie.status = 'ACTIVE'
 	ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -1895,17 +1938,17 @@ WHERE r.is_deleted = false`
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
 		out, err := rowsToMapSlice(rows)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+errtext.Detail(w, err))
 			return
 		}
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Rows error: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Rows error: "+errtext.Detail(w, rows.Err()))
 			return
 		}
 
@@ -2012,14 +2055,14 @@ WHERE r.is_deleted = false AND l.processing_status = 'APPROVED'`
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
 
 		out, err := rowsToMapSlice(rows)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, err))
 			return
 		}
 		if out == nil {
@@ -2123,14 +2166,14 @@ WHERE t.is_deleted = false AND l.processing_status = 'APPROVED'`
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
 
 		out, err := rowsToMapSlice(rows)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, err))
 			return
 		}
 		if out == nil {
@@ -2279,7 +2322,7 @@ WHERE t.is_deleted = false`
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2332,7 +2375,7 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			) a ON true
 			WHERE r.receipt_id=$1 AND r.is_deleted=false`, req.ReceiptID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Receipt query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Receipt query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer receiptRows.Close()
@@ -2352,7 +2395,7 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		// 2. TDS row
 		tdsRows, err := pool.Query(ctx, `SELECT * FROM investment.fd_tds_receipt WHERE receipt_id=$1`, req.ReceiptID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TDS query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "TDS query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer tdsRows.Close()
@@ -2361,7 +2404,7 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		// 3. Reconcile result
 		reconcileRows, err := pool.Query(ctx, `SELECT * FROM investment.fd_receipt_reconcile_result WHERE receipt_id=$1`, req.ReceiptID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Reconcile query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Reconcile query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer reconcileRows.Close()
@@ -2370,7 +2413,7 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		// 4. Exceptions
 		exceptionRows, err := pool.Query(ctx, `SELECT * FROM investment.fd_receipt_exception WHERE receipt_id=$1 AND is_deleted=false`, req.ReceiptID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Exception query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Exception query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer exceptionRows.Close()
@@ -2397,7 +2440,7 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			GROUP BY je.entry_id, l.processing_status
 			ORDER BY je.entry_date`, req.ReceiptID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Journal query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Journal query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer jeRows.Close()
@@ -2484,6 +2527,9 @@ func GetReceiptAuditHistory(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !requireFDReceiptIDScope(r.Context(), pool, w, []string{req.ReceiptID}, nil) {
+			return
+		}
 		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
@@ -2507,7 +2553,7 @@ func GetReceiptAuditHistory(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2592,7 +2638,7 @@ func GetTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2697,14 +2743,14 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 					period_start, period_end, matching_basis,
 					triggered_by, triggered_at, trigger_mode, run_status
 				) VALUES (
-					'RRUN-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
+					`+freeShortIDExpr("RRUN-", "investment.fd_receipt_reconcile_run", "reconcile_run_id")+`,
 					$1,$2,$3,$4,$5,$6,$7,now(),'MANUAL','PREVIEW'
 				) RETURNING reconcile_run_id`,
 				req.EntityID, req.EntityName, nullStr(req.BankIDFilter),
 				req.PeriodStart, req.PeriodEnd, req.MatchingBasis, userEmail,
 			).Scan(&runID)
 			if insErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Reconcile preview failed: "+insErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Reconcile preview failed: "+errtext.Detail(w, insErr))
 				return
 			}
 			preview, previewErr = reconcileEngine(ctx, pool, runID, true, nil, nil)
@@ -2713,7 +2759,7 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if previewErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Preview computation failed: "+previewErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Preview computation failed: "+errtext.Detail(w, previewErr))
 			return
 		}
 
@@ -2828,14 +2874,14 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 				period_start, period_end, matching_basis,
 				triggered_by, triggered_at, trigger_mode, run_status
 			) VALUES (
-				'RRUN-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
+				`+freeShortIDExpr("RRUN-", "investment.fd_receipt_reconcile_run", "reconcile_run_id")+`,
 				$1,$2,$3,$4,$5,$6,$7,now(),'MANUAL','RUNNING'
 			) RETURNING reconcile_run_id`,
 			req.EntityID, req.EntityName, nullStr(req.BankIDFilter),
 			req.PeriodStart, req.PeriodEnd, req.MatchingBasis, userEmail,
 		).Scan(&runID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Reconcile run insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Reconcile run insert failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -3009,7 +3055,7 @@ func GetReconcileRunStatus(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -3140,7 +3186,7 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -3321,6 +3367,9 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `SELECT entity_id::text FROM investment.fd_receipt_reconcile_run WHERE reconcile_run_id::text = $1`, req.ReconcileRunID) {
+			return
+		}
 		if req.ReconcileRunID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "reconcile_run_id is required")
 			return
@@ -3414,7 +3463,7 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			&run.TotalExpectedTDS, &run.TotalReceivedTDS, &run.TotalTDSVariance,
 		)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Reconcile run not found: "+err.Error())
+			api.RespondWithError(w, http.StatusNotFound, "Reconcile run not found: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -3482,7 +3531,7 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE rr.reconcile_run_id = $1
 			ORDER BY rr.result_type, rr.created_at`, req.ReconcileRunID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer resultRows.Close()
@@ -3790,7 +3839,7 @@ WHERE r.is_deleted = false
 
 		iRows, err := pool.Query(ctx, interestSQL, iArgs...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer iRows.Close()
@@ -3881,7 +3930,7 @@ WHERE t.is_deleted = false
 
 		tRows, err := pool.Query(ctx, tdsSQL, tArgs...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tRows.Close()
@@ -3932,7 +3981,7 @@ func GetExceptions(pool *pgxpool.Pool) http.HandlerFunc {
 			BankIDs:         scope.BankIDs(),
 		})
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		if out == nil {
@@ -4053,7 +4102,7 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 
 		cols, err := fdReceiptTableColumns(ctx, tx, "fd_receipt_exception")
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "schema lookup failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "schema lookup failed: "+errtext.Detail(w, err))
 			return
 		}
 		sets := []string{"exception_status='IN_REVIEW'", "proposed_resolution=$1", "reason_code=$2", "resolution_remarks=$3", "attachment=$4"}
@@ -4083,12 +4132,12 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 			strings.Join(sets, ", "), len(args))
 		_, err = tx.Exec(ctx, updateSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+errtext.Detail(w, err))
 			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -4133,6 +4182,9 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !requireFDReceiptIDScope(r.Context(), pool, w, append(append([]string{}, req.ReceiptIDs...), req.ReceiptID), nil) {
+			return
+		}
 		userEmail := resolveUserEmail(r.Context())
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
@@ -4149,6 +4201,7 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 		posted, skipped := 0, 0
 		results := make([]map[string]interface{}, 0)
 
+		var postedReceiptIDs []string
 		for _, rid := range req.ReceiptIDs {
 			var rec ReceiptForPosting
 			var receiptDateRaw, periodStartRaw, periodEndRaw *time.Time
@@ -4224,10 +4277,11 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 			interestEntryID, tdsEntryID, jErr := postReceiptJournals(ctx, pool, rec, userEmail)
 			if jErr != nil {
 				skipped++
-				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": jErr.Error()})
+				results = append(results, map[string]interface{}{"receipt_id": rid, "success": false, "error": errtext.Text(jErr)})
 				continue
 			}
 			posted++
+			postedReceiptIDs = append(postedReceiptIDs, rid)
 			results = append(results, map[string]interface{}{
 				"receipt_id":        rid,
 				"success":           true,
@@ -4238,7 +4292,7 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 
 		api.LogInfo("[FDReceipt] PostJournals: %d posted %d skipped by %s", posted, skipped, userEmail)
 
-		for _, rID := range req.ReceiptIDs {
+		for _, rID := range postedReceiptIDs {
 			go func(id, uEmail string) {
 				notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/post-journals", id, map[string]interface{}{
 					"record_id":   id,
@@ -4297,6 +4351,9 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !requireFDReceiptIDScope(r.Context(), pool, w, nil, []string{req.TdsID}) {
+			return
+		}
 		if req.TdsID == "" || len(req.Fields) == 0 || req.Reason == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "tds_id, fields, and reason are required")
 			return
@@ -4328,7 +4385,7 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			if scanErr := pool.QueryRow(ctx,
 				`SELECT start_date, maturity_date FROM investment.fd_master WHERE fd_id=$1 AND is_deleted=false`,
 				fdIDForTDS).Scan(&fdStartU, &fdMaturityU); scanErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "FD date lookup failed: "+scanErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "FD date lookup failed: "+errtext.Detail(w, scanErr))
 				return
 			}
 			periodStartForValidation := ""
@@ -4422,7 +4479,7 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			&oldStatus, &oldActual, &oldRateApplied,
 			&oldVariance, &oldExceptionRaised, &oldBankTDSRef, &oldIsActive)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Snapshot failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Snapshot failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -4470,7 +4527,7 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			strings.Join(setClauses, ","), idx)
 
 		if _, err = tx.Exec(ctx, updateSQL, args...); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -4485,12 +4542,12 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			oldExceptionRaised, oldBankTDSRef, oldIsActive)
 
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+errtext.Detail(w, err))
 			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -4588,7 +4645,7 @@ func GetTDSDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			JOIN investment.fd_interest_receipt r ON r.receipt_id = t.receipt_id
 			WHERE t.tds_id=$1`, req.TdsID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tdsRows.Close()
@@ -4614,7 +4671,7 @@ func GetTDSDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT * FROM investment.fd_tds_receipt_audit
 			WHERE tds_id=$1 ORDER BY requested_at DESC`, req.TdsID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Audit query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer auditRows.Close()
@@ -4681,7 +4738,7 @@ func GetTDSAuditHistory(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()

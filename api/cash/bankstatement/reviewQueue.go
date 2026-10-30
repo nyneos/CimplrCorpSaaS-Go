@@ -9,6 +9,7 @@ import (
 	cat "CimplrCorpSaas/internal/services/categorizer"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -133,6 +134,7 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 
 		out := make([]map[string]interface{}, 0)
 		seenQueue := make(map[int64]struct{})
+		var backfills []narrationBackfill
 		for rows.Next() {
 			var queueID, txnID int64
 			var suggestedCat *string
@@ -184,18 +186,8 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 				if paymentChannel == "" {
 					paymentChannel = string(nr.Channel)
 				}
-				// Persist asynchronously so subsequent fetches already have it.
-				go func(txID int64, nc, ns, ref string, pc cat.IndianBankChannel) {
-					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-					defer cancel()
-					_, _ = pool.Exec(ctx, `
-						UPDATE cimplrcorpsaas.bank_statement_transactions
-						SET narration_clean=$1, narration_stemmed=$2,
-						    narration_ref=$3, payment_channel=$4
-						WHERE transaction_id=$5
-						  AND (narration_clean IS NULL OR narration_clean = '')
-					`, nc, ns, ref, string(pc), txID)
-				}(txnID, nr.Clean, nr.Stemmed, nr.Ref, nr.Channel)
+				// Persisted after the response in one batch so later fetches already have it.
+				backfills = append(backfills, narrationBackfill{txnID: txnID, clean: nr.Clean, stemmed: nr.Stemmed, ref: nr.Ref, channel: string(nr.Channel)})
 			}
 
 			// current_step / current_confidence reflect the transaction's
@@ -273,7 +265,44 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 			"limit":  req.Limit,
 			"offset": req.Offset,
 		})
+		if len(backfills) > 0 {
+			go persistNarrationBackfills(pool, backfills)
+		}
 	})
+}
+
+type narrationBackfill struct {
+	txnID                        int64
+	clean, stemmed, ref, channel string
+}
+
+// persistNarrationBackfills stores narrations derived on read in a single statement.
+func persistNarrationBackfills(pool *pgxpool.Pool, items []narrationBackfill) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			api.LogError("[smart-cat] narration backfill panic: %v", rec)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ids := make([]int64, len(items))
+	clean := make([]string, len(items))
+	stemmed := make([]string, len(items))
+	refs := make([]string, len(items))
+	channels := make([]string, len(items))
+	for i, it := range items {
+		ids[i], clean[i], stemmed[i], refs[i], channels[i] = it.txnID, it.clean, it.stemmed, it.ref, it.channel
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE cimplrcorpsaas.bank_statement_transactions t
+		SET narration_clean = v.clean, narration_stemmed = v.stemmed,
+		    narration_ref = v.ref, payment_channel = v.channel
+		FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::text[]) AS v(id, clean, stemmed, ref, channel)
+		WHERE t.transaction_id = v.id
+		  AND (t.narration_clean IS NULL OR t.narration_clean = '')`,
+		ids, clean, stemmed, refs, channels); err != nil {
+		api.LogError("[smart-cat] narration backfill: %v", err)
+	}
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -546,6 +575,8 @@ func CreateGLMappingHandler(pool *pgxpool.Pool) http.Handler {
 //  5. Marks categorization_review_queue entry as CORRECTED.
 // ─────────────────────────────────────────────────────────────
 
+var errTransactionOutOfScope = errors.New("transaction is outside your entity scope")
+
 func applyCorrection(ctx context.Context, pool *pgxpool.Pool, txnID int64, categoryID, correctedBy string) error {
 	// Read current narration columns
 	var narrationClean, narrationStemmed, entityID, rawDesc string
@@ -561,6 +592,9 @@ func applyCorrection(ctx context.Context, pool *pgxpool.Pool, txnID int64, categ
 	`, txnID).Scan(&narrationClean, &narrationStemmed, &entityID, &rawDesc)
 	if err != nil {
 		return fmt.Errorf("fetch transaction: %w", err)
+	}
+	if !api.EntityInScope(ctx, entityID) {
+		return errTransactionOutOfScope
 	}
 
 	// Derive narration if not yet processed by the categorizer
@@ -620,12 +654,14 @@ func applyCorrection(ctx context.Context, pool *pgxpool.Pool, txnID int64, categ
 
 	// 4. Update review queue if the transaction is in it; also update step so
 	// the frozen snapshot stays in sync with the transaction's actual state.
-	_, _ = tx.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 		UPDATE cimplrcorpsaas.categorization_review_queue
 		SET status='CORRECTED', step='CORRECTION',
 		    reviewed_by=$1, reviewed_at=now()
 		WHERE transaction_id=$2
-	`, correctedBy, txnID)
+	`, correctedBy, txnID); err != nil {
+		return fmt.Errorf("review queue: %w", err)
+	}
 
 	return tx.Commit(ctx)
 }

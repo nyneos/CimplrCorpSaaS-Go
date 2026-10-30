@@ -4,11 +4,12 @@ import (
 	"CimplrCorpSaas/api/constants"
 	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	"context"
+	"errors"
 	"fmt"
-	"math/rand"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -34,6 +35,15 @@ func buildReceiptPeriod(t time.Time) string {
 	return strings.ToUpper(t.Format("Jan 2006"))
 }
 
+// errReceiptAlreadyPosted is returned when the receipt already carries a journal entry.
+var errReceiptAlreadyPosted = errors.New("receipt journals are already posted")
+
+// newJournalEntryID returns a journal entry id with 48 random bits so ids generated in
+// the same millisecond (interest + TDS, or concurrent posts) cannot collide.
+func newJournalEntryID() string {
+	return fmt.Sprintf("JE_%d_%s", time.Now().UnixMilli(), strings.ReplaceAll(uuid.NewString(), "-", "")[:12])
+}
+
 // postReceiptJournals generates and persists journal entries for an interest receipt.
 // Returns (interestEntryID, tdsEntryID, error).
 func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptForPosting, userEmail string) (string, string, error) {
@@ -52,7 +62,7 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 		).Scan(&entityName)
 	}
 
-	interestEntryID := fmt.Sprintf("JE_%d_%04d", time.Now().UnixMilli(), rand.Intn(10000))
+	interestEntryID := newJournalEntryID()
 	tdsEntryID := ""
 
 	tx, err := pool.Begin(ctx)
@@ -60,6 +70,20 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 		return "", "", fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Lock the receipt and re-check it inside the transaction so two concurrent
+	// post requests cannot both create journals for it.
+	var lockedReceipt string
+	err = tx.QueryRow(ctx, `
+		SELECT receipt_id FROM investment.fd_interest_receipt
+		WHERE receipt_id = $1 AND journal_entry_id IS NULL AND COALESCE(receipt_status,'') <> 'POSTED'
+		FOR UPDATE`, rec.ReceiptID).Scan(&lockedReceipt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", errReceiptAlreadyPosted
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("lock receipt: %w", err)
+	}
 
 	// Step 1: INSERT accounting_activity (required parent row for FK)
 	var activityID string
@@ -83,7 +107,9 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 	// (entity, bank, event) drives the lines, amount bases and rounding; with no
 	// mapping configured the built-in Dr Bank / Cr Accrued Interest pair is used.
 	var bankID string
-	_ = pool.QueryRow(ctx, `SELECT COALESCE(bank_id,'') FROM investment.fd_master WHERE fd_id = $1`, rec.FDID).Scan(&bankID)
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(bank_id,'') FROM investment.fd_master WHERE fd_id = $1`, rec.FDID).Scan(&bankID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", "", fmt.Errorf("fd bank lookup: %w", err)
+	}
 	mapped, mErr := fdAccounting.BuildMappedJournal(ctx, tx, rec.EntityID, bankID, "FD_INTEREST_RECEIPT",
 		fdAccounting.AmountSet{
 			Full: rec.GrossInterestReceived,
@@ -139,7 +165,7 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 	// Step 2: INSERT TDS journal entry if TDS > 0. Driven by the ACTIVE
 	// FD_TDS_DEDUCTED mapping when one is configured.
 	if rec.TDSAmountDeducted > 0 {
-		tdsEntryID = fmt.Sprintf("JE_%d_%04d", time.Now().UnixMilli(), rand.Intn(10000))
+		tdsEntryID = newJournalEntryID()
 		tdsMapped, tErr := fdAccounting.BuildMappedJournal(ctx, tx, rec.EntityID, bankID, "FD_TDS_DEDUCTED",
 			fdAccounting.AmountSet{
 				Full: rec.TDSAmountDeducted,
@@ -190,12 +216,15 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 	}
 
 	// Step 4: UPDATE receipt with journal_entry_id + POSTED status
-	_, err = tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE investment.fd_interest_receipt
 		SET journal_entry_id=$1, receipt_status='POSTED'
-		WHERE receipt_id=$2`, interestEntryID, rec.ReceiptID)
+		WHERE receipt_id=$2 AND journal_entry_id IS NULL`, interestEntryID, rec.ReceiptID)
 	if err != nil {
 		return "", "", fmt.Errorf("receipt update: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return "", "", errReceiptAlreadyPosted
 	}
 
 	// UPDATE TDS row with journal_entry_id + POSTED if TDS was deducted

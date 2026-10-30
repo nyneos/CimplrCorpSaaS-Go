@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -261,7 +262,7 @@ func ExportCalendarICS(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		hols, err := fetchApprovedActiveHolidays(ctx, pgxPool, req.CalendarID, cal.EffFrom, cal.EffTo)
 		if err != nil {
-			api.RespondWithError(w, 500, "fetch holidays failed: "+err.Error())
+			api.RespondWithError(w, 500, "fetch holidays failed: "+errtext.Detail(w, err))
 			return
 		}
 

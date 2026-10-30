@@ -13,9 +13,6 @@ import (
 func RequestActor(r *http.Request, reqActorID string) string {
 	actor := strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context()))
 	if actor == "" {
-		actor = strings.TrimSpace(reqActorID)
-	}
-	if actor == "" {
 		actor = "system"
 	}
 	return actor

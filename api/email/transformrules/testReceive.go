@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/internal/logger"
 )
 
@@ -29,7 +30,8 @@ func testReceiveToFolder(w http.ResponseWriter, r *http.Request, subfolder, logL
 		return
 	}
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
-		writeTestReceiveErr(w, "expected multipart form with field file: "+err.Error(), http.StatusBadRequest)
+		api.LogErrorForResponse(w, "transform test receive parse failed: %v", err)
+		writeTestReceiveErr(w, "invalid multipart form", http.StatusBadRequest)
 		return
 	}
 	file, hdr, err := r.FormFile("file")
@@ -41,7 +43,8 @@ func testReceiveToFolder(w http.ResponseWriter, r *http.Request, subfolder, logL
 
 	body, err := io.ReadAll(file)
 	if err != nil {
-		writeTestReceiveErr(w, "failed to read upload: "+err.Error(), http.StatusInternalServerError)
+		api.LogErrorForResponse(w, "transform test receive read failed: %v", err)
+		writeTestReceiveErr(w, "request failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -51,7 +54,8 @@ func testReceiveToFolder(w http.ResponseWriter, r *http.Request, subfolder, logL
 	}
 	dir := filepath.Join(base, subfolder)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		writeTestReceiveErr(w, "mkdir "+subfolder+": "+err.Error(), http.StatusInternalServerError)
+		api.LogErrorForResponse(w, "transform test receive mkdir failed: %v", err)
+		writeTestReceiveErr(w, "request failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -61,7 +65,8 @@ func testReceiveToFolder(w http.ResponseWriter, r *http.Request, subfolder, logL
 	}
 	full := filepath.Join(dir, name)
 	if err := os.WriteFile(full, body, 0o644); err != nil {
-		writeTestReceiveErr(w, "write file: "+err.Error(), http.StatusInternalServerError)
+		api.LogErrorForResponse(w, "transform test receive write failed: %v", err)
+		writeTestReceiveErr(w, "request failed", http.StatusInternalServerError)
 		return
 	}
 	abs, _ := filepath.Abs(full)

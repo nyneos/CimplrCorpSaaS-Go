@@ -68,7 +68,7 @@ func HandlePreview(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 		if err != nil {
 			api.LogErrorForResponse(w, "dms preview: %v", err)
-			api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, err.Error(), "DMS_PREVIEW_FAILED")
+			api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "failed to build the preview", "DMS_PREVIEW_FAILED")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Preview ready", map[string]interface{}{

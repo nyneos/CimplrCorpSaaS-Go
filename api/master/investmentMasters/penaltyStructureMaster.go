@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -349,7 +350,7 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		input := req.PenaltyStructureInput
 
 		if err := validatePenaltyFields(input); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			api.LogError("Validation failed for penalty structure: %v", err)
 			return
 		}
@@ -377,7 +378,7 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Check uniqueness before attempting insert to provide a friendly error
 		if conflict, err := penaltyStructureFindConflict(ctx, tx, input); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+errtext.Detail(w, err))
 			return
 		} else if conflict != nil {
 			api.RespondWithPayload(w, false, fmt.Sprintf("Penalty create aborted: a matching active penalty structure already exists (penalty_id=%v, bank_code=%v, penalty_type=%v, min_tenor_days=%v, max_tenor_days=%v, penalty_value=%v)", conflict["penalty_id"], conflict["bank_code"], conflict["penalty_type"], conflict["min_tenor_days"], conflict["max_tenor_days"], conflict["penalty_value"]), nil)
@@ -489,7 +490,7 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errorsList = append(errorsList, map[string]interface{}{
 					"row_index":            i,
 					constants.ValueSuccess: false,
-					constants.ValueError:   err.Error(),
+					constants.ValueError:   errtext.Text(err),
 					"bank_code":            row.BankCode,
 				})
 			} else {
@@ -504,7 +505,7 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			api.LogError("Bulk create transaction begin failed: %v", err)
 			return
 		}
@@ -523,7 +524,7 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for i := 0; i < len(finalValidInputs); {
 			conflict, err := penaltyStructureFindConflict(ctx, tx, finalValidInputs[i])
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed uniqueness check: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "failed uniqueness check: "+errtext.Detail(w, err))
 				return
 			}
 			if conflict != nil {
@@ -877,7 +878,7 @@ func UpdatePenaltyStructureBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			api.LogError("Bulk update transaction begin failed: %v", err)
 			return
 		}
@@ -907,7 +908,7 @@ func UpdatePenaltyStructureBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			var oldVals [16]interface{}
 			if err := rows.Scan(&id, &oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12], &oldVals[13], &oldVals[14], &oldVals[15]); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+errtext.Detail(w, err))
 				api.LogError("Old values scan failed: %v", err)
 				return
 			}
@@ -1020,7 +1021,7 @@ func UpdatePenaltyStructureBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errorsList = append(errorsList, map[string]interface{}{
 					"penalty_id":           update.PenaltyID,
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Audit failed: " + err.Error(),
+					constants.ValueError:   "Audit failed: " + errtext.Text(err),
 				})
 				continue
 			}
@@ -1097,7 +1098,7 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for existingRows.Next() {
 			var id string
 			if err := existingRows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Existing id scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Existing id scan failed: "+errtext.Detail(w, err))
 				api.LogError("Delete: existing id scan failed: %v", err)
 				return
 			}
@@ -1233,7 +1234,7 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var a auditRow
 			if err := rows.Scan(&a.AuditID, &a.PenaltyID, &a.ActionType, &a.ProcessingStatus); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Audit scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Audit scan failed: "+errtext.Detail(w, err))
 				api.LogError("Bulk approve: audit scan failed: %v", err)
 				return
 			}
@@ -1262,14 +1263,14 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				if _, err := tx.Exec(ctx, `UPDATE investment.fd_penalty_structure_master SET is_deleted = true WHERE penalty_id = $1`, a.PenaltyID); err != nil {
-					errorsList = append(errorsList, map[string]interface{}{"penalty_id": a.PenaltyID, "audit_id": a.AuditID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+					errorsList = append(errorsList, map[string]interface{}{"penalty_id": a.PenaltyID, "audit_id": a.AuditID, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 					continue
 				}
 			}
 
 			// Mark audit as approved
-			if _, err := tx.Exec(ctx, `UPDATE investment.fd_audit_penalty_structure SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE audit_id=$3`, userEmail, req.CheckerComment, a.AuditID); err != nil {
-				errorsList = append(errorsList, map[string]interface{}{"penalty_id": a.PenaltyID, "audit_id": a.AuditID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			if _, err := tx.Exec(ctx, `UPDATE investment.fd_audit_penalty_structure SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (audit_id=$3) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`, userEmail, req.CheckerComment, a.AuditID); err != nil {
+				errorsList = append(errorsList, map[string]interface{}{"penalty_id": a.PenaltyID, "audit_id": a.AuditID, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 				continue
 			}
 
@@ -1334,7 +1335,7 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		res, err := tx.Exec(ctx, `
 			UPDATE investment.fd_audit_penalty_structure
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE penalty_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+			WHERE (penalty_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, userEmail, req.CheckerComment, req.PenaltyIDs)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, "Rejection failed")
@@ -1437,7 +1438,7 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			var isActive *bool
 
 			if err := rows.Scan(&id, &bank, &bankName, &bankShortName, &minAmt, &maxAmt, &minTenor, &maxTenor, &minHeld, &maxHeld, &pType, &pValue, &calcMethod, &noInterest, &desc, &effFrom, &effTo, &isActive); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Row scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Row scan failed: "+errtext.Detail(w, err))
 				api.LogError("Get approved active scan failed: %v", err)
 				return
 			}
@@ -1615,7 +1616,7 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+errtext.Detail(w, rows.Err()))
 			api.LogError("Row iteration error in GetPenaltyStructuresWithAudit: %v", rows.Err())
 			return
 		}
@@ -1656,7 +1657,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -1667,7 +1668,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			storedFileName = s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(r.Context(), s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -1679,7 +1680,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rowsData, err = parseXLSXFile(newBytesMultipartFile(fileBytes))
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "failed to parse file: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "failed to parse file: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -1839,7 +1840,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			seenKeysInFile[key] = rowIdx + 2
 
 			if conflict, err := penaltyStructureFindConflict(ctx, pgxPool, input); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+errtext.Detail(w, err))
 				return
 			} else if conflict != nil {
 				sendFail(rowIdx+2, fmt.Sprintf("conflicts with existing active penalty structure (penalty_id=%v, bank_code=%v, penalty_type=%v, min_tenor_days=%v, max_tenor_days=%v, penalty_value=%v)", conflict["penalty_id"], conflict["bank_code"], conflict["penalty_type"], conflict["min_tenor_days"], conflict["max_tenor_days"], conflict["penalty_value"]))
@@ -1857,7 +1858,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Transactional batch insert
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			api.LogError("Upload: transaction begin failed: %v", err)
 			return
 		}

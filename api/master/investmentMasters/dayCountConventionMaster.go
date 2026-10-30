@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -159,7 +160,7 @@ func validateDayCountFields(input DayCountConventionInput) error {
 func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(10 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -171,13 +172,13 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		file, handler, err := r.FormFile("file")
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to get file: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to get file: "+errtext.Detail(w, err))
 			return
 		}
 		fileBytes, err := io.ReadAll(file)
 		file.Close()
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -201,7 +202,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			data, err = parseXLSXFile(newBytesMultipartFile(fileBytes))
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -312,7 +313,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			storedFileName = s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -322,7 +323,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if s3Key != "" {
 				_ = s3storage.DeleteFromS3(ctx, s3Key)
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		committed := false
@@ -511,13 +512,13 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		normCode, err := normalizeDayCountCode(req.DayCountCode)
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 		req.DayCountCode = normCode
 
 		if err := validateDayCountFields(req.DayCountConventionInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -665,7 +666,7 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errResults = append(errResults, map[string]interface{}{
 					"row_index":            i,
 					constants.ValueSuccess: false,
-					constants.ValueError:   err.Error(),
+					constants.ValueError:   errtext.Text(err),
 				})
 			} else {
 				validRows = append(validRows, row)
@@ -679,7 +680,7 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -757,7 +758,7 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var code string
 			var id interface{}
 			if err := insertRows.Scan(&code, &id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+errtext.Detail(w, err))
 				return
 			}
 			insertedCodes = append(insertedCodes, code)
@@ -1000,7 +1001,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1028,7 +1029,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var code string
 			var rec oldRecord
 			if err := oldRows.Scan(&code, &rec.Name, &rec.Type, &rec.Desc, &rec.Formula, &rec.IsActive); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+errtext.Detail(w, err))
 				return
 			}
 			oldMap[code] = rec
@@ -1078,7 +1079,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						errResults = append(errResults, map[string]interface{}{
 							"day_count_code":       update.DayCountCode,
 							constants.ValueSuccess: false,
-							constants.ValueError:   constants.ErrUpdateFailed + err.Error(),
+							constants.ValueError:   constants.ErrUpdateFailed + errtext.Text(err),
 						})
 						continue
 					}
@@ -1107,7 +1108,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errResults = append(errResults, map[string]interface{}{
 					"day_count_code":       update.DayCountCode,
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Audit failed: " + err.Error(),
+					constants.ValueError:   "Audit failed: " + errtext.Text(err),
 				})
 				continue
 			}
@@ -1162,7 +1163,7 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1182,7 +1183,7 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for verifyRows.Next() {
 			var code string
 			if err := verifyRows.Scan(&code); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+errtext.Detail(w, err))
 				return
 			}
 			validCodes = append(validCodes, code)
@@ -1290,7 +1291,7 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_day_count_convention
 			SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE day_count_code = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+			WHERE (day_count_code = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, userEmail, req.Comment, req.DayCountCodes)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Approval failed")
@@ -1315,7 +1316,10 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, code := range deleteApprovedCodes {
 				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_day_count_convention_master", code)
 				if len(blockers) > 0 {
-					_, _ = tx.Exec(ctx, `UPDATE investment.fd_audit_day_count_convention SET processing_status='PENDING_DELETE_APPROVAL', checker_by=NULL, checker_at=NULL, checker_comment=NULL WHERE day_count_code=$1 AND action_type='DELETE' AND processing_status='APPROVED'`, code)
+					if _, err := tx.Exec(ctx, `UPDATE investment.fd_audit_day_count_convention SET processing_status='PENDING_DELETE_APPROVAL', checker_by=NULL, checker_at=NULL, checker_comment=NULL WHERE day_count_code=$1 AND action_type='DELETE' AND processing_status='APPROVED'`, code); err != nil {
+						api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+						return
+					}
 					blockedItems = append(blockedItems, map[string]interface{}{"day_count_code": code, "blocked_by": dependency.BlockersSummary(blockers)})
 				}
 			}
@@ -1396,7 +1400,7 @@ func BulkRejectDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_day_count_convention
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE day_count_code = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+			WHERE (day_count_code = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, userEmail, req.Comment, req.DayCountCodes)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Rejection failed")
@@ -1447,7 +1451,7 @@ func GetDayCountConventionsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFun
 			var isActive bool
 
 			if err := rows.Scan(&id, &code, &name, &convType, &desc, &formula, &isActive); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+errtext.Detail(w, err))
 				return
 			}
 			out = append(out, map[string]interface{}{
@@ -1570,7 +1574,7 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			vals, err := rows.Values()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Row value error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Row value error: "+errtext.Detail(w, err))
 				return
 			}
 			row := make(map[string]interface{}, len(fields))
@@ -1585,7 +1589,7 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+errtext.Detail(w, rows.Err()))
 			return
 		}
 

@@ -32,6 +32,7 @@ package investmentdashboards
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -42,6 +43,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -155,13 +157,16 @@ func mergeInterestTrendBuckets(ctx context.Context, pool *pgxpool.Pool, entityFi
 		var sortKey string
 		var accrued float64
 		if err := accrRows.Scan(&sortKey, &accrued); err != nil {
-			continue
+			return nil, err
 		}
 		accruedMap[sortKey] = fdRound(accrued, 2)
 		if !seen[sortKey] {
 			seen[sortKey] = true
 			sortKeys = append(sortKeys, sortKey)
 		}
+	}
+	if err := accrRows.Err(); err != nil {
+		return nil, err
 	}
 
 	recRows, rerr := pool.Query(ctx, receivedSQL, entityFilter)
@@ -173,13 +178,16 @@ func mergeInterestTrendBuckets(ctx context.Context, pool *pgxpool.Pool, entityFi
 		var sortKey string
 		var received float64
 		if err := recRows.Scan(&sortKey, &received); err != nil {
-			continue
+			return nil, err
 		}
 		recvMap[sortKey] = fdRound(received, 2)
 		if !seen[sortKey] {
 			seen[sortKey] = true
 			sortKeys = append(sortKeys, sortKey)
 		}
+	}
+	if err := recRows.Err(); err != nil {
+		return nil, err
 	}
 
 	// sort keys chronologically
@@ -274,11 +282,11 @@ type govFetchItemsRequest struct {
 	SourcePage string
 }
 
-func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter string, req govFetchItemsRequest) []govFDItem {
+func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter string, req govFetchItemsRequest) ([]govFDItem, error) {
 	rows, err := pool.Query(ctx, req.SQL, entityFilter, bankFilter)
 	if err != nil {
 		api.LogError("[CfoDash] governance %s query error: %v", req.Action, err)
-		return []govFDItem{}
+		return []govFDItem{}, nil
 	}
 	defer rows.Close()
 	out := []govFDItem{}
@@ -289,7 +297,7 @@ func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFi
 			&f.Principal, &f.Rate, &f.MaturityDate, &f.Status,
 			&f.RequestedBy, &f.RequestedAt,
 		); scanErr != nil {
-			continue
+			return nil, scanErr
 		}
 		f.Principal = fdRound(f.Principal, 2)
 		f.Rate = fdRound(f.Rate, 4)
@@ -299,16 +307,19 @@ func govFetchItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFi
 		f.Currency = "INR"
 		out = append(out, f)
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // govFetchBookingItems returns one row per booking with booking_status and the
 // latest open audit processing_status (create/edit/delete).
-func govFetchBookingItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter, sql, source, sourcePage string) []govFDItem {
+func govFetchBookingItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter, sql, source, sourcePage string) ([]govFDItem, error) {
 	rows, err := pool.Query(ctx, sql, entityFilter, bankFilter)
 	if err != nil {
 		api.LogError("[CfoDash] governance booking query error: %v", err)
-		return []govFDItem{}
+		return []govFDItem{}, nil
 	}
 	defer rows.Close()
 	out := []govFDItem{}
@@ -320,7 +331,7 @@ func govFetchBookingItems(ctx context.Context, pool *pgxpool.Pool, entityFilter,
 			&f.Principal, &f.Rate, &f.MaturityDate, &bookingStatus, &processingStatus,
 			&f.RequestedBy, &f.RequestedAt,
 		); scanErr != nil {
-			continue
+			return nil, scanErr
 		}
 		f.Principal = fdRound(f.Principal, 2)
 		f.Rate = fdRound(f.Rate, 4)
@@ -340,7 +351,10 @@ func govFetchBookingItems(ctx context.Context, pool *pgxpool.Pool, entityFilter,
 		f.Currency = "INR"
 		out = append(out, f)
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func govSumPrincipal(items []govFDItem) float64 {
@@ -354,7 +368,7 @@ func govSumPrincipal(items []govFDItem) float64 {
 // govFetchAccrualRunItems returns accrual runs awaiting CFO approval.
 // Mirrors GetAccrualRuns (/run/all): run_status must be PENDING_APPROVAL and the
 // latest fd_accrual_run_audit.processing_status must not be APPROVED or REJECTED.
-func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, snapshotDate string) []govFDItem {
+func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilter, snapshotDate string) ([]govFDItem, error) {
 	sql := `
 		WITH latest_audit AS (
 		  SELECT DISTINCT ON (run_id)
@@ -393,7 +407,7 @@ func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilt
 	rows, err := pool.Query(ctx, sql, entityFilter)
 	if err != nil {
 		api.LogError("[CfoDash] governance accrual_run query error: %v", err)
-		return []govFDItem{}
+		return []govFDItem{}, nil
 	}
 	defer rows.Close()
 	out := []govFDItem{}
@@ -405,7 +419,7 @@ func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilt
 			&f.Principal, &f.Rate, &f.MaturityDate, &f.Status,
 			&f.RequestedBy, &f.RequestedAt, &procStatus,
 		); scanErr != nil {
-			continue
+			return nil, scanErr
 		}
 		f.Principal = fdRound(f.Principal, 2)
 		f.Rate = fdRound(f.Rate, 4)
@@ -417,10 +431,13 @@ func govFetchAccrualRunItems(ctx context.Context, pool *pgxpool.Pool, entityFilt
 		f.Currency = "INR"
 		out = append(out, f)
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter, snapshotDate string, periodStart time.Time) map[string]interface{} {
+func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter, bankFilter, snapshotDate string, periodStart time.Time) (map[string]interface{}, error) {
 	// snapshotDate upper-bound: only show items that existed as of this date.
 	// An empty snapshotDate means "no upper bound" (current live view).
 	snapUntil := ""
@@ -627,24 +644,44 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  AND ($2::text='' OR o.bank_id=$2 OR o.bank_name=$2)
 		ORDER BY COALESCE(la.requested_at, o.created_at) DESC LIMIT 200`
 
-	bookingItems := govFetchBookingItems(ctx, pool, entityFilter, bankFilter, pendingBookingSQL, constants.FDBookingLabel, constants.FDBooking)
-	confirmItems := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingConfirmSQL, Action: "PENDING_CONFIRMATION_APPROVAL", Source: constants.FDConfirmation, SourcePage: constants.FDConfirmationLabel})
-	activationItems := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingActivationSQL, Action: "PENDING_ACTIVATION_APPROVAL", Source: constants.FDActivationLabel, SourcePage: constants.FDActivation})
-	maturityItems := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingClosureSQL, Action: "PENDING_CLOSURE_APPROVAL", Source: constants.FDMaturity, SourcePage: constants.FdmaturityLabel})
-	rateNegotiationItems := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingRateNegotiationSQL, Action: constants.StatusPendingApproval, Source: constants.FDRateNegotiationLabel, SourcePage: constants.FDRateNegotiation})
+	bookingItems, err := govFetchBookingItems(ctx, pool, entityFilter, bankFilter, pendingBookingSQL, constants.FDBookingLabel, constants.FDBooking)
+	if err != nil {
+		return nil, err
+	}
+	confirmItems, err := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingConfirmSQL, Action: "PENDING_CONFIRMATION_APPROVAL", Source: constants.FDConfirmation, SourcePage: constants.FDConfirmationLabel})
+	if err != nil {
+		return nil, err
+	}
+	activationItems, err := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingActivationSQL, Action: "PENDING_ACTIVATION_APPROVAL", Source: constants.FDActivationLabel, SourcePage: constants.FDActivation})
+	if err != nil {
+		return nil, err
+	}
+	maturityItems, err := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingClosureSQL, Action: "PENDING_CLOSURE_APPROVAL", Source: constants.FDMaturity, SourcePage: constants.FdmaturityLabel})
+	if err != nil {
+		return nil, err
+	}
+	rateNegotiationItems, err := govFetchItems(ctx, pool, entityFilter, bankFilter, govFetchItemsRequest{SQL: pendingRateNegotiationSQL, Action: constants.StatusPendingApproval, Source: constants.FDRateNegotiationLabel, SourcePage: constants.FDRateNegotiation})
+	if err != nil {
+		return nil, err
+	}
 
-	accrualItems := govFetchAccrualRunItems(ctx, pool, entityFilter, snapshotDate)
+	accrualItems, err := govFetchAccrualRunItems(ctx, pool, entityFilter, snapshotDate)
+	if err != nil {
+		return nil, err
+	}
 	accrualRunCount := int64(len(accrualItems))
 
 	var latestRunStatus string
-	_ = pool.QueryRow(ctx, `
+	if err := pool.QueryRow(ctx, `
 		SELECT COALESCE(run_status,'') FROM investment.fd_accrual_run
 		WHERE COALESCE(is_deleted,false)=false AND (entity_id = ANY(string_to_array($1, ',')))
-		ORDER BY created_at DESC LIMIT 1`, entityFilter).Scan(&latestRunStatus)
+		ORDER BY created_at DESC LIMIT 1`, entityFilter).Scan(&latestRunStatus); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
 	accrualPosted := latestRunStatus == "POSTED" || latestRunStatus == constants.StatusApproved
 
 	var unprocessedMaturities int64
-	_ = pool.QueryRow(ctx, `
+	if err := pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM investment.fd_master m
 		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 		WHERE m.is_deleted=false AND m.maturity_date <= CURRENT_DATE
@@ -653,7 +690,9 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 		  AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 		  AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3 OR b.bank_id=$3 OR b.bank_name=$3)
 		  AND NOT (`+sqlAnyClosureProcessed+`)`,
-		entityFilter, periodStart.Format(constants.DateFormat), bankFilter).Scan(&unprocessedMaturities)
+		entityFilter, periodStart.Format(constants.DateFormat), bankFilter).Scan(&unprocessedMaturities); err != nil {
+		return nil, err
+	}
 
 	bookingPriority := "Low"
 	for _, it := range bookingItems {
@@ -705,7 +744,10 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 	_ = accrualPosted
 	_ = latestRunStatus
 
-	checklist := buildPeriodClosingChecklist(ctx, pool, entityFilter)
+	checklist, err := buildPeriodClosingChecklist(ctx, pool, entityFilter)
+	if err != nil {
+		return nil, err
+	}
 
 	completed, blockers := int64(0), int64(0)
 	for _, it := range checklist {
@@ -730,13 +772,13 @@ func buildGovernanceBundle(ctx context.Context, pool *pgxpool.Pool, entityFilter
 			"blockers":  blockers,
 		},
 		"closing_checklist": checklist,
-	}
+	}, nil
 }
 
 // buildPeriodClosingChecklist returns the real Month/Quarter-End Closing
 // Checklist totals use all non-deleted closing cycles, matching cycle/list and checklist/list.
 // A step is blocked only when at least one item explicitly has status BLOCKED.
-func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityFilter string) []govChecklistItem {
+func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entityFilter string) ([]govChecklistItem, error) {
 	sqlStr := `
 		SELECT
 		  i.step_code,
@@ -757,7 +799,7 @@ func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entity
 	rows, err := pool.Query(ctx, sqlStr, entityFilter)
 	if err != nil {
 		api.LogError("[CfoDash] period_closing checklist query error: %v", err)
-		return []govChecklistItem{}
+		return []govChecklistItem{}, nil
 	}
 	defer rows.Close()
 
@@ -768,7 +810,7 @@ func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entity
 		var isCritical bool
 		var total, completedCnt, blockedCnt int64
 		if scanErr := rows.Scan(&stepCode, &stepName, &sequence, &isCritical, &total, &completedCnt, &blockedCnt); scanErr != nil {
-			continue
+			return nil, scanErr
 		}
 		pending := total - completedCnt
 		detail := formatInt64(completedCnt) + "/" + formatInt64(total) + " FD-cycle items completed; " + formatInt64(pending) + " pending; " + formatInt64(blockedCnt) + " blocked"
@@ -784,7 +826,10 @@ func buildPeriodClosingChecklist(ctx context.Context, pool *pgxpool.Pool, entity
 			IsCritical:   isCritical,
 		})
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -903,7 +948,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// but always have a non-zero number to compare against.
 		run("bank_concentration", func(ctx context.Context) (interface{}, error) {
 			var totalAmt float64
-			_ = pool.QueryRow(ctx,
+			if err := pool.QueryRow(ctx,
 				`SELECT COALESCE(SUM(m.principal_amount),0)
 				 FROM investment.fd_master m
 				 LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
@@ -911,7 +956,9 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				   AND (COALESCE(m.entity_id,b.entity_id) = ANY(string_to_array($1, ',')))
 				   AND ($2::text='' OR COALESCE(m.interest_type_code,'')=$2)
 				   AND ($3::text='' OR m.bank_id=$3 OR m.bank_name=$3)`+snapshotFilter,
-				entityFilter, fdTypeFilter, bankFilter).Scan(&totalAmt)
+				entityFilter, fdTypeFilter, bankFilter).Scan(&totalAmt); err != nil {
+				return nil, err
+			}
 
 			// 30% of total portfolio = default per-counterparty concentration cap
 			policyCap := totalAmt * 0.30
@@ -932,7 +979,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    WHERE limit_id = bl.limit_id
 				    ORDER BY requested_at DESC
 				    LIMIT 1
-				  ) abl ON abl.processing_status = 'APPROVED'
+				  ) abl ON UPPER(TRIM(abl.processing_status)) = 'APPROVED'
 				  WHERE COALESCE(bl.is_deleted, false) = false
 				    AND (bl.bank_name = m.bank_name OR bl.bank_name = m.bank_id)
 				    AND (
@@ -971,7 +1018,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				var br bcRow
 				var bankCap float64
 				if err := rows.Scan(&br.Bank, &br.Exposure, &bankCap); err != nil {
-					continue
+					return nil, err
 				}
 				if bankCap > 0 {
 					br.Limit = bankCap
@@ -989,6 +1036,9 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				br.Breach = br.Limit > 0 && br.Exposure > br.Limit
 				data = append(data, br)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			if len(data) == 0 {
 				return map[string]interface{}{
@@ -1165,12 +1215,13 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				return nil, err
 			}
+			defer recRows.Close()
 			for recRows.Next() {
 				var exceptionID, fdID, bookingID, resultType, excType, severity, status, bank, entity, entityID, maturityDate string
 				var expected, received, variance, principal, rate float64
 				if scanErr := recRows.Scan(&exceptionID, &fdID, &bookingID, &resultType, &excType, &severity, &status,
 					&expected, &received, &variance, &bank, &entity, &entityID, &principal, &rate, &maturityDate); scanErr != nil {
-					continue
+					return nil, scanErr
 				}
 				variance = fdRound(variance, 2)
 				delta := math.Abs(variance)
@@ -1192,6 +1243,9 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					ActualValue:   fmt.Sprintf("%.2f", fdRound(received, 2)),
 					ModuleCode:    "FD_" + resultType, Status: status,
 				})
+			}
+			if err := recRows.Err(); err != nil {
+				return nil, err
 			}
 			recRows.Close()
 
@@ -1228,6 +1282,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				ORDER BY COALESCE(ABS(vl.variance_delta),0) DESC`, entityFilter)
 			if cErr == nil {
+				defer confRows.Close()
 				for confRows.Next() {
 					var varianceID, recordID, fdID, bookingID, bank, entity, entityID, maturityDate string
 					var fieldName, varianceType, priority, expectedValue, actualValue, systemComment, status string
@@ -1235,7 +1290,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					if scanErr := confRows.Scan(&varianceID, &recordID, &fdID, &bookingID, &bank, &entity, &entityID,
 						&principal, &rate, &maturityDate, &fieldName, &varianceType, &priority, &delta,
 						&expectedValue, &actualValue, &systemComment, &status); scanErr != nil {
-						continue
+						return nil, scanErr
 					}
 					delta = fdRound(delta, 4)
 					tKey := varianceType
@@ -1251,6 +1306,9 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 						ExpectedValue: expectedValue, ActualValue: actualValue, SystemComment: systemComment,
 						ModuleCode: "FD_CONFIRMATION", Status: status,
 					})
+				}
+				if err := confRows.Err(); err != nil {
+					return nil, err
 				}
 				confRows.Close()
 			}
@@ -1286,15 +1344,21 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				    AND (b.entity_id = ANY(string_to_array($1, ',')))
 				) x GROUP BY mod`, entityFilter)
 			if combinedRows != nil {
+				defer combinedRows.Close()
 				for combinedRows.Next() {
 					var mod string
 					var cnt int64
 					var val float64
-					if scanErr := combinedRows.Scan(&mod, &cnt, &val); scanErr == nil {
-						moduleCounts[mod] = cnt
-						moduleValues[mod] = val
-						trueCount += cnt
+					if scanErr := combinedRows.Scan(&mod, &cnt, &val); scanErr != nil {
+						return nil, scanErr
 					}
+					moduleCounts[mod] = cnt
+					moduleValues[mod] = val
+					trueCount += cnt
+
+				}
+				if err := combinedRows.Err(); err != nil {
+					return nil, err
 				}
 				combinedRows.Close()
 			}
@@ -1348,6 +1412,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND (b.entity_id = ANY(string_to_array($1, ',')))
 				ORDER BY COALESCE(ABS(vl.variance_delta),0) DESC`, entityFilter)
 			if ocErr == nil {
+				defer openConfRows.Close()
 				for openConfRows.Next() {
 					var varianceID, recordID, fdID, bookingID, bank, entity, entityID, maturityDate string
 					var fieldName, varianceType, priority, expectedValue, actualValue, systemComment, status string
@@ -1355,7 +1420,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					if scanErr := openConfRows.Scan(&varianceID, &recordID, &fdID, &bookingID, &bank, &entity, &entityID,
 						&principal, &rate, &maturityDate, &fieldName, &varianceType, &priority, &delta,
 						&expectedValue, &actualValue, &systemComment, &status); scanErr != nil {
-						continue
+						return nil, scanErr
 					}
 					openItems = append(openItems, item{
 						VarianceID: varianceID, RecordID: recordID, FDID: fdID, BookingID: bookingID,
@@ -1365,6 +1430,9 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 						ExpectedValue: expectedValue, ActualValue: actualValue, SystemComment: systemComment,
 						ModuleCode: "FD_CONFIRMATION", Status: status,
 					})
+				}
+				if err := openConfRows.Err(); err != nil {
+					return nil, err
 				}
 				openConfRows.Close()
 			}
@@ -1410,16 +1478,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			if err := pool.QueryRow(ctx, sql, entityFilter).Scan(
 				&openCnt, &highCnt, &excCnt, &amtImpact, &avgRateDelta, &avgDayDelta,
 			); err != nil {
-				// Empty result if variance_log not available
-				return map[string]interface{}{
-					"open_count":      0,
-					"high_count":      0,
-					"exception_count": 0,
-					"amount_impact":   0,
-					"avg_rate_delta":  0,
-					"avg_day_delta":   0,
-					"breakup":         []interface{}{},
-				}, nil
+				return nil, err
 			}
 
 			// per-type breakup for the tile sub-list
@@ -1439,13 +1498,17 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				GROUP BY 1
 				ORDER BY cnt DESC`
 			if brRows, berr := pool.Query(ctx, brSQL, entityFilter); berr == nil {
+				defer brRows.Close()
 				for brRows.Next() {
 					var br vrRow
 					if scanErr := brRows.Scan(&br.Type, &br.Count, &br.Delta); scanErr != nil {
-						continue
+						return nil, scanErr
 					}
 					br.Delta = fdRound(br.Delta, 2)
 					breakup = append(breakup, br)
+				}
+				if err := brRows.Err(); err != nil {
+					return nil, err
 				}
 				brRows.Close()
 			}
@@ -1546,12 +1609,15 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 						&it.IsException, &it.ModuleCode, &it.Status,
 					); scanErr != nil {
 						api.LogError("[CfoDash] variance_impact items scan: %v", scanErr)
-						continue
+						return nil, scanErr
 					}
 					it.Principal = fdRound(it.Principal, 2)
 					it.Rate = fdRound(it.Rate, 4)
 					it.Delta = fdRound(it.Delta, 4)
 					items = append(items, it)
+				}
+				if err := itRows.Err(); err != nil {
+					return nil, err
 				}
 			} else {
 				api.LogError("[CfoDash] variance_impact items query: %v", ierr)
@@ -1652,13 +1718,16 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				var lr ladderRow
 				var firstMat interface{}
 				if err := rows.Scan(&lr.Period, &lr.Amount, &lr.Count, &firstMat); err != nil {
-					continue
+					return nil, err
 				}
 				lr.Amount = fdRound(lr.Amount, 2)
 				if t, ok := firstMat.(time.Time); ok {
 					lr.FirstMaturity = t.Format(constants.DateFormat)
 				}
 				out = append(out, lr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			if out == nil {
 				out = []ladderRow{}
@@ -1728,9 +1797,12 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			for rows.Next() {
 				var yr ynRow
 				if err := rows.Scan(&yr.Label, &yr.Count); err != nil {
-					continue
+					return nil, err
 				}
 				out = append(out, yr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			if out == nil {
 				out = []ynRow{}
@@ -1788,10 +1860,13 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			for rows.Next() {
 				var rr rateRow
 				if err := rows.Scan(&rr.Bucket, &rr.Count, &rr.Value); err != nil {
-					continue
+					return nil, err
 				}
 				rr.Value = fdRound(rr.Value, 2)
 				out = append(out, rr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			if out == nil {
 				out = []rateRow{}
@@ -1801,7 +1876,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 9. governance - approvals + period closing (5 categories) ─────────
 		run("governance", func(ctx context.Context) (interface{}, error) {
-			return buildGovernanceBundle(ctx, pool, entityFilter, bankFilter, snapshotDate, periodStart), nil
+			return buildGovernanceBundle(ctx, pool, entityFilter, bankFilter, snapshotDate, periodStart)
 		})
 
 		// ── 11. fd_list ───────────────────────────────────────────────────────
@@ -1987,13 +2062,16 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					&fr.ClosureType, &fr.ClosureStatus,
 					&fr.IsClosureProcessed,
 				); err != nil {
-					continue
+					return nil, err
 				}
 				fr.Principal = fdRound(fr.Principal, 2)
 				fr.InterestAccrued = fdRound(fr.InterestAccrued, 2)
 				fr.InterestEarned = fdRound(fr.InterestEarned, 2)
 				fr.Rate = fdRound(fr.Rate, 4)
 				out = append(out, fr)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
 			if out == nil {
 				out = []fdRow{}
@@ -2003,6 +2081,14 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── wait for all goroutines ───────────────────────────────────────────
 		wg.Wait()
+
+		for _, sub := range results {
+			if sub.err != nil {
+				api.LogErrorForResponse(w, "investment dashboard query failed: %v", sub.err)
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDB)
+				return
+			}
+		}
 
 		// ── build bank_concentration chart + limit_utilization KPI ───────────
 		// Both derived from the bank_concentration sub-result so the chart and

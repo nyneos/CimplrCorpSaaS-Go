@@ -20,6 +20,10 @@ func handleListMappings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	toolURL := transformtool.BaseURL()
+	if toolURL == "" {
+		emailcommon.RespondInternal(w, "Transformation tool is not configured")
+		return
+	}
 
 	resp, err := httpClient.Get(toolURL + "/tftoolapi/mappings/summary")
 	if err != nil {

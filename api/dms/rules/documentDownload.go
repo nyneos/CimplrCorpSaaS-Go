@@ -30,6 +30,9 @@ func HandleDocumentDownload(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "BAD_REQUEST")
 			return
 		}
+		if !common.RequireRecordsEntityAccess(w, r, pool, common.DocEntityQuery, []string{req.DocID}) {
+			return
+		}
 		docID := strings.TrimSpace(req.DocID)
 		if docID == "" {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "doc_id is required", "BAD_REQUEST")

@@ -3,12 +3,14 @@ package allMaster
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
 	dependency "CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -137,7 +139,7 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+errtext.Detail(w, err))
 			return
 		}
 		defer func() {
@@ -192,12 +194,12 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.QueryRow(ctx, query, args...).Scan(&accountID); err != nil {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		if err != nil {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		auditQuery := `INSERT INTO auditactionbankaccount (
@@ -213,7 +215,7 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&auditActionID)
 		if auditErr != nil {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, "Account created but audit log failed: "+auditErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Account created but audit log failed: "+errtext.Detail(w, auditErr))
 			return
 		}
 		var clearingResults []map[string]interface{}
@@ -235,13 +237,13 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			err := tx.QueryRow(ctx, ccQuery, accountID, cc.CodeType, cc.CodeValue, optType, optVal).Scan(&clearingID)
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			clearingResults = append(clearingResults, map[string]interface{}{constants.ValueSuccess: true, "clearing_id": clearingID, "code_type": cc.CodeType})
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+errtext.Detail(w, err))
 			return
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
@@ -281,7 +283,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, acc := range req.Accounts {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxStartFailed + err.Error(), "account_id": acc.AccountID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxStartFailed + errtext.Text(err), "account_id": acc.AccountID})
 				continue
 			}
 			committed := false
@@ -327,7 +329,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&exErpType, &exSapBukrs, &exSapHbkid, &exSapHktid, &exSapBankl,
 					&exOraLedger, &exOraBranch, &exOraAccount, &exTallyLedger, &exSageCC,
 					&exAddr1, &exAddr2, &exCity, &exState, &exPostal); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to fetch existing account: " + err.Error(), "account_id": acc.AccountID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to fetch existing account: " + errtext.Text(err), "account_id": acc.AccountID})
 					return
 				}
 
@@ -548,7 +550,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					query := "UPDATE masterbankaccount SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE account_id=$%d RETURNING account_id", pos)
 					args = append(args, acc.AccountID)
 					if err := tx.QueryRow(ctx, query, args...).Scan(&updatedAccountID); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "account_id": acc.AccountID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errtext.Text(err), "account_id": acc.AccountID})
 						return
 					}
 				} else {
@@ -563,7 +565,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					// marshal then unmarshal to our struct for safety
 					b, _ := json.Marshal(clearingPayload)
 					if err := json.Unmarshal(b, &codes); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid clearing_codes payload: " + err.Error(), "account_id": updatedAccountID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid clearing_codes payload: " + errtext.Text(err), "account_id": updatedAccountID})
 						return
 					}
 
@@ -625,7 +627,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 					// mark existing clearing codes as deleted (soft-delete)
 					if _, delErr := tx.Exec(ctx, `UPDATE masterclearingcode SET is_deleted = true WHERE account_id=$1`, updatedAccountID); delErr != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to soft-delete old clearing codes: " + delErr.Error(), "account_id": updatedAccountID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to soft-delete old clearing codes: " + errtext.Text(delErr), "account_id": updatedAccountID})
 						return
 					}
 
@@ -657,7 +659,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						ccQuery := `INSERT INTO masterclearingcode (account_id, code_type, code_value, old_code_type, old_code_value, optional_code_type, old_optional_code_type, optional_code_value, old_optional_code_value) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING clearing_id`
 						var clearingID string
 						if err := tx.QueryRow(ctx, ccQuery, updatedAccountID, cc.CodeType, cc.CodeValue, oldType, oldValue, optType, oldOptType, optVal, oldOptValue).Scan(&clearingID); err != nil {
-							results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "account_id": updatedAccountID, "code_type": cc.CodeType})
+							results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errtext.Text(err), "account_id": updatedAccountID, "code_type": cc.CodeType})
 							return
 						}
 						clearingResults = append(clearingResults, map[string]interface{}{constants.ValueSuccess: true, "clearing_id": clearingID, "code_type": cc.CodeType})
@@ -670,12 +672,12 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				) VALUES ($1, $2, $3, $4, $5, now()) RETURNING action_id`
 				var auditActionID string
 				if err := tx.QueryRow(ctx, auditQuery, updatedAccountID, "EDIT", constants.StatusPendingEditApproval, nil, updatedBy).Scan(&auditActionID); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Account updated but audit log failed: " + err.Error(), "account_id": updatedAccountID, "clearing_codes": clearingResults})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Account updated but audit log failed: " + errtext.Text(err), "account_id": updatedAccountID, "clearing_codes": clearingResults})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxCommitFailed + err.Error(), "account_id": updatedAccountID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxCommitFailed + errtext.Text(err), "account_id": updatedAccountID})
 					return
 				}
 				committed = true
@@ -718,7 +720,8 @@ func BulkDeleteBankAccountAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = pgxPool.QueryRow(r.Context(), `
 				SELECT COUNT(*) FROM cimplrcorpsaas.bank_statements bs
 				JOIN masterbankaccount ma ON ma.account_number = bs.account_number
-				WHERE ma.account_id = $1 AND COALESCE(ma.is_deleted, false) = false`, accountID,
+				WHERE ma.account_id = $1 AND COALESCE(ma.is_deleted, false) = false
+				  AND COALESCE(bs.is_deleted, false) = false`, accountID,
 			).Scan(&stmtCount)
 			if stmtCount > 0 {
 				blocked = append(blocked, map[string]interface{}{
@@ -779,10 +782,10 @@ func BulkRejectBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		var rows pgx.Rows
 		var err error
-		query := `UPDATE auditactionbankaccount SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE account_id = ANY($3) RETURNING action_id,account_id`
+		query := `UPDATE auditactionbankaccount SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (account_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id,account_id`
 		rows, err = pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.AccountIDs))
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -817,70 +820,89 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
+		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
+			return
+		}
+		defer tx.Rollback(context.Background())
+
 		// Handle audit rows that requested DELETE — blockers were already enforced at delete-request time.
-		var delRows pgx.Rows
-		var delErr error
-		var deleted []string
-		var accountIDsToDelete []string
-		delQuery := `UPDATE auditactionbankaccount SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2 WHERE account_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, account_id`
-		delRows, delErr = pgxPool.Query(r.Context(), delQuery, checkerBy, req.Comment, pq.Array(req.AccountIDs))
-		if delErr == nil {
-			defer delRows.Close()
-			for delRows.Next() {
-				var id, accountID string
-				if err := delRows.Scan(&id, &accountID); err != nil {
-					logger.LogError("BulkApproveBankAccountAuditActions: delete rows scan failed: %v", err)
-				}
-				deleted = append(deleted, id, accountID)
-				accountIDsToDelete = append(accountIDsToDelete, accountID)
-			}
+		delQuery := `UPDATE auditactionbankaccount SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2 WHERE (account_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, account_id`
+		deleted, accountIDsToDelete, err := collectActionAccountPairs(ctx, tx, delQuery, checkerBy, req.Comment, pq.Array(req.AccountIDs))
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to approve delete requests: "+errtext.Detail(w, err))
+			return
 		}
 
-		// Soft-delete all approved accounts and cascade non-core children.
-		ctx := r.Context()
 		for _, accountID := range accountIDsToDelete {
-			_, _ = pgxPool.Exec(ctx, `
+			if _, err := tx.Exec(ctx, `
 				UPDATE bank_balances_manual SET is_deleted = true
 				WHERE account_no = (SELECT account_number FROM masterbankaccount WHERE account_id = $1)
-				  AND COALESCE(is_deleted, false) = false`, accountID)
-			_, _ = pgxPool.Exec(ctx, `
+				  AND COALESCE(is_deleted, false) = false`, accountID); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to delete account balances: "+errtext.Detail(w, err))
+				return
+			}
+			if _, err := tx.Exec(ctx, `
 				INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, requested_by, requested_at)
 				SELECT balance_id, 'DELETE', 'APPROVED', $2, now()
 				FROM bank_balances_manual
 				WHERE account_no = (SELECT account_number FROM masterbankaccount WHERE account_id = $1)
-				ON CONFLICT DO NOTHING`, accountID, checkerBy)
-			_ = dependency.CascadeDelete(ctx, pgxPool, "masterbankaccount", accountID, checkerBy)
+				ON CONFLICT DO NOTHING`, accountID, checkerBy); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to audit account balances: "+errtext.Detail(w, err))
+				return
+			}
 		}
 		if len(accountIDsToDelete) > 0 {
-			if _, err := pgxPool.Exec(r.Context(), `UPDATE masterbankaccount SET is_deleted = true WHERE account_id = ANY($1)`, accountIDsToDelete); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to mark bank accounts as deleted: "+err.Error())
+			if _, err := tx.Exec(ctx, `UPDATE masterbankaccount SET is_deleted = true WHERE account_id = ANY($1)`, accountIDsToDelete); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to mark bank accounts as deleted: "+errtext.Detail(w, err))
 				return
 			}
 		}
 
 		// Approve remaining audit actions (exclude those that were pending delete)
-		var rows pgx.Rows
-		var err error
-		query := `UPDATE auditactionbankaccount SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE account_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,account_id`
-		rows, err = pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.AccountIDs))
+		query := `UPDATE auditactionbankaccount SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (account_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id,account_id`
+		updated, _, err := collectActionAccountPairs(ctx, tx, query, checkerBy, req.Comment, pq.Array(req.AccountIDs))
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to approve bank accounts: "+errtext.Detail(w, err))
 			return
 		}
-		defer rows.Close()
-		var updated []string
-		for rows.Next() {
-			var id, accountID string
-			if err := rows.Scan(&id, &accountID); err != nil {
-				logger.LogError("BulkApproveBankAccountAuditActions: scan failed: %v", err)
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
+			return
+		}
+
+		// Non-core children each soft-delete in their own transaction.
+		for _, accountID := range accountIDsToDelete {
+			if err := dependency.CascadeDelete(ctx, pgxPool, "masterbankaccount", accountID, checkerBy); err != nil {
+				logger.LogError("BulkApproveBankAccountAuditActions: cascade delete %s failed: %v", accountID, err)
 			}
-			updated = append(updated, id, accountID)
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"updated": updated,
 			"deleted": deleted,
 		})
 	}
+}
+
+// collectActionAccountPairs runs an UPDATE ... RETURNING action_id, account_id.
+func collectActionAccountPairs(ctx context.Context, tx pgx.Tx, query string, args ...interface{}) ([]string, []string, error) {
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var pairs, accountIDs []string
+	for rows.Next() {
+		var id, accountID string
+		if err := rows.Scan(&id, &accountID); err != nil {
+			return nil, nil, err
+		}
+		pairs = append(pairs, id, accountID)
+		accountIDs = append(accountIDs, accountID)
+	}
+	return pairs, accountIDs, rows.Err()
 }
 
 // GET handler to fetch all bank_id, bank_name (bank_short_name) for banks used by accounts
@@ -908,7 +930,7 @@ func GetBankNamesWithIDForAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := pgxPool.Query(r.Context(), query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -933,7 +955,7 @@ func GetBankNamesWithIDForAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if anyError != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, anyError))
 			return
 		}
 		if results == nil {
@@ -1038,7 +1060,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 
 		rows, err := pgxPool.Query(ctx, baseQuery, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1063,7 +1085,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 				&approvedBalance,
 				&clearingCodes,
 			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "row scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "row scan failed: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1129,7 +1151,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "rows iteration failed: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "rows iteration failed: "+errtext.Detail(w, rows.Err()))
 			return
 		}
 
@@ -1174,7 +1196,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 // 		`
 // 		rows, err := pgxPool.Query(r.Context(), query)
 // 		if err != nil {
-// 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+// 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 // 			return
 // 		}
 // 		defer rows.Close()
@@ -1227,7 +1249,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 
 // 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 // 		if anyErr != nil {
-// 			api.RespondWithError(w, http.StatusInternalServerError, anyErr.Error())
+// 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, anyErr))
 // 			return
 // 		}
 // 		if results == nil {
@@ -1345,7 +1367,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -1353,7 +1375,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Begin TX
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+errtext.Detail(w, err))
 				return
 			}
 			committed := false
@@ -1370,7 +1392,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_bankaccount`)
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1609,7 +1631,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_bankaccount_table"}, columns, pgx.CopyFromRows(newCopyRows))
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1655,7 +1677,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err := tx.Query(ctx, insertSQL, batchID, s3KeyPtr)
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1673,14 +1695,14 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					// capture scan errors
 					rows.Close()
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to read inserted rows: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to read inserted rows: "+errtext.Detail(w, err))
 					return
 				}
 			}
 			if err := rows.Err(); err != nil {
 				rows.Close()
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Error iterating inserted rows: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Error iterating inserted rows: "+errtext.Detail(w, err))
 				return
 			}
 			rows.Close()
@@ -1696,7 +1718,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					FROM masterbankaccount WHERE account_id = ANY($2)`
 				if _, err := tx.Exec(ctx, auditSQL, userName, ids); err != nil {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+errtext.Detail(w, err))
 					return
 				}
 
@@ -1723,14 +1745,14 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				`, batchID, ids)
 				if err != nil {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert clearing codes: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert clearing codes: "+errtext.Detail(w, err))
 					return
 				}
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 				return
 			}
 			committed = true
@@ -1853,7 +1875,7 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, baseQuery, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2105,7 +2127,7 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2165,7 +2187,7 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&row.SwiftBic, &row.OldSwiftBic, &row.SwiftService, &row.OldSwiftService, &row.PortalURL, &row.OldPortalURL,
 				&row.PortalNotes, &row.OldPortalNotes, &row.ClearingCodes, &row.BankIDOut, &row.BankNameOut, &row.EntityIDOut, &row.EntityNameOut,
 			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 		} else {
@@ -2579,7 +2601,7 @@ WHERE COALESCE(a.is_deleted, false) = false`
 
 		rows, err := pgxPool.Query(ctx, baseQuery, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()

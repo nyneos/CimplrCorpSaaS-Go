@@ -24,6 +24,9 @@ func HandleAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid JSON body", "BAD_REQUEST")
 			return
 		}
+		if !common.RequireRecordsEntityAccess(w, r, pool, common.RuleEntityQuery, []string{req.RuleID}) {
+			return
+		}
 		ruleID := strings.TrimSpace(req.RuleID)
 		if ruleID == "" {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "rule_id is required", "BAD_REQUEST")

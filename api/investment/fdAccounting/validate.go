@@ -1,6 +1,7 @@
 package fdAccounting
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -66,7 +67,7 @@ func validateOne(ctx context.Context, pool *pgxpool.Pool, entryID string) map[st
 		return fail("journal entry not found")
 	}
 	if err != nil {
-		return fail(constants.ErrQueryFailed + err.Error())
+		return fail(constants.ErrQueryFailed + errtext.Text(err))
 	}
 
 	checks := []map[string]interface{}{}
@@ -79,13 +80,13 @@ func validateOne(ctx context.Context, pool *pgxpool.Pool, entryID string) map[st
 
 	lines, lerr := loadLines(ctx, pool, entryID)
 	if lerr != nil {
-		return fail(constants.ErrQueryFailed + lerr.Error())
+		return fail(constants.ErrQueryFailed + errtext.Text(lerr))
 	}
 	valid := addCheck("Journal lines", validateForPosting(lines, totalDebit, totalCredit))
 
 	periodReason := ""
 	if locked, why, perr := periodLocked(ctx, pool, entityID, entityName, entryDate); perr != nil {
-		return fail(constants.ErrQueryFailed + perr.Error())
+		return fail(constants.ErrQueryFailed + errtext.Text(perr))
 	} else if locked {
 		periodReason = why
 	}
@@ -93,7 +94,7 @@ func validateOne(ctx context.Context, pool *pgxpool.Pool, entryID string) map[st
 
 	approvalReason := ""
 	if latest, aerr := latestAuditStatus(ctx, pool, entryID); aerr != nil {
-		return fail(constants.ErrQueryFailed + aerr.Error())
+		return fail(constants.ErrQueryFailed + errtext.Text(aerr))
 	} else if latest != constants.StatusApproved && latest != "COMPLETED" && latest != "FAILED" {
 		approvalReason = "latest checker action is " + latest
 	}

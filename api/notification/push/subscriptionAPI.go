@@ -53,10 +53,10 @@ type unsubscribeRequest struct {
 
 // RegisterSubscriptionRoutes wires push-subscription routes onto the mux.
 // Call from api/notification/dino.go alongside RegisterPushInboxRoutes.
-func RegisterSubscriptionRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
+func RegisterSubscriptionRoutes(mux *http.ServeMux, pool *pgxpool.Pool, chain func(http.Handler) http.Handler) {
 	mux.HandleFunc("/notification/push-subscription/vapid-public-key", handleVAPIDPublicKey)
-	mux.HandleFunc("/notification/push-subscription/register", withPool(pool, handleSubscribe))
-	mux.HandleFunc("/notification/push-subscription/unregister", withPool(pool, handleUnsubscribe))
+	mux.Handle("/notification/push-subscription/register", chain(withPool(pool, handleSubscribe)))
+	mux.Handle("/notification/push-subscription/unregister", chain(withPool(pool, handleUnsubscribe)))
 }
 
 // withPool adapts a pool-accepting handler func into a standard http.HandlerFunc.

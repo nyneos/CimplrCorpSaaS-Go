@@ -55,15 +55,13 @@ func SyncEmailServiceStatus(ctx context.Context, pool *pgxpool.Pool) (bool, stri
 }
 
 // RequireEmailService blocks poll/ingest when the mail engine is unavailable.
-func RequireEmailService(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Runtime) error {
+func RequireEmailService(ctx context.Context, _ *pgxpool.Pool, rt *mailruntime.Runtime) error {
 	if rt == nil || !rt.Ready() {
 		return fmt.Errorf("mail processing not configured")
 	}
 	if err := rt.HealthCheck(ctx); err != nil {
-		detail := mailEngineUnavailableMsg(err)
 		logger.LogError("[email-service] poll blocked — health check failed: %v", err)
-		markPollingMailboxesSubscriptionExpired(ctx, pool, detail)
-		return fmt.Errorf("%s", detail)
+		return fmt.Errorf("mail engine unavailable")
 	}
 	return nil
 }

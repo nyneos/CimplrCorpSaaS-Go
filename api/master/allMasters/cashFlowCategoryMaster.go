@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/bsasync"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/dependency"
@@ -492,7 +493,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		relAdded := 0
 		relTx, relTxErr := pgxPool.Begin(ctx)
 		if relTxErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to begin relationship transaction: "+relTxErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to begin relationship transaction: "+errtext.Detail(w, relTxErr))
 			return
 		}
 		relTxOk := false
@@ -518,7 +519,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if err := relTx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to commit relationship inserts: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to commit relationship inserts: "+errtext.Detail(w, err))
 			return
 		}
 		relTxOk = true
@@ -1090,7 +1091,7 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&existingErpTypeI, &existingErpExtI, &existingErpSegmentI, &existingSapFsvI, &existingSapNodeI, &existingSapBukrsI, &existingSapNotesI,
 					&existingOracleLedgerI, &existingOracleCFCodeI, &existingOracleCFNameI, &existingOracleLineI,
 					&existingTallyGroupI, &existingTallyVoucherI, &existingTallyNotesI, &existingSageSectionI, &existingSageLineI, &existingSageNotesI); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to fetch existing category: " + err.Error(), "category_id": cat.CategoryID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to fetch existing category: " + errtext.Text(err), "category_id": cat.CategoryID})
 					return
 				}
 				var sets []string
@@ -1403,7 +1404,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 		// Safety check: abort if any transactions currently reference these categories
 		var txnCount int64
-		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions WHERE category_id = ANY($1)`, allToDelete).Scan(&txnCount); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions t JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id WHERE t.category_id = ANY($1) AND COALESCE(bs.is_deleted, false) = false`, allToDelete).Scan(&txnCount); err != nil {
 			tx.Rollback(ctx)
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, constants.ErrFailedToFetchCategoryRelationships)
 			if statusCode == http.StatusOK {
@@ -1438,7 +1439,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 		committed = true
@@ -1537,7 +1538,7 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		query := `UPDATE auditactioncashflowcategory SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE category_id = ANY($3) RETURNING action_id, category_id`
+		query := `UPDATE auditactioncashflowcategory SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (category_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, category_id`
 		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to reject category actions")
@@ -1689,7 +1690,7 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}()
 
-		query := `UPDATE auditactioncashflowcategory SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE category_id = ANY($3) RETURNING action_id, category_id, actiontype`
+		query := `UPDATE auditactioncashflowcategory SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (category_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, category_id, actiontype`
 		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, safeToApprove)
 		if err != nil {
 			tx.Rollback(ctx)
@@ -1723,48 +1724,48 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			// 1. Soft-delete master categories
 			if _, err := tx.Exec(ctx, `UPDATE mastercashflowcategory SET is_deleted = true WHERE category_id = ANY($1)`, pq.Array(deleteCategoryIDs)); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 
 			// 2. Delete all rule components for rules of these categories
 			if _, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id IN (SELECT rule_id FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1))`, pq.Array(deleteCategoryIDs)); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 
 			// 3. Delete all rules for these categories
 			if _, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(deleteCategoryIDs)); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 
 			// 4. Delete orphaned scopes that belonged to these rules (only if no rules remain for those scopes)
 			if _, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.rule_scope rs WHERE rs.scope_id IN (SELECT DISTINCT scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)) AND NOT EXISTS (SELECT 1 FROM cimplrcorpsaas.category_rules r WHERE r.scope_id = rs.scope_id)`, pq.Array(deleteCategoryIDs)); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 
 			// 5–6. RECAT audit with per-transaction old/new before unassigning categories
 			if err := bsasync.InsertCategoryDeleteRecatInTx(ctx, tx, deleteCategoryIDs, checkerBy, req.Comment, ""); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 
 			// 7. Unassign transactions referencing these categories
 			if _, err := tx.Exec(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = NULL WHERE category_id = ANY($1)`, pq.Array(deleteCategoryIDs)); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 		committed = true
@@ -1866,7 +1867,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fileHeader.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -1987,7 +1988,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					`, parentSrcCol, parentSrcCol, parentSrcCol, parentSrcCol, parentSrcCol, parentSrcCol)
 					invalidRows, err := tx.Query(ctx, invalidParentQuery, batchID)
 					if err != nil {
-						api.RespondWithError(w, http.StatusInternalServerError, "Parent validation failed: "+err.Error())
+						api.RespondWithError(w, http.StatusInternalServerError, "Parent validation failed: "+errtext.Detail(w, err))
 						return
 					}
 					for invalidRows.Next() {
@@ -2032,7 +2033,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						`, srcCols[0], catTypeSrcCol, parentSrcCol, parentSrcCol, parentSrcCol, parentSrcCol, parentSrcCol, catTypeSrcCol)
 						mismatchRows, err := tx.Query(ctx, typeMismatchQuery, batchID)
 						if err != nil {
-							api.RespondWithError(w, http.StatusInternalServerError, "Category type validation failed: "+err.Error())
+							api.RespondWithError(w, http.StatusInternalServerError, "Category type validation failed: "+errtext.Detail(w, err))
 							return
 						}
 						for mismatchRows.Next() {
@@ -2090,7 +2091,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				`
 				_, err = tx.Exec(ctx, auditSQL, userName, newCategoryIDs)
 				if err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -2103,7 +2104,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				`
 				_, err = tx.Exec(ctx, relSQL, newCategoryIDs)
 				if err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert relationships: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert relationships: "+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -2160,7 +2161,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		userName := session.Name
 
 		if err := r.ParseMultipartForm(64 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form: "+errtext.Detail(w, err))
 			return
 		}
 		file, fh, err := r.FormFile("file")
@@ -2183,7 +2184,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		records, err := parseCashFlowCategoryFile(newBytesMultipartFile(fileBytes), getFileExt(fh.Filename))
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "File parsing failed: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "File parsing failed: "+errtext.Detail(w, err))
 			return
 		}
 		if len(records) < 2 {
@@ -2247,14 +2248,14 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 				return
 			}
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+errtext.Detail(w, err))
 			return
 		}
 		defer func() {
@@ -2279,14 +2280,14 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 `)
 
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Temp table failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Temp table failed: "+errtext.Detail(w, err))
 			return
 		}
 		copyStart := time.Now()
 		_, err = tx.CopyFrom(ctx, pgx.Identifier{"tmp_mcc"}, copyCols, pgx.CopyFromRows(copyRows))
 		copyDur := time.Since(copyStart)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+errtext.Detail(w, err))
 			return
 		}
 		timings = append(timings, map[string]interface{}{"phase": "copy_to_tmp", "rows": rowCount, "ms": copyDur.Milliseconds()})
@@ -2321,7 +2322,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		parentQuery := `SELECT DISTINCT parent_category_name, category_name, category_type FROM tmp_mcc WHERE parent_category_name IS NOT NULL AND parent_category_name != ''`
 		parentRows, err := tx.Query(ctx, parentQuery)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Parent check failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Parent check failed: "+errtext.Detail(w, err))
 			return
 		}
 		for parentRows.Next() {
@@ -2422,7 +2423,7 @@ AND (
 `
 		updateStart := time.Now()
 		if _, err := tx.Exec(ctx, updateSQL); err != nil {
-			api.RespondWithError(w, 500, constants.ErrUpdateFailed+err.Error())
+			api.RespondWithError(w, 500, constants.ErrUpdateFailed+errtext.Detail(w, err))
 			return
 		}
 		updateDur := time.Since(updateStart)
@@ -2449,7 +2450,7 @@ WHERE m.category_id = a.category_id;
 `
 		hierarchyStart := time.Now()
 		if _, err := tx.Exec(ctx, hierarchySQL); err != nil {
-			api.RespondWithError(w, 500, "Hierarchy failed: "+err.Error())
+			api.RespondWithError(w, 500, "Hierarchy failed: "+errtext.Detail(w, err))
 			return
 		}
 		hierarchyDur := time.Since(hierarchyStart)
@@ -2467,7 +2468,7 @@ ON CONFLICT (parent_category_name, child_category_name) DO NOTHING;
 `
 		relStart := time.Now()
 		if _, err := tx.Exec(ctx, relationshipSQL); err != nil {
-			api.RespondWithError(w, 500, "Relationships failed: "+err.Error())
+			api.RespondWithError(w, 500, "Relationships failed: "+errtext.Detail(w, err))
 			return
 		}
 		relDur := time.Since(relStart)
@@ -2483,7 +2484,7 @@ ON CONFLICT DO NOTHING;
 `
 		auditStart := time.Now()
 		if _, err := tx.Exec(ctx, auditSQL, userName); err != nil {
-			api.RespondWithError(w, 500, constants.ErrAuditInsertFailed+err.Error())
+			api.RespondWithError(w, 500, constants.ErrAuditInsertFailed+errtext.Detail(w, err))
 			return
 		}
 		auditDur := time.Since(auditStart)
@@ -2492,7 +2493,7 @@ ON CONFLICT DO NOTHING;
 
 		commitStart := time.Now()
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
 		commitDur := time.Since(commitStart)

@@ -133,18 +133,22 @@ func incrementStagingBatchProgress(ctx context.Context, pool *pgxpool.Pool, batc
 		return
 	}
 	if succeeded {
-		_, _ = pool.Exec(ctx, `
+		if _, execErr := pool.Exec(ctx, `
 			UPDATE cimplrcorpsaas.pdf_staging_batch
 			   SET processed_files = processed_files + 1, updated_at = now()
 			 WHERE batch_id = $1
-		`, batchID)
+		`, batchID); execErr != nil {
+			logger.LogError("[bank-statement] staging bookkeeping write failed: %v", execErr)
+		}
 		return
 	}
-	_, _ = pool.Exec(ctx, `
+	if _, execErr := pool.Exec(ctx, `
 		UPDATE cimplrcorpsaas.pdf_staging_batch
 		   SET failed_files = failed_files + 1, updated_at = now()
 		 WHERE batch_id = $1
-	`, batchID)
+	`, batchID); execErr != nil {
+		logger.LogError("[bank-statement] staging bookkeeping write failed: %v", execErr)
+	}
 }
 
 func updateStagingStatementV2Result(ctx context.Context, pool *pgxpool.Pool, stagingID string, resp map[string]interface{}, bankStatementID string) error {

@@ -520,7 +520,7 @@ func isMissingObjectError(err error) bool {
 	return false
 }
 
-func objectContentHash(ctx context.Context, key string) (string, error) {
+func objectContentHash(ctx context.Context, key string, wantLen int) (string, error) {
 	client, bucket, err := newS3Client(ctx)
 	if err != nil {
 		return "", err
@@ -532,10 +532,15 @@ func objectContentHash(ctx context.Context, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if head.Metadata != nil {
-		if hash := strings.TrimSpace(head.Metadata[contentHashMetadataKey]); hash != "" {
-			return hash, nil
+	for k, hash := range head.Metadata {
+		if strings.EqualFold(k, contentHashMetadataKey) {
+			if hash = strings.TrimSpace(hash); hash != "" {
+				return hash, nil
+			}
 		}
+	}
+	if wantLen >= 0 && head.ContentLength != nil && *head.ContentLength != int64(wantLen) {
+		return "", nil
 	}
 	obj, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
@@ -545,11 +550,11 @@ func objectContentHash(ctx context.Context, key string) (string, error) {
 		return "", err
 	}
 	defer obj.Body.Close()
-	body, err := io.ReadAll(obj.Body)
-	if err != nil {
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, io.LimitReader(obj.Body, int64(wantLen)+1)); err != nil {
 		return "", fmt.Errorf("read s3 object %s from bucket %s: %w", key, bucket, err)
 	}
-	return ContentHashHex(body), nil
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func FindDuplicateObjectKey(ctx context.Context, body []byte, keys []string) (string, error) {
@@ -564,7 +569,7 @@ func FindDuplicateObjectKey(ctx context.Context, body []byte, keys []string) (st
 			continue
 		}
 		seen[key] = struct{}{}
-		hash, err := objectContentHash(ctx, key)
+		hash, err := objectContentHash(ctx, key, len(body))
 		if err != nil {
 			if isMissingObjectError(err) {
 				continue

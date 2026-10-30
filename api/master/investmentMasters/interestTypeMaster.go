@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -181,7 +182,7 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		fileBytes, err := io.ReadAll(file)
 		file.Close()
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 			return
 		}
 		contentType := s3storage.DetectContentType(fileBytes)
@@ -205,7 +206,7 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err = parseXLSXFile(newBytesMultipartFile(fileBytes))
 		}
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "File parsing failed: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "File parsing failed: "+errtext.Detail(w, err))
 			api.LogError("File parsing failed: %v", err)
 			return
 		}
@@ -352,7 +353,7 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			storedFileName = s3storage.BuildUploadedFilename(handler.Filename, userEmail, time.Now().UTC())
 			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -363,7 +364,7 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if s3Key != "" {
 				_ = s3storage.DeleteFromS3(ctx, s3Key)
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			api.LogError("Upload transaction begin failed: %v", err)
 			return
 		}
@@ -482,7 +483,7 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for insertRows.Next() {
 			var id, code string
 			if err := insertRows.Scan(&id, &code); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Upload scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Upload scan failed: "+errtext.Detail(w, err))
 				api.LogError("Upload result scan failed: %v", err)
 				return
 			}
@@ -597,7 +598,7 @@ func CreateInterestTypeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := validateInterestTypeFields(input); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			api.LogError("Validation failed for interest type: %v", err)
 			return
 		}
@@ -727,7 +728,7 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, map[string]interface{}{
 					"row_index":            i,
 					constants.ValueSuccess: false,
-					constants.ValueError:   err.Error(),
+					constants.ValueError:   errtext.Text(err),
 					"interest_type_code":   row.InterestTypeCode,
 				})
 			} else {
@@ -743,7 +744,7 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ULTRA FAST: Single transaction for ALL operations
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			api.LogError("Bulk create transaction begin failed: %v", err)
 			return
 		}
@@ -857,7 +858,7 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var id, code string
 			if err := rows.Scan(&id, &code); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+errtext.Detail(w, err))
 				api.LogError("Insert result scan failed: %v", err)
 				return
 			}
@@ -1133,7 +1134,7 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ULTRA FAST: Single transaction for ALL updates
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			api.LogError("Bulk update transaction begin failed: %v", err)
 			return
 		}
@@ -1161,7 +1162,7 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			var oldVals [8]interface{}
 			if err := rows.Scan(&id, &oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7]); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Old values scan failed: "+errtext.Detail(w, err))
 				api.LogError("Old values scan failed: %v", err)
 				return
 			}
@@ -1270,7 +1271,7 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, map[string]interface{}{
 					"interest_id":          update.InterestID,
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Audit failed: " + err.Error(),
+					constants.ValueError:   "Audit failed: " + errtext.Text(err),
 				})
 				continue
 			}
@@ -1331,7 +1332,7 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ULTRA FAST: Single transaction for ALL deletes
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			api.LogError("Bulk delete transaction begin failed: %v", err)
 			return
 		}
@@ -1357,7 +1358,7 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Verification scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Verification scan failed: "+errtext.Detail(w, err))
 				api.LogError("Delete verification scan failed: %v", err)
 				return
 			}
@@ -1485,7 +1486,7 @@ func BulkApproveInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_interest_type 
 			SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2
-			WHERE interest_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+			WHERE (interest_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, userEmail, req.Comment, req.InterestIDs)
 
 		if err != nil {
@@ -1511,7 +1512,10 @@ func BulkApproveInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, id := range deleteApprovedIDs {
 				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "fd_interest_type_master", id)
 				if len(blockers) > 0 {
-					_, _ = tx.Exec(ctx, `UPDATE investment.fd_audit_interest_type SET processing_status='PENDING_DELETE_APPROVAL', checker_by=NULL, checker_at=NULL, checker_comment=NULL WHERE interest_id=$1 AND action_type='DELETE' AND processing_status='APPROVED'`, id)
+					if _, err := tx.Exec(ctx, `UPDATE investment.fd_audit_interest_type SET processing_status='PENDING_DELETE_APPROVAL', checker_by=NULL, checker_at=NULL, checker_comment=NULL WHERE interest_id=$1 AND action_type='DELETE' AND processing_status='APPROVED'`, id); err != nil {
+						api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+						return
+					}
 					blockedItems = append(blockedItems, map[string]interface{}{"interest_id": id, "blocked_by": dependency.BlockersSummary(blockers)})
 				}
 			}
@@ -1596,7 +1600,7 @@ func BulkRejectInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_interest_type 
 			SET processing_status = 'REJECTED', checker_by = $1, checker_at = now(), checker_comment = $2
-			WHERE interest_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+			WHERE (interest_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, userEmail, req.Comment, req.InterestIDs)
 
 		if err != nil {
@@ -1662,7 +1666,7 @@ func GetInterestTypesApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var isDefault, isActive bool
 
 			if err := rows.Scan(&id, &code, &name, &method, &minTenor, &maxTenor, &isDefault, &desc, &isActive); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+errtext.Detail(w, err))
 				api.LogError("Database scan error in GetInterestTypesApprovedActive: %v", err)
 				return
 			}
@@ -1796,7 +1800,7 @@ func GetInterestTypesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+errtext.Detail(w, rows.Err()))
 			api.LogError("Row iteration error in GetInterestTypesWithAudit: %v", rows.Err())
 			return
 		}

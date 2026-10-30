@@ -3,6 +3,7 @@ package realtimebalances
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -288,7 +289,7 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 			INNER JOIN public.masterbankaccount mba ON bs.account_number = mba.account_number AND COALESCE(mba.is_deleted, false) = false
 			INNER JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
 			WHERE bs.is_deleted = false
-			AND bs.current_status = 'APPROVED'
+			AND UPPER(TRIM(bs.current_status)) = 'APPROVED'
 			AND bs.account_number = ANY($1)
 				AND bs.entity_id = ANY($2)
 				AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($3)
@@ -463,6 +464,10 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 				varianceBars = append(varianceBars, VarianceBar{Name: entityName + " . " + bankName, Value: value})
 			}
 		}
+		if err := vbRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
+		}
 		vbRows.Close()
 
 		donutSlices := []DonutSlice{}
@@ -481,6 +486,10 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 			if err := dRows.Scan(&code, &value); err == nil {
 				donutSlices = append(donutSlices, DonutSlice{ID: code, Label: code, Value: value})
 			}
+		}
+		if err := dRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		dRows.Close()
 
@@ -504,6 +513,10 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 				if err := eRows.Scan(&id, &entityName, &bankName, &ccy, &opening, &closing); err == nil {
 					entityRows = append(entityRows, EntityRow{ID: id, Entity: entityName, Bank: bankName, CCY: ccy, Opening: opening, Closing: closing, Delta: closing - opening})
 				}
+			}
+			if err := eRows.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			eRows.Close()
 		}
@@ -533,6 +546,10 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 					}
 					topCurrencies = append(topCurrencies, TopCurrency{Code: code, Label: code, Amount: amount, Color: color})
 				}
+			}
+			if err := tcRows.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			tcRows.Close()
 		}
@@ -564,7 +581,9 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 			var entityName, bankName, ccy string
 			var opening, closing float64
 			if err := aggRows.Scan(&entityName, &bankName, &ccy, &opening, &closing); err != nil {
-				continue
+				aggRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			key := entityName + "_" + bankName + "_" + ccy
 			trends = append(trends, Trend{
@@ -576,6 +595,10 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 				Statements: []AccountStatement{},
 			})
 			trendMap[key] = len(trends) - 1
+		}
+		if err := aggRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		aggRows.Close()
 
@@ -630,7 +653,9 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 				var txnID int64
 				var opening, inflow, outflow, closing float64
 				if err := trendTxnRows.Scan(&entityName, &bankName, &ccy, &dt, &txnID, &opening, &inflow, &outflow, &closing, &narration, &category); err != nil {
-					continue
+					trendTxnRows.Close()
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+					return
 				}
 				_ = txnID
 				key := entityName + "_" + bankName + "_" + ccy
@@ -644,6 +669,10 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 					Category:       category,
 				}
 				stmtsByKey[key] = append(stmtsByKey[key], stmt)
+			}
+			if err := trendTxnRows.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			trendTxnRows.Close()
 
@@ -718,7 +747,9 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 				var entityID, entityName, bankName, accountNo, ccy string
 				var opening, closing float64
 				if err := abRows.Scan(&entityID, &entityName, &bankName, &accountNo, &ccy, &opening, &closing); err != nil {
-					continue
+					abRows.Close()
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+					return
 				}
 				accountBalances = append(accountBalances, AccountBalance{
 					EntityID:   entityID,
@@ -737,6 +768,10 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 				if normalizedAcctNo != "" {
 					accountIndex[entityID+"\x1f"+normalizedAcctNo] = len(accountBalances) - 1
 				}
+			}
+			if err := abRows.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			abRows.Close()
 		}
@@ -771,7 +806,9 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 			var opening, inflow, outflow, closing float64
 			var narration, category string
 			if err := stmt2Rows.Scan(&entID, &accountNo, &dt, &opening, &inflow, &outflow, &closing, &narration, &category); err != nil {
-				continue
+				stmt2Rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 
 			stmt := AccountStatement{
@@ -790,6 +827,10 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 					accountBalances[idx].Statements = append(accountBalances[idx].Statements, stmt)
 				}
 			}
+		}
+		if err := stmt2Rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		stmt2Rows.Close()
 
@@ -875,7 +916,7 @@ per_day_account AS (
     JOIN cimplrcorpsaas.bank_statements bs
         ON t.bank_statement_id = bs.bank_statement_id
         AND bs.is_deleted = false
-        AND bs.current_status = 'APPROVED'
+        AND UPPER(TRIM(bs.current_status)) = 'APPROVED'
         AND bs.entity_id = ANY($3)
         AND bs.account_number = ANY($4)
     INNER JOIN public.masterbankaccount mba
@@ -901,6 +942,10 @@ ORDER BY day`
 					if err := tRows.Scan(&day, &val); err == nil {
 						balanceTrend = append(balanceTrend, DayPoint{X: day.Format("02 Jan"), Y: val})
 					}
+				}
+				if err := tRows.Err(); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+					return
 				}
 				tRows.Close()
 			}

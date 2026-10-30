@@ -1,6 +1,7 @@
 package fdAccounting
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"encoding/json"
 	"net/http"
 	"path"
@@ -42,7 +43,7 @@ func DownloadJournalEvidence(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		if key == "" {
@@ -57,7 +58,7 @@ func DownloadJournalEvidence(pool *pgxpool.Pool) http.HandlerFunc {
 			url, err = s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
 		}
 		if err != nil {
-			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "presign evidence file: "+err.Error())
+			fdclosingcommon.RespondError(w, http.StatusInternalServerError, "presign evidence file: "+errtext.Detail(w, err))
 			return
 		}
 		fdclosingcommon.RespondSuccess(w, "Success", map[string]interface{}{

@@ -43,8 +43,12 @@ func NewFXServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	RegisterFXRoutes(mux, serviceName, pgxPool)
 
 	server := &http.Server{
-		Addr:    ":" + port,
-		Handler: observability.WrapHTTP(serviceName, mux),
+		Addr:              ":" + port,
+		Handler:           observability.WrapHTTP(serviceName, limitFXRequestBody(mux)),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		WriteTimeout:      10 * time.Minute,
+		IdleTimeout:       120 * time.Second,
 	}
 	return server, pgxPool, nil
 }

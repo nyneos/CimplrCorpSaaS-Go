@@ -284,10 +284,10 @@ func UpdateChecklistItem(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		fdclosingcommon.RespondSuccess(w, "Checklist change submitted for approval", map[string]interface{}{
-			"item_id":            req.ItemID,
-			"processing_status":  "PENDING_EDIT_APPROVAL",
-			"proposed_status":    req.Status,
-			"status":             oldStatus, // live master unchanged
+			"item_id":           req.ItemID,
+			"processing_status": "PENDING_EDIT_APPROVAL",
+			"proposed_status":   req.Status,
+			"status":            oldStatus, // live master unchanged
 		})
 		api.LogInfo("[FDClosingChecklist] UpdateChecklistItem staged: item=%s cycle=%s proposed=%s by=%s",
 			req.ItemID, cycleID, req.Status, actor.Email)

@@ -1,10 +1,12 @@
 package emailmailbox
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"encoding/json"
 	"net/http"
 	"strings"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
 	"CimplrCorpSaas/internal/services/mailruntime"
@@ -40,7 +42,7 @@ func HandleIMAPTest(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			merged, mergeErr := MergeIMAPFields(stored, fields, addr)
 			if mergeErr != nil {
-				emailcommon.RespondBadRequest(w, mergeErr.Error())
+				emailcommon.RespondBadRequest(w, errtext.Detail(w, mergeErr))
 				return
 			}
 			fields = merged
@@ -56,7 +58,8 @@ func HandleIMAPTest(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		payload := fields.ToRuntimeIMAP()
 		if err := emailClient.VerifyIMAP(r.Context(), addr, payload); err != nil {
-			emailcommon.RespondFailPayload(w, constants.RouteIMAPTest, err.Error(), map[string]interface{}{"ok": false})
+			api.LogErrorForResponse(w, "email imap test failed: %v", err)
+			emailcommon.RespondFailPayload(w, constants.RouteIMAPTest, "request failed", map[string]interface{}{"ok": false})
 			return
 		}
 		host := strings.TrimSpace(payload.Host)

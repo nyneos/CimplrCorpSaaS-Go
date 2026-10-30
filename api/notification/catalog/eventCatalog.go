@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 
 	"bytes"
 	"context"
@@ -135,7 +136,7 @@ func CreateEventSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -155,7 +156,7 @@ func CreateEventSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if strings.Contains(err.Error(), "uq_event") || strings.Contains(err.Error(), "unique") {
 				respondWithError(w, http.StatusConflict, "duplicate event: the combination of (module_code, sub_module_code, event_code, entity_name) or (event_display_name, entity_name) or (source_route, entity_name) already exists")
 			} else {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			}
 			return
 		}
@@ -165,12 +166,12 @@ func CreateEventSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				event_id, action_type, processing_status, requested_by, requested_at
 			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`
 		if _, err := tx.Exec(ctx, auditQ, eventID, userEmail); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -229,7 +230,7 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -254,7 +255,7 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := tx.Query(ctx, batchQ, valueArgs...)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -275,7 +276,7 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if strings.Contains(err.Error(), "uq_event") || strings.Contains(err.Error(), "unique") {
 				respondWithError(w, http.StatusConflict, "duplicate event: the combination of (module_code, sub_module_code, event_code, entity_name) or (event_display_name, entity_name) or (source_route, entity_name) already exists")
 			} else {
-				respondWithError(w, http.StatusConflict, "event insert failed: "+err.Error())
+				respondWithError(w, http.StatusConflict, "event insert failed: "+errtext.Detail(w, err))
 			}
 			return
 		}
@@ -293,13 +294,13 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			auditQ := fmt.Sprintf("INSERT INTO notification_svc.audit_event (event_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ","))
 			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -337,7 +338,7 @@ func UpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -372,7 +373,7 @@ func UpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			q := fmt.Sprintf("UPDATE notification_svc.event SET %s WHERE event_id = $%d", strings.Join(sets, ", "), pos)
 			args = append(args, req.EventID)
 			if _, err := tx.Exec(ctx, q, args...); err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 		}
@@ -384,12 +385,12 @@ func UpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				old_event_display_name, old_description, old_is_active, old_entity_name
 			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6,$7)`
 		if _, err := tx.Exec(ctx, auditQ, req.EventID, req.Reason, userEmail, oldName, oldDesc, oldActive, nullStr(oldEntityName)); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -422,7 +423,7 @@ func BulkApproveEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -433,7 +434,7 @@ func BulkApproveEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE event_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
 		`, userEmail, req.Comment, req.EventIDs)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -445,7 +446,7 @@ func BulkApproveEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND COALESCE(is_deleted, false) = false
 		`, req.EventIDs)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -463,21 +464,21 @@ func BulkApproveEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RETURNING event_id
 		`, req.EventIDs)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		for delRows.Next() {
 			var eid string
 			if err := delRows.Scan(&eid); err != nil {
 				delRows.Close()
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			cascadeEventIDs = append(cascadeEventIDs, eid)
 		}
 		delRows.Close()
 		if err := delRows.Err(); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -488,7 +489,7 @@ func BulkApproveEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE event_id = ANY($1::text[])
 			`, cascadeEventIDs)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 
@@ -522,7 +523,7 @@ func BulkApproveEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE t.event_id = ANY($3::text[])
 			`, userEmail, req.Comment, cascadeEventIDs)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 
@@ -532,7 +533,7 @@ func BulkApproveEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE event_id = ANY($2::text[])
 			`, userEmail, cascadeEventIDs)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 
@@ -547,13 +548,13 @@ func BulkApproveEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE nc.event_id = ANY($3::text[])
 			`, userEmail, req.Comment, cascadeEventIDs)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -586,7 +587,7 @@ func BulkRejectEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -597,12 +598,12 @@ func BulkRejectEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE event_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
 		`, userEmail, req.Comment, req.EventIDs)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -697,7 +698,7 @@ func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err = pgxPool.Query(ctx, q)
 		}
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -720,7 +721,7 @@ func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if rows.Err() != nil {
-			respondWithError(w, http.StatusInternalServerError, rows.Err().Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, rows.Err()))
 			return
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
@@ -765,7 +766,7 @@ func GetEventAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					)
 				  )
 			)`, req.EventID).Scan(&eventVisible); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		if !eventVisible {
@@ -776,7 +777,7 @@ func GetEventAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		q := `SELECT audit_id, event_id, action_type, processing_status, reason, requested_by, requested_at, checker_by, checker_at, checker_comment, old_event_display_name, old_description, old_is_active, old_entity_name FROM notification_svc.audit_event WHERE event_id = $1 ORDER BY requested_at DESC`
 		rows, err := pgxPool.Query(ctx, q, req.EventID)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -835,7 +836,7 @@ func DeleteEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -844,7 +845,7 @@ func DeleteEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// verifyQ := `SELECT event_id FROM notification_svc.event WHERE event_id = ANY($1::text[]) AND action_type != 'DELETE' AND COALESCE(is_deleted, false) = false`
 		// rows, err := tx.Query(ctx, verifyQ, req.EventIDs)
 		// if err != nil {
-		// 	respondWithError(w, http.StatusInternalServerError, err.Error())
+		// 	respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 		// 	return
 		// }
 		// defer rows.Close()
@@ -873,12 +874,12 @@ func DeleteEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		auditQ := fmt.Sprintf("INSERT INTO notification_svc.audit_event (event_id, action_type, processing_status, requested_by, requested_at, checker_comment) VALUES %s", strings.Join(auditVals, ","))
 		if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -915,7 +916,7 @@ func BulkUpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -954,7 +955,7 @@ func BulkUpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				q := fmt.Sprintf("UPDATE notification_svc.event SET %s WHERE event_id=$%d", strings.Join(sets, ", "), pos)
 				args = append(args, row.EventID)
 				if _, err := tx.Exec(ctx, q, args...); err != nil {
-					errorsList = append(errorsList, map[string]interface{}{"event_id": row.EventID, "success": false, "error": err.Error()})
+					errorsList = append(errorsList, map[string]interface{}{"event_id": row.EventID, "success": false, "error": errtext.Text(err)})
 					continue
 				}
 			}
@@ -962,7 +963,7 @@ func BulkUpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// insert audit record with old values
 			auditQ := `INSERT INTO notification_svc.audit_event (event_id, action_type, processing_status, reason, requested_by, requested_at, old_event_display_name, old_description, old_is_active, old_entity_name) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6,$7)`
 			if _, err := tx.Exec(ctx, auditQ, row.EventID, row.Reason, userEmail, oldName, oldDesc, oldActive, nullStr(oldEntityName)); err != nil {
-				errorsList = append(errorsList, map[string]interface{}{"event_id": row.EventID, "success": false, "error": err.Error()})
+				errorsList = append(errorsList, map[string]interface{}{"event_id": row.EventID, "success": false, "error": errtext.Text(err)})
 				continue
 			}
 
@@ -970,7 +971,7 @@ func BulkUpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -1075,7 +1076,7 @@ func GetEventsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err != nil {
 			api.LogError("GetEventsWithAudit query failed: %v", err)
-			respondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			respondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1096,7 +1097,7 @@ func GetEventsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if rows.Err() != nil {
 			api.LogError("Row iteration error in GetEventsWithAudit: %v", rows.Err())
-			respondWithError(w, http.StatusInternalServerError, "row scan error: "+rows.Err().Error())
+			respondWithError(w, http.StatusInternalServerError, "row scan error: "+errtext.Detail(w, rows.Err()))
 			return
 		}
 
@@ -1145,7 +1146,7 @@ func GetEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var isActive, isDeleted bool
 		var audits json.RawMessage
 		if err := row.Scan(&id, &module, &sub, &code, &name, &desc, &route, &isActive, &isDeleted, &entityName, &audits); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		var auditsVal interface{}
@@ -1172,7 +1173,7 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Expect multipart form with `file` and `user_id`
 		if err := r.ParseMultipartForm(64 << 20); err != nil {
-			respondWithError(w, http.StatusBadRequest, "failed to parse multipart form: "+err.Error())
+			respondWithError(w, http.StatusBadRequest, "failed to parse multipart form: "+errtext.Detail(w, err))
 			return
 		}
 		userID := r.FormValue("user_id")
@@ -1182,7 +1183,7 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		file, handler, err := r.FormFile("file")
 		if err != nil {
-			respondWithError(w, http.StatusBadRequest, "file is required: "+err.Error())
+			respondWithError(w, http.StatusBadRequest, "file is required: "+errtext.Detail(w, err))
 			return
 		}
 		defer file.Close()
@@ -1198,7 +1199,7 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			respondWithError(w, http.StatusBadRequest, "failed to parse file: "+err.Error())
+			respondWithError(w, http.StatusBadRequest, "failed to parse file: "+errtext.Detail(w, err))
 			return
 		}
 		if len(rows) < 2 {
@@ -1245,7 +1246,7 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1288,7 +1289,7 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rowsOut, err := tx.Query(ctx, batchQ, valueArgs...)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rowsOut.Close()
@@ -1314,13 +1315,13 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			auditQ := fmt.Sprintf("INSERT INTO notification_svc.audit_event (event_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ","))
 			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 

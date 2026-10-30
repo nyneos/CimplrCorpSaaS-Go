@@ -1,6 +1,7 @@
 package fdInterestAndTdsWorkbench
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -314,7 +315,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil {
 			api.LogError("[TDSRegister] Create failed: %v", err)
-			api.RespondWithError(w, http.StatusInternalServerError, "TDS register creation failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "TDS register creation failed: "+errtext.Detail(w, err))
 			return
 		}
 
@@ -475,7 +476,7 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit la ON la.tds_id = tds.tds_id
 			LEFT JOIN history h ON h.tds_id = tds.tds_id
 			LEFT JOIN LATERAL (
-				SELECT ai.* FROM uam.approval_instance ai
+				SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 				WHERE ai.record_id = tds.tds_id
 				  AND ai.module_code = 'FIXED_DEPOSIT'
 				  AND ai.status = 'PENDING'
@@ -484,7 +485,7 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) ai ON true
 			LEFT JOIN LATERAL (
-				SELECT aie.* FROM uam.approval_instance_eye aie
+				SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 				WHERE aie.instance_id = ai.instance_id
 				  AND aie.status = 'ACTIVE'
 				ORDER BY aie.position ASC, aie.instance_eye_id ASC
@@ -524,7 +525,7 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pool.Query(ctx, sql, args...)
 		if err != nil {
 			api.LogError("[TDSRegisterView] Query failed: %v", err)
-			api.RespondWithError(w, http.StatusInternalServerError, "TDS register query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "TDS register query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -933,7 +934,7 @@ func UpdateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			if scanErr := pool.QueryRow(ctx,
 				`SELECT start_date, maturity_date FROM investment.fd_master WHERE fd_id=$1 AND is_deleted=false`,
 				fdIDForTDS).Scan(&fdStartU, &fdMaturityU); scanErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "FD date lookup failed: "+scanErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "FD date lookup failed: "+errtext.Detail(w, scanErr))
 				return
 			}
 			if errMsg := checkFDPeriodDates(fdStartU, fdMaturityU, req.PeriodStart, req.PeriodEnd); errMsg != "" {
@@ -1600,7 +1601,7 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE `+filterCol+` = $1 AND je.is_deleted = false`+dateClause+`
 			ORDER BY je.entry_date DESC, jl.line_number ASC`, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Journal query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Journal query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()

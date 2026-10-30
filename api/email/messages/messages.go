@@ -1,6 +1,7 @@
 package emailmessages
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -188,7 +189,8 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 		countArgs := args
 		var totalCount int
 		if err := pool.QueryRow(r.Context(), countQuery, countArgs...).Scan(&totalCount); err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email messages list count failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 			return
 		}
 
@@ -197,7 +199,8 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email messages list query failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 			return
 		}
 		defer rows.Close()
@@ -236,7 +239,8 @@ func HandleMessageList(pool *pgxpool.Pool) http.HandlerFunc {
 				&item.BodyTextPreview, &item.CreatedAt, &item.UploadedBy,
 				&item.AttachmentCount, &item.ParsedAttachmentCount, &item.AdditionalFileCount,
 				&item.MailDirection, &item.EnvelopeTo, &item.EntityName, &item.BusinessEntityID); err != nil {
-				emailcommon.RespondInternal(w, err.Error())
+				api.LogErrorForResponse(w, "email messages list scan failed: %v", err)
+				emailcommon.RespondInternal(w, "database operation failed")
 				return
 			}
 			items = append(items, item)
@@ -362,7 +366,8 @@ func HandleMessageGet(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE message_id = $1::uuid
 		`, messageID)
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email message attachments query failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 			return
 		}
 		defer attRows.Close()
@@ -380,7 +385,8 @@ func HandleMessageGet(pool *pgxpool.Pool) http.HandlerFunc {
 		for attRows.Next() {
 			var a att
 			if err := attRows.Scan(&a.AttachmentID, &a.Filename, &a.ContentType, &a.FileSize, &a.S3Key); err != nil {
-				emailcommon.RespondInternal(w, err.Error())
+				api.LogErrorForResponse(w, "email message attachments scan failed: %v", err)
+				emailcommon.RespondInternal(w, "database operation failed")
 				return
 			}
 			a.Source = attachmentSource(a.S3Key)
@@ -433,6 +439,9 @@ func HandleMessageExtract(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondBadRequest(w, "message_id is required")
 			return
 		}
+			if !emailcommon.RequireMessageAccess(w, r, pool, emailcommon.MessageByIDQuery, strings.TrimSpace(req.MessageID)) {
+				return
+			}
 
 		var s3RawKey, s3ParsedKey, module string
 		err := pool.QueryRow(r.Context(), `
@@ -467,7 +476,7 @@ func HandleMessageExtract(pool *pgxpool.Pool) http.HandlerFunc {
 
 		bodyLen, bodyErr := parsedBodyRuneLen(r.Context(), s3ParsedKey)
 		if bodyErr != nil {
-			emailcommon.RespondBadRequest(w, bodyErr.Error())
+			emailcommon.RespondBadRequest(w, errtext.Detail(w, bodyErr))
 			return
 		}
 		if bodyLen < minExtractBodyRunes {
@@ -481,7 +490,8 @@ func HandleMessageExtract(pool *pgxpool.Pool) http.HandlerFunc {
 
 		out, err := rt.ExtractStructured(r.Context(), s3ParsedKey, module)
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email message extract failed: %v", err)
+			emailcommon.RespondInternal(w, "request failed")
 			return
 		}
 
@@ -537,6 +547,13 @@ func HandleMessageLink(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondBadRequest(w, "message_id and entity_id are required")
 			return
 		}
+			if !emailcommon.RequireMessageAccess(w, r, pool, emailcommon.MessageByIDQuery, strings.TrimSpace(req.MessageID)) {
+				return
+			}
+			if !emailcommon.EntityInScope(req.EntityID, api.GetEntityIDsFromCtx(r.Context())) && !emailcommon.IsEmailAdmin(r.Context(), api.GetUserIDFromCtx(r.Context())) {
+				emailcommon.RespondForbidden(w, "entity not accessible")
+				return
+			}
 
 		_, err := pool.Exec(r.Context(), `
 			UPDATE email_svc.message
@@ -546,7 +563,8 @@ func HandleMessageLink(pool *pgxpool.Pool) http.HandlerFunc {
 			WHERE message_id = $1::uuid
 		`, req.MessageID, req.Module, req.EntityID)
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email message link failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 			return
 		}
 		emailcommon.RespondPayload(w, "inbox/update", map[string]interface{}{})
@@ -595,7 +613,8 @@ func HandleAttachmentDownload(pool *pgxpool.Pool) http.HandlerFunc {
 			signedURL, err = s3storage.GetDownloadPresignedURL(r.Context(), s3Key, 15*time.Minute)
 		}
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "email attachment download url failed: %v", err)
+			emailcommon.RespondInternal(w, "request failed")
 			return
 		}
 		emailcommon.RespondPayload(w, "attachments/download", map[string]interface{}{

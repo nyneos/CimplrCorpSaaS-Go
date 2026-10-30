@@ -20,12 +20,13 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
-// toUSD returns how many USD equal 1 unit of cur, using live rates from rate.json.
-// Falls back to 1.0 if the currency is unavailable.
+// toUSD returns how many USD equal 1 unit of cur, using rates from rate.json.
+// A currency without a rate returns 0, so its amounts are left out rather than valued as USD.
 func toUSD(cur string) float64 {
 	rate, err := ticker.RateBetween(cur, "USD")
 	if err != nil || rate == 0 {
-		return 1.0
+		logger.LogError("no USD rate for currency %q; amount excluded", cur)
+		return 0
 	}
 	return rate
 }
@@ -147,7 +148,8 @@ func GetForwardBookingMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFun
 			var amount float64
 			var currency, deliveryPeriod string
 			if err := rows.Scan(&amount, &currency, &deliveryPeriod); err != nil {
-				continue
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
 			}
 
 			currency = strings.ToUpper(currency)
@@ -160,6 +162,10 @@ func GetForwardBookingMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFun
 			usdAmount := math.Abs(amount) * rate
 			bucketKey := normalizeDeliveryPeriod(deliveryPeriod)
 			bucketTotals[bucketKey] += usdAmount
+		}
+		if err := rows.Err(); err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
 		}
 
 		// Prepare response
@@ -200,7 +206,7 @@ func GetForwardBookingsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 				maturity_date, add_date
 			FROM forward_bookings
 			WHERE entity_level_0 = ANY($1)
-			  AND (processing_status = 'Approved' OR processing_status = 'approved')
+			  AND (processing_status = 'Approved' OR UPPER(TRIM(processing_status)) = 'APPROVED')
 		`, buNames)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
@@ -237,7 +243,8 @@ func GetForwardBookingsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 				&fcyAmount, &spotRate, &forwardRate, &marginBps, &lcyValue,
 				&maturityDate, &dealDate,
 			); err != nil {
-				continue
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
 			}
 
 			// Helper for NullString → interface{}
@@ -285,6 +292,10 @@ func GetForwardBookingsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 				DealDate:     dateOrNil(dealDate),
 			}
 			result = append(result, row)
+		}
+		if err := rows.Err(); err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
 		}
 
 		if result == nil {

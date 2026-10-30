@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
@@ -142,7 +143,7 @@ func CreateBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := validateBankInput(req.BankInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -175,22 +176,32 @@ func CreateBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(id, uID, uEmail string) {
-			defer func() { recover() }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
-			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "BANK_CREATE",
 				RecordID: id, RecordTable: "apibox.bank_master",
 				AuditTable: "apibox.audit_bank_master", AuditIDColumn: "bank_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 				RequirePinnedMatrix: true,
 				AutoApplyIfUnpinned: true,
-			})
+			}); err != nil {
+				logger.LogError("[CounterpartyHub] approval instance creation failed: %v", err)
+			}
 		}(bankID, req.UserID, userEmail)
 
 		go func(id, uEmail string) {
-			defer func() { recover() }()
-			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 				"/master/counterparty-hub/bank/create", id,
 				map[string]interface{}{"record_id": id, "event": "BANK_CREATED", "actor_email": uEmail},
 			)
@@ -232,7 +243,7 @@ func CreateBankBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for i, row := range req.Rows {
 			if err := validateBankInput(row); err != nil {
-				errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 				continue
 			}
 			id, err := insertBankInTx(ctx, pgxPool, row, userEmail)
@@ -308,7 +319,7 @@ func UpdateBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if k == "bank_name" {
 				if s, ok := v.(string); ok {
 					if err := validateNoBIC(s); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 						return
 					}
 				}
@@ -436,8 +447,8 @@ func BulkApproveBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					logger.LogError("approveBank: delete bank_master exec failed: %v", err)
 				}
 			}
-			if _, err := tx.Exec(ctx, `UPDATE apibox.audit_bank_master SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE audit_id=$3`, userEmail, req.Comment, a.AuditID); err != nil {
-				errList = append(errList, map[string]interface{}{"bank_id": a.ID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			if _, err := tx.Exec(ctx, `UPDATE apibox.audit_bank_master SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (audit_id=$3) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`, userEmail, req.Comment, a.AuditID); err != nil {
+				errList = append(errList, map[string]interface{}{"bank_id": a.ID, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 				continue
 			}
 			success = append(success, map[string]interface{}{constants.ValueSuccess: true, "bank_id": a.ID})
@@ -487,7 +498,7 @@ func BulkRejectBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		res, err := tx.Exec(ctx, `
 			UPDATE apibox.audit_bank_master SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE bank_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'`,
+			WHERE (bank_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`,
 			userEmail, req.Comment, req.BankIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")

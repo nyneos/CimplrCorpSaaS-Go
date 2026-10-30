@@ -1,6 +1,8 @@
 package cfo
 
 import (
+	"CimplrCorpSaas/api/dash/fxrates"
+	"CimplrCorpSaas/api/errtext"
 	// "context"
 	"database/sql"
 	"fmt"
@@ -18,19 +20,7 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
-var rates = map[string]float64{
-	"USD": 1.0,
-	"AUD": 0.68,
-	"CAD": 0.75,
-	"CHF": 1.1,
-	"CNY": 0.14,
-	"RMB": 0.14,
-	"EUR": 1.09,
-	"GBP": 1.28,
-	"JPY": 0.0067,
-	"SEK": 0.095,
-	"INR": 0.0117,
-}
+var rates = fxrates.USDPerUnit()
 
 // Helper to get user_id from context
 func getUserID(r *http.Request) string {
@@ -55,7 +45,7 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		logger.LogInfo("%v", buNames)
-		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND LOWER(TRIM(COALESCE(approval_status, ''))) = 'approved'`
 		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
@@ -67,7 +57,9 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			var amount sql.NullFloat64
 			var currency sql.NullString
 			if err := rows.Scan(&amount, &currency); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			// enforce prevalidated currency scope
 			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
@@ -76,10 +68,11 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			val := math.Abs(amount.Float64)
 			cur := strings.ToUpper(currency.String)
 			rate := rates[cur]
-			if rate == 0 {
-				rate = 1.0
-			}
 			totalUsd += val * rate
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"totalUsd": totalUsd})
 	}
@@ -98,7 +91,7 @@ func GetPayablesByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
-		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'PO' OR exposure_type = 'creditors' OR exposure_type = 'grn') AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'PO' OR exposure_type = 'creditors' OR exposure_type = 'grn') AND entity = ANY($1) AND LOWER(TRIM(COALESCE(approval_status, ''))) = 'approved'`
 		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
@@ -110,7 +103,9 @@ func GetPayablesByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			var amount sql.NullFloat64
 			var currency sql.NullString
 			if err := rows.Scan(&amount, &currency); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			// enforce prevalidated currency scope
 			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
@@ -119,6 +114,10 @@ func GetPayablesByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			val := math.Abs(amount.Float64)
 			cur := strings.ToUpper(currency.String)
 			currencyTotals[cur] += val * (rates[cur])
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		type Payable struct {
 			Currency string `json:"currency"`
@@ -145,7 +144,7 @@ func GetReceivablesByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
-		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'SO' OR exposure_type = 'LC' OR exposure_type = 'debitors') AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'SO' OR exposure_type = 'LC' OR exposure_type = 'debitors') AND entity = ANY($1) AND LOWER(TRIM(COALESCE(approval_status, ''))) = 'approved'`
 		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
@@ -157,7 +156,9 @@ func GetReceivablesByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			var amount sql.NullFloat64
 			var currency sql.NullString
 			if err := rows.Scan(&amount, &currency); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			// enforce prevalidated currency scope
 			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
@@ -166,6 +167,10 @@ func GetReceivablesByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			val := math.Abs(amount.Float64)
 			cur := strings.ToUpper(currency.String)
 			currencyTotals[cur] += val * (rates[cur])
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		type Receivable struct {
 			Currency string `json:"currency"`
@@ -192,7 +197,7 @@ func GetAmountByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
-		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND LOWER(TRIM(COALESCE(approval_status, ''))) = 'approved'`
 		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
@@ -204,7 +209,9 @@ func GetAmountByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			var amount sql.NullFloat64
 			var currency sql.NullString
 			if err := rows.Scan(&amount, &currency); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			// enforce prevalidated currency scope
 			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
@@ -213,6 +220,10 @@ func GetAmountByCurrencyFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			val := math.Abs(amount.Float64)
 			cur := strings.ToUpper(currency.String)
 			currencyTotals[cur] += val * (rates[cur])
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		type Amount struct {
 			Currency string `json:"currency"`
@@ -239,7 +250,7 @@ func GetBusinessUnitCurrencySummaryFromHeaders(db *pgxpool.Pool) http.HandlerFun
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
-		query := `SELECT entity, currency, total_open_amount FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		query := `SELECT entity, currency, total_open_amount FROM exposure_headers WHERE entity = ANY($1) AND LOWER(TRIM(COALESCE(approval_status, ''))) = 'approved'`
 		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
@@ -251,7 +262,9 @@ func GetBusinessUnitCurrencySummaryFromHeaders(db *pgxpool.Pool) http.HandlerFun
 			var entity, currency sql.NullString
 			var amount sql.NullFloat64
 			if err := rows.Scan(&entity, &currency, &amount); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			// enforce prevalidated currency scope
 			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
@@ -271,6 +284,10 @@ func GetBusinessUnitCurrencySummaryFromHeaders(db *pgxpool.Pool) http.HandlerFun
 				buMap[bu] = map[string]float64{}
 			}
 			buMap[bu][cur] += usdAmount
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		type Currency struct {
 			Code   string `json:"code"`
@@ -308,7 +325,7 @@ func GetMaturityExpirySummaryFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
-		query := `SELECT total_open_amount, currency, value_date FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		query := `SELECT total_open_amount, currency, value_date FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND LOWER(TRIM(COALESCE(approval_status, ''))) = 'approved'`
 		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
@@ -322,7 +339,9 @@ func GetMaturityExpirySummaryFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			var currency sql.NullString
 			var docDate sql.NullTime
 			if err := rows.Scan(&amount, &currency, &docDate); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			// enforce prevalidated currency scope
 			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
@@ -331,9 +350,6 @@ func GetMaturityExpirySummaryFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			val := math.Abs(amount.Float64)
 			cur := strings.ToUpper(currency.String)
 			rate := rates[cur]
-			if rate == 0 {
-				rate = 1.0
-			}
 			usdAmount := val * rate
 			if !docDate.Valid {
 				continue
@@ -348,6 +364,10 @@ func GetMaturityExpirySummaryFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 					sum30 += usdAmount
 				}
 			}
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		output := []map[string]string{
 			{"label": "Next 7 Days", "value": "$" + formatK(sum7)},
@@ -386,7 +406,7 @@ func GetAvgExposureMaturity(db *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
-		query := `SELECT total_original_amount AS amount, currency, value_date, ABS(CAST(value_date AS date) - CURRENT_DATE) AS days_to_maturity FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		query := `SELECT total_original_amount AS amount, currency, value_date, ABS(CAST(value_date AS date) - CURRENT_DATE) AS days_to_maturity FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND LOWER(TRIM(COALESCE(approval_status, ''))) = 'approved'`
 		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, "Error calculating Avg Exposure Maturity", http.StatusInternalServerError)
@@ -400,19 +420,22 @@ func GetAvgExposureMaturity(db *pgxpool.Pool) http.HandlerFunc {
 			var documentDate sql.NullTime
 			var daysToMaturity sql.NullInt64
 			if err := rows.Scan(&amount, &currency, &documentDate, &daysToMaturity); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			// enforce prevalidated currency scope
 			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
 				continue
 			}
 			rate := rates[strings.ToUpper(currency.String)]
-			if rate == 0 {
-				rate = 1.0
-			}
 			usdAmount := math.Abs(amount.Float64) * rate
 			weightedSum += usdAmount * float64(daysToMaturity.Int64)
 			totalAmount += usdAmount
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		avgMaturity := 0
 		if totalAmount > 0 {
@@ -430,7 +453,7 @@ func GetMaturityExpiryCount7DaysFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
-		query := `SELECT value_date FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		query := `SELECT value_date FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND LOWER(TRIM(COALESCE(approval_status, ''))) = 'approved'`
 		rows, err := db.Query(r.Context(), query, buNames)
 		if err != nil {
 			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
@@ -442,7 +465,9 @@ func GetMaturityExpiryCount7DaysFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var docDate sql.NullTime
 			if err := rows.Scan(&docDate); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			if !docDate.Valid {
 				continue
@@ -451,6 +476,10 @@ func GetMaturityExpiryCount7DaysFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			if diffDays >= 0 && diffDays <= 7 {
 				count7++
 			}
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"value": count7})
 	}

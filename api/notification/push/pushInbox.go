@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -19,17 +18,13 @@ import (
 )
 
 // RegisterPushInboxRoutes wires the inbox REST handlers into mux.
-func RegisterPushInboxRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
-	// Primary endpoints
-	mux.HandleFunc("/notification/inbox/list", handleGetInbox(pool))
-	mux.HandleFunc("/notification/inbox/count", handleGetCount(pool))
-	mux.HandleFunc("/notification/inbox/mark-read", handleMarkRead(pool))
-	mux.HandleFunc("/notification/inbox/mark-all-read", handleMarkAllRead(pool))
-	mux.HandleFunc("/notification/inbox/delete", handleDelete(pool))
-
-	// Convenience alias: POST /notification/inbox → same as /notification/inbox/list
-	// Supports frontends that call the bare /notification/inbox path.
-	mux.HandleFunc("/notification/inbox", handleGetInbox(pool))
+func RegisterPushInboxRoutes(mux *http.ServeMux, pool *pgxpool.Pool, chain func(http.Handler) http.Handler) {
+	mux.Handle("/notification/inbox/list", chain(handleGetInbox(pool)))
+	mux.Handle("/notification/inbox/count", chain(handleGetCount(pool)))
+	mux.Handle("/notification/inbox/mark-read", chain(handleMarkRead(pool)))
+	mux.Handle("/notification/inbox/mark-all-read", chain(handleMarkAllRead(pool)))
+	mux.Handle("/notification/inbox/delete", chain(handleDelete(pool)))
+	mux.Handle("/notification/inbox", chain(handleGetInbox(pool)))
 }
 
 // userIDFromCtx resolves the calling user's ID from context or query param.
@@ -68,7 +63,7 @@ func pushCountSSE(ctx context.Context, pool *pgxpool.Pool, userID string) {
 		userID,
 	).Scan(&count)
 	if err != nil {
-		fmt.Printf("[PUSH] pushCountSSE query error for %s: %v\n", userID, err)
+		api.LogError("[PUSH] pushCountSSE query error for %s: %v", userID, err)
 		return
 	}
 	msg, _ := json.Marshal(map[string]interface{}{
@@ -76,6 +71,21 @@ func pushCountSSE(ctx context.Context, pool *pgxpool.Pool, userID string) {
 		"unread": count,
 	})
 	dashboard.SendToUser(userID, msg)
+}
+
+// pushCountSSEAsync updates the unread badge after the handler returns.
+// The request context is already cancelled by then, so this uses its own timeout.
+func pushCountSSEAsync(pool *pgxpool.Pool, userID string) {
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				api.LogError("[PUSH] count sse panic: %v", rec)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		pushCountSSE(ctx, pool, userID)
+	}()
 }
 
 // inboxItem is the JSON shape returned by GET /notification/inbox/list.
@@ -179,7 +189,7 @@ func handleGetInbox(pool *pgxpool.Pool) http.HandlerFunc {
 				&moduleCode, &subModuleCode, &eventCode, &eventName,
 				&senderID, &senderName, &senderEmail,
 			); err != nil {
-				fmt.Printf("[PUSH] handleGetInbox scan error: %v\n", err)
+				api.LogError("[PUSH] handleGetInbox scan error: %v", err)
 				continue
 			}
 
@@ -311,7 +321,7 @@ func handleMarkRead(pool *pgxpool.Pool) http.HandlerFunc {
 			// May be a system (in-memory) notification — try marking it there
 			catalog.MarkSystemNotifRead(userID, body.ID)
 		}
-		go pushCountSSE(r.Context(), pool, userID)
+		pushCountSSEAsync(pool, userID)
 		writeOK(w, map[string]interface{}{"message": "notification marked as read"})
 	}
 }
@@ -349,7 +359,7 @@ func handleMarkAllRead(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Also mark all in-memory system notifications as read
 		catalog.MarkSystemNotifsRead(userID)
-		go pushCountSSE(r.Context(), pool, userID)
+		pushCountSSEAsync(pool, userID)
 		writeOK(w, map[string]interface{}{
 			"message": "all notifications marked as read",
 			"updated": tag.RowsAffected(),
@@ -396,7 +406,7 @@ func handleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			writeErr(w, http.StatusNotFound, "notification not found or already deleted")
 			return
 		}
-		go pushCountSSE(r.Context(), pool, userID)
+		pushCountSSEAsync(pool, userID)
 		writeOK(w, map[string]interface{}{"message": "notification deleted"})
 	}
 }

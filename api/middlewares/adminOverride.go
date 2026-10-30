@@ -253,7 +253,6 @@ func LoadAllEntities(ctx context.Context, db *pgxpool.Pool) ([]string, []string,
                 SELECT entity_id::text, entity_name
                 FROM masterentitycash
                 WHERE COALESCE(is_deleted, false) = false
-                  AND LOWER(active_status) = 'active'
                 ORDER BY entity_name
             `,
 		},

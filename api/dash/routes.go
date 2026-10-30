@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"CimplrCorpSaas/api"
 	bankbalance "CimplrCorpSaas/api/dash/bankBalance"
 	benchmarks "CimplrCorpSaas/api/dash/benchmarks"
 	"CimplrCorpSaas/api/dash/buCurrExpDash"
@@ -17,8 +18,8 @@ import (
 	liqsnap "CimplrCorpSaas/api/dash/liqsnap"
 	notifDash "CimplrCorpSaas/api/dash/notification"
 	payablereceivabledash "CimplrCorpSaas/api/dash/payableReceivableDash"
-	policyenginedash "CimplrCorpSaas/api/dash/policyEngine"
 	plannedinflowoutflowdash "CimplrCorpSaas/api/dash/plannedInflowOutflowDash"
+	policyenginedash "CimplrCorpSaas/api/dash/policyEngine"
 	projectiondash "CimplrCorpSaas/api/dash/projectionDash"
 	realtimebalances "CimplrCorpSaas/api/dash/realTimeBalances"
 	reports "CimplrCorpSaas/api/dash/reports"
@@ -49,10 +50,10 @@ func RegisterDashRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool
 	}
 	// Read-only investment dashboards: prevalidation v2 entity scope + light path (no FD/MF master preload).
 	midDashInvestRead := func(h http.Handler) http.Handler {
-		return investmentdashboards.CacheDashboardHandler(
-			middlewares.PreValidationMiddleware(pgxPool)(
-				middlewares.GlobalIndependentMiddleware(pgxPool)(
-					middlewares.GlobalDependentMiddleware(pgxPool)(h),
+		return middlewares.PreValidationMiddleware(pgxPool)(
+			middlewares.GlobalIndependentMiddleware(pgxPool)(
+				middlewares.GlobalDependentMiddleware(pgxPool)(
+					investmentdashboards.CacheDashboardHandler(h),
 				),
 			),
 		)
@@ -232,30 +233,30 @@ func RegisterDashRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool
 	mux.Handle("/dash/builder/data", midDashFull(dashboardbuilder.GetDataSource(pgxPool)))
 
 	// ── Notification Dashboard ────────────────────────────────────────────────
-	mux.Handle("/dash/notification/kpi", midDashFull(notifDash.GetKPI(pgxPool)))
-	mux.Handle("/dash/notification/logs", midDashFull(notifDash.GetLogs(pgxPool)))
-	mux.Handle("/dash/notification/channel-breakdown", midDashFull(notifDash.GetChannelBreakdown(pgxPool)))
-	mux.Handle("/dash/notification/hourly-trend", midDashFull(notifDash.GetHourlyTrend(pgxPool)))
-	mux.Handle("/dash/notification/top-events", midDashFull(notifDash.GetTopEvents(pgxPool)))
-	mux.Handle("/dash/notification/timeline", midDashFull(notifDash.GetTimeline(pgxPool)))
-	mux.Handle("/dash/notification/retry-stats", midDashFull(notifDash.GetRetryStats(pgxPool)))
-	mux.Handle("/dash/notification/send-history", midDashFull(notifDash.GetSendHistory(pgxPool)))
-	mux.Handle("/dash/notification/provider-stats", midDashFull(notifDash.GetProviderStats(pgxPool)))
-	mux.Handle("/dash/notification/event-config", midDashFull(notifDash.GetEventConfig(pgxPool)))
-	mux.Handle("/dash/notification/failure-reasons", midDashFull(notifDash.GetFailureReasons(pgxPool)))
-	mux.Handle("/dash/notification/overview", midDashFull(notifDash.GetOverview(pgxPool)))
+	mux.Handle("/dash/notification/kpi", midDashFull(api.RequireAdminOverride(notifDash.GetKPI(pgxPool))))
+	mux.Handle("/dash/notification/logs", midDashFull(api.RequireAdminOverride(notifDash.GetLogs(pgxPool))))
+	mux.Handle("/dash/notification/channel-breakdown", midDashFull(api.RequireAdminOverride(notifDash.GetChannelBreakdown(pgxPool))))
+	mux.Handle("/dash/notification/hourly-trend", midDashFull(api.RequireAdminOverride(notifDash.GetHourlyTrend(pgxPool))))
+	mux.Handle("/dash/notification/top-events", midDashFull(api.RequireAdminOverride(notifDash.GetTopEvents(pgxPool))))
+	mux.Handle("/dash/notification/timeline", midDashFull(api.RequireAdminOverride(notifDash.GetTimeline(pgxPool))))
+	mux.Handle("/dash/notification/retry-stats", midDashFull(api.RequireAdminOverride(notifDash.GetRetryStats(pgxPool))))
+	mux.Handle("/dash/notification/send-history", midDashFull(api.RequireAdminOverride(notifDash.GetSendHistory(pgxPool))))
+	mux.Handle("/dash/notification/provider-stats", midDashFull(api.RequireAdminOverride(notifDash.GetProviderStats(pgxPool))))
+	mux.Handle("/dash/notification/event-config", midDashFull(api.RequireAdminOverride(notifDash.GetEventConfig(pgxPool))))
+	mux.Handle("/dash/notification/failure-reasons", midDashFull(api.RequireAdminOverride(notifDash.GetFailureReasons(pgxPool))))
+	mux.Handle("/dash/notification/overview", midDashFull(api.RequireAdminOverride(notifDash.GetOverview(pgxPool))))
 
 	// ── Policy Engine Dashboard ───────────────────────────────────────────────
 	// Light chain only (Session+Global) — this dashboard only reads
 	// policyengine_svc, no Cash/FD/MF middleware preloads needed (see
 	// midDashCash's comment above on why those preloads can hang minutes).
-	mux.Handle("/dash/policy-engine/overview", midDashCash(policyenginedash.GetOverview(pgxPool)))
-	mux.Handle("/dash/policy-engine/kpi", midDashCash(policyenginedash.GetKPI(pgxPool)))
-	mux.Handle("/dash/policy-engine/result-trend", midDashCash(policyenginedash.GetResultTrend(pgxPool)))
-	mux.Handle("/dash/policy-engine/module-breakdown", midDashCash(policyenginedash.GetModuleBreakdown(pgxPool)))
-	mux.Handle("/dash/policy-engine/top-breaching", midDashCash(policyenginedash.GetTopBreaching(pgxPool)))
-	mux.Handle("/dash/policy-engine/criticality-breakdown", midDashCash(policyenginedash.GetCriticalityBreakdown(pgxPool)))
-	mux.Handle("/dash/policy-engine/module-heatmap", midDashCash(policyenginedash.GetModuleHeatmap(pgxPool)))
-	mux.Handle("/dash/policy-engine/latency-distribution", midDashCash(policyenginedash.GetLatencyDistribution(pgxPool)))
-	mux.Handle("/dash/policy-engine/logs", midDashCash(policyenginedash.GetLogs(pgxPool)))
+	mux.Handle("/dash/policy-engine/overview", midDashCash(api.RequireAdminOverride(policyenginedash.GetOverview(pgxPool))))
+	mux.Handle("/dash/policy-engine/kpi", midDashCash(api.RequireAdminOverride(policyenginedash.GetKPI(pgxPool))))
+	mux.Handle("/dash/policy-engine/result-trend", midDashCash(api.RequireAdminOverride(policyenginedash.GetResultTrend(pgxPool))))
+	mux.Handle("/dash/policy-engine/module-breakdown", midDashCash(api.RequireAdminOverride(policyenginedash.GetModuleBreakdown(pgxPool))))
+	mux.Handle("/dash/policy-engine/top-breaching", midDashCash(api.RequireAdminOverride(policyenginedash.GetTopBreaching(pgxPool))))
+	mux.Handle("/dash/policy-engine/criticality-breakdown", midDashCash(api.RequireAdminOverride(policyenginedash.GetCriticalityBreakdown(pgxPool))))
+	mux.Handle("/dash/policy-engine/module-heatmap", midDashCash(api.RequireAdminOverride(policyenginedash.GetModuleHeatmap(pgxPool))))
+	mux.Handle("/dash/policy-engine/latency-distribution", midDashCash(api.RequireAdminOverride(policyenginedash.GetLatencyDistribution(pgxPool))))
+	mux.Handle("/dash/policy-engine/logs", midDashCash(api.RequireAdminOverride(policyenginedash.GetLogs(pgxPool))))
 }

@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -360,7 +361,7 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fileBytes, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToReadFile+errtext.Detail(w, err))
 				return
 			}
 			contentType := s3storage.DetectContentType(fileBytes)
@@ -618,7 +619,7 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -1227,7 +1228,7 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.auditactionscheme
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id = ANY($3)
+				WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 			`, checkerBy, req.Comment, toApprove); err != nil {
 				msg, status := getUserFriendlySchemeError(err, "approve update failed")
 				api.RespondWithError(w, status, msg)
@@ -1387,7 +1388,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err := tx.Exec(ctx, `
 			UPDATE investment.auditactionscheme
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE action_id = ANY($3)
+			WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'
 		`, checkerBy, req.Comment, actionIDs); err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrUpdateFailed)
 			api.RespondWithError(w, status, msg)
@@ -1643,7 +1644,7 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+errtext.Detail(w, rows.Err()))
 			return
 		}
 
@@ -1741,7 +1742,7 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error(),
+					constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + errtext.Text(err),
 				})
 				continue
 			}
@@ -1789,14 +1790,14 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`
 			if _, err := tx.Exec(ctx, audit, schemeID, userEmail); err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(),
+					constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + errtext.Text(err),
 				})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error(),
+					constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailedCapitalized + errtext.Text(err),
 				})
 				continue
 			}
@@ -1857,7 +1858,7 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error(),
+					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + errtext.Text(err),
 				})
 				continue
 			}
@@ -1872,7 +1873,7 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9],
 			); err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: "fetch failed: " + err.Error(),
+					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: "fetch failed: " + errtext.Text(err),
 				})
 				continue
 			}
@@ -1974,7 +1975,7 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if _, err := tx.Exec(ctx, q, args...); err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: constants.ErrUpdateFailed + err.Error(),
+					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: constants.ErrUpdateFailed + errtext.Text(err),
 				})
 				continue
 			}
@@ -1987,14 +1988,14 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			execArgs := append([]interface{}{row.SchemeID, row.Reason, userEmail}, auditArgs...)
 			if _, err := tx.Exec(ctx, auditQuery, execArgs...); err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(),
+					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: constants.ErrAuditInsertFailed + errtext.Text(err),
 				})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: constants.ErrCommitFailed + err.Error(),
+					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: constants.ErrCommitFailed + errtext.Text(err),
 				})
 				continue
 			}

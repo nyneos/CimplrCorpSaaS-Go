@@ -66,9 +66,9 @@ func RegisterNotificationRoutes(mux *http.ServeMux, serviceName string, pool *pg
 	mux.Handle("/notification/config/bulk-reject", midNotification(catalog.BulkRejectNotifConfig(pool)))
 
 	// Register in-app push inbox routes
-	push.RegisterPushInboxRoutes(mux, pool)
+	push.RegisterPushInboxRoutes(mux, pool, midNotification)
 
 	// Register browser push subscription routes (VAPID public key, register, unregister)
-	push.RegisterSubscriptionRoutes(mux, pool)
+	push.RegisterSubscriptionRoutes(mux, pool, midNotification)
 	mux.Handle("/notification/metrics", observability.MetricsHandler(serviceName))
 }

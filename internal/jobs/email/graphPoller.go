@@ -76,7 +76,14 @@ func StartGraphPoller(ctx context.Context, pool *pgxpool.Pool) {
 	defer ticker.Stop()
 
 	runOnce := func() {
-		if err := graphPollOnce(ctx, pool, rt); err != nil {
+		if !graphPollMu.TryLock() {
+			logger.LogInfo("[graph-poller] skip tick, already running")
+			return
+		}
+		defer graphPollMu.Unlock()
+		if err := runPollCycle(ctx, pool, "email-graph-poll", func(ctx context.Context) error {
+			return graphPollOnce(ctx, pool, rt)
+		}); err != nil {
 			logger.LogError("[graph-poller] tick error: %v", err)
 		}
 	}
@@ -147,17 +154,28 @@ func graphPollOnce(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Runt
 	mailboxDelay := time.Duration(getenvInt("GRAPH_MAILBOX_POLL_DELAY_MS", 1500)) * time.Millisecond
 	pollTargets := func(targets []graphPollTarget) {
 		for i, target := range targets {
-			if i > 0 && mailboxDelay > 0 {
-				time.Sleep(mailboxDelay)
+			if err := ctx.Err(); err != nil {
+				return
 			}
-			n, err := pollGraphMailboxFolder(ctx, pool, rt, target.inbox, target.folder)
+			if i > 0 && mailboxDelay > 0 {
+				timer := time.NewTimer(mailboxDelay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+			mboxCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			n, err := pollGraphMailboxFolder(mboxCtx, pool, rt, target.inbox, target.folder)
+			cancel()
 			if err != nil {
 				logger.LogError("[graph-poller] mailbox=%s direction=%s err=%v", target.inbox.MailboxAddress, target.folder.direction, err)
 				_, _ = pool.Exec(ctx, `
 					UPDATE email_svc.inbox_config
 					SET ses_last_error = $2, updated_at = now()
 					WHERE inbox_id = $1::uuid
-				`, target.inbox.InboxID, "graph: "+err.Error())
+				`, target.inbox.InboxID, "graph poll failed")
 				continue
 			}
 			ingested += n
@@ -319,8 +337,7 @@ func ingestGraphPollPage(ctx context.Context, pool *pgxpool.Pool, inbox graphInb
 		}
 
 		if err := ingestGraphMessage(ctx, pool, inboxRow, gm.Parsed, gm.GraphMessageID, folder.direction, sourceType); err != nil {
-			logger.LogError("[graph-poller] ingest graph_id=%s err=%v", gm.GraphMessageID, err)
-			continue
+			return ingested, err
 		}
 		ingested++
 		logger.LogInfo("[graph-poller] ingested graph_id=%s direction=%s subject=%q", gm.GraphMessageID, folder.direction, gm.Parsed.Envelope.Subject)

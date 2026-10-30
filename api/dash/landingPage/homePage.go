@@ -12,6 +12,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// maxDashboardHorizonDays bounds client-supplied horizons that drive per-day loops.
+const maxDashboardHorizonDays = 3650
+
 // HomePageRequest carries optional knobs; entity scope comes from the v2 master middleware chain.
 type HomePageRequest struct {
 	UserID      string `json:"user_id"`
@@ -61,6 +64,9 @@ func GetHomePageDashboard(db *pgxpool.Pool) http.HandlerFunc {
 		horizon := req.HorizonDays
 		if horizon <= 0 {
 			horizon = 900
+		}
+		if horizon > maxDashboardHorizonDays {
+			horizon = maxDashboardHorizonDays
 		}
 
 		// Liquidity block
@@ -175,7 +181,7 @@ func computeHomeRiskLeverage(ctx context.Context, db *pgxpool.Pool, entities []s
 
 // buildGlobalLiquidity aggregates cash balance, burn, net operating cashflow, and runway days.
 func buildGlobalLiquidity(ctx context.Context, db *pgxpool.Pool, entities []string, horizon int) (GlobalLiquidity, error) {
-	today := time.Now().UTC()
+	today := time.Now().UTC().Truncate(24 * time.Hour)
 	yesterday := today.AddDate(0, 0, -1)
 
 	latestBalance, err := getLatestBalanceINR(ctx, db, today, entities)
@@ -285,6 +291,9 @@ func getHedgedVsUnhedged(ctx context.Context, db *pgxpool.Pool, entities []strin
 			unhedged += v
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
 
 	return hedged, unhedged, nil
 }
@@ -327,6 +336,9 @@ func getTopUnhedgedByCurrency(ctx context.Context, db *pgxpool.Pool, entities []
 			Currency: cur,
 			Amount:   formatAmount(convertToINR(amt, cur)),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return res, nil
 }
@@ -385,6 +397,9 @@ func sumUnhedgedBetween(ctx context.Context, db *pgxpool.Pool, entities []string
 		}
 		total += convertToINR(amt, cur)
 	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 	return total, nil
 }
 
@@ -415,7 +430,7 @@ func getLatestBalanceINR(ctx context.Context, db *pgxpool.Pool, asOfDate time.Ti
 			FROM public.bank_balances_manual bbm
 			JOIN public.auditactionbankbalances a ON a.balance_id = bbm.balance_id
 			JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
-			WHERE a.processing_status = 'APPROVED'
+			WHERE UPPER(TRIM(a.processing_status)) = 'APPROVED'
 				AND mba.is_deleted = false
 				AND COALESCE(mba.status, 'Active') = 'Active'
 			ORDER BY bbm.account_no, bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
@@ -442,6 +457,9 @@ func getLatestBalanceINR(ctx context.Context, db *pgxpool.Pool, asOfDate time.Ti
 		}
 		total += convertToINR(amt, cur)
 	}
+	if err := mbRows.Err(); err != nil {
+		return 0, err
+	}
 
 	// If we have manual balances, return them.
 	if total > 0 {
@@ -466,7 +484,7 @@ func getLatestBalanceINR(ctx context.Context, db *pgxpool.Pool, asOfDate time.Ti
 				FROM cimplrcorpsaas.auditactionbankstatement
 				ORDER BY bankstatementid, requested_at DESC
 			) a ON a.bankstatementid = s.bank_statement_id
-			WHERE a.processing_status = 'APPROVED'
+			WHERE UPPER(TRIM(a.processing_status)) = 'APPROVED'
 			GROUP BY s.account_number
 		)
 		SELECT COALESCE(SUM(s.closing_balance),0)::float8 AS sum_amt, COALESCE(mba.currency,'INR') as currency_code
@@ -491,6 +509,9 @@ func getLatestBalanceINR(ctx context.Context, db *pgxpool.Pool, asOfDate time.Ti
 		}
 		total += convertToINR(amt, cur)
 	}
+	if err := bsRows.Err(); err != nil {
+		return 0, err
+	}
 
 	return total, nil
 }
@@ -513,7 +534,7 @@ func getPayablesSumINR(ctx context.Context, db *pgxpool.Pool, entities []string,
 
 	query := fmt.Sprintf(`SELECT COALESCE(SUM(p.amount),0)::float8, COALESCE(p.currency_code,'INR')
 		FROM tr_payables p
-		JOIN auditactionpayable a ON a.payable_id = p.payable_id AND a.processing_status = 'APPROVED'
+		JOIN auditactionpayable a ON a.payable_id = p.payable_id AND UPPER(TRIM(a.processing_status)) = 'APPROVED'
 		%s GROUP BY p.currency_code`, where)
 
 	rows, err := db.Query(ctx, query, args...)
@@ -530,6 +551,9 @@ func getPayablesSumINR(ctx context.Context, db *pgxpool.Pool, entities []string,
 			return 0, err
 		}
 		total += convertToINR(amt, cur)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
 	}
 	return total, nil
 }
@@ -552,7 +576,7 @@ func getReceivablesSumINR(ctx context.Context, db *pgxpool.Pool, entities []stri
 
 	query := fmt.Sprintf(`SELECT COALESCE(SUM(r.invoice_amount),0)::float8, COALESCE(r.currency_code,'INR')
 		FROM tr_receivables r
-		JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND a.processing_status = 'APPROVED'
+		JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND UPPER(TRIM(a.processing_status)) = 'APPROVED'
 		%s GROUP BY r.currency_code`, where)
 
 	rows, err := db.Query(ctx, query, args...)
@@ -569,6 +593,9 @@ func getReceivablesSumINR(ctx context.Context, db *pgxpool.Pool, entities []stri
 			return 0, err
 		}
 		total += convertToINR(amt, cur)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
 	}
 	return total, nil
 }
@@ -644,7 +671,7 @@ func buildDailyMaps(ctx context.Context, db *pgxpool.Pool, entities []string, st
 		idx++
 	}
 	recQ := fmt.Sprintf(`SELECT r.due_date::date, COALESCE(SUM(r.invoice_amount),0)::float8, COALESCE(r.currency_code,'INR') FROM tr_receivables r
-		JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND a.processing_status = 'APPROVED'
+		JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND UPPER(TRIM(a.processing_status)) = 'APPROVED'
 		%s GROUP BY r.due_date::date, r.currency_code`, recWhere)
 	recRows, err := db.Query(ctx, recQ, recArgs...)
 	if err != nil {
@@ -661,6 +688,9 @@ func buildDailyMaps(ctx context.Context, db *pgxpool.Pool, entities []string, st
 		key := dt.Format(constants.DateFormat)
 		inflows[key] += convertToINR(amt, cur)
 	}
+	if err := recRows.Err(); err != nil {
+		return nil, nil, err
+	}
 	recRows.Close()
 
 	// Payables
@@ -673,7 +703,7 @@ func buildDailyMaps(ctx context.Context, db *pgxpool.Pool, entities []string, st
 		idx++
 	}
 	payQ := fmt.Sprintf(`SELECT p.due_date::date, COALESCE(SUM(p.amount),0)::float8, COALESCE(p.currency_code,'INR') FROM tr_payables p
-		JOIN auditactionpayable a ON a.payable_id = p.payable_id AND a.processing_status = 'APPROVED'
+		JOIN auditactionpayable a ON a.payable_id = p.payable_id AND UPPER(TRIM(a.processing_status)) = 'APPROVED'
 		%s GROUP BY p.due_date::date, p.currency_code`, payWhere)
 	payRows, err := db.Query(ctx, payQ, payArgs...)
 	if err != nil {
@@ -689,6 +719,9 @@ func buildDailyMaps(ctx context.Context, db *pgxpool.Pool, entities []string, st
 		}
 		key := dt.Format(constants.DateFormat)
 		outflows[key] += convertToINR(amt, cur)
+	}
+	if err := payRows.Err(); err != nil {
+		return nil, nil, err
 	}
 	payRows.Close()
 
@@ -707,7 +740,7 @@ func buildDailyMaps(ctx context.Context, db *pgxpool.Pool, entities []string, st
 		JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id AND COALESCE(cpi.is_deleted, false) = false
 		JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
 		LEFT JOIN LATERAL (SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1) aa ON TRUE
-		WHERE aa.processing_status = 'APPROVED' AND (cpm.year*12 + cpm.month) BETWEEN $1 AND $2%s
+		WHERE UPPER(TRIM(aa.processing_status)) = 'APPROVED' AND (cpm.year*12 + cpm.month) BETWEEN $1 AND $2%s
 		GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cp.currency_code, cpi.start_date`, projWhere)
 
 	projRows, err := db.Query(ctx, projQ, projArgs...)
@@ -756,6 +789,9 @@ func buildDailyMaps(ctx context.Context, db *pgxpool.Pool, entities []string, st
 				}
 			}
 		}
+	}
+	if err := projRows.Err(); err != nil {
+		return nil, nil, err
 	}
 	projRows.Close()
 

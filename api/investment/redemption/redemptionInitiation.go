@@ -2,8 +2,10 @@ package redemption
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/governance"
 	approvalengine "CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/investment/portfolio"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -243,6 +245,127 @@ func redemptionMFDematRefs(ctx context.Context) []string {
 // CreateRedemptionSingle
 // ---------------------------
 
+// redemptionUnitBlock identifies the holding and the number of units to block.
+type redemptionUnitBlock struct {
+	SchemeID, FolioID, DematID, EntityName string
+	Units                                  float64
+}
+
+// blockRedemptionUnits blocks units against buy lots in FIFO order and returns the
+// units actually blocked. Candidate lots are locked first and availability is computed
+// from the locked row versions, so concurrent redemptions cannot over-block a holding.
+type redemptionMethodQueryer interface {
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}
+
+// redemptionMethodForScheme returns the lot-selection method configured on the scheme
+// master (FIFO, LIFO or WEIGHTED_AVERAGE). FIFO is used only when the scheme has none.
+func redemptionMethodForScheme(ctx context.Context, q redemptionMethodQueryer, schemeID string) (string, error) {
+	var method string
+	err := q.QueryRow(ctx, `
+		SELECT UPPER(TRIM(COALESCE(method, '')))
+		FROM investment.masterscheme
+		WHERE (scheme_id::text = $1 OR internal_scheme_code = $1)
+		  AND COALESCE(is_deleted, false) = false
+		LIMIT 1`, schemeID).Scan(&method)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+	switch method {
+	case "FIFO", "LIFO", "WEIGHTED_AVERAGE":
+		return method, nil
+	}
+	return "FIFO", nil
+}
+
+func blockRedemptionUnits(ctx context.Context, tx pgx.Tx, p redemptionUnitBlock) (float64, error) {
+	method, err := redemptionMethodForScheme(ctx, tx, p.SchemeID)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := tx.Query(ctx, `
+				WITH locked AS (
+					SELECT
+						ot.id,
+						ot.units,
+						COALESCE(ot.blocked_units, 0) AS current_blocked,
+						ot.transaction_date
+					FROM investment.onboard_transaction ot
+					LEFT JOIN investment.masterscheme ms ON (
+						COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))
+					)
+					WHERE 
+						LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
+						AND (
+							ms.scheme_id = $1 OR
+														ms.internal_scheme_code = $1 OR
+														ot.scheme_id = $1 OR
+							ot.scheme_internal_code = $1
+						)
+						AND (
+							-- When no folio/demat supplied, match on scheme+entity alone.
+							($2::text IS NULL AND $3::text IS NULL)
+							OR ($2::text IS NOT NULL AND ot.folio_id = $2)
+							OR ($3::text IS NOT NULL AND ot.demat_id = $3)
+						)
+						AND ($6::text IS NULL OR ot.entity_name = $6)
+						AND (ot.units - COALESCE(ot.blocked_units, 0)) > 0
+					FOR UPDATE OF ot
+				),
+				target_transactions AS (
+					SELECT
+						id, units, current_blocked, transaction_date,
+						ROW_NUMBER() OVER (
+							ORDER BY
+								CASE WHEN $4 = 'FIFO' THEN transaction_date END ASC,
+								CASE WHEN $4 = 'LIFO' THEN transaction_date END DESC,
+								id ASC
+						) AS row_num
+					FROM locked
+					WHERE units - current_blocked > 0
+				),
+				blocking_allocation AS (
+					SELECT
+						id,
+						units,
+						current_blocked,
+						LEAST(
+							units - current_blocked,
+							$5 - COALESCE(SUM(LEAST(units - current_blocked, $5)) OVER (
+								ORDER BY row_num
+								ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+							), 0)
+						) AS units_to_block_here
+					FROM target_transactions
+				)
+				UPDATE investment.onboard_transaction ot
+				SET blocked_units = ba.current_blocked + ba.units_to_block_here
+				FROM blocking_allocation ba
+				WHERE ot.id = ba.id AND ba.units_to_block_here > 0
+				RETURNING ba.units_to_block_here
+			`,
+		p.SchemeID,
+		nullIfEmptyString(p.FolioID),
+		nullIfEmptyString(p.DematID),
+		method,
+		p.Units,
+		nullIfEmptyString(p.EntityName),
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var total float64
+	for rows.Next() {
+		var b float64
+		if err := rows.Scan(&b); err != nil {
+			return 0, err
+		}
+		total += b
+	}
+	return total, rows.Err()
+}
+
 func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateRedemptionRequestSingle
@@ -282,6 +405,11 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			entityCode = req.SchemeID
 		}
 		schemeName, amcName := lookupRedemptionSchemeEnrichment(ctx, pgxPool, req.SchemeID)
+		redemptionMethod, methodErr := redemptionMethodForScheme(ctx, pgxPool, req.SchemeID)
+		if methodErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to load scheme redemption method: "+errtext.Detail(w, methodErr))
+			return
+		}
 		ok, createMatrixID := mfEnforceMatrix(ctx, w, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateRedemptionSingle",
 			APIPath: "/investment/redemption/initiation/create", SubModule: mfSubRedemption, EntityCode: entityCode, Actor: userEmail},
 			buildRedemptionInitiationPolicyFields(redemptionInitiationRow{
@@ -295,7 +423,7 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				TransactionDate:   req.TransactionDate,
 				ByAmount:          &req.ByAmount,
 				ByUnits:           &req.ByUnits,
-				Method:            "FIFO",
+				Method:            redemptionMethod,
 				EntityName:        req.EntityName,
 				EstimatedProceeds: &req.EstimatedProceeds,
 				GainLoss:          &req.GainLoss,
@@ -369,8 +497,17 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY ans.nav_date DESC, ans.file_date DESC
 				LIMIT 1
 			`
-			if err := tx.QueryRow(ctx, navQuery, req.SchemeID).Scan(&latestNAV); err != nil || latestNAV == 0 {
-				api.RespondWithError(w, http.StatusInternalServerError, "Unable to fetch NAV for amount-based redemption: "+err.Error())
+			if err := tx.QueryRow(ctx, navQuery, req.SchemeID).Scan(&latestNAV); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					api.RespondWithError(w, http.StatusBadRequest, "No NAV available for this scheme; use a units-based redemption")
+					return
+				}
+				api.LogError("[Redemption] NAV lookup scheme=%s: %v", req.SchemeID, err)
+				api.RespondWithError(w, http.StatusInternalServerError, "Unable to fetch NAV for amount-based redemption")
+				return
+			}
+			if latestNAV <= 0 {
+				api.RespondWithError(w, http.StatusBadRequest, "Latest NAV for this scheme is zero; use a units-based redemption")
 				return
 			}
 			unitsToBlock = req.ByAmount / latestNAV
@@ -379,68 +516,19 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Update blocked_units in onboard_transaction for the holding
 		// CRITICAL: Use entity_name filter to prevent cross-entity blocking when folio_number is non-unique (e.g., "1")
 		if unitsToBlock > 0 {
-			updateBlockedUnitsQuery := `
-				WITH target_transactions AS (
-					SELECT 
-						ot.id,
-						ot.units,
-						COALESCE(ot.blocked_units, 0) AS current_blocked,
-						ot.transaction_date,
-						ROW_NUMBER() OVER (
-							ORDER BY 
-								CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
-								CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC,
-								ot.id ASC
-						) AS row_num
-					FROM investment.onboard_transaction ot
-					LEFT JOIN investment.masterscheme ms ON (
-						COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))
-					)
-					WHERE 
-						LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
-						AND (
-							ms.scheme_id = $1 OR
-														ms.internal_scheme_code = $1 OR
-														ot.scheme_id = $1 OR
-							ot.scheme_internal_code = $1
-						)
-						AND (
-							-- When no folio/demat supplied, match on scheme+entity alone.
-							($2::text IS NULL AND $3::text IS NULL)
-							OR ($2::text IS NOT NULL AND ot.folio_id = $2)
-							OR ($3::text IS NOT NULL AND ot.demat_id = $3)
-						)
-						AND ($6::text IS NULL OR ot.entity_name = $6)
-						AND (ot.units - COALESCE(ot.blocked_units, 0)) > 0
-				),
-				blocking_allocation AS (
-					SELECT
-						id,
-						units,
-						current_blocked,
-						LEAST(
-							units - current_blocked,
-							$5 - COALESCE(SUM(LEAST(units - current_blocked, $5)) OVER (
-								ORDER BY row_num
-								ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-							), 0)
-						) AS units_to_block_here
-					FROM target_transactions
-				)
-				UPDATE investment.onboard_transaction ot
-				SET blocked_units = COALESCE(ot.blocked_units, 0) + ba.units_to_block_here
-				FROM blocking_allocation ba
-				WHERE ot.id = ba.id AND ba.units_to_block_here > 0
-			`
-			if _, err := tx.Exec(ctx, updateBlockedUnitsQuery,
-				req.SchemeID,
-				nullIfEmptyString(req.FolioID),
-				nullIfEmptyString(req.DematID),
-				"FIFO", // default for unit blocking ORDER BY
-				unitsToBlock,
-				nullIfEmptyString(req.EntityName),
-			); err != nil {
+			blockedTotal, err := blockRedemptionUnits(ctx, tx, redemptionUnitBlock{
+				SchemeID:   req.SchemeID,
+				FolioID:    req.FolioID,
+				DematID:    req.DematID,
+				EntityName: req.EntityName,
+				Units:      unitsToBlock,
+			})
+			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to block units: "+err.Error())
+				return
+			}
+			if blockedTotal+1e-6 < unitsToBlock {
+				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Insufficient free units: requested %.4f, available %.4f", unitsToBlock, blockedTotal))
 				return
 			}
 		}
@@ -499,6 +587,11 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		correlationID := redemptionID
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
 			payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, []string{redemptionID}, constants.AuditActionCreate, userEmail)
 			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/create", correlationID, payload.ToMap())
 			dmsjobs.FireDmsEvent(pgxPool, "INVESTMENT_MF", "MF_REDEMPTION", "POST_CREATE", []string{redemptionID}, userEmail)
@@ -577,6 +670,11 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				entityCode = row.SchemeID
 			}
 			bulkSchemeName, bulkAMCName := lookupRedemptionSchemeEnrichment(ctx, pgxPool, row.SchemeID)
+			bulkMethod, methodErr := redemptionMethodForScheme(ctx, pgxPool, row.SchemeID)
+			if methodErr != nil {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to load scheme redemption method: " + errtext.Text(methodErr)})
+				continue
+			}
 			ok, pmsg, bulkCreateMatrixID := mfEnforceInlineWithMatrix(ctx, r, pgxPool, enforceCtx{EventCode: common.TriggerPreCreate, HandlerName: "CreateRedemptionBulk",
 				APIPath: "/investment/redemption/initiation/create-bulk", SubModule: mfSubRedemption, EntityCode: entityCode, Actor: userEmail},
 				buildRedemptionInitiationPolicyFields(redemptionInitiationRow{
@@ -590,7 +688,7 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					TransactionDate:   row.TransactionDate,
 					ByAmount:          &row.ByAmount,
 					ByUnits:           &row.ByUnits,
-					Method:            "FIFO",
+					Method:            bulkMethod,
 					EntityName:        row.EntityName,
 					EstimatedProceeds: &row.EstimatedProceeds,
 					GainLoss:          &row.GainLoss,
@@ -605,7 +703,6 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
 				continue
 			}
-			defer tx.Rollback(ctx)
 
 			// Auto-resolve folio_id / demat_id from active holdings when neither is provided.
 			if row.FolioID == "" && row.DematID == "" {
@@ -633,6 +730,7 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if resolveErr != nil || (resolvedFolioID == "" && resolvedDematID == "") {
 					tx.Rollback(ctx)
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "No active holding found for scheme " + row.SchemeID + ". Provide folio_id or demat_id explicitly."})
+					_ = tx.Rollback(ctx)
 					continue
 				}
 				if resolvedFolioID != "" {
@@ -662,8 +760,14 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					ORDER BY ans.nav_date DESC, ans.file_date DESC
 					LIMIT 1
 				`
-				if err := tx.QueryRow(ctx, navQuery, row.SchemeID).Scan(&latestNAV); err != nil || latestNAV == 0 {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Unable to fetch NAV: " + err.Error()})
+				if err := tx.QueryRow(ctx, navQuery, row.SchemeID).Scan(&latestNAV); err != nil || latestNAV <= 0 {
+					msg := "No usable NAV for this scheme; use a units-based redemption"
+					if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+						api.LogError("[Redemption] bulk NAV lookup scheme=%s: %v", row.SchemeID, err)
+						msg = "Unable to fetch NAV"
+					}
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: msg})
+					_ = tx.Rollback(ctx)
 					continue
 				}
 				unitsToBlock = row.ByAmount / latestNAV
@@ -671,68 +775,21 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Update blocked_units with entity scoping
 			if unitsToBlock > 0 {
-				updateBlockedUnitsQuery := `
-					WITH target_transactions AS (
-						SELECT 
-							ot.id,
-							ot.units,
-							COALESCE(ot.blocked_units, 0) AS current_blocked,
-							ot.transaction_date,
-							ROW_NUMBER() OVER (
-								ORDER BY 
-									CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
-									CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC,
-									ot.id ASC
-							) AS row_num
-						FROM investment.onboard_transaction ot
-						LEFT JOIN investment.masterscheme ms ON (
-							COALESCE(ms.is_deleted, false) = false AND ((NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.scheme_id::text = TRIM(ot.scheme_id)) OR (NULLIF(TRIM(ot.scheme_internal_code), '') IS NOT NULL AND ms.internal_scheme_code = TRIM(ot.scheme_internal_code)) OR (NULLIF(TRIM(ot.scheme_id), '') IS NOT NULL AND ms.amfi_scheme_code = TRIM(ot.scheme_id)))
-						)
-						WHERE 
-							LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
-							AND (
-								ms.scheme_id = $1 OR
-																ms.internal_scheme_code = $1 OR
-																ot.scheme_id = $1 OR
-								ot.scheme_internal_code = $1
-							)
-							AND (
-								-- When no folio/demat supplied, match on scheme+entity alone.
-								($2::text IS NULL AND $3::text IS NULL)
-								OR ($2::text IS NOT NULL AND ot.folio_id = $2)
-								OR ($3::text IS NOT NULL AND ot.demat_id = $3)
-							)
-							AND ($6::text IS NULL OR ot.entity_name = $6)
-							AND (ot.units - COALESCE(ot.blocked_units, 0)) > 0
-					),
-					blocking_allocation AS (
-						SELECT 
-							id,
-							units,
-							current_blocked,
-							LEAST(
-								units - current_blocked,
-								$5 - COALESCE(SUM(LEAST(units - current_blocked, $5)) OVER (
-									ORDER BY row_num
-									ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-								), 0)
-							) AS units_to_block_here
-						FROM target_transactions
-					)
-					UPDATE investment.onboard_transaction ot
-					SET blocked_units = COALESCE(ot.blocked_units, 0) + ba.units_to_block_here
-					FROM blocking_allocation ba
-					WHERE ot.id = ba.id AND ba.units_to_block_here > 0
-				`
-				if _, err := tx.Exec(ctx, updateBlockedUnitsQuery,
-					row.SchemeID,
-					nullIfEmptyString(row.FolioID),
-					nullIfEmptyString(row.DematID),
-					"FIFO", // default for unit blocking ORDER BY
-					unitsToBlock,
-					nullIfEmptyString(row.EntityName),
-				); err != nil {
+				blockedTotal, err := blockRedemptionUnits(ctx, tx, redemptionUnitBlock{
+					SchemeID:   row.SchemeID,
+					FolioID:    row.FolioID,
+					DematID:    row.DematID,
+					EntityName: row.EntityName,
+					Units:      unitsToBlock,
+				})
+				if err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to block units: " + err.Error()})
+					_ = tx.Rollback(ctx)
+					continue
+				}
+				if blockedTotal+1e-6 < unitsToBlock {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: fmt.Sprintf("Insufficient free units: requested %.4f, available %.4f", unitsToBlock, blockedTotal)})
+					_ = tx.Rollback(ctx)
 					continue
 				}
 			}
@@ -747,6 +804,7 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, nullIfEmptyString(row.FolioID), nullIfEmptyString(row.DematID), row.SchemeID, userEmail,
 				nullIfEmptyString(row.TransactionDate), nullIfZeroFloat(row.ByAmount), nullIfZeroFloat(row.ByUnits), nullIfEmptyString(row.EntityName), nullIfZeroFloat(row.EstimatedProceeds), nullIfZeroFloat(row.GainLoss)).Scan(&redemptionID); err != nil {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Insert failed: " + err.Error()})
+				_ = tx.Rollback(ctx)
 				continue
 			}
 
@@ -755,6 +813,7 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now(), $3)
 			`, redemptionID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
+				_ = tx.Rollback(ctx)
 				continue
 			}
 
@@ -792,6 +851,11 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(createdIDs) > 0 {
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
 				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, createdIDs, constants.AuditActionCreate, userEmail)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/create-bulk", createdIDs[0], payload.ToMap())
 			}()
@@ -919,6 +983,11 @@ func UpdateRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
 			payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, []string{req.RedemptionID}, "UPDATE", userEmail)
 			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/update", req.RedemptionID, payload.ToMap())
 		}()
@@ -1071,6 +1140,11 @@ func UpdateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(updatedIDs) > 0 {
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
 				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, updatedIDs, "UPDATE", userEmail)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/update-bulk", updatedIDs[0], payload.ToMap())
 			}()
@@ -1164,6 +1238,11 @@ func DeleteRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
 			payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, req.RedemptionIDs, "DELETE_REQUEST", requestedBy)
 			corID := ""
 			if len(req.RedemptionIDs) > 0 {
@@ -1220,7 +1299,7 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		sel := `
-			SELECT DISTINCT ON (redemption_id) action_id, redemption_id, actiontype, processing_status
+			SELECT DISTINCT ON (redemption_id) action_id, redemption_id, actiontype, processing_status, COALESCE(requested_by, '')
 			FROM investment.auditactionredemption
 			WHERE redemption_id = ANY($1)
 			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
@@ -1240,8 +1319,11 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var deleteMasterIDs []string
 
 		for rows.Next() {
-			var aid, rid, atype, pstatus string
-			if err := rows.Scan(&aid, &rid, &atype, &pstatus); err != nil {
+			var aid, rid, atype, pstatus, maker string
+			if err := rows.Scan(&aid, &rid, &atype, &pstatus, &maker); err != nil {
+				continue
+			}
+			if governance.IsSelfApprovalCtx(ctx, maker) {
 				continue
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
@@ -1449,6 +1531,11 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				editSet[id] = struct{}{}
 			}
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
 				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, ids, constants.AuditActionApprove, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, redemptionInitiationApprovePath, ids[0], payload.ToMap())
 				for _, id := range ids {
@@ -1462,6 +1549,11 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if len(deleteMasterIDs) > 0 {
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
 				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, deleteMasterIDs, constants.AuditActionDelete, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, redemptionInitiationApprovePath, deleteMasterIDs[0], payload.ToMap())
 				for _, id := range deleteMasterIDs {
@@ -1691,6 +1783,11 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(req.RedemptionIDs) > 0 {
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
 				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, req.RedemptionIDs, constants.AuditActionReject, checkerBy)
 				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/reject", req.RedemptionIDs[0], payload.ToMap())
 				for _, id := range req.RedemptionIDs {
@@ -1851,7 +1948,7 @@ func fetchRedemptionInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, i
 		LEFT JOIN resolved_folio rf ON rf.redemption_id = m.redemption_id
 		LEFT JOIN resolved_demat rd ON rd.redemption_id = m.redemption_id
 		LEFT JOIN LATERAL (
-			SELECT ai.* FROM uam.approval_instance ai
+			SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 			WHERE ai.record_id = m.redemption_id::text
 			  AND ai.module_code = 'INVESTMENT_MF'
 			  AND ai.status = 'PENDING'
@@ -1860,7 +1957,7 @@ func fetchRedemptionInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, i
 			LIMIT 1
 		) ai ON true
 		LEFT JOIN LATERAL (
-			SELECT aie.* FROM uam.approval_instance_eye aie
+			SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 			WHERE aie.instance_id = ai.instance_id
 			  AND aie.status = 'ACTIVE'
 			ORDER BY aie.position ASC, aie.instance_eye_id ASC

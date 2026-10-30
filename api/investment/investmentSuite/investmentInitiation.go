@@ -2,6 +2,7 @@ package investmentsuite
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/governance"
 	approvalengine "CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
@@ -340,9 +341,16 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		go func(iID, uID, uEmail string) {
-			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, []string{iID}, constants.AuditActionCreate, uEmail)
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
+			pl := BuildInitiationNotifPayload(bgCtx, pgxPool, []string{iID}, constants.AuditActionCreate, uEmail)
 			catalog.TriggerNotification(
-				context.Background(), pgxPool,
+				bgCtx, pgxPool,
 				"/investment/initiation/create",
 				fmt.Sprintf("INVESTMENT_INITIATION_CREATE/%s/%d", uID, time.Now().UnixMilli()),
 				pl.ToMap(),
@@ -546,9 +554,16 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := userEmail
 			go func() {
-				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionCreate, uEmail)
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer bgCancel()
+				pl := BuildInitiationNotifPayload(bgCtx, pgxPool, ids, constants.AuditActionCreate, uEmail)
 				catalog.TriggerNotification(
-					context.Background(), pgxPool,
+					bgCtx, pgxPool,
 					"/investment/initiation/bulk-create",
 					fmt.Sprintf("INVESTMENT_INITIATION_BULK_CREATE/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
@@ -679,9 +694,16 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(iID, uID, uEmail string) {
-			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, []string{iID}, "UPDATE", uEmail)
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
+			pl := BuildInitiationNotifPayload(bgCtx, pgxPool, []string{iID}, "UPDATE", uEmail)
 			catalog.TriggerNotification(
-				context.Background(), pgxPool,
+				bgCtx, pgxPool,
 				"/investment/initiation/update",
 				fmt.Sprintf("INVESTMENT_INITIATION_UPDATE/%s/%d", uID, time.Now().UnixMilli()),
 				pl.ToMap(),
@@ -836,9 +858,16 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := userEmail
 			go func() {
-				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "UPDATE", uEmail)
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer bgCancel()
+				pl := BuildInitiationNotifPayload(bgCtx, pgxPool, ids, "UPDATE", uEmail)
 				catalog.TriggerNotification(
-					context.Background(), pgxPool,
+					bgCtx, pgxPool,
 					"/investment/initiation/bulk-update",
 					fmt.Sprintf("INVESTMENT_INITIATION_BULK_UPDATE/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
@@ -934,9 +963,16 @@ func DeleteInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(ids []string, uID, uEmail string) {
-			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "DELETE_REQUEST", uEmail)
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
+			pl := BuildInitiationNotifPayload(bgCtx, pgxPool, ids, "DELETE_REQUEST", uEmail)
 			catalog.TriggerNotification(
-				context.Background(), pgxPool,
+				bgCtx, pgxPool,
 				"/investment/initiation/delete-request",
 				fmt.Sprintf("INVESTMENT_INITIATION_DELETE_REQUEST/%s/%d", uID, time.Now().UnixMilli()),
 				pl.ToMap(),
@@ -996,7 +1032,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		sel := `
-			SELECT DISTINCT ON (initiation_id) action_id, initiation_id, actiontype, processing_status
+			SELECT DISTINCT ON (initiation_id) action_id, initiation_id, actiontype, processing_status, COALESCE(requested_by, '')
 			FROM investment.auditactioninitiation
 			WHERE initiation_id = ANY($1)
 			  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
@@ -1016,8 +1052,11 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var deleteMasterIDs []string
 
 		for rows.Next() {
-			var aid, iid, atype, pstatus string
-			if err := rows.Scan(&aid, &iid, &atype, &pstatus); err != nil {
+			var aid, iid, atype, pstatus, maker string
+			if err := rows.Scan(&aid, &iid, &atype, &pstatus, &maker); err != nil {
+				continue
+			}
+			if governance.IsSelfApprovalCtx(ctx, maker) {
 				continue
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
@@ -1136,9 +1175,16 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := checkerBy
 			go func() {
-				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionApprove, uEmail)
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer bgCancel()
+				pl := BuildInitiationNotifPayload(bgCtx, pgxPool, ids, constants.AuditActionApprove, uEmail)
 				catalog.TriggerNotification(
-					context.Background(), pgxPool,
+					bgCtx, pgxPool,
 					"/investment/initiation/approve",
 					fmt.Sprintf("INVESTMENT_INITIATION_APPROVE/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
@@ -1157,9 +1203,16 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uID := req.UserID
 			uEmail := checkerBy
 			go func() {
-				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionDelete, uEmail)
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[investment] background notification panic: %v", rec)
+					}
+				}()
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer bgCancel()
+				pl := BuildInitiationNotifPayload(bgCtx, pgxPool, ids, constants.AuditActionDelete, uEmail)
 				catalog.TriggerNotification(
-					context.Background(), pgxPool,
+					bgCtx, pgxPool,
 					"/investment/initiation/delete",
 					fmt.Sprintf("INVESTMENT_INITIATION_DELETE/%s/%d", uID, time.Now().UnixMilli()),
 					pl.ToMap(),
@@ -1303,9 +1356,16 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(ids []string, uID, uEmail string) {
-			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, constants.AuditActionReject, uEmail)
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[investment] background notification panic: %v", rec)
+				}
+			}()
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer bgCancel()
+			pl := BuildInitiationNotifPayload(bgCtx, pgxPool, ids, constants.AuditActionReject, uEmail)
 			catalog.TriggerNotification(
-				context.Background(), pgxPool,
+				bgCtx, pgxPool,
 				"/investment/initiation/reject",
 				fmt.Sprintf("INVESTMENT_INITIATION_REJECT/%s/%d", uID, time.Now().UnixMilli()),
 				pl.ToMap(),
@@ -1646,7 +1706,7 @@ func fetchInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []strin
 			LIMIT 1
 		) nav ON true
 		LEFT JOIN LATERAL (
-			SELECT ai.* FROM uam.approval_instance ai
+			SELECT ai.instance_id, ai.status, ai.submitted_at, ai.transaction_type, ai.record_id, ai.module_code, ai.is_deleted FROM uam.approval_instance ai
 			WHERE ai.record_id = m.initiation_id::text
 			  AND ai.module_code = 'INVESTMENT_MF'
 			  AND ai.status = 'PENDING'
@@ -1655,7 +1715,7 @@ func fetchInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []strin
 			LIMIT 1
 		) ai ON true
 		LEFT JOIN LATERAL (
-			SELECT aie.* FROM uam.approval_instance_eye aie
+			SELECT aie.instance_eye_id, aie.instance_id, aie.position, aie.approvals_required, aie.approvals_received, aie.sla_deadline, aie.is_escalated, aie.status FROM uam.approval_instance_eye aie
 			WHERE aie.instance_id = ai.instance_id
 			  AND aie.status = 'ACTIVE'
 			ORDER BY aie.position ASC, aie.instance_eye_id ASC

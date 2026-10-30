@@ -20,6 +20,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -140,7 +141,7 @@ func uploadToSupabase(ctx context.Context, fileBytes []byte, objectPath string) 
 	}
 	req.Header.Set(constants.ContentTypeText, contentType)
 
-	client := &http.Client{Timeout: 0}
+	client := &http.Client{Timeout: storageTransferTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -149,7 +150,7 @@ func uploadToSupabase(ctx context.Context, fileBytes []byte, objectPath string) 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
 	}
-	b, _ := io.ReadAll(resp.Body)
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, storageErrorBodyLimit))
 	return fmt.Errorf("supabase upload failed: %d %s", resp.StatusCode, string(b))
 }
 
@@ -181,7 +182,7 @@ func deleteFromSupabase(ctx context.Context, objectPath string) error {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
 	}
-	b, _ := io.ReadAll(resp.Body)
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, storageErrorBodyLimit))
 	return fmt.Errorf("supabase delete failed: %d %s", resp.StatusCode, string(b))
 }
 
@@ -274,6 +275,8 @@ func proxyStreamToFinPDF(w http.ResponseWriter, r *http.Request, fileBytes []byt
 	// set content type to multipart with boundary
 	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
 
+	// No overall timeout: the converter streams for as long as extraction runs, and the
+	// request context ends the call when the client goes away.
 	client := &http.Client{Timeout: 0}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -281,12 +284,7 @@ func proxyStreamToFinPDF(w http.ResponseWriter, r *http.Request, fileBytes []byt
 	}
 	defer resp.Body.Close()
 
-	// Stream response headers and body to original client
-	for k, vals := range resp.Header {
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
-	}
+	// Upstream headers are not forwarded; only the JSON content type is set.
 	// ensure chunked streaming
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 	w.WriteHeader(resp.StatusCode)
@@ -725,6 +723,11 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 			capturedUser := uploadUserID
 			capturedFile := header.Filename
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						logger.LogError("goroutine panic: %v", rec)
+					}
+				}()
 				notifPayload := BuildBankStatementPayloadFromV2Result(
 					capturedResp,
 					capturedUser,
@@ -1804,13 +1807,18 @@ func GetPDFMetadataHandler(pool *pgxpool.Pool) http.Handler {
 			Status           string
 			CreatedAt        time.Time
 		}
-		q := `SELECT id, original_filename, storage_path, checksum_sha256, status, created_at FROM cimplrcorpsaas.bank_pdf_uploads WHERE id=$1`
-		if err := pool.QueryRow(r.Context(), q, id).Scan(&row.ID, &row.OriginalFilename, &row.StoragePath, &row.ChecksumSHA256, &row.Status, &row.CreatedAt); err != nil {
+		var rowEntity string
+		q := `SELECT id, original_filename, storage_path, checksum_sha256, status, created_at, COALESCE(entity_name, '') FROM cimplrcorpsaas.bank_pdf_uploads WHERE id=$1`
+		if err := pool.QueryRow(r.Context(), q, id).Scan(&row.ID, &row.OriginalFilename, &row.StoragePath, &row.ChecksumSHA256, &row.Status, &row.CreatedAt, &rowEntity); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 				respondWithError(w, nil, "Not found", http.StatusNotFound)
 				return
 			}
 			respondWithError(w, err, "Failed to fetch metadata", http.StatusInternalServerError)
+			return
+		}
+		if !api.EntityInScope(r.Context(), rowEntity) {
+			api.RespondEntityOutOfScope(w)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", row)
@@ -1865,21 +1873,9 @@ func DownloadPDFHandler(pool *pgxpool.Pool) http.Handler {
 				LIMIT 1
 			`, storagePath.String).Scan(&bankStatementID)
 		}
-		// entity validation: if DB row has entity_name, ensure requester is allowed
-		// try to get entity from request header `X-Entity-Name` or context
-		requesterEntity := r.Header.Get("X-Entity-Name")
-		if requesterEntity == "" {
-			if v := r.Context().Value("EntityName"); v != nil {
-				if s, ok := v.(string); ok {
-					requesterEntity = s
-				}
-			}
-		}
-		if entityName.Valid && entityName.String != "" {
-			if requesterEntity == "" || requesterEntity != entityName.String {
-				respondWithError(w, nil, "Forbidden: entity mismatch", http.StatusForbidden)
-				return
-			}
+		if !api.EntityInScope(r.Context(), entityName.String) {
+			respondWithError(w, nil, "Forbidden: entity mismatch", http.StatusForbidden)
+			return
 		}
 
 		supaURL := os.Getenv("SUPABASE_URL")
@@ -1914,7 +1910,7 @@ func DownloadPDFHandler(pool *pgxpool.Pool) http.Handler {
 		} else if supaAnonKey != "" {
 			req.Header.Set("apikey", supaAnonKey)
 		}
-		client := &http.Client{Timeout: 0}
+		client := &http.Client{Timeout: storageTransferTimeout}
 		resp, err := client.Do(req)
 		if err != nil {
 			respondWithError(w, err, "Failed to download file from storage", http.StatusInternalServerError)
@@ -1922,21 +1918,25 @@ func DownloadPDFHandler(pool *pgxpool.Pool) http.Handler {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			body, _ := io.ReadAll(resp.Body)
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, storageErrorBodyLimit))
 			logger.LogError("download failed: %d %s", resp.StatusCode, string(body))
 			respondWithError(w, fmt.Errorf("download failed: %d", resp.StatusCode), "Failed to download file from storage", http.StatusInternalServerError)
 			return
 		}
-		data, err := io.ReadAll(resp.Body)
+		data, err := io.ReadAll(io.LimitReader(resp.Body, storageDownloadLimit+1))
 		if err != nil {
 			respondWithError(w, err, "Failed to read downloaded file", http.StatusInternalServerError)
 			return
 		}
+		if int64(len(data)) > storageDownloadLimit {
+			respondWithError(w, fmt.Errorf("stored file exceeds %d bytes", storageDownloadLimit), "Stored file is too large to download", http.StatusInternalServerError)
+			return
+		}
 
 		// record audit: prefer provided user_id in POST/GET payload, else header X-User-ID or context
-		userID := providedUserID
+		userID := api.GetUserIDFromCtx(r.Context())
 		if userID == "" {
-			userID = r.Header.Get("X-User-ID")
+			userID = providedUserID
 		}
 		if userID == "" {
 			if v := r.Context().Value("UserID"); v != nil {
@@ -1946,9 +1946,16 @@ func DownloadPDFHandler(pool *pgxpool.Pool) http.Handler {
 			}
 		}
 		ip := api.ClientIPFromRequest(r)
+		auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("goroutine panic: %v", rec)
+				}
+			}()
+			defer cancelAudit()
 			// best-effort; log on error
-			if err := insertDownloadAuditPgx(r.Context(), pool, sql.NullString{String: strings.TrimSpace(id), Valid: strings.TrimSpace(id) != ""}, sql.NullString{}, userID, ip, entityName); err != nil {
+			if err := insertDownloadAuditPgx(auditCtx, pool, sql.NullString{String: strings.TrimSpace(id), Valid: strings.TrimSpace(id) != ""}, sql.NullString{}, userID, ip, entityName); err != nil {
 				logger.LogError("failed to insert download audit: %v", err)
 			}
 		}()
@@ -1956,7 +1963,11 @@ func DownloadPDFHandler(pool *pgxpool.Pool) http.Handler {
 		// stream file
 		w.Header().Set(constants.ContentTypeText, "application/pdf")
 		fname := filename.String
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", fname))
+		disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(fname)})
+		if disposition == "" {
+			disposition = "attachment"
+		}
+		w.Header().Set("Content-Disposition", disposition)
 		http.ServeContent(w, r, fname, time.Now(), bytes.NewReader(data))
 	})
 }

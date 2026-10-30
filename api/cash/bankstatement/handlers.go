@@ -115,7 +115,7 @@ func GetAllBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 														s.upload_s3_key
 											FROM cimplrcorpsaas.bank_statements s
 											JOIN public.masterentitycash e ON s.entity_id = e.entity_id
-											LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.is_deleted = false
+											LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.entity_id::text = s.entity_id::text AND mba.is_deleted = false
 											LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 											WHERE s.entity_id = ANY($1)
 											  AND (cardinality($2::text[]) = 0 OR s.account_number = ANY($2::text[]))
@@ -306,7 +306,7 @@ func GetBankStatementTransactionsHandler(pool *pgxpool.Pool) http.Handler {
 			JOIN public.masterentitycash e
 				ON s.entity_id = e.entity_id
 			LEFT JOIN public.masterbankaccount mba
-				ON mba.account_number = s.account_number AND mba.is_deleted = false
+				ON mba.account_number = s.account_number AND mba.entity_id::text = s.entity_id::text AND mba.is_deleted = false
 			LEFT JOIN public.mastercashflowcategory c
 				ON t.category_id = c.category_id
 			LEFT JOIN LATERAL (
@@ -485,7 +485,7 @@ func GetBankStatementDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 			FROM cimplrcorpsaas.bank_statements s
 			LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
 			LEFT JOIN cimplrcorpsaas.bank_pdf_uploads p ON p.storage_path = s.upload_s3_key
-			LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.is_deleted = false
+			LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.entity_id::text = s.entity_id::text AND mba.is_deleted = false
 			WHERE s.bank_statement_id = $1
 		`, body.BankStatementID).Scan(&uploadS3Key, &entityName, &auditFileID, &entityID, &accountNumber, &bankID, &currency)
 		if err != nil {
@@ -576,7 +576,7 @@ func GetBankStatementBulkDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 				FROM cimplrcorpsaas.bank_statements s
 				LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
 				LEFT JOIN cimplrcorpsaas.bank_pdf_uploads p ON p.storage_path = s.upload_s3_key
-				LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.is_deleted = false
+				LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.entity_id::text = s.entity_id::text AND mba.is_deleted = false
 				WHERE s.bank_statement_id = $1
 			`, bankStatementID).Scan(&uploadS3Key, &entityName, &auditFileID, &entityID, &accountNumber, &bankID, &currency)
 			if err != nil {
@@ -671,7 +671,7 @@ func MarkBankStatementTransactionsMisclassifiedHandler(pool *pgxpool.Pool) http.
 			       COALESCE(mba.bank_id, ''), COALESCE(mba.currency, '')
 			FROM cimplrcorpsaas.bank_statement_transactions t
 			JOIN cimplrcorpsaas.bank_statements s ON s.bank_statement_id = t.bank_statement_id
-			LEFT JOIN public.masterbankaccount mba ON mba.account_number = t.account_number AND mba.is_deleted = false
+			LEFT JOIN public.masterbankaccount mba ON mba.account_number = t.account_number AND mba.entity_id::text = s.entity_id::text AND mba.is_deleted = false
 			WHERE t.transaction_id = ANY($1)
 			  AND COALESCE(s.is_deleted, false) = false
 		`, body.TransactionIDs)
@@ -1928,6 +1928,18 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 		accountNumbers := parseAccountNumbers(r.MultipartForm.Value)
 		forceOverride := r.FormValue("force_override") == "true"
 		accountOverride := ""
+		// Parse the file at most once for account matching and the policy lookup below.
+		var parsedFileRows [][]string
+		parsedFileDone := false
+		fileRows := func() [][]string {
+			if !parsedFileDone {
+				parsedFileDone = true
+				if rows, parseErr := parseFileToRows(fileBytes); parseErr == nil {
+					parsedFileRows = rows
+				}
+			}
+			return parsedFileRows
+		}
 
 		if forceOverride {
 			switch len(accountNumbers) {
@@ -1943,11 +1955,7 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 			}
 		} else if len(accountNumbers) >= 1 {
 			// Weighted scoring: match filename patterns + masked numbers in file content.
-			var fileContent [][]string
-			if parsedRows, parseErr := parseFileToRows(fileBytes); parseErr == nil {
-				fileContent = parsedRows
-			}
-			matched := matchAccountNumberToFile(r.Context(), pgxPool, uploadFileName, "", accountNumbers, fileContent)
+			matched := matchAccountNumberToFile(r.Context(), pgxPool, uploadFileName, "", accountNumbers, fileRows())
 			if matched != "" {
 				accountOverride = matched
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] Matched file to account %s via weighted scoring", matched)
@@ -1960,13 +1968,9 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 		}
 		policyAccount := accountOverride
 		if policyAccount == "" {
-			var policyFileContent [][]string
-			if parsedRows, parseErr := parseFileToRows(fileBytes); parseErr == nil {
-				policyFileContent = parsedRows
-			}
-			policyAccount = matchAccountNumberToFile(r.Context(), pgxPool, uploadFileName, "", nil, policyFileContent)
+			policyAccount = matchAccountNumberToFile(r.Context(), pgxPool, uploadFileName, "", nil, fileRows())
 			if policyAccount == "" {
-				policyAccount = lookupAccountNumberFromContent(r.Context(), pgxPool, policyFileContent)
+				policyAccount = lookupAccountNumberFromContent(r.Context(), pgxPool, fileRows())
 			}
 		}
 		if !enforceBankStatementUpload(map[string]interface{}{
@@ -2099,6 +2103,11 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 			capturedUser := r.FormValue("user_id")
 			capturedFile := uploadFileName
 			go func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						logger.LogError("goroutine panic: %v", rec)
+					}
+				}()
 				notifPayload := BuildBankStatementPayloadFromV2Result(
 					capturedResult,
 					capturedUser,
@@ -2233,6 +2242,11 @@ func UploadZippedBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 			http.Error(w, fmt.Sprintf("Failed to open zip file: %v", err), http.StatusBadRequest)
 			return
 		}
+		if err := checkZipEntryCount(zipReader); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		zipBudget := newZipReadBudget()
 
 		type FileResult struct {
 			FileName string                 `json:"file_name"`
@@ -2272,14 +2286,7 @@ func UploadZippedBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 				failureCount++
 				continue
 			}
-			fr, oErr := zipFileEntry.Open()
-			if oErr != nil {
-				results = append(results, FileResult{FileName: zipFileEntry.Name, Success: false, Error: fmt.Sprintf("Failed to open file from zip: %v", oErr)})
-				failureCount++
-				continue
-			}
-			fd, rErr := io.ReadAll(fr)
-			fr.Close()
+			fd, rErr := zipBudget.read(zipFileEntry)
 			if rErr != nil {
 				results = append(results, FileResult{FileName: zipFileEntry.Name, Success: false, Error: fmt.Sprintf("Failed to read file contents: %v", rErr)})
 				failureCount++
@@ -2474,6 +2481,11 @@ func UploadZippedBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 				capturedResult := fres.Result
 				capturedZipFile := zipHeader.Filename
 				go func() {
+					defer func() {
+						if rec := recover(); rec != nil {
+							logger.LogError("goroutine panic: %v", rec)
+						}
+					}()
 					notifPayload := BuildBankStatementPayloadFromV2Result(
 						capturedResult,
 						userID,

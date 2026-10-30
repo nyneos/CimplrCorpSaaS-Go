@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/policyengine/common"
 	"context"
 	"encoding/json"
@@ -300,7 +301,7 @@ func DeleteRateRequests(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		if len(valid) == 0 {
@@ -508,7 +509,7 @@ func bulkDecide(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, appr
 			}
 			if applyErr != nil {
 				_ = tx.Rollback(ctx)
-				errors = append(errors, id+errSuffixMasterApplyFailed+applyErr.Error())
+				errors = append(errors, id+errSuffixMasterApplyFailed+errtext.Text(applyErr))
 				continue
 			}
 			if err := tx.Commit(ctx); err != nil {
@@ -578,7 +579,7 @@ func bulkDecide(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, appr
 				}
 				if applyErr := applyApproveMaster(ctx, tx, id, actionType); applyErr != nil {
 					_ = tx.Rollback(ctx)
-					errors = append(errors, id+errSuffixMasterApplyFailed+applyErr.Error())
+					errors = append(errors, id+errSuffixMasterApplyFailed+errtext.Text(applyErr))
 					continue
 				}
 				if err := tx.Commit(ctx); err != nil {
@@ -611,7 +612,7 @@ func bulkDecide(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, appr
 		}
 		if applyErr != nil {
 			_ = tx.Rollback(ctx)
-			errors = append(errors, id+errSuffixMasterApplyFailed+applyErr.Error())
+			errors = append(errors, id+errSuffixMasterApplyFailed+errtext.Text(applyErr))
 			continue
 		}
 		if err := tx.Commit(ctx); err != nil {

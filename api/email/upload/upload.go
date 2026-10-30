@@ -1,6 +1,7 @@
 package emailupload
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -24,12 +25,34 @@ import (
 
 const maxEmlUploadBytes = 25 << 20 // 25 MB
 
+func respondUploadInternal(w http.ResponseWriter, err error) {
+	logger.LogError("[email-upload] %v", err)
+	emailcommon.RespondInternal(w, "upload failed")
+}
+
+func scheduleAttachmentRules(ctx context.Context, pool *pgxpool.Pool, inboxID, messageID, attachmentID, filename, s3Key string) {
+	if inboxID == "" || attachmentID == "" || s3Key == "" {
+		return
+	}
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				logger.LogError("[email-upload] attachment rules panic: %v", rec)
+			}
+		}()
+		runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		emailjobs.ProcessAttachmentRules(runCtx, pool, inboxID, messageID, attachmentID, filename, s3Key)
+	}()
+}
+
 func HandleUploadEml(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			emailcommon.RespondMethodNotAllowed(w)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxEmlUploadBytes+(1<<20))
 		if err := r.ParseMultipartForm(maxEmlUploadBytes); err != nil {
 			emailcommon.RespondBadRequest(w, "invalid multipart form")
 			return
@@ -50,7 +73,7 @@ func HandleUploadEml(pool *pgxpool.Pool) http.HandlerFunc {
 
 		body, err := io.ReadAll(io.LimitReader(file, maxEmlUploadBytes+1))
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			respondUploadInternal(w, err)
 			return
 		}
 		if len(body) > maxEmlUploadBytes {
@@ -67,9 +90,20 @@ func HandleUploadEml(pool *pgxpool.Pool) http.HandlerFunc {
 			now.Year(), now.Month(), now.Day(), now.Unix(), safeName)
 
 		if err := s3storage.PutObjectToS3(r.Context(), s3Key, body, "message/rfc822"); err != nil {
-			emailcommon.RespondInternal(w, "s3 upload failed: "+err.Error())
+			respondUploadInternal(w, err)
 			return
 		}
+		stored := true
+		defer func() {
+			if !stored {
+				return
+			}
+			delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if derr := s3storage.DeleteFromS3(delCtx, s3Key); derr != nil {
+				logger.LogError("[email-upload] cleanup %s: %v", s3Key, derr)
+			}
+		}()
 
 		client := mailruntime.NewRuntime()
 		if !client.Ready() {
@@ -79,15 +113,14 @@ func HandleUploadEml(pool *pgxpool.Pool) http.HandlerFunc {
 
 		parsed, err := client.DecodeMessages(r.Context(), []string{s3Key})
 		if err != nil {
-			emailcommon.RespondInternal(w, "parse failed: "+err.Error())
+			respondUploadInternal(w, err)
 			return
 		}
 		if len(parsed.Results) == 0 {
-			msg := "parser returned no result"
 			if len(parsed.Errors) > 0 {
-				msg = parsed.Errors[0]
+				logger.LogError("[email-upload] parser: %s", parsed.Errors[0])
 			}
-			emailcommon.RespondInternal(w, msg)
+			emailcommon.RespondInternal(w, "parser returned no result")
 			return
 		}
 
@@ -104,7 +137,7 @@ func HandleUploadEml(pool *pgxpool.Pool) http.HandlerFunc {
 			UserID: userID, UserEmail: userEmail, EntityIDs: entityIDs, Admin: admin, SkipInboxFilters: true,
 		})
 		if err != nil {
-			emailcommon.RespondBadRequest(w, err.Error())
+			emailcommon.RespondBadRequest(w, errtext.Detail(w, err))
 			return
 		}
 
@@ -112,7 +145,7 @@ func HandleUploadEml(pool *pgxpool.Pool) http.HandlerFunc {
 			Status: "MANUAL_UPLOAD", InboxID: inbox.InboxID, Module: inbox.Module, EntityID: inbox.EntityID, MailDirection: mailDirection,
 		})
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			respondUploadInternal(w, err)
 			return
 		}
 
@@ -128,6 +161,7 @@ func HandleUploadEml(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		logger.LogInfo("[email-upload] ingested manual .eml message_id=%s key=%s", messageID, s3Key)
+		stored = false
 		emailcommon.RespondPayload(w, "upload/eml", map[string]interface{}{
 			"message_id": messageID,
 			"s3_raw_key": s3Key,
@@ -143,6 +177,7 @@ func HandleAttachmentUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondMethodNotAllowed(w)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxEmlUploadBytes+(1<<20))
 		if err := r.ParseMultipartForm(maxEmlUploadBytes); err != nil {
 			emailcommon.RespondBadRequest(w, "invalid multipart form")
 			return
@@ -171,7 +206,7 @@ func HandleAttachmentUpload(pool *pgxpool.Pool) http.HandlerFunc {
 
 		body, err := io.ReadAll(io.LimitReader(file, maxEmlUploadBytes+1))
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			respondUploadInternal(w, err)
 			return
 		}
 		if len(body) > maxEmlUploadBytes {
@@ -191,13 +226,24 @@ func HandleAttachmentUpload(pool *pgxpool.Pool) http.HandlerFunc {
 		hash := sha256.Sum256(body)
 		hashHex := hex.EncodeToString(hash[:])
 		now := time.Now().UTC()
-		s3Key := fmt.Sprintf("email/inbound/attachments/manual/%04d/%02d/%02d/%s/%s",
-			now.Year(), now.Month(), now.Day(), messageID, filename)
+		s3Key := fmt.Sprintf("email/inbound/attachments/manual/%04d/%02d/%02d/%s/%s-%s",
+			now.Year(), now.Month(), now.Day(), messageID, hashHex[:12], filename)
 
 		if err := s3storage.PutObjectToS3(r.Context(), s3Key, body, contentType); err != nil {
-			emailcommon.RespondInternal(w, "s3 upload failed: "+err.Error())
+			respondUploadInternal(w, err)
 			return
 		}
+		stored := true
+		defer func() {
+			if !stored {
+				return
+			}
+			delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if derr := s3storage.DeleteFromS3(delCtx, s3Key); derr != nil {
+				logger.LogError("[email-upload] cleanup %s: %v", s3Key, derr)
+			}
+		}()
 
 		var attachmentID string
 		err = pool.QueryRow(r.Context(), `
@@ -207,9 +253,10 @@ func HandleAttachmentUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			RETURNING attachment_id::text
 		`, messageID, filename, contentType, len(body), s3Key, hashHex).Scan(&attachmentID)
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			respondUploadInternal(w, err)
 			return
 		}
+		stored = false
 
 		var inboxID string
 		_ = pool.QueryRow(r.Context(), `
@@ -231,7 +278,7 @@ func HandleAttachmentUpload(pool *pgxpool.Pool) http.HandlerFunc {
 		})
 
 		if inboxID != "" {
-			go emailjobs.ProcessAttachmentRules(context.Background(), pool, inboxID, messageID, attachmentID, filename, s3Key)
+			scheduleAttachmentRules(r.Context(), pool, inboxID, messageID, attachmentID, filename, s3Key)
 		}
 
 		emailcommon.RespondPayload(w, "attachments/upload", map[string]interface{}{
@@ -252,15 +299,21 @@ type ingestMessageInfo struct {
 func ingestParsedMessage(ctx context.Context, pool *pgxpool.Pool, msg mailruntime.ParsedEmail, info ingestMessageInfo) (string, error) {
 	status, inboxID, module, entityID, mailDirection :=
 		info.Status, info.InboxID, info.Module, info.EntityID, info.MailDirection
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+
 	var exists bool
-	if err := pool.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS(SELECT 1 FROM email_svc.message WHERE s3_raw_key = $1)
 	`, msg.S3RawKey).Scan(&exists); err != nil {
 		return "", err
 	}
 	if exists {
 		var messageID string
-		err := pool.QueryRow(ctx, `
+		err := tx.QueryRow(ctx, `
 			SELECT message_id::text FROM email_svc.message WHERE s3_raw_key = $1
 		`, msg.S3RawKey).Scan(&messageID)
 		return messageID, err
@@ -276,7 +329,7 @@ func ingestParsedMessage(ctx context.Context, pool *pgxpool.Pool, msg mailruntim
 	}
 
 	var messageID string
-	err := pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO email_svc.message (
 			inbox_id, s3_raw_key, s3_parsed_key, message_id_header,
 			envelope_from, envelope_to, subject, received_at,
@@ -296,9 +349,13 @@ func ingestParsedMessage(ctx context.Context, pool *pgxpool.Pool, msg mailruntim
 		return "", err
 	}
 
+	type queuedRule struct {
+		attachmentID, filename, s3Key string
+	}
+	queued := make([]queuedRule, 0, len(msg.Attachments))
 	for _, att := range msg.Attachments {
 		var attachmentID string
-		err := pool.QueryRow(ctx, `
+		err := tx.QueryRow(ctx, `
 			INSERT INTO email_svc.message_attachment (
 				message_id, filename, content_type, file_size, s3_key, file_hash
 			) VALUES ($1::uuid, $2, $3, $4, $5, $6)
@@ -307,11 +364,15 @@ func ingestParsedMessage(ctx context.Context, pool *pgxpool.Pool, msg mailruntim
 		if err != nil {
 			return "", err
 		}
-		if inboxID != "" && attachmentID != "" && att.S3Key != "" {
-			go emailjobs.ProcessAttachmentRules(context.Background(), pool, inboxID, messageID, attachmentID, att.Filename, att.S3Key)
-		}
+		queued = append(queued, queuedRule{attachmentID: attachmentID, filename: att.Filename, s3Key: att.S3Key})
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
 	}
 
+	for _, att := range queued {
+		scheduleAttachmentRules(ctx, pool, inboxID, messageID, att.attachmentID, att.filename, att.s3Key)
+	}
 	emailcommon.LogProcessing(ctx, pool, messageID, "INGEST", "OK", map[string]interface{}{
 		"s3_raw_key": msg.S3RawKey,
 		"source":     status,

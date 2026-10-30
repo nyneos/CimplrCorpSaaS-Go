@@ -1,6 +1,8 @@
 package payablereceivabledash
 
 import (
+	"CimplrCorpSaas/api/dash/fxrates"
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"math"
@@ -41,19 +43,7 @@ type PayRecRow struct {
 // GetPayablesReceivables returns combined payable and receivable rows for the dashboard
 func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	// static spot rates to USD (example/fallback)
-	spotRates := map[string]float64{
-		"USD": 1.0,
-		"AUD": 0.68,
-		"CAD": 0.75,
-		"CHF": 1.1,
-		"CNY": 0.14,
-		"RMB": 0.14,
-		"EUR": 1.09,
-		"GBP": 1.28,
-		"JPY": 0.0067,
-		"SEK": 0.095,
-		"INR": 0.0117,
-	}
+	spotRates := fxrates.USDPerUnit()
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -91,7 +81,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		  FROM auditactionpayable
 		  ORDER BY payable_id, requested_at DESC
 		) a ON a.payable_id = p.payable_id
-		WHERE a.processing_status = 'APPROVED'
+		WHERE UPPER(TRIM(a.processing_status)) = 'APPROVED'
 		  AND p.entity_name = ANY($1)
 		  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($2)
 		ORDER BY p.due_date
@@ -107,7 +97,9 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var amt float64
 			var currency, counterparty, entity string
 			if err := rows.Scan(&invoice, &due, &amt, &currency, &counterparty, &entity); err != nil {
-				continue
+				rows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			rate := 1.0
 			if r, ok := spotRates[currency]; ok && r > 0 {
@@ -123,6 +115,10 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Entity:       entity,
 			})
 		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
+		}
 		rows.Close()
 
 		// Receivables
@@ -136,7 +132,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		  FROM auditactionreceivable
 		  ORDER BY receivable_id, requested_at DESC
 		) a ON a.receivable_id = r.receivable_id
-		WHERE a.processing_status = 'APPROVED'
+		WHERE UPPER(TRIM(a.processing_status)) = 'APPROVED'
 		  AND r.entity_name = ANY($1)
 		  AND UPPER(TRIM(COALESCE(r.currency_code, ''))) = ANY($2)
 		ORDER BY r.due_date
@@ -152,7 +148,9 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var amt float64
 			var currency, counterparty, entity string
 			if err := rows2.Scan(&invoice, &due, &amt, &currency, &counterparty, &entity); err != nil {
-				continue
+				rows2.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			rate := 1.0
 			if r, ok := spotRates[currency]; ok && r > 0 {
@@ -167,6 +165,10 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Amount:       converted,
 				Entity:       entity,
 			})
+		}
+		if err := rows2.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+			return
 		}
 		rows2.Close()
 
@@ -193,7 +195,13 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		start := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
 		next30 := start.AddDate(0, 0, 30)
 		next60 := start.AddDate(0, 0, 60)
-		next90 := start.AddDate(0, 0, 90)
+		// Remainder of the current calendar quarter (start of next quarter minus one day).
+		quarterEnd := time.Date(start.Year(), start.Month()-time.Month((int(start.Month())-1)%3)+3, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
+		// The fetch window must cover the longest bucket.
+		fetchEnd := next60
+		if quarterEnd.After(fetchEnd) {
+			fetchEnd = quarterEnd
+		}
 
 		// top-level map: bucket -> entity -> counterparty -> type -> currency -> amount
 		buckets := map[string]map[string]map[string]map[string]map[string]float64{}
@@ -204,7 +212,7 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}{
 			{"next30", "Next 30 Days", start, next30},
 			{"next60", "Next 60 Days", start, next60},
-			{"quarter", "This Quarter", start, next90},
+			{"quarter", "This Quarter", start, quarterEnd},
 		}
 
 		for _, b := range ranges {
@@ -240,14 +248,20 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($4)
 		`
 		payRows := make([]payRow, 0)
-		rows, err := pgxPool.Query(ctx, payQ, start, next90, allowedEntities, allowedCurrencies)
+		rows, err := pgxPool.Query(ctx, payQ, start, fetchEnd, allowedEntities, allowedCurrencies)
 		if err == nil {
 			for rows.Next() {
 				var pr payRow
 				if err := rows.Scan(&pr.Entity, &pr.Counterparty, &pr.Due, &pr.Amt, &pr.Currency, &pr.ID); err != nil {
-					continue
+					rows.Close()
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+					return
 				}
 				payRows = append(payRows, pr)
+			}
+			if err := rows.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			rows.Close()
 		}
@@ -271,9 +285,15 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				for arows.Next() {
 					var id, st string
 					if err := arows.Scan(&id, &st); err != nil {
-						continue
+						arows.Close()
+						api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+						return
 					}
 					statusMap[id] = st
+				}
+				if err := arows.Err(); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+					return
 				}
 				arows.Close()
 			}
@@ -320,14 +340,20 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND UPPER(TRIM(COALESCE(r.currency_code, ''))) = ANY($4)
 		`
 		recRows := make([]recRow, 0)
-		rows2, err := pgxPool.Query(ctx, recQ, start, next90, allowedEntities, allowedCurrencies)
+		rows2, err := pgxPool.Query(ctx, recQ, start, fetchEnd, allowedEntities, allowedCurrencies)
 		if err == nil {
 			for rows2.Next() {
 				var rr recRow
 				if err := rows2.Scan(&rr.Entity, &rr.Counterparty, &rr.Due, &rr.Amt, &rr.Currency, &rr.ID); err != nil {
-					continue
+					rows2.Close()
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+					return
 				}
 				recRows = append(recRows, rr)
+			}
+			if err := rows2.Err(); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+				return
 			}
 			rows2.Close()
 		}
@@ -349,9 +375,15 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				for arows.Next() {
 					var id, st string
 					if err := arows.Scan(&id, &st); err != nil {
-						continue
+						arows.Close()
+						api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+						return
 					}
 					statusMap[id] = st
+				}
+				if err := arows.Err(); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
+					return
 				}
 				arows.Close()
 			}

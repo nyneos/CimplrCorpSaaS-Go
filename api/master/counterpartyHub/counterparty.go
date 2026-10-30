@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/logger"
 	"context"
@@ -127,7 +128,7 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := validateCounterpartyInput(req.CounterpartyInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -140,7 +141,7 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			if err := validateBankFields(*req.Bank); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 				return
 			}
 		case "EXCHANGE":
@@ -150,7 +151,7 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			req.Exchange.CounterpartyID = "PLACEHOLDER"
 			if err := validateExchangeInput(*req.Exchange); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 				return
 			}
 		case "DATA_PROVIDER":
@@ -160,7 +161,7 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			req.DataProvider.CounterpartyID = "PLACEHOLDER"
 			if err := validateDataProviderInput(*req.DataProvider); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 				return
 			}
 		case "CCP_CSD":
@@ -170,7 +171,7 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			req.CcpCsd.CounterpartyID = "PLACEHOLDER"
 			if err := validateCcpCsdInput(*req.CcpCsd); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 				return
 			}
 		case "PAYMENT_NETWORK":
@@ -180,7 +181,7 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			req.PaymentNetwork.CounterpartyID = "PLACEHOLDER"
 			if err := validatePaymentNetworkInput(*req.PaymentNetwork); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 				return
 			}
 		case "ERP_SYSTEM":
@@ -190,7 +191,7 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			req.ERPSystem.CounterpartyID = "PLACEHOLDER"
 			if err := validateERPSystemInput(*req.ERPSystem); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 				return
 			}
 		}
@@ -273,23 +274,33 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(cpID, uID, uEmail string) {
-			defer func() { recover() }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
-			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_MASTER_CREATE",
 				RecordID: cpID, RecordTable: constants.ErrCounterpartyMasterTable,
 				AuditTable: constants.ErrAuditCounterpartyMasterTable, AuditIDColumn: "counterparty_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 				RequirePinnedMatrix: true,
 				AutoApplyIfUnpinned: true,
-			})
+			}); err != nil {
+				logger.LogError("[CounterpartyHub] approval instance creation failed: %v", err)
+			}
 		}(counterpartyID, req.UserID, userEmail)
 
 		go func(cpID, uEmail string) {
-			defer func() { recover() }()
-			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 				"/master/counterparty-hub/counterparty/create", cpID,
 				map[string]interface{}{"record_id": cpID, "event": "COUNTERPARTY_MASTER_CREATED", "actor_email": uEmail},
 			)
@@ -336,7 +347,7 @@ func CreateCounterpartyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errorsList = append(errorsList, map[string]interface{}{
 					"row_index":            i,
 					constants.ValueSuccess: false,
-					constants.ValueError:   err.Error(),
+					constants.ValueError:   errtext.Text(err),
 					"counterparty_code":    row.CounterpartyCode,
 				})
 			} else {
@@ -351,7 +362,7 @@ func CreateCounterpartyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -415,17 +426,23 @@ func CreateCounterpartyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, cpID := range insertedIDs {
 			go func(id, uID, uEmail string) {
-				defer func() { recover() }()
+				defer func() {
+					if rec := recover(); rec != nil {
+						logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+					}
+				}()
 				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer bgCancel()
-				_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+				if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_MASTER_CREATE",
 					RecordID: id, RecordTable: constants.ErrCounterpartyMasterTable,
 					AuditTable: constants.ErrAuditCounterpartyMasterTable, AuditIDColumn: "counterparty_id",
 					ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 					RequirePinnedMatrix: true,
 					AutoApplyIfUnpinned: true,
-				})
+				}); err != nil {
+					logger.LogError("[CounterpartyHub] approval instance creation failed: %v", err)
+				}
 			}(cpID, req.UserID, userEmail)
 		}
 
@@ -590,23 +607,33 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(cpID, uID, uEmail string) {
-			defer func() { recover() }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
 			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
-			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_MASTER_EDIT",
 				RecordID: cpID, RecordTable: constants.ErrCounterpartyMasterTable,
 				AuditTable: constants.ErrAuditCounterpartyMasterTable, AuditIDColumn: "counterparty_id",
 				ActionType: "EDIT", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 				RequirePinnedMatrix: true,
 				AutoApplyIfUnpinned: true,
-			})
+			}); err != nil {
+				logger.LogError("[CounterpartyHub] approval instance creation failed: %v", err)
+			}
 		}(req.CounterpartyID, req.UserID, userEmail)
 
 		go func(cpID, uEmail string) {
-			defer func() { recover() }()
-			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 				"/master/counterparty-hub/update", cpID,
 				map[string]interface{}{"record_id": cpID, "event": "COUNTERPARTY_MASTER_UPDATED", "actor_email": uEmail},
 			)
@@ -674,7 +701,7 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var a auditRow
 			if err := rows.Scan(&a.AuditID, &a.CPID, &a.ActionType, &a.Status, &a.RequestedBy, &a.CPType); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Audit scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Audit scan failed: "+errtext.Detail(w, err))
 				return
 			}
 			audits = append(audits, a)
@@ -704,7 +731,7 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					UPDATE apibox.counterparty_master SET is_deleted=true, updated_by=$1, updated_at=now()
 					WHERE counterparty_id=$2`, userEmail, a.CPID); err != nil {
 					errorsList = append(errorsList, map[string]interface{}{
-						"counterparty_id": a.CPID, constants.ValueSuccess: false, constants.ValueError: err.Error(),
+						"counterparty_id": a.CPID, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err),
 					})
 					continue
 				}
@@ -714,7 +741,7 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					WHERE counterparty_id=$2 AND status IN ('DRAFT','PENDING_APPROVAL')`,
 					userEmail, a.CPID); err != nil {
 					errorsList = append(errorsList, map[string]interface{}{
-						"counterparty_id": a.CPID, constants.ValueSuccess: false, constants.ValueError: err.Error(),
+						"counterparty_id": a.CPID, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err),
 					})
 					continue
 				}
@@ -764,9 +791,9 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.Exec(ctx, `
 				UPDATE apibox.audit_counterparty_master
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE audit_id=$3`, userEmail, req.Comment, a.AuditID); err != nil {
+				WHERE (audit_id=$3) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`, userEmail, req.Comment, a.AuditID); err != nil {
 				errorsList = append(errorsList, map[string]interface{}{
-					"counterparty_id": a.CPID, constants.ValueSuccess: false, constants.ValueError: err.Error(),
+					"counterparty_id": a.CPID, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err),
 				})
 				continue
 			}
@@ -784,8 +811,12 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, s := range success {
 			cpID := s["counterparty_id"].(string)
 			go func(id, uEmail string) {
-				defer func() { recover() }()
-				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				defer func() {
+					if rec := recover(); rec != nil {
+						logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 					"/master/counterparty-hub/bulk-approve", id,
 					map[string]interface{}{"record_id": id, "event": "COUNTERPARTY_MASTER_APPROVED", "actor_email": uEmail},
 				)
@@ -859,7 +890,7 @@ func BulkRejectCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			res, err := tx.Exec(ctx, `
 				UPDATE apibox.audit_counterparty_master
 				SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE counterparty_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'`,
+				WHERE (counterparty_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`,
 				userEmail, req.Comment, rejectIDs)
 			if err != nil {
 				msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")
@@ -977,8 +1008,12 @@ func BulkDeleteCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, s := range successList {
 			go func(id, uEmail string) {
-				defer func() { recover() }()
-				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+				defer func() {
+					if rec := recover(); rec != nil {
+						logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+					}
+				}()
+				notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 					"/master/counterparty-hub/bulk-delete", id,
 					map[string]interface{}{"record_id": id, "event": "COUNTERPARTY_MASTER_DELETE_REQUESTED", "actor_email": uEmail},
 				)
@@ -1115,7 +1150,7 @@ func GetCounterpartyMasterAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Row scan error: "+errtext.Detail(w, rows.Err()))
 			return
 		}
 

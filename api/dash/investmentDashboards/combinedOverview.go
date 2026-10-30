@@ -12,7 +12,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
-		portfoliopkg "CimplrCorpSaas/api/investment/portfolio"
+	portfoliopkg "CimplrCorpSaas/api/investment/portfolio"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -124,10 +124,17 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var h holdingRow
 			if err := rows.Scan(&h.EntityName, &h.AmcName, &h.SchemeName, &h.SchemeID, &h.Units, &h.Nav, &h.CurrentValue, &h.AmfiNav, &h.AmfiSchemeCode, &h.FolioNumber, &h.GainLoss, &h.GainLossPct, &h.RiskRating, &h.InternalRiskScore, &h.InvestedAmount, &h.Isin, &h.PurchaseNav, &h.SchemeCategory, &h.SchemeSubCategory, &h.SchemeType); err != nil {
-				continue
+				api.LogErrorForResponse(w, "investment dashboard scan: %v", err)
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDB)
+				return
 			}
 			holdings = append(holdings, h)
 			totalAUM += h.CurrentValue
+		}
+		if err := rows.Err(); err != nil {
+			api.LogErrorForResponse(w, "investment dashboard scan: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDB)
+			return
 		}
 
 		// Use the shared helper (same as individual handler) to fetch recent transactions

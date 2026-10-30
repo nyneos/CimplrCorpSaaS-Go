@@ -68,13 +68,15 @@ func DownloadEvidencePack(pool *pgxpool.Pool) http.HandlerFunc {
 
 		cycleID, _ := pack["cycle_id"].(string)
 		var entityID string
-		if err := pool.QueryRow(ctx, `SELECT entity_id FROM `+cycleTable+` WHERE cycle_id = $1`, cycleID).Scan(&entityID); err == nil {
-			scope := ctxutil.FromContext(ctx)
-			if !scope.HasEntityAccess(entityID) {
-				fdclosingcommon.RespondError(w, http.StatusForbidden,
-					"Entity ID '"+entityID+"' is not within your authorized access scope.")
-				return
-			}
+		if err := pool.QueryRow(ctx, `SELECT entity_id FROM `+cycleTable+` WHERE cycle_id = $1`, cycleID).Scan(&entityID); err != nil {
+			api.LogErrorForResponse(w, "[FDClosingEvidencePack] DownloadEvidencePack cycle lookup: %v", err)
+			fdclosingcommon.RespondError(w, http.StatusNotFound, "Evidence pack not found")
+			return
+		}
+		if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
+			fdclosingcommon.RespondError(w, http.StatusForbidden,
+				"Entity ID '"+entityID+"' is not within your authorized access scope.")
+			return
 		}
 
 		s3Key, _ := pack["s3_key"].(string)

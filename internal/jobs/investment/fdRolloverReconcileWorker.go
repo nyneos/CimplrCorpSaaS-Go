@@ -36,6 +36,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -205,13 +206,23 @@ func activateRolloverFD(ctx context.Context, db *pgxpool.Pool, r rolloverReconci
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Double-create guard inside the transaction (FOR UPDATE on booking row).
+	// Double-create guard inside the transaction: lock the booking row first so two
+	// workers cannot both pass the fd_master existence check for the same booking.
+	var lockedBooking string
+	if err := tx.QueryRow(ctx,
+		`SELECT booking_id FROM investment.fd_booking_request WHERE booking_id=$1 FOR UPDATE`,
+		r.NewBookingID,
+	).Scan(&lockedBooking); err != nil {
+		return fmt.Errorf("lock booking %s: %w", r.NewBookingID, err)
+	}
 	var existingFDID string
-	_ = tx.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT COALESCE(fd_id,'') FROM investment.fd_master
 		 WHERE booking_id=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
 		r.NewBookingID,
-	).Scan(&existingFDID)
+	).Scan(&existingFDID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("check existing fd_master: %w", err)
+	}
 	if existingFDID != "" {
 		// Already activated by someone else between the outer query and now.
 		logger.LogError("[RolloverReconcile] booking %s already has fd_master %s — skipping", r.NewBookingID, existingFDID)
@@ -275,40 +286,54 @@ func activateRolloverFD(ctx context.Context, db *pgxpool.Pool, r rolloverReconci
 		return fmt.Errorf("insert fd_master: %w", err)
 	}
 
-	// Generate and save cashflow schedule.
-	if cfErr := generateAndSaveCashflows(ctx, tx, newFDID, r); cfErr != nil {
-		// Non-fatal — fd_master is created; cashflows can be regenerated manually.
-		logger.LogError("[RolloverReconcile] cashflow generation failed for fd %s: %v", newFDID, cfErr)
-	} else {
+	// Generate and save the cashflow schedule inside a savepoint: a failure there is
+	// non-fatal (fd_master survives and cashflows can be regenerated manually), and
+	// rolling back only the savepoint keeps the outer transaction usable.
+	if cfErr := func() error {
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer sp.Rollback(ctx) //nolint:errcheck
+		if err := generateAndSaveCashflows(ctx, sp, newFDID, r); err != nil {
+			return err
+		}
 		// Mark cashflow_generated so the accrual engine picks it up.
-		_, _ = tx.Exec(ctx,
+		if _, err := sp.Exec(ctx,
 			`UPDATE investment.fd_master SET cashflow_generated=true, cashflow_generated_at=now() WHERE fd_id=$1`,
-			newFDID)
+			newFDID); err != nil {
+			return err
+		}
+		return sp.Commit(ctx)
+	}(); cfErr != nil {
+		logger.LogError("[RolloverReconcile] cashflow generation failed for fd %s: %v", newFDID, cfErr)
 	}
 
-	// Link new fd_id back on closure and booking tables.
-	_, _ = tx.Exec(ctx,
+	// Link new fd_id back on closure and booking tables, and mark the booking active.
+	if _, err := tx.Exec(ctx,
 		`UPDATE investment.fd_closure_rollover SET new_fd_id=$1 WHERE closure_request_id=$2`,
-		newFDID, r.ClosureRequestID)
-	_, _ = tx.Exec(ctx,
-		`UPDATE investment.fd_booking_request SET new_fd_id=$1 WHERE booking_id=$2`,
-		newFDID, r.NewBookingID)
-	// Update booking status to show it is now active.
-	_, _ = tx.Exec(ctx,
-		`UPDATE investment.fd_booking_request SET booking_status='ACTIVATED' WHERE booking_id=$1`,
-		r.NewBookingID)
+		newFDID, r.ClosureRequestID); err != nil {
+		return fmt.Errorf("link closure rollover: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE investment.fd_booking_request SET new_fd_id=$1, booking_status='ACTIVATED' WHERE booking_id=$2`,
+		newFDID, r.NewBookingID); err != nil {
+		return fmt.Errorf("link booking: %w", err)
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 
 	// Log success.
-	_, _ = db.Exec(ctx, `
+	if _, err := db.Exec(ctx, `
 		INSERT INTO investment.fd_auto_renewal_log (
 		  fd_id, closure_request_id, renewal_date, renewal_status,
 		  new_tenor_days, rollover_amount, created_at
 		) VALUES ($1,$2,CURRENT_DATE,'RECONCILE_ACTIVATED',$3,$4,NOW())`,
-		newFDID, r.ClosureRequestID, r.TenureDays, r.PrincipalAmount)
+		newFDID, r.ClosureRequestID, r.TenureDays, r.PrincipalAmount); err != nil {
+		logger.LogError("[RolloverReconcile] renewal log insert failed fd=%s: %v", newFDID, err)
+	}
 
 	logger.LogError("[RolloverReconcile] Activated fd_master %s for booking %s (closure %s)",
 		newFDID, r.NewBookingID, r.ClosureRequestID)

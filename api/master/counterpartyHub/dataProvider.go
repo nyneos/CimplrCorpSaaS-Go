@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
@@ -73,7 +74,7 @@ func CreateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := validateDataProviderInput(req.DataProviderInput); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 			return
 		}
 
@@ -134,22 +135,32 @@ func CreateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(pid, uID, uEmail string) {
-			defer func() { recover() }()
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
-			_, _ = approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "DATA_PROVIDER_CREATE",
 				RecordID: pid, RecordTable: "apibox.data_provider_master",
 				AuditTable: "apibox.audit_data_provider", AuditIDColumn: "provider_id",
 				ActionType: "CREATE", SubmittedBy: uID, SubmittedByEmail: uEmail, MatrixID: "",
 				RequirePinnedMatrix: true,
 				AutoApplyIfUnpinned: true,
-			})
+			}); err != nil {
+				logger.LogError("[CounterpartyHub] approval instance creation failed: %v", err)
+			}
 		}(providerID, req.UserID, userEmail)
 
 		go func(pid, uEmail string) {
-			defer func() { recover() }()
-			notifcatalog.TriggerNotification(context.Background(), pgxPool,
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[CounterpartyHub] background task panic: %v", rec)
+				}
+			}()
+			notifcatalog.TriggerNotification(context.WithoutCancel(ctx), pgxPool,
 				"/master/counterparty-hub/data-provider/create", pid,
 				map[string]interface{}{"record_id": pid, "event": "DATA_PROVIDER_CREATED", "actor_email": uEmail},
 			)
@@ -191,7 +202,7 @@ func CreateDataProviderBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for i, row := range req.Rows {
 			if err := validateDataProviderInput(row); err != nil {
-				errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				errList = append(errList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 				continue
 			}
 			pid, err := insertDataProviderInTx(ctx, pgxPool, row, userEmail)
@@ -306,7 +317,7 @@ func UpdateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if k == "api_creds_kms_ref" {
 				if s, ok := v.(string); ok {
 					if err := validateKMSPath("api_creds_kms_ref", s); err != nil {
-						api.RespondWithError(w, http.StatusBadRequest, err.Error())
+						api.RespondWithError(w, http.StatusBadRequest, errtext.Detail(w, err))
 						return
 					}
 				}
@@ -433,8 +444,8 @@ func BulkApproveDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.Exec(ctx, `
 				UPDATE apibox.audit_data_provider
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE audit_id=$3`, userEmail, req.Comment, a.AuditID); err != nil {
-				errList = append(errList, map[string]interface{}{"provider_id": a.ID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				WHERE (audit_id=$3) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`, userEmail, req.Comment, a.AuditID); err != nil {
+				errList = append(errList, map[string]interface{}{"provider_id": a.ID, constants.ValueSuccess: false, constants.ValueError: errtext.Text(err)})
 				continue
 			}
 			success = append(success, map[string]interface{}{constants.ValueSuccess: true, "provider_id": a.ID})
@@ -485,7 +496,7 @@ func BulkRejectDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		res, err := tx.Exec(ctx, `
 			UPDATE apibox.audit_data_provider
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE provider_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'`,
+			WHERE (provider_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%'`,
 			userEmail, req.Comment, req.ProviderIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Rejection failed")
@@ -675,7 +686,7 @@ func GetDataProviderAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -762,7 +773,7 @@ func GetDataProviderDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusNotFound, "Data provider not found")
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 

@@ -1288,15 +1288,17 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			var actionID string
 			delStatus := payRecAuditStatus(deleteMatrixByID[id], "PENDING_DELETE_APPROVAL")
-			if err := tx.QueryRow(ctx, insPay, id, delStatus, reasonArg, requestedBy, requestedIP).Scan(&actionID); err == nil {
-				if !policyPinnedMatrix(deleteMatrixByID[id]) {
-					if _, err := tx.Exec(ctx, `
-						UPDATE tr_payables SET is_deleted = TRUE, deleted_at = now(), deleted_by = $2
-						WHERE payable_id = $1 AND is_deleted != TRUE
-					`, id, requestedBy); err != nil {
-						api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to delete payable: "+err.Error(), "")
-						return
-					}
+			if err := tx.QueryRow(ctx, insPay, id, delStatus, reasonArg, requestedBy, requestedIP).Scan(&actionID); err != nil {
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to record payable delete request: "+err.Error(), "")
+				return
+			}
+			if !policyPinnedMatrix(deleteMatrixByID[id]) {
+				if _, err := tx.Exec(ctx, `
+					UPDATE tr_payables SET is_deleted = TRUE, deleted_at = now(), deleted_by = $2
+					WHERE payable_id = $1 AND is_deleted != TRUE
+				`, id, requestedBy); err != nil {
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to delete payable: "+err.Error(), "")
+					return
 				}
 			}
 		}
@@ -1317,15 +1319,17 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			var actionID string
 			delStatus := payRecAuditStatus(deleteMatrixByID[id], "PENDING_DELETE_APPROVAL")
-			if err := tx.QueryRow(ctx, insRec, id, delStatus, reasonArg, requestedBy, requestedIP).Scan(&actionID); err == nil {
-				if !policyPinnedMatrix(deleteMatrixByID[id]) {
-					if _, err := tx.Exec(ctx, `
-						UPDATE tr_receivables SET is_deleted = TRUE, deleted_at = now(), deleted_by = $2
-						WHERE receivable_id = $1 AND is_deleted != TRUE
-					`, id, requestedBy); err != nil {
-						api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to delete receivable: "+err.Error(), "")
-						return
-					}
+			if err := tx.QueryRow(ctx, insRec, id, delStatus, reasonArg, requestedBy, requestedIP).Scan(&actionID); err != nil {
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to record receivable delete request: "+err.Error(), "")
+				return
+			}
+			if !policyPinnedMatrix(deleteMatrixByID[id]) {
+				if _, err := tx.Exec(ctx, `
+					UPDATE tr_receivables SET is_deleted = TRUE, deleted_at = now(), deleted_by = $2
+					WHERE receivable_id = $1 AND is_deleted != TRUE
+				`, id, requestedBy); err != nil {
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to delete receivable: "+err.Error(), "")
+					return
 				}
 			}
 		}

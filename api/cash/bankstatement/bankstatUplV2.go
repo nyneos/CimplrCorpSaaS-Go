@@ -53,12 +53,7 @@ func tryExtractNumbersAsXLSX(data []byte) []byte {
 		name := strings.ToLower(f.Name)
 		// Look for any xlsx inside the zip (Numbers puts it under Sheets/)
 		if strings.HasSuffix(name, ".xlsx") {
-			rc, openErr := f.Open()
-			if openErr != nil {
-				continue
-			}
-			xlsxBytes, readErr := io.ReadAll(rc)
-			rc.Close()
+			xlsxBytes, readErr := newZipReadBudget().read(f)
 			if readErr == nil && len(xlsxBytes) > 0 {
 				logger.LogInfo("[BANK-PARSE] extracted embedded xlsx '%s' from .numbers file (%d bytes)", f.Name, len(xlsxBytes))
 				return xlsxBytes
@@ -2917,6 +2912,11 @@ RETURNING bank_statement_id
 		pool := opts.PgxPool
 		bsID := bankStatementID // capture for goroutine
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("goroutine panic: %v", rec)
+				}
+			}()
 			if ok, msg := bsasync.EnforcePostUploadJob(context.Background(), pool, bsID); !ok {
 				logger.LogInfo("[SMART-CAT] post-upload policy blocked bs=%s: %s", bsID, msg)
 				return

@@ -1,6 +1,7 @@
 package scope
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -100,7 +101,7 @@ func DeleteScope(pool *pgxpool.Pool) http.HandlerFunc {
 			}); err != nil {
 				tx.Rollback(ctx) //nolint:errcheck
 				api.LogErrorForResponse(w, "[FDClosingScope] DeleteScope apply for %s: %v", scopeID, err)
-				errs = append(errs, scopeID+": "+err.Error())
+				errs = append(errs, scopeID+": "+errtext.Text(err))
 				continue
 			}
 

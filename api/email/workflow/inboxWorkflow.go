@@ -1,14 +1,17 @@
 package emailworkflow
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
@@ -18,6 +21,8 @@ import (
 	emailjobs "CimplrCorpSaas/internal/jobs/email"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -135,16 +140,121 @@ type inboxAuditEntry struct {
 	Detail  map[string]interface{}
 }
 
-func logInboxAudit(ctx context.Context, pool *pgxpool.Pool, entry inboxAuditEntry) {
+// inboxDB is the pool or transaction used for inbox writes that must commit together.
+type inboxDB interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func logInboxAudit(ctx context.Context, db inboxDB, entry inboxAuditEntry) error {
 	detail := entry.Detail
 	if detail == nil {
 		detail = map[string]interface{}{}
 	}
-	b, _ := json.Marshal(detail)
-	_, _ = pool.Exec(ctx, `
+	b, err := json.Marshal(detail)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `
 		INSERT INTO email_svc.inbox_audit (inbox_id, action_type, status, processing_status, performed_by, comment, detail)
 		VALUES ($1::uuid, $2, $3, $3, NULLIF($4,''), NULLIF($5,''), $6::jsonb)
 	`, entry.InboxID, entry.Action, entry.Status, entry.UserID, entry.Comment, string(b))
+	return err
+}
+
+func inboxMailboxConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == "23505" && strings.Contains(pgErr.ConstraintName, "mailbox")
+}
+
+func inInboxTx(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func respondInboxSubmitFailed(w http.ResponseWriter) {
+	emailcommon.RespondInternal(w, "Failed to submit inbox for approval")
+}
+
+// abandonUnsubmittedInbox retires a create that committed before its approval
+// instance could be created, so the row is not left PENDING_APPROVAL.
+func abandonUnsubmittedInbox(ctx context.Context, pool *pgxpool.Pool, inboxID, userID string) error {
+	return inInboxTx(ctx, pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE email_svc.inbox_config
+			SET processing_status = $2,
+			    is_active = false,
+			    is_deleted = true,
+			    updated_at = now()
+			WHERE inbox_id = $1::uuid
+			  AND processing_status = $3
+			  AND COALESCE(is_deleted, false) = false
+		`, inboxID, constants.StatusRejected, constants.StatusPendingApproval)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("unsubmitted inbox was not pending approval")
+		}
+		return logInboxAudit(ctx, tx, inboxAuditEntry{
+			InboxID: inboxID,
+			Action:  "CREATE",
+			Status:  constants.StatusRejected,
+			UserID:  userID,
+			Detail:  map[string]interface{}{"approval_instance": "failed"},
+		})
+	})
+}
+
+type inboxStatusRestore struct {
+	InboxID      string
+	PriorStatus  string
+	UserID       string
+	Action       string
+	ClearPending bool
+}
+
+func restoreInboxProcessingStatus(ctx context.Context, pool *pgxpool.Pool, restore inboxStatusRestore) error {
+	return inInboxTx(ctx, pool, func(tx pgx.Tx) error {
+		var err error
+		if restore.ClearPending {
+			_, err = tx.Exec(ctx, `
+				UPDATE email_svc.inbox_config
+				SET processing_status = $2,
+				    pending_edit_json = NULL,
+				    updated_at = now()
+				WHERE inbox_id = $1::uuid
+				  AND COALESCE(is_deleted, false) = false
+			`, restore.InboxID, restore.PriorStatus)
+		} else {
+			_, err = tx.Exec(ctx, `
+				UPDATE email_svc.inbox_config
+				SET processing_status = $2, updated_at = now()
+				WHERE inbox_id = $1::uuid
+				  AND COALESCE(is_deleted, false) = false
+			`, restore.InboxID, restore.PriorStatus)
+		}
+		if err != nil {
+			return err
+		}
+		return logInboxAudit(ctx, tx, inboxAuditEntry{
+			InboxID: restore.InboxID,
+			Action:  restore.Action,
+			Status:  restore.PriorStatus,
+			UserID:  restore.UserID,
+			Detail:  map[string]interface{}{"approval_instance": "failed", "restored_status": restore.PriorStatus},
+		})
+	})
 }
 
 // inboxApprovalRequest groups the fields submitted to the approval engine by
@@ -223,13 +333,22 @@ func finalizeEmailInboxApproval(ctx context.Context, pool *pgxpool.Pool, recordI
 }
 
 func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transactionType, finalStatus, actorID, comment string) error {
+	ruleName, err := applyInboxDecisionDB(ctx, pool, pool, inboxID, transactionType, finalStatus, actorID, comment)
+	if err != nil {
+		return err
+	}
+	removeInboxSESRule(ctx, ruleName)
+	return nil
+}
+
+func applyInboxDecisionDB(ctx context.Context, pool *pgxpool.Pool, db inboxDB, inboxID, transactionType, finalStatus, actorID, comment string) (string, error) {
 	if finalStatus == approvalengine.InstStatusRejected {
 		switch transactionType {
 		case "EMAIL_INBOX_CREATE", "EMAIL_INBOX_EDIT", "EMAIL_INBOX_DELETE":
 			// Reject create, edit, or delete → REJECTED (never restored to the prior
 			// status, never soft-deleted). The row is kept (is_deleted stays false) so
 			// it stays visible.
-			_, err := pool.Exec(ctx, `
+			_, err := db.Exec(ctx, `
 				UPDATE email_svc.inbox_config
 				SET processing_status = $2,
 				    pending_edit_json = NULL,
@@ -239,40 +358,40 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 				    updated_at = now()
 				WHERE inbox_id = $1::uuid
 			`, inboxID, constants.StatusRejected, comment)
-			return err
+			return "", err
 		}
-		return nil
+		return "", nil
 	}
 
 	switch transactionType {
 	case "EMAIL_INBOX_CREATE":
-		_, err := pool.Exec(ctx, `
+		_, err := db.Exec(ctx, `
 			UPDATE email_svc.inbox_config
 			SET processing_status = $2, approved_by = $3, checker_comment = $4,
 			    is_active = true, updated_at = now()
 			WHERE inbox_id = $1::uuid
 		`, inboxID, constants.StatusApproved, actorID, comment)
-		return err
+		return "", err
 	case "EMAIL_INBOX_EDIT":
 		var pendingEdit string
-		if err := pool.QueryRow(ctx, `
+		if err := db.QueryRow(ctx, `
 			SELECT COALESCE(pending_edit_json::text,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
 		`, inboxID).Scan(&pendingEdit); err != nil {
-			return err
+			return "", err
 		}
 		if pendingEdit == "" || pendingEdit == "null" {
-			_, err := pool.Exec(ctx, `
+			_, err := db.Exec(ctx, `
 				UPDATE email_svc.inbox_config
 				SET processing_status = $2, pending_edit_json = NULL,
 				    approved_by = $3, checker_comment = $4,
 				    is_active = true, updated_at = now()
 				WHERE inbox_id = $1::uuid
 			`, inboxID, constants.StatusApproved, actorID, comment)
-			return err
+			return "", err
 		}
 		var edit workflowInbox
 		if err := json.Unmarshal([]byte(pendingEdit), &edit); err != nil {
-			return err
+			return "", err
 		}
 		mailbox, existingIMAP, _ := emailmailbox.LoadMailboxIMAPFields(ctx, pool, inboxID)
 		existingGraph, _ := emailmailbox.LoadMailboxGraphFields(ctx, pool, inboxID)
@@ -295,7 +414,7 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 				googleFinal = merged
 			}
 		}
-		_, err := pool.Exec(ctx, `
+		_, err := db.Exec(ctx, `
 			UPDATE email_svc.inbox_config
 			SET display_name = COALESCE(NULLIF($2,''), display_name),
 			    filters_json = COALESCE($3::jsonb, filters_json),
@@ -328,26 +447,37 @@ func applyInboxDecision(ctx context.Context, pool *pgxpool.Pool, inboxID, transa
 			imapFinal.Username, imapFinal.Password,
 			imapFinal.InboxFolder, imapFinal.SentFolder, imapFinal.UseTLS,
 			constants.StatusApproved, actorID, comment)
-		return err
+		return "", err
 	case "EMAIL_INBOX_DELETE":
-		return applyApprovedInboxDelete(ctx, pool, inboxID, actorID, comment)
+		return applyApprovedInboxDeleteDB(ctx, pool, db, inboxID, actorID, comment)
 	}
-	return nil
+	return "", nil
 }
 
 // applyApprovedInboxDelete soft-deletes the mailbox (row kept for audit), removes
 // its messages, and drops any SES inbound rule. Reject of a delete request must
 // NOT call this — reject sets REJECTED without touching is_deleted.
 func applyApprovedInboxDelete(ctx context.Context, pool *pgxpool.Pool, inboxID, actorID, comment string) error {
-	var ruleName string
-	_ = pool.QueryRow(ctx, `
-		SELECT COALESCE(ses_rule_name,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
-	`, inboxID).Scan(&ruleName)
-
-	if err := emailcommon.DeleteMessagesForInbox(ctx, pool, inboxID); err != nil {
+	ruleName, err := applyApprovedInboxDeleteDB(ctx, pool, pool, inboxID, actorID, comment)
+	if err != nil {
 		return err
 	}
-	_, err := pool.Exec(ctx, `
+	removeInboxSESRule(ctx, ruleName)
+	return nil
+}
+
+func applyApprovedInboxDeleteDB(ctx context.Context, pool *pgxpool.Pool, db inboxDB, inboxID, actorID, comment string) (string, error) {
+	var ruleName string
+	if err := db.QueryRow(ctx, `
+		SELECT COALESCE(ses_rule_name,'') FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
+	`, inboxID).Scan(&ruleName); err != nil {
+		return "", err
+	}
+
+	if err := emailcommon.DeleteMessagesForInbox(ctx, pool, inboxID); err != nil {
+		return "", err
+	}
+	_, err := db.Exec(ctx, `
 		UPDATE email_svc.inbox_config
 		SET processing_status = 'DELETED', is_deleted = true, is_active = false,
 		    deleted_at = now(), deleted_by = $2, approved_by = $2,
@@ -357,16 +487,21 @@ func applyApprovedInboxDelete(ctx context.Context, pool *pgxpool.Pool, inboxID, 
 		  AND is_deleted = false
 	`, inboxID, actorID, comment)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if strings.TrimSpace(ruleName) != "" {
-		client := mailruntime.NewRuntime()
-		if client.Ready() {
-			ruleSet := strings.TrimSpace(os.Getenv("EMAIL_SES_RULE_SET_NAME"))
-			_ = client.RemoveInboundRule(ctx, ruleSet, ruleName)
-		}
+	return ruleName, nil
+}
+
+func removeInboxSESRule(ctx context.Context, ruleName string) {
+	if strings.TrimSpace(ruleName) == "" {
+		return
 	}
-	return nil
+	client := mailruntime.NewRuntime()
+	if !client.Ready() {
+		return
+	}
+	ruleSet := strings.TrimSpace(os.Getenv("EMAIL_SES_RULE_SET_NAME"))
+	_ = client.RemoveInboundRule(ctx, ruleSet, ruleName)
 }
 
 func SyncApprovedInboxesToSES(ctx context.Context, pool *pgxpool.Pool) (*mailruntime.InboundRuleSyncResult, error) {
@@ -561,7 +696,8 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(r.Context(), query, args...)
 		if err != nil {
-			emailcommon.RespondInternal(w, err.Error())
+			api.LogErrorForResponse(w, "inbox workflow list query failed: %v", err)
+			emailcommon.RespondInternal(w, "database operation failed")
 			return
 		}
 		defer rows.Close()
@@ -597,7 +733,8 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 				&item.DeletedAt, &item.DeletedBy,
 				&item.CheckerAt, &item.CheckerBy,
 			); err != nil {
-				emailcommon.RespondInternal(w, err.Error())
+				api.LogErrorForResponse(w, "inbox workflow list scan failed: %v", err)
+				emailcommon.RespondInternal(w, "database operation failed")
 				return
 			}
 			if pendingText != "" && pendingText != "null" {
@@ -684,6 +821,10 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			entityID := strings.TrimSpace(defaultEntityID)
 			if strings.TrimSpace(item.EntityID) != "" {
 				entityID = strings.TrimSpace(item.EntityID)
+				if !emailcommon.IsEmailAdmin(r.Context(), userID) && !emailcommon.EntityInScope(entityID, api.GetEntityIDsFromCtx(r.Context())) {
+					errors = append(errors, item.MailboxAddress+": entity not accessible")
+					continue
+				}
 			}
 			okPolicy, pmsg, matrixID := inboxEnforceMatrix(r.Context(), r, pool, inboxEnforceMatrixParams{
 				Event: common.TriggerPreCreate, Handler: "HandleWorkflowInboxCreate",
@@ -761,68 +902,83 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			var inboxID string
-			err := pool.QueryRow(r.Context(), `
-				INSERT INTO email_svc.inbox_config (
-					mailbox_address, display_name, domain, filters_json, poll_interval_secs,
-					module, entity_id, is_active, processing_status, source_type,
-					graph_tenant_key, graph_tenant_label, graph_tenant_id, graph_client_id, graph_client_secret,
-					google_workspace_tenant_key, google_workspace_tenant_label,
-					google_workspace_service_account_email, google_workspace_client_id, google_workspace_private_key,
-					imap_provider, imap_host, imap_port, imap_username, imap_password,
-					imap_inbox_folder, imap_sent_folder, imap_use_tls,
-					oauth_provider, oauth_mail_transport,
-					owner_user_id, submitted_by, ses_rule_name
-				) VALUES ($1, $2, $3, $4::jsonb, $5, NULLIF($6,''), NULLIF($7,''), false,
-				          $8, $9,
-				          $10, $11, $12, $13, $14,
-				          $15, $16, $17, $18, $19,
-				          $20, $21, $22, $23, $24,
-				          $25, $26, $27,
-				          COALESCE($28,''), COALESCE(NULLIF($29,''),'api'),
-				          $30, $31, $32)
-				RETURNING inbox_id::text
-			`, addr, item.DisplayName, domain, string(item.FiltersJSON), item.PollIntervalSecs,
-				item.Module, entityID, constants.StatusPendingApproval, sourceType,
-				graphTenantKey, graphFields.TenantLabel, graphFields.TenantID, graphFields.ClientID, graphFields.ClientSecret,
-				googleTenantKey, googleFields.WorkspaceTenantLabel, googleFields.WorkspaceServiceAccountEmail, googleFields.WorkspaceClientID, googleFields.WorkspacePrivateKey,
-				imapFields.Provider, imapFields.Host, imapFields.Port, imapFields.Username, imapFields.Password,
-				imapFields.InboxFolder, imapFields.SentFolder, imapFields.UseTLS,
-				strings.TrimSpace(item.OAuthProvider), strings.TrimSpace(item.OAuthMailTransport),
-				userID, userID, "",
-			).Scan(&inboxID)
-			if err != nil {
-				errors = append(errors, addr+": "+err.Error())
-				continue
-			}
-
-			ruleName := sesRuleNameForInbox(inboxID)
-			if sourceType == "SES" {
-				_, _ = pool.Exec(r.Context(), `UPDATE email_svc.inbox_config SET ses_rule_name = $2 WHERE inbox_id = $1::uuid`, inboxID, ruleName)
-			}
-
 			shared := req.SharedUserIDs
 			if len(item.SharedUserIDs) > 0 {
 				shared = item.SharedUserIDs
 			}
-			for _, uid := range shared {
-				uid = strings.TrimSpace(uid)
-				if uid == "" {
+			var inboxID string
+			err := inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+				if err := tx.QueryRow(r.Context(), `
+					INSERT INTO email_svc.inbox_config (
+						mailbox_address, display_name, domain, filters_json, poll_interval_secs,
+						module, entity_id, is_active, processing_status, source_type,
+						graph_tenant_key, graph_tenant_label, graph_tenant_id, graph_client_id, graph_client_secret,
+						google_workspace_tenant_key, google_workspace_tenant_label,
+						google_workspace_service_account_email, google_workspace_client_id, google_workspace_private_key,
+						imap_provider, imap_host, imap_port, imap_username, imap_password,
+						imap_inbox_folder, imap_sent_folder, imap_use_tls,
+						oauth_provider, oauth_mail_transport,
+						owner_user_id, submitted_by, ses_rule_name
+					) VALUES ($1, $2, $3, $4::jsonb, $5, NULLIF($6,''), NULLIF($7,''), false,
+					          $8, $9,
+					          $10, $11, $12, $13, $14,
+					          $15, $16, $17, $18, $19,
+					          $20, $21, $22, $23, $24,
+					          $25, $26, $27,
+					          COALESCE($28,''), COALESCE(NULLIF($29,''),'api'),
+					          $30, $31, $32)
+					RETURNING inbox_id::text
+				`, addr, item.DisplayName, domain, string(item.FiltersJSON), item.PollIntervalSecs,
+					item.Module, entityID, constants.StatusPendingApproval, sourceType,
+					graphTenantKey, graphFields.TenantLabel, graphFields.TenantID, graphFields.ClientID, graphFields.ClientSecret,
+					googleTenantKey, googleFields.WorkspaceTenantLabel, googleFields.WorkspaceServiceAccountEmail, googleFields.WorkspaceClientID, googleFields.WorkspacePrivateKey,
+					imapFields.Provider, imapFields.Host, imapFields.Port, imapFields.Username, imapFields.Password,
+					imapFields.InboxFolder, imapFields.SentFolder, imapFields.UseTLS,
+					strings.TrimSpace(item.OAuthProvider), strings.TrimSpace(item.OAuthMailTransport),
+					userID, userID, "",
+				).Scan(&inboxID); err != nil {
+					return err
+				}
+				if sourceType == "SES" {
+					if _, err := tx.Exec(r.Context(), `UPDATE email_svc.inbox_config SET ses_rule_name = $2 WHERE inbox_id = $1::uuid`, inboxID, sesRuleNameForInbox(inboxID)); err != nil {
+						return err
+					}
+				}
+				for _, uid := range shared {
+					uid = strings.TrimSpace(uid)
+					if uid == "" {
+						continue
+					}
+					if _, err := tx.Exec(r.Context(), `
+						INSERT INTO email_svc.inbox_members (inbox_id, user_id, role)
+						VALUES ($1::uuid, $2, 'VIEWER')
+						ON CONFLICT DO NOTHING
+					`, inboxID, uid); err != nil {
+						return err
+					}
+				}
+				return logInboxAudit(r.Context(), tx, inboxAuditEntry{
+					InboxID: inboxID, Action: "CREATE", Status: constants.StatusPendingApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{"mailbox": addr},
+				})
+			})
+			if err != nil {
+				if inboxMailboxConflict(err) {
+					errors = append(errors, addr+": mailbox already exists")
 					continue
 				}
-				_, _ = pool.Exec(r.Context(), `
-					INSERT INTO email_svc.inbox_members (inbox_id, user_id, role)
-					VALUES ($1::uuid, $2, 'VIEWER')
-					ON CONFLICT DO NOTHING
-				`, inboxID, uid)
+				api.LogErrorForResponse(w, "inbox create failed mailbox=%s: %v", addr, err)
+				errors = append(errors, addr+": failed to create inbox")
+				continue
 			}
-			logInboxAudit(r.Context(), pool, inboxAuditEntry{
-				InboxID: inboxID, Action: "CREATE", Status: constants.StatusPendingApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{"mailbox": addr},
-			})
 			if _, err := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
 				InboxID: inboxID, EntityID: entityID, TxType: "EMAIL_INBOX_CREATE", ActionType: "CREATE", UserID: userID, UserEmail: userEmail, MatrixID: matrixID,
 			}); err != nil {
-				errors = append(errors, addr+constants.ErrApprovalInstancePrefix+err.Error())
+				api.LogErrorForResponse(w, "inbox create approval instance failed mailbox=%s inbox=%s: %v", addr, inboxID, err)
+				if rbErr := abandonUnsubmittedInbox(r.Context(), pool, inboxID, userID); rbErr != nil {
+					api.LogErrorForResponse(w, "inbox create failed to clear unsubmitted inbox=%s: %v", inboxID, rbErr)
+				}
+				respondInboxSubmitFailed(w)
+				return
 			}
 			created = append(created, inboxID)
 		}
@@ -892,31 +1048,49 @@ func HandleWorkflowInboxUpdate(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			pending, _ := json.Marshal(item)
-			_, err := pool.Exec(r.Context(), `
-				UPDATE email_svc.inbox_config
-				SET processing_status = $2,
-				    pending_edit_json = $3::jsonb,
-				    submitted_by = $4,
-				    checker_comment = '',
-				    updated_at = now()
-				WHERE inbox_id = $1::uuid
-				  AND is_deleted = false
-			`, inboxID, constants.StatusPendingEditApproval, string(pending), userID)
+			pending, err := json.Marshal(item)
 			if err != nil {
-				errors = append(errors, inboxID+": "+err.Error())
+				api.LogErrorForResponse(w, "inbox update encode failed inbox=%s: %v", inboxID, err)
+				errors = append(errors, inboxID+": failed to update inbox")
 				continue
 			}
-			logInboxAudit(r.Context(), pool, inboxAuditEntry{
-				InboxID: inboxID, Action: "EDIT", Status: constants.StatusPendingEditApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{
-					"pending":      item,
-					"prior_status": statusNorm,
-				},
+			err = inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+				if _, err := tx.Exec(r.Context(), `
+					UPDATE email_svc.inbox_config
+					SET processing_status = $2,
+					    pending_edit_json = $3::jsonb,
+					    submitted_by = $4,
+					    checker_comment = '',
+					    updated_at = now()
+					WHERE inbox_id = $1::uuid
+					  AND is_deleted = false
+				`, inboxID, constants.StatusPendingEditApproval, string(pending), userID); err != nil {
+					return err
+				}
+				return logInboxAudit(r.Context(), tx, inboxAuditEntry{
+					InboxID: inboxID, Action: "EDIT", Status: constants.StatusPendingEditApproval, UserID: userID, Comment: "", Detail: map[string]interface{}{
+						"pending":      item,
+						"prior_status": statusNorm,
+					},
+				})
 			})
+			if err != nil {
+				api.LogErrorForResponse(w, "inbox update failed inbox=%s: %v", inboxID, err)
+				errors = append(errors, inboxID+": failed to update inbox")
+				continue
+			}
 			if _, instErr := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
 				InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_EDIT", ActionType: "EDIT", UserID: userID, UserEmail: userEmail, MatrixID: matrixID,
 			}); instErr != nil {
-				errors = append(errors, inboxID+constants.ErrApprovalInstancePrefix+instErr.Error())
+				api.LogErrorForResponse(w, "inbox update approval instance failed inbox=%s: %v", inboxID, instErr)
+				if rbErr := restoreInboxProcessingStatus(r.Context(), pool, inboxStatusRestore{
+					InboxID: inboxID, PriorStatus: statusNorm, UserID: userID, Action: "EDIT",
+					ClearPending: statusNorm != constants.StatusPendingEditApproval,
+				}); rbErr != nil {
+					api.LogErrorForResponse(w, "inbox update failed to restore status inbox=%s: %v", inboxID, rbErr)
+				}
+				respondInboxSubmitFailed(w)
+				return
 			}
 			updated = append(updated, inboxID)
 		}
@@ -981,32 +1155,54 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, inboxID+": "+pmsg)
 					continue
 				}
-				_, err := pool.Exec(r.Context(), `
-					UPDATE email_svc.inbox_config
-					SET processing_status = 'PENDING_DELETE_APPROVAL',
-					    submitted_by = $2,
-					    pending_edit_json = NULL,
-					    checker_comment = $3,
-					    updated_at = now()
-					WHERE inbox_id = $1::uuid
-					  AND is_deleted = false
-				`, inboxID, userID, deleteReason)
+				err := inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+					if _, err := tx.Exec(r.Context(), `
+						UPDATE email_svc.inbox_config
+						SET processing_status = 'PENDING_DELETE_APPROVAL',
+						    submitted_by = $2,
+						    pending_edit_json = NULL,
+						    checker_comment = $3,
+						    updated_at = now()
+						WHERE inbox_id = $1::uuid
+						  AND is_deleted = false
+					`, inboxID, userID, deleteReason); err != nil {
+						return err
+					}
+					return logInboxAudit(r.Context(), tx, inboxAuditEntry{
+						InboxID: inboxID, Action: "DELETE", Status: constants.StatusPendingDeleteApproval, UserID: userID, Comment: deleteReason, Detail: map[string]interface{}{
+							"prior_status": statusNorm,
+							"reason":       deleteReason,
+						},
+					})
+				})
 				if err != nil {
-					errors = append(errors, inboxID+": "+err.Error())
+					api.LogErrorForResponse(w, "inbox delete request failed inbox=%s: %v", inboxID, err)
+					errors = append(errors, inboxID+": failed to delete inbox")
 					continue
 				}
 				// Cancel any open create/edit approval instances; submit a delete instance.
-				_ = approvalengine.CancelPendingInstances(r.Context(), pool, emailInboxModuleCode, inboxID, userEmail)
-				logInboxAudit(r.Context(), pool, inboxAuditEntry{
-					InboxID: inboxID, Action: "DELETE", Status: constants.StatusPendingDeleteApproval, UserID: userID, Comment: deleteReason, Detail: map[string]interface{}{
-						"prior_status": statusNorm,
-						"reason":       deleteReason,
-					},
-				})
+				// The approval API accepts a pool, so this runs after the inbox transaction commits.
+				if err := approvalengine.CancelPendingInstances(r.Context(), pool, emailInboxModuleCode, inboxID, userEmail); err != nil {
+					api.LogErrorForResponse(w, "inbox delete cancel pending failed inbox=%s: %v", inboxID, err)
+					if rbErr := restoreInboxProcessingStatus(r.Context(), pool, inboxStatusRestore{
+						InboxID: inboxID, PriorStatus: statusNorm, UserID: userID, Action: "DELETE",
+					}); rbErr != nil {
+						api.LogErrorForResponse(w, "inbox delete failed to restore status inbox=%s: %v", inboxID, rbErr)
+					}
+					respondInboxSubmitFailed(w)
+					return
+				}
 				if _, instErr := submitInboxApproval(r.Context(), pool, inboxApprovalRequest{
 					InboxID: inboxID, EntityID: inboxEntityID, TxType: "EMAIL_INBOX_DELETE", ActionType: "DELETE", UserID: userID, UserEmail: userEmail, MatrixID: matrixID,
 				}); instErr != nil {
-					errors = append(errors, inboxID+constants.ErrApprovalInstancePrefix+instErr.Error())
+					api.LogErrorForResponse(w, "inbox delete approval instance failed inbox=%s: %v", inboxID, instErr)
+					if rbErr := restoreInboxProcessingStatus(r.Context(), pool, inboxStatusRestore{
+						InboxID: inboxID, PriorStatus: statusNorm, UserID: userID, Action: "DELETE",
+					}); rbErr != nil {
+						api.LogErrorForResponse(w, "inbox delete failed to restore status inbox=%s: %v", inboxID, rbErr)
+					}
+					respondInboxSubmitFailed(w)
+					return
 				}
 				updated = append(updated, inboxID)
 			case constants.StatusPendingDeleteApproval:
@@ -1094,19 +1290,29 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if actionRes.Acted {
 					if actionRes.InstanceStatus == constants.StatusApproved {
-						if err := applyInboxDecision(r.Context(), pool, inboxID, txType, approvalengine.InstStatusApproved, userID, req.Comment); err != nil {
-							errors = append(errors, inboxID+": "+err.Error())
-							continue
-						}
 						auditAction, auditStatus := "APPROVE", constants.StatusApproved
 						if txType == "EMAIL_INBOX_DELETE" {
 							auditAction, auditStatus = "APPROVE_DELETE", "DELETED"
 						} else if txType == "EMAIL_INBOX_EDIT" {
 							auditAction = "APPROVE_EDIT"
 						}
-						logInboxAudit(r.Context(), pool, inboxAuditEntry{
-							InboxID: inboxID, Action: auditAction, Status: auditStatus, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{"engine_instance": actionRes.InstanceID},
+						var ruleName string
+						err := inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+							var decErr error
+							ruleName, decErr = applyInboxDecisionDB(r.Context(), pool, tx, inboxID, txType, approvalengine.InstStatusApproved, userID, req.Comment)
+							if decErr != nil {
+								return decErr
+							}
+							return logInboxAudit(r.Context(), tx, inboxAuditEntry{
+								InboxID: inboxID, Action: auditAction, Status: auditStatus, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{"engine_instance": actionRes.InstanceID},
+							})
 						})
+						if err != nil {
+							api.LogErrorForResponse(w, "inbox approve failed inbox=%s: %v", inboxID, err)
+							errors = append(errors, inboxID+": failed to approve inbox")
+							continue
+						}
+						removeInboxSESRule(r.Context(), ruleName)
 						approved = append(approved, inboxID)
 						if txType != "EMAIL_INBOX_DELETE" {
 							OnInboxApproved(pool, inboxID)
@@ -1122,14 +1328,18 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, inboxID+": "+err.Error())
 					continue
 				}
-				_, err = pool.Exec(r.Context(), `
-					UPDATE email_svc.inbox_config
-					SET processing_status = $2, approved_by = $3, checker_comment = $4,
-					    is_active = true, updated_at = now()
-					WHERE inbox_id = $1::uuid
-				`, inboxID, constants.StatusApproved, userID, req.Comment)
-				logInboxAudit(r.Context(), pool, inboxAuditEntry{
-					InboxID: inboxID, Action: "APPROVE", Status: constants.StatusApproved, UserID: userID, Comment: req.Comment, Detail: nil,
+				err = inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+					if _, err := tx.Exec(r.Context(), `
+						UPDATE email_svc.inbox_config
+						SET processing_status = $2, approved_by = $3, checker_comment = $4,
+						    is_active = true, updated_at = now()
+						WHERE inbox_id = $1::uuid
+					`, inboxID, constants.StatusApproved, userID, req.Comment); err != nil {
+						return err
+					}
+					return logInboxAudit(r.Context(), tx, inboxAuditEntry{
+						InboxID: inboxID, Action: "APPROVE", Status: constants.StatusApproved, UserID: userID, Comment: req.Comment, Detail: nil,
+					})
 				})
 
 			case constants.StatusPendingEditApproval:
@@ -1170,63 +1380,92 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 							}
 							googleFinal = merged
 						}
-						_, err = pool.Exec(r.Context(), `
-							UPDATE email_svc.inbox_config
-							SET display_name = COALESCE(NULLIF($2,''), display_name),
-							    filters_json = COALESCE($3::jsonb, filters_json),
-							    poll_interval_secs = CASE WHEN $4 > 0 THEN $4 ELSE poll_interval_secs END,
-							    module = COALESCE(NULLIF($5,''), module),
-							    graph_tenant_key = $6,
-							    graph_tenant_label = $7, graph_tenant_id = $8,
-							    graph_client_id = $9, graph_client_secret = $10,
-							    google_workspace_tenant_key = $11,
-							    google_workspace_tenant_label = $12,
-							    google_workspace_service_account_email = $13,
-							    google_workspace_client_id = $14,
-							    google_workspace_private_key = $15,
-							    imap_provider = $16, imap_host = $17, imap_port = $18,
-							    imap_username = $19, imap_password = $20,
-							    imap_inbox_folder = $21, imap_sent_folder = $22, imap_use_tls = $23,
-							    processing_status = $24,
-							    pending_edit_json = NULL,
-							    approved_by = $25,
-							    checker_comment = $26,
-							    is_active = true,
-							    updated_at = now()
-							WHERE inbox_id = $1::uuid
-						`, inboxID, edit.DisplayName, emailcommon.NullableJSON(edit.FiltersJSON), edit.PollIntervalSecs,
-							edit.Module,
-							graphFinal.TenantKey, graphFinal.TenantLabel, graphFinal.TenantID, graphFinal.ClientID, graphFinal.ClientSecret,
-							googleFinal.WorkspaceTenantKey, googleFinal.WorkspaceTenantLabel, googleFinal.WorkspaceServiceAccountEmail,
-							googleFinal.WorkspaceClientID, googleFinal.WorkspacePrivateKey,
-							imapFinal.Provider, imapFinal.Host, imapFinal.Port,
-							imapFinal.Username, imapFinal.Password,
-							imapFinal.InboxFolder, imapFinal.SentFolder, imapFinal.UseTLS,
-							constants.StatusApproved, userID, req.Comment)
+						err = inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+							if _, err := tx.Exec(r.Context(), `
+								UPDATE email_svc.inbox_config
+								SET display_name = COALESCE(NULLIF($2,''), display_name),
+								    filters_json = COALESCE($3::jsonb, filters_json),
+								    poll_interval_secs = CASE WHEN $4 > 0 THEN $4 ELSE poll_interval_secs END,
+								    module = COALESCE(NULLIF($5,''), module),
+								    graph_tenant_key = $6,
+								    graph_tenant_label = $7, graph_tenant_id = $8,
+								    graph_client_id = $9, graph_client_secret = $10,
+								    google_workspace_tenant_key = $11,
+								    google_workspace_tenant_label = $12,
+								    google_workspace_service_account_email = $13,
+								    google_workspace_client_id = $14,
+								    google_workspace_private_key = $15,
+								    imap_provider = $16, imap_host = $17, imap_port = $18,
+								    imap_username = $19, imap_password = $20,
+								    imap_inbox_folder = $21, imap_sent_folder = $22, imap_use_tls = $23,
+								    processing_status = $24,
+								    pending_edit_json = NULL,
+								    approved_by = $25,
+								    checker_comment = $26,
+								    is_active = true,
+								    updated_at = now()
+								WHERE inbox_id = $1::uuid
+							`, inboxID, edit.DisplayName, emailcommon.NullableJSON(edit.FiltersJSON), edit.PollIntervalSecs,
+								edit.Module,
+								graphFinal.TenantKey, graphFinal.TenantLabel, graphFinal.TenantID, graphFinal.ClientID, graphFinal.ClientSecret,
+								googleFinal.WorkspaceTenantKey, googleFinal.WorkspaceTenantLabel, googleFinal.WorkspaceServiceAccountEmail,
+								googleFinal.WorkspaceClientID, googleFinal.WorkspacePrivateKey,
+								imapFinal.Provider, imapFinal.Host, imapFinal.Port,
+								imapFinal.Username, imapFinal.Password,
+								imapFinal.InboxFolder, imapFinal.SentFolder, imapFinal.UseTLS,
+								constants.StatusApproved, userID, req.Comment); err != nil {
+								return err
+							}
+							return logInboxAudit(r.Context(), tx, inboxAuditEntry{
+								InboxID: inboxID, Action: "APPROVE_EDIT", Status: constants.StatusApproved, UserID: userID, Comment: req.Comment, Detail: nil,
+							})
+						})
+					} else {
+						err = logInboxAudit(r.Context(), pool, inboxAuditEntry{
+							InboxID: inboxID, Action: "APPROVE_EDIT", Status: constants.StatusApproved, UserID: userID, Comment: req.Comment, Detail: nil,
+						})
 					}
 				} else {
-					_, err = pool.Exec(r.Context(), `
-						UPDATE email_svc.inbox_config
-						SET processing_status = $2, pending_edit_json = NULL,
-						    approved_by = $3, checker_comment = $4,
-						    is_active = true, updated_at = now()
-						WHERE inbox_id = $1::uuid
-					`, inboxID, constants.StatusApproved, userID, req.Comment)
+					err = inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+						if _, err := tx.Exec(r.Context(), `
+							UPDATE email_svc.inbox_config
+							SET processing_status = $2, pending_edit_json = NULL,
+							    approved_by = $3, checker_comment = $4,
+							    is_active = true, updated_at = now()
+							WHERE inbox_id = $1::uuid
+						`, inboxID, constants.StatusApproved, userID, req.Comment); err != nil {
+							return err
+						}
+						return logInboxAudit(r.Context(), tx, inboxAuditEntry{
+							InboxID: inboxID, Action: "APPROVE_EDIT", Status: constants.StatusApproved, UserID: userID, Comment: req.Comment, Detail: nil,
+						})
+					})
 				}
-				logInboxAudit(r.Context(), pool, inboxAuditEntry{
-					InboxID: inboxID, Action: "APPROVE_EDIT", Status: constants.StatusApproved, UserID: userID, Comment: req.Comment, Detail: nil,
-				})
 
 			case constants.StatusPendingDeleteApproval:
 				var mailbox string
-				_ = pool.QueryRow(r.Context(), `SELECT mailbox_address FROM email_svc.inbox_config WHERE inbox_id = $1::uuid`, inboxID).Scan(&mailbox)
-				if err = applyApprovedInboxDelete(r.Context(), pool, inboxID, userID, req.Comment); err != nil {
-					errors = append(errors, inboxID+": "+err.Error())
+				if err = pool.QueryRow(r.Context(), `SELECT mailbox_address FROM email_svc.inbox_config WHERE inbox_id = $1::uuid`, inboxID).Scan(&mailbox); err != nil {
+					api.LogErrorForResponse(w, "inbox approve delete lookup failed inbox=%s: %v", inboxID, err)
+					errors = append(errors, inboxID+": failed to approve inbox")
 					continue
 				}
-				logInboxAudit(r.Context(), pool, inboxAuditEntry{
-					InboxID: inboxID, Action: "APPROVE_DELETE", Status: "DELETED", UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{"mailbox": mailbox},
+				var ruleName string
+				err = inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+					var delErr error
+					ruleName, delErr = applyApprovedInboxDeleteDB(r.Context(), pool, tx, inboxID, userID, req.Comment)
+					if delErr != nil {
+						return delErr
+					}
+					return logInboxAudit(r.Context(), tx, inboxAuditEntry{
+						InboxID: inboxID, Action: "APPROVE_DELETE", Status: "DELETED", UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{"mailbox": mailbox},
+					})
 				})
+				if err != nil {
+					api.LogErrorForResponse(w, "inbox approve delete failed inbox=%s: %v", inboxID, err)
+					errors = append(errors, inboxID+": failed to approve inbox")
+					continue
+				}
+				removeInboxSESRule(r.Context(), ruleName)
 				approved = append(approved, inboxID)
 				continue
 
@@ -1235,7 +1474,8 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if err != nil {
-				errors = append(errors, inboxID+": "+err.Error())
+				api.LogErrorForResponse(w, "inbox approve failed inbox=%s: %v", inboxID, err)
+				errors = append(errors, inboxID+": failed to approve inbox")
 				continue
 			}
 			approved = append(approved, inboxID)
@@ -1303,60 +1543,77 @@ func HandleWorkflowInboxReject(pool *pgxpool.Pool) http.HandlerFunc {
 				if actionRes.Acted {
 					// Rejecting a create, edit, or delete request always lands on REJECTED —
 					// never restored to the pre-request status.
-					if err := applyInboxDecision(r.Context(), pool, inboxID, txType, approvalengine.InstStatusRejected, userID, req.Comment); err != nil {
-						errors = append(errors, inboxID+": "+err.Error())
+					err := inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+						if _, err := applyInboxDecisionDB(r.Context(), pool, tx, inboxID, txType, approvalengine.InstStatusRejected, userID, req.Comment); err != nil {
+							return err
+						}
+						return logInboxAudit(r.Context(), tx, inboxAuditEntry{
+							InboxID: inboxID, Action: "REJECT", Status: constants.StatusRejected, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{
+								"engine_instance": actionRes.InstanceID,
+								"rejected_tx":     txType,
+								"prior_status":    status,
+							},
+						})
+					})
+					if err != nil {
+						api.LogErrorForResponse(w, "inbox reject failed inbox=%s: %v", inboxID, err)
+						errors = append(errors, inboxID+": failed to reject inbox")
 						continue
 					}
-					logInboxAudit(r.Context(), pool, inboxAuditEntry{
-						InboxID: inboxID, Action: "REJECT", Status: constants.StatusRejected, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{
-							"engine_instance": actionRes.InstanceID,
-							"rejected_tx":     txType,
-							"prior_status":    status,
-						},
-					})
 					rejected = append(rejected, inboxID)
 					continue
 				}
 			}
 
+			auditDetail := map[string]interface{}{"prior_status": status}
 			switch status {
 			case constants.StatusPendingApproval:
 				// Reject create → REJECTED (row kept, is_deleted stays false)
-				_, err = pool.Exec(r.Context(), `
-					UPDATE email_svc.inbox_config
-					SET processing_status = 'REJECTED',
-					    checker_comment = $2,
-					    is_active = false,
-					    is_deleted = false,
-					    updated_at = now()
-					WHERE inbox_id = $1::uuid
-				`, inboxID, req.Comment)
+				err = inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+					if _, err := tx.Exec(r.Context(), `
+						UPDATE email_svc.inbox_config
+						SET processing_status = 'REJECTED',
+						    checker_comment = $2,
+						    is_active = false,
+						    is_deleted = false,
+						    updated_at = now()
+						WHERE inbox_id = $1::uuid
+					`, inboxID, req.Comment); err != nil {
+						return err
+					}
+					return logInboxAudit(r.Context(), tx, inboxAuditEntry{
+						InboxID: inboxID, Action: "REJECT", Status: constants.StatusRejected, UserID: userID, Comment: req.Comment, Detail: auditDetail,
+					})
+				})
 			case constants.StatusPendingEditApproval, constants.StatusPendingDeleteApproval:
 				// Reject edit or delete request → REJECTED, clear pending_edit_json.
 				// Row is kept (is_deleted stays false) so it stays visible.
-				_, err = pool.Exec(r.Context(), `
-					UPDATE email_svc.inbox_config
-					SET processing_status = $2,
-					    pending_edit_json = NULL,
-					    checker_comment = $3,
-					    is_active = false,
-					    is_deleted = false,
-					    updated_at = now()
-					WHERE inbox_id = $1::uuid
-				`, inboxID, constants.StatusRejected, req.Comment)
+				err = inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+					if _, err := tx.Exec(r.Context(), `
+						UPDATE email_svc.inbox_config
+						SET processing_status = $2,
+						    pending_edit_json = NULL,
+						    checker_comment = $3,
+						    is_active = false,
+						    is_deleted = false,
+						    updated_at = now()
+						WHERE inbox_id = $1::uuid
+					`, inboxID, constants.StatusRejected, req.Comment); err != nil {
+						return err
+					}
+					return logInboxAudit(r.Context(), tx, inboxAuditEntry{
+						InboxID: inboxID, Action: "REJECT", Status: constants.StatusRejected, UserID: userID, Comment: req.Comment, Detail: auditDetail,
+					})
+				})
 			default:
 				errors = append(errors, inboxID+": not pending approval")
 				continue
 			}
 			if err != nil {
-				errors = append(errors, inboxID+": "+err.Error())
+				api.LogErrorForResponse(w, "inbox reject failed inbox=%s: %v", inboxID, err)
+				errors = append(errors, inboxID+": failed to reject inbox")
 				continue
 			}
-			logInboxAudit(r.Context(), pool, inboxAuditEntry{
-				InboxID: inboxID, Action: "REJECT", Status: constants.StatusRejected, UserID: userID, Comment: req.Comment, Detail: map[string]interface{}{
-					"prior_status": status,
-				},
-			})
 			rejected = append(rejected, inboxID)
 		}
 		emailcommon.RespondBulk(w, "inbox/workflow/reject", "rejected", rejected, errors)
@@ -1379,6 +1636,10 @@ func HandleWorkflowInboxAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 		inboxID := strings.TrimSpace(req.InboxID)
 		if inboxID == "" {
 			emailcommon.RespondBadRequest(w, "inbox_id is required")
+			return
+		}
+		if !emailcommon.CanManageInbox(r.Context(), pool, inboxID, api.GetUserIDFromCtx(r.Context())) {
+			emailcommon.RespondForbidden(w, "inbox not accessible")
 			return
 		}
 
@@ -1438,9 +1699,13 @@ func HandleWorkflowInboxSync(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondMethodNotAllowed(w)
 			return
 		}
+		if !emailcommon.IsEmailAdmin(r.Context(), api.GetUserIDFromCtx(r.Context())) {
+			emailcommon.RespondForbidden(w, "SES sync is limited to administrators")
+			return
+		}
 		result, err := SyncApprovedInboxesToSES(r.Context(), pool)
 		if err != nil {
-			emailcommon.RespondBadRequest(w, err.Error())
+			emailcommon.RespondBadRequest(w, errtext.Detail(w, err))
 			return
 		}
 		ApplyInboundRuleSyncResult(r.Context(), pool, result, nil)

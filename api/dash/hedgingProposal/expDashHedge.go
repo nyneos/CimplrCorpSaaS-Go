@@ -29,7 +29,7 @@ func GetBuMaturityCurrencySummaryJoinedFromHeaders(db *pgxpool.Pool) http.Handle
 			api.RespondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit, "")
 			return
 		}
-		rows, err := db.Query(r.Context(), `SELECT h.entity AS business_unit, h.currency, h.exposure_type, h.total_open_amount, b.month_1, b.month_2, b.month_3, b.month_4, b.month_4_6, b.month_6plus FROM exposure_headers h JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id WHERE h.entity = ANY($1) AND (h.approval_status = 'Approved' OR h.approval_status = 'approved') AND (b.status_bucketing = 'Approved' OR b.status_bucketing = 'approved')`, buNames)
+		rows, err := db.Query(r.Context(), `SELECT h.entity AS business_unit, h.currency, h.exposure_type, h.total_open_amount, b.month_1, b.month_2, b.month_3, b.month_4, b.month_4_6, b.month_6plus FROM exposure_headers h JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id WHERE h.entity = ANY($1) AND LOWER(TRIM(COALESCE(h.approval_status, ''))) = 'approved' AND LOWER(TRIM(COALESCE(b.status_bucketing, ''))) = 'approved'`, buNames)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDB, "")
 			return
@@ -50,7 +50,8 @@ func GetBuMaturityCurrencySummaryJoinedFromHeaders(db *pgxpool.Pool) http.Handle
 			var totalOpenAmount sql.NullFloat64
 			var month1, month2, month3, month4, month46, month6plus sql.NullFloat64
 			if err := rows.Scan(&bu, &currency, &exposureType, &totalOpenAmount, &month1, &month2, &month3, &month4, &month46, &month6plus); err != nil {
-				continue
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				return
 			}
 			bu = strings.TrimSpace(bu)
 			if bu == "" {
@@ -96,6 +97,10 @@ func GetBuMaturityCurrencySummaryJoinedFromHeaders(db *pgxpool.Pool) http.Handle
 				summary[bucket][bu][currency] = entry
 			}
 		}
+		if err := rows.Err(); err != nil {
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+			return
+		}
 		response := []map[string]interface{}{}
 		for bucket, buMap := range summary {
 			maturityLabel := bucketLabels[bucket]
@@ -140,7 +145,7 @@ func GetExposureRowsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 				total_open_amount, value_date
 			FROM exposure_headers
 			WHERE entity = ANY($1)
-			  AND LOWER(approval_status) = 'approved'
+			  AND LOWER(TRIM(COALESCE(approval_status, ''))) = 'approved'
 		`, buNames)
 		if err != nil {
 			api.RespondEnvelopeError(w, http.StatusInternalServerError, constants.ErrDB, "")
@@ -159,7 +164,8 @@ func GetExposureRowsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			)
 
 			if err := rows.Scan(&bu, &currency, &exposureType, &documentID, &client, &amount, &maturityDate); err != nil {
-				continue
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				return
 			}
 
 			// helpers
@@ -231,6 +237,10 @@ func GetExposureRowsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 				"maturityDate":   dateStr,
 				"maturityBucket": maturityBucket,
 			})
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+			return
 		}
 
 		if response == nil {

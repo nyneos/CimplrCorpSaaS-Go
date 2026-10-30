@@ -31,8 +31,8 @@ type createReq struct {
 	ScheduleMonthDay        *int                  `json:"schedule_month_day"`
 	ScheduleTimezone        string                `json:"schedule_timezone"`
 	RowExpandMode           string                `json:"row_expand_mode"` // FIRST_ROW | PER_ROW
-	DataRowFrom             *int                  `json:"data_row_from"` // 1-based inclusive; default 1
-	DataRowTo               *int                  `json:"data_row_to"`   // 1-based inclusive; default 500
+	DataRowFrom             *int                  `json:"data_row_from"`   // 1-based inclusive; default 1
+	DataRowTo               *int                  `json:"data_row_to"`     // 1-based inclusive; default 500
 	Filters                 []filterReq           `json:"filters"`
 	Attachments             []attachmentReq       `json:"attachments"`
 	Destinations            []destinationReq      `json:"destinations"`

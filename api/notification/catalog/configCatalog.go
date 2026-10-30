@@ -3,6 +3,7 @@ package catalog
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -204,7 +205,7 @@ func UpsertNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&configID, &eventID, &channel, &isEnabledOut,
 			&retryMaxOut, &retryBackoffOut, &priorityLevelOut, &updatedBy, &updatedAt,
 		); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			api.RespondWithPayload(w, false, errtext.Detail(w, err), nil)
 			return
 		}
 
@@ -334,7 +335,7 @@ func GetNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			api.RespondWithPayload(w, false, errtext.Detail(w, err), nil)
 			return
 		}
 		defer rows.Close()
@@ -354,7 +355,7 @@ func GetNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if rows.Err() != nil {
-			api.RespondWithPayload(w, false, "row scan error: "+rows.Err().Error(), nil)
+			api.RespondWithPayload(w, false, "row scan error: "+errtext.Detail(w, rows.Err()), nil)
 			return
 		}
 		api.RespondWithPayload(w, true, "", out)
@@ -417,7 +418,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			api.RespondWithPayload(w, false, errtext.Detail(w, err), nil)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -451,7 +452,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.QueryRow(ctx, selQ, row.EventID, row.Channel).Scan(
 				&configID, &oldEnabled, &oldRetryMax, &oldRetryBackoff, &oldPriority,
 			); err != nil {
-				results = append(results, result{EventID: row.EventID, Channel: row.Channel, Success: false, Error: "config not found: " + err.Error()})
+				results = append(results, result{EventID: row.EventID, Channel: row.Channel, Success: false, Error: "config not found: " + errtext.Text(err)})
 				continue
 			}
 
@@ -498,7 +499,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.QueryRow(ctx, updQ, uArgs...).Scan(
 				&newConfigID, &newEventID, &newChannel, &newEnabled, &newRetry, &newBackoff, &newPriority,
 			); err != nil {
-				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: constants.ErrUpdateFailed + err.Error()})
+				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: constants.ErrUpdateFailed + errtext.Text(err)})
 				continue
 			}
 
@@ -513,7 +514,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				row.Reason, editor,
 				oldEnabled, oldRetryMax, oldRetryBackoff, oldPriority,
 			); err != nil {
-				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: constants.ErrAuditInsertFailed + err.Error()})
+				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: constants.ErrAuditInsertFailed + errtext.Text(err)})
 				continue
 			}
 
@@ -531,7 +532,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrCommitFailed+errtext.Detail(w, err), nil)
 			return
 		}
 
@@ -574,7 +575,7 @@ func BulkApproveNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			api.RespondWithPayload(w, false, errtext.Detail(w, err), nil)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -601,12 +602,12 @@ func BulkApproveNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, checker, req.Comment, req.ConfigIDs)
 		}
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			api.RespondWithPayload(w, false, errtext.Detail(w, err), nil)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrCommitFailed+errtext.Detail(w, err), nil)
 			return
 		}
 
@@ -648,7 +649,7 @@ func BulkRejectNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			api.RespondWithPayload(w, false, errtext.Detail(w, err), nil)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -670,7 +671,7 @@ func BulkRejectNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND processing_status LIKE '%PENDING%'
 		`, req.ConfigIDs)
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			api.RespondWithPayload(w, false, errtext.Detail(w, err), nil)
 			return
 		}
 		var rollbacks []rollbackRow
@@ -707,7 +708,7 @@ func BulkRejectNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, checker, req.Comment, req.ConfigIDs)
 		}
 		if err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+			api.RespondWithPayload(w, false, errtext.Detail(w, err), nil)
 			return
 		}
 
@@ -752,7 +753,7 @@ func BulkRejectNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrCommitFailed+errtext.Detail(w, err), nil)
 			return
 		}
 

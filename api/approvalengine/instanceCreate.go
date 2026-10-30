@@ -4,10 +4,12 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -109,6 +111,23 @@ func CreateInstance(ctx context.Context, pool *pgxpool.Pool, req InstanceRequest
 		return "", fmt.Errorf("CreateInstance begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Serialise instance creation per record so two requests cannot both insert.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "approval_instance:"+req.ModuleCode+":"+req.RecordID); err != nil {
+		return "", fmt.Errorf("CreateInstance lock: %w", err)
+	}
+	var pendingID string
+	switch err := tx.QueryRow(ctx, `
+		SELECT instance_id::text FROM uam.approval_instance
+		WHERE module_code = $1 AND record_id = $2 AND status = 'PENDING' AND is_deleted = false
+		ORDER BY submitted_at DESC
+		LIMIT 1`, req.ModuleCode, req.RecordID).Scan(&pendingID); {
+	case err == nil:
+		api.LogInfo("[ApprovalEngine] Reusing pending instance %s for %s/%s", pendingID, req.ModuleCode, req.RecordID)
+		return pendingID, nil
+	case !errors.Is(err, pgx.ErrNoRows):
+		return "", fmt.Errorf("CreateInstance pending check: %w", err)
+	}
 
 	// Step 4: INSERT approval_instance.
 	// NOTE: audit_table IS a real column on uam.approval_instance.

@@ -56,7 +56,14 @@ func StartGoogleWorkspacePoller(ctx context.Context, pool *pgxpool.Pool) {
 	defer ticker.Stop()
 
 	runOnce := func() {
-		if err := googleWorkspacePollOnce(ctx, pool, rt); err != nil {
+		if !googleWorkspacePollMu.TryLock() {
+			logger.LogInfo("[google-workspace-poller] skip tick, already running")
+			return
+		}
+		defer googleWorkspacePollMu.Unlock()
+		if err := runPollCycle(ctx, pool, "email-google-workspace-poll", func(ctx context.Context) error {
+			return googleWorkspacePollOnce(ctx, pool, rt)
+		}); err != nil {
 			logger.LogError("[google-workspace-poller] tick error: %v", err)
 		}
 	}
@@ -133,7 +140,7 @@ func googleWorkspacePollOnce(ctx context.Context, pool *pgxpool.Pool, rt *mailru
 					UPDATE email_svc.inbox_config
 					SET ses_last_error = $2, updated_at = now()
 					WHERE inbox_id = $1::uuid
-				`, target.inbox.InboxID, "google: "+err.Error())
+				`, target.inbox.InboxID, "google workspace poll failed")
 				continue
 			}
 			ingested += n

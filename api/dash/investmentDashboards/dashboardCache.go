@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/internal/logger"
 )
 
 type investmentDashboardCacheEntry struct {
@@ -49,9 +50,13 @@ func CacheDashboardHandler(next http.Handler) http.Handler {
 			return
 		}
 
-		body, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxDashboardCacheBody+1))
 		if err != nil {
-			next.ServeHTTP(w, r)
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "VALIDATION_ERROR")
+			return
+		}
+		if len(body) > maxDashboardCacheBody {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "request body too large", "VALIDATION_ERROR")
 			return
 		}
 		r.Body.Close()
@@ -73,6 +78,14 @@ func CacheDashboardHandler(next http.Handler) http.Handler {
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
+		} else {
+			defer endInvestmentDashboardInflight(key)
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("investment dashboard cache panic: %v", rec)
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, "dashboard request failed", "DASHBOARD_FAILED")
+				}
+			}()
 		}
 
 		rec := httptest.NewRecorder()
@@ -88,13 +101,17 @@ func CacheDashboardHandler(next http.Handler) http.Handler {
 			body:    append([]byte(nil), rec.Body.Bytes()...),
 			expires: now.Add(ttl),
 		}
-		if status >= http.StatusOK && status < http.StatusMultipleChoices {
+		if status >= http.StatusOK && status < http.StatusMultipleChoices && len(entry.body) <= maxDashboardCacheBody {
 			setInvestmentDashboardCacheEntry(key, entry)
 		}
-		endInvestmentDashboardInflight(key)
 		writeCachedDashboardResponse(w, entry)
 	})
 }
+
+const (
+	maxDashboardCacheBody    = 1 << 20
+	maxDashboardCacheEntries = 500
+)
 
 func investmentDashboardCacheTTL() time.Duration {
 	raw := strings.TrimSpace(os.Getenv("INVESTMENT_DASHBOARD_CACHE_TTL_SECONDS"))
@@ -160,8 +177,17 @@ func getInvestmentDashboardCacheEntry(key string, now time.Time) (investmentDash
 
 func setInvestmentDashboardCacheEntry(key string, entry investmentDashboardCacheEntry) {
 	investmentDashboardCacheState.Lock()
+	defer investmentDashboardCacheState.Unlock()
+	now := time.Now()
+	for k, existing := range investmentDashboardCacheState.entries {
+		if now.After(existing.expires) {
+			delete(investmentDashboardCacheState.entries, k)
+		}
+	}
+	if _, exists := investmentDashboardCacheState.entries[key]; !exists && len(investmentDashboardCacheState.entries) >= maxDashboardCacheEntries {
+		return
+	}
 	investmentDashboardCacheState.entries[key] = entry
-	investmentDashboardCacheState.Unlock()
 }
 
 func beginInvestmentDashboardInflight(key string) *investmentDashboardInflight {

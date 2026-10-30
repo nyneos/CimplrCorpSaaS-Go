@@ -40,7 +40,7 @@ func NewFdMonthEndClosingService(cfg map[string]interface{}, pool *pgxpool.Pool)
 func (s *FdMonthEndClosingService) Name() string { return serviceName }
 
 func (s *FdMonthEndClosingService) Start() error {
-	port := "7144"
+	port := ""
 	if s.config != nil {
 		if v, ok := s.config["port"]; ok {
 			switch t := v.(type) {
@@ -54,6 +54,9 @@ func (s *FdMonthEndClosingService) Start() error {
 		}
 	}
 
+	if port == "" {
+		return fmt.Errorf("fd-month-end-closing port is not configured")
+	}
 	if s.pool == nil {
 		return fmt.Errorf("fd-month-end-closing pgxpool is not configured")
 	}

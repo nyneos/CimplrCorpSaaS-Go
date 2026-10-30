@@ -1,8 +1,10 @@
 package forwards
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/fx/auditutil"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
@@ -445,7 +447,7 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 			valPtrs[i] = &vals[i]
 		}
 		if err := row.Scan(valPtrs...); err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		result := make(map[string]interface{})
@@ -468,6 +470,11 @@ func AddForwardBookingManualEntry(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			go func(id, email, matrixID string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("goroutine panic: %v", rec)
+					}
+				}()
 				_, _ = approvalengine.CreateInstance(context.Background(), pool, approvalengine.InstanceRequest{
 					ModuleCode:          "FX",
 					EntityCode:          req.EntityLevel0,
@@ -516,7 +523,7 @@ func GetEntityRelevantForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 			  AND COALESCE(f.is_deleted, false) = false
 		`, buNames)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		fieldDescs := rows.FieldDescriptions()
@@ -587,7 +594,7 @@ func UploadForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+errtext.Detail(w, err))
 			return
 		}
 		files := r.MultipartForm.File["files"]
@@ -619,7 +626,7 @@ func UploadForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		results, err := processUploadForwardBookings(ctx, pool, r, buNames)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
@@ -671,6 +678,11 @@ func UploadForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 				createMatrices[id] = tID
 			}
 			go func(ids []string, email string, matrices, entities map[string]string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("goroutine panic: %v", rec)
+					}
+				}()
 				bgCtx := context.Background()
 				for _, id := range ids {
 					_, _ = approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
@@ -701,15 +713,19 @@ func processUploadForwardBookings(ctx context.Context, pool *pgxpool.Pool, r *ht
 	for _, fileHeader := range files {
 		file, err := fileHeader.Open()
 		if err != nil {
-			results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": err.Error()})
+			results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": errtext.Text(err)})
 			continue
 		}
 		// Read all file bytes for parsing, hashing, and deferred S3 upload.
-		fileBytes, _ := io.ReadAll(file)
+		fileBytes, readErr := io.ReadAll(file)
 		file.Close()
+		if readErr != nil {
+			results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": errtext.Text(readErr)})
+			continue
+		}
 		if s3storage.IsS3UploadEnabled() {
 			if err := ensureUniqueForwardBookingUpload(ctx, pool, fileBytes); err != nil {
-				message := err.Error()
+				message := errtext.Text(err)
 				if errors.Is(err, ErrForwardBookingFileAlreadyUploaded) {
 					message = duplicateForwardBookingUploadMessage
 				}
@@ -732,7 +748,7 @@ func processUploadForwardBookings(ctx context.Context, pool *pgxpool.Pool, r *ht
 			reader := csv.NewReader(bytes.NewReader(fileBytes))
 			headers, err := reader.Read()
 			if err != nil {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": err.Error()})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": errtext.Text(err)})
 				continue
 			}
 			for i, h := range headers {
@@ -755,19 +771,19 @@ func processUploadForwardBookings(ctx context.Context, pool *pgxpool.Pool, r *ht
 		} else if ext == ".xls" || ext == ".xlsx" {
 			tmpFile, err := os.CreateTemp("", constants.ErrExposureUploadFilenamePattern)
 			if err != nil {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": err.Error()})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": errtext.Text(err)})
 				continue
 			}
 			_, err = tmpFile.Write(fileBytes)
 			if err != nil {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": err.Error()})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": errtext.Text(err)})
 				tmpFile.Close()
 				continue
 			}
 			tmpFile.Close()
 			f, err := excelize.OpenFile(tmpFile.Name())
 			if err != nil {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": err.Error()})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": errtext.Text(err)})
 				continue
 			}
 			sheetName := f.GetSheetName(0)
@@ -856,12 +872,11 @@ func processUploadForwardBookings(ctx context.Context, pool *pgxpool.Pool, r *ht
 				"filename":      fileHeader.Filename,
 				"upload_s3_key": "",
 				"inserted":      0,
-				"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToStartDBTransaction, "details": err.Error()}},
+				"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToStartDBTransaction, "details": errtext.Text(err)}},
 				"invalidRows":   invalidRows,
 			})
 			continue
 		}
-		defer tx.Rollback(ctx)
 
 		uploadS3Key := ""
 		s3Uploaded := false
@@ -872,9 +887,10 @@ func processUploadForwardBookings(ctx context.Context, pool *pgxpool.Pool, r *ht
 					"filename":      fileHeader.Filename,
 					"upload_s3_key": "",
 					"inserted":      0,
-					"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToUploadFileToS3, "details": err.Error()}},
+					"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToUploadFileToS3, "details": errtext.Text(err)}},
 					"invalidRows":   invalidRows,
 				})
+				_ = tx.Rollback(ctx)
 				continue
 			}
 			uploadS3Key = s3Key
@@ -894,7 +910,7 @@ func processUploadForwardBookings(ctx context.Context, pool *pgxpool.Pool, r *ht
 			}
 			_, err := tx.Exec(ctx, query, values...)
 			if err != nil {
-				errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "Database insert error", "details": err.Error()})
+				errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "Database insert error", "details": errtext.Text(err)})
 				break
 			} else {
 				successCount++
@@ -913,6 +929,7 @@ func processUploadForwardBookings(ctx context.Context, pool *pgxpool.Pool, r *ht
 				"errors":        errorRows,
 				"invalidRows":   invalidRows,
 			})
+			_ = tx.Rollback(ctx)
 			continue
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -925,7 +942,7 @@ func processUploadForwardBookings(ctx context.Context, pool *pgxpool.Pool, r *ht
 				"filename":      fileHeader.Filename,
 				"upload_s3_key": "",
 				"inserted":      0,
-				"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToCommitTransaction, "details": err.Error()}},
+				"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToCommitTransaction, "details": errtext.Text(err)}},
 				"invalidRows":   invalidRows,
 			})
 			continue
@@ -977,7 +994,7 @@ func UploadForwardConfirmationsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+errtext.Detail(w, err))
 			return
 		}
 		files := r.MultipartForm.File["files"]
@@ -995,7 +1012,7 @@ func UploadForwardConfirmationsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		results, err := processUploadForwardConfirmations(ctx, pool, r, buNames)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
@@ -1021,15 +1038,19 @@ func processUploadForwardConfirmations(ctx context.Context, pool *pgxpool.Pool, 
 	for _, fileHeader := range files {
 		file, err := fileHeader.Open()
 		if err != nil {
-			results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": err.Error()})
+			results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": errtext.Text(err)})
 			continue
 		}
 		// Read all file bytes for parsing, hashing, and deferred S3 upload.
-		fileBytes, _ := io.ReadAll(file)
+		fileBytes, readErr := io.ReadAll(file)
 		file.Close()
+		if readErr != nil {
+			results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": errtext.Text(readErr)})
+			continue
+		}
 		if s3storage.IsS3UploadEnabled() {
 			if err := ensureUniqueForwardConfirmationUpload(ctx, pool, fileBytes); err != nil {
-				message := err.Error()
+				message := errtext.Text(err)
 				if errors.Is(err, ErrForwardConfirmationFileAlreadyUploaded) {
 					message = duplicateForwardConfirmationUploadMessage
 				}
@@ -1052,7 +1073,7 @@ func processUploadForwardConfirmations(ctx context.Context, pool *pgxpool.Pool, 
 			reader := csv.NewReader(bytes.NewReader(fileBytes))
 			headers, err := reader.Read()
 			if err != nil {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": err.Error()})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": errtext.Text(err)})
 				continue
 			}
 			for i, h := range headers {
@@ -1075,19 +1096,19 @@ func processUploadForwardConfirmations(ctx context.Context, pool *pgxpool.Pool, 
 		} else if ext == ".xls" || ext == ".xlsx" {
 			tmpFile, err := os.CreateTemp("", constants.ErrExposureUploadFilenamePattern)
 			if err != nil {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": err.Error()})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": errtext.Text(err)})
 				continue
 			}
 			_, err = tmpFile.Write(fileBytes)
 			if err != nil {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": err.Error()})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": errtext.Text(err)})
 				tmpFile.Close()
 				continue
 			}
 			tmpFile.Close()
 			f, err := excelize.OpenFile(tmpFile.Name())
 			if err != nil {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": err.Error()})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": errtext.Text(err)})
 				continue
 			}
 			sheetName := f.GetSheetName(0)
@@ -1154,12 +1175,11 @@ func processUploadForwardConfirmations(ctx context.Context, pool *pgxpool.Pool, 
 				"filename":      fileHeader.Filename,
 				"upload_s3_key": "",
 				"updated":       0,
-				"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToStartDBTransaction, "details": err.Error()}},
+				"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToStartDBTransaction, "details": errtext.Text(err)}},
 				"invalidRows":   invalidRows,
 			})
 			continue
 		}
-		defer tx.Rollback(ctx)
 
 		uploadS3Key := ""
 		s3Uploaded := false
@@ -1170,9 +1190,10 @@ func processUploadForwardConfirmations(ctx context.Context, pool *pgxpool.Pool, 
 					"filename":      fileHeader.Filename,
 					"upload_s3_key": "",
 					"updated":       0,
-					"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToUploadFileToS3, "details": err.Error()}},
+					"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToUploadFileToS3, "details": errtext.Text(err)}},
 					"invalidRows":   invalidRows,
 				})
+				_ = tx.Rollback(ctx)
 				continue
 			}
 			uploadS3Key = s3Key
@@ -1207,7 +1228,7 @@ func processUploadForwardConfirmations(ctx context.Context, pool *pgxpool.Pool, 
 			}
 			res, err := tx.Exec(ctx, updateQuery, updateValues...)
 			if err != nil {
-				errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "Failed to update record", "details": err.Error()})
+				errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "Failed to update record", "details": errtext.Text(err)})
 				break
 			}
 			rowsAffected := res.RowsAffected()
@@ -1230,6 +1251,7 @@ func processUploadForwardConfirmations(ctx context.Context, pool *pgxpool.Pool, 
 				"errors":        errorRows,
 				"invalidRows":   invalidRows,
 			})
+			_ = tx.Rollback(ctx)
 			continue
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -1242,7 +1264,7 @@ func processUploadForwardConfirmations(ctx context.Context, pool *pgxpool.Pool, 
 				"filename":      fileHeader.Filename,
 				"upload_s3_key": "",
 				"updated":       0,
-				"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToCommitTransaction, "details": err.Error()}},
+				"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToCommitTransaction, "details": errtext.Text(err)}},
 				"invalidRows":   invalidRows,
 			})
 			continue
@@ -1283,7 +1305,7 @@ func UploadBankForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
+			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+errtext.Detail(w, err))
 			return
 		}
 		// Validate user_id
@@ -1295,7 +1317,7 @@ func UploadBankForwardBookingsMulti(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		results, batchID, err := processUploadBankForwardBookings(ctx, pool, r)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, err.Error())
+			respondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		respondEnvelopeSuccess(w, "Success", map[string]interface{}{
@@ -1641,15 +1663,19 @@ func processUploadBankForwardBookings(ctx context.Context, pool *pgxpool.Pool, r
 		for _, fileHeader := range files {
 			file, err := fileHeader.Open()
 			if err != nil {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": err.Error()})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": errtext.Text(err)})
 				continue
 			}
 			// Read all file bytes for parsing, hashing, and deferred S3 upload.
-			fileBytes, _ := io.ReadAll(file)
+			fileBytes, readErr := io.ReadAll(file)
 			file.Close()
+			if readErr != nil {
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": errtext.Text(readErr)})
+				continue
+			}
 			if s3storage.IsS3UploadEnabled() {
 				if err := ensureUniqueForwardBookingUpload(ctx, pool, fileBytes); err != nil {
-					message := err.Error()
+					message := errtext.Text(err)
 					if errors.Is(err, ErrForwardBookingFileAlreadyUploaded) {
 						message = duplicateForwardBookingUploadMessage
 					}
@@ -1674,7 +1700,7 @@ func processUploadBankForwardBookings(ctx context.Context, pool *pgxpool.Pool, r
 				reader := csv.NewReader(bytes.NewReader(fileBytes))
 				headers, err := reader.Read()
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": errtext.Text(err)})
 					continue
 				}
 				for i, h := range headers {
@@ -1697,19 +1723,19 @@ func processUploadBankForwardBookings(ctx context.Context, pool *pgxpool.Pool, r
 			} else if ext == ".xls" || ext == ".xlsx" {
 				tmpFile, err := os.CreateTemp("", constants.ErrExposureUploadFilenamePattern)
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": errtext.Text(err)})
 					continue
 				}
 				_, err = tmpFile.Write(fileBytes)
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": errtext.Text(err)})
 					tmpFile.Close()
 					continue
 				}
 				tmpFile.Close()
 				f, err := excelize.OpenFile(tmpFile.Name())
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": errtext.Text(err)})
 					continue
 				}
 				sheetName := f.GetSheetName(0)
@@ -1749,7 +1775,7 @@ func processUploadBankForwardBookings(ctx context.Context, pool *pgxpool.Pool, r
 					"staging_inserted":  0,
 					"staging_errors":    []map[string]interface{}{},
 					"bookings_inserted": 0,
-					"booking_errors":    []map[string]interface{}{{constants.ValueError: "Failed to fetch mapping: " + err.Error()}},
+					"booking_errors":    []map[string]interface{}{{constants.ValueError: "Failed to fetch mapping: " + errtext.Text(err)}},
 				})
 				continue
 			}
@@ -1780,7 +1806,7 @@ func processUploadBankForwardBookings(ctx context.Context, pool *pgxpool.Pool, r
 					"filename":          fileHeader.Filename,
 					"upload_s3_key":     "",
 					"staging_inserted":  0,
-					"staging_errors":    []map[string]interface{}{{constants.ValueError: constants.ErrFailedToStartDBTransaction, "details": err.Error()}},
+					"staging_errors":    []map[string]interface{}{{constants.ValueError: constants.ErrFailedToStartDBTransaction, "details": errtext.Text(err)}},
 					"bookings_inserted": 0,
 					"booking_errors":    []map[string]interface{}{},
 				})
@@ -1797,7 +1823,7 @@ func processUploadBankForwardBookings(ctx context.Context, pool *pgxpool.Pool, r
 						"filename":          fileHeader.Filename,
 						"upload_s3_key":     "",
 						"staging_inserted":  0,
-						"staging_errors":    []map[string]interface{}{{constants.ValueError: constants.ErrFailedToUploadFileToS3, "details": err.Error()}},
+						"staging_errors":    []map[string]interface{}{{constants.ValueError: constants.ErrFailedToUploadFileToS3, "details": errtext.Text(err)}},
 						"bookings_inserted": 0,
 						"booking_errors":    []map[string]interface{}{},
 					})
@@ -1856,7 +1882,7 @@ func processUploadBankForwardBookings(ctx context.Context, pool *pgxpool.Pool, r
 				}
 				_, err := tx.Exec(ctx, fmt.Sprintf("INSERT INTO staging_bank_forward (%s) VALUES (%s)", strings.Join(fields, ", "), strings.Join(placeholders, ", ")), values...)
 				if err != nil {
-					stagingErrors = append(stagingErrors, map[string]interface{}{"row": i + 1, constants.ValueError: err.Error()})
+					stagingErrors = append(stagingErrors, map[string]interface{}{"row": i + 1, constants.ValueError: errtext.Text(err)})
 					break
 				}
 				stagingSuccess++
@@ -1943,7 +1969,7 @@ func processUploadBankForwardBookings(ctx context.Context, pool *pgxpool.Pool, r
 				}
 				_, err := tx.Exec(ctx, fmt.Sprintf("INSERT INTO forward_bookings (%s) VALUES (%s)", strings.Join(fields, ", "), strings.Join(placeholders, ", ")), values...)
 				if err != nil {
-					bookingErrors = append(bookingErrors, map[string]interface{}{"row": i + 1, constants.ValueError: err.Error()})
+					bookingErrors = append(bookingErrors, map[string]interface{}{"row": i + 1, constants.ValueError: errtext.Text(err)})
 					break
 				}
 				bookingSuccess++
@@ -1977,7 +2003,7 @@ func processUploadBankForwardBookings(ctx context.Context, pool *pgxpool.Pool, r
 					"staging_inserted":  0,
 					"staging_errors":    []map[string]interface{}{},
 					"bookings_inserted": 0,
-					"booking_errors":    []map[string]interface{}{{constants.ValueError: constants.ErrFailedToCommitTransaction, "details": err.Error()}},
+					"booking_errors":    []map[string]interface{}{{constants.ValueError: constants.ErrFailedToCommitTransaction, "details": errtext.Text(err)}},
 				})
 				continue
 			}

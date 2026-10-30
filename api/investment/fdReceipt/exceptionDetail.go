@@ -1,6 +1,7 @@
 package fdReceipt
 
 import (
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -57,6 +58,12 @@ func GetExceptionDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT rr.entity_id::text FROM investment.fd_receipt_exception e
+			JOIN investment.fd_receipt_reconcile_run rr ON rr.reconcile_run_id = e.reconcile_run_id
+			WHERE e.exception_id::text = $1`, req.ExceptionID) {
+			return
+		}
 		if req.ExceptionID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "exception_id is required")
 			return
@@ -75,7 +82,7 @@ func GetExceptionDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusNotFound, constants.ErrExceptionNotFound)
 				return
 			}
-			api.RespondWithError(w, http.StatusInternalServerError, "Load variance failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Load variance failed: "+errtext.Detail(w, err))
 			return
 		}
 

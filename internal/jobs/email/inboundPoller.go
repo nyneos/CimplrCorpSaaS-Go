@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -73,7 +74,14 @@ func StartInboundPoller(ctx context.Context, pool *pgxpool.Pool) {
 	defer ticker.Stop()
 
 	runOnce := func() {
-		if err := pollOnce(ctx, pool, rt); err != nil {
+		if !inboundPollMu.TryLock() {
+			logger.LogInfo("[email-poller] skip tick, already running")
+			return
+		}
+		defer inboundPollMu.Unlock()
+		if err := runPollCycle(ctx, pool, "email-inbound-poll", func(ctx context.Context) error {
+			return pollOnce(ctx, pool, rt)
+		}); err != nil {
 			logger.LogError("[email-poller] tick error: %v", err)
 		}
 	}
@@ -124,35 +132,49 @@ func pollOnce(ctx context.Context, pool *pgxpool.Pool, rt *mailruntime.Runtime) 
 		}
 		logger.LogInfo("[email-poller] found %d new S3 key(s) after cursor=%q", len(keys), lastKey)
 
-		newestKey := lastKey
+		sort.Strings(keys)
 		filtered := make([]string, 0, len(keys))
 		for _, k := range keys {
-			if k > newestKey {
-				newestKey = k
-			}
-			// Graph and IMAP pollers upload under dedicated prefixes — skip here to avoid duplicate ingest.
 			if strings.Contains(k, "/graph/") || strings.Contains(k, "/imap/") {
 				continue
 			}
 			filtered = append(filtered, k)
 		}
 
+		parsedByKey := make(map[string]mailruntime.ParsedEmail, len(filtered))
 		if len(filtered) > 0 {
 			parsed, err := rt.DecodeMessages(ctx, filtered)
 			if err != nil {
 				return err
 			}
 			for _, msg := range parsed.Results {
-				if msg.S3RawKey > newestKey {
-					newestKey = msg.S3RawKey
-				}
-				if err := ingestMessage(ctx, pool, inboxes, msg); err != nil {
-					logger.LogError("[email-poller] ingest %s: %v", msg.S3RawKey, err)
-				}
+				parsedByKey[msg.S3RawKey] = msg
 			}
 		}
 
-		lastKey = newestKey
+		advanced := lastKey
+		for _, k := range keys {
+			if strings.Contains(k, "/graph/") || strings.Contains(k, "/imap/") {
+				advanced = k
+				continue
+			}
+			msg, ok := parsedByKey[k]
+			if !ok {
+				if err := touchCursor(ctx, pool, advanced); err != nil {
+					return err
+				}
+				return fmt.Errorf("email poll decode missing %s", k)
+			}
+			if err := ingestMessage(ctx, pool, inboxes, msg); err != nil {
+				if cerr := touchCursor(ctx, pool, advanced); cerr != nil {
+					return cerr
+				}
+				return fmt.Errorf("ingest %s: %w", k, err)
+			}
+			advanced = k
+		}
+
+		lastKey = advanced
 		if err := touchCursor(ctx, pool, lastKey); err != nil {
 			return err
 		}
@@ -221,8 +243,14 @@ func loadActiveInboxes(ctx context.Context, pool *pgxpool.Pool) ([]inboxRow, err
 }
 
 func ingestMessage(ctx context.Context, pool *pgxpool.Pool, inboxes []inboxRow, msg mailruntime.ParsedEmail) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
 	var exists bool
-	if err := pool.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS(SELECT 1 FROM email_svc.message WHERE s3_raw_key = $1)
 	`, msg.S3RawKey).Scan(&exists); err != nil {
 		return err
@@ -257,7 +285,7 @@ func ingestMessage(ctx context.Context, pool *pgxpool.Pool, inboxes []inboxRow, 
 	preview := BodyPreviewForStorage(msg.Body.TextPlain, msg.Body.TextHTML)
 
 	var messageID string
-	err := pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO email_svc.message (
 			inbox_id, s3_raw_key, s3_parsed_key, message_id_header,
 			envelope_from, envelope_to, subject, received_at,
@@ -280,9 +308,17 @@ func ingestMessage(ctx context.Context, pool *pgxpool.Pool, inboxes []inboxRow, 
 		return err
 	}
 
+	type queuedRule struct {
+		attachmentID string
+		filename     string
+		contentType  string
+		s3Key        string
+		fileSize     int64
+	}
+	queued := make([]queuedRule, 0, len(msg.Attachments))
 	for _, att := range msg.Attachments {
 		var attachmentID string
-		err := pool.QueryRow(ctx, `
+		err := tx.QueryRow(ctx, `
 			INSERT INTO email_svc.message_attachment (
 				message_id, filename, content_type, file_size, s3_key, file_hash
 			) VALUES ($1::uuid, $2, $3, $4, $5, $6)
@@ -291,23 +327,49 @@ func ingestMessage(ctx context.Context, pool *pgxpool.Pool, inboxes []inboxRow, 
 		if err != nil {
 			return err
 		}
-		logAttachmentIngest(ctx, pool, attachmentIngestInfo{
-			MessageID: messageID, AttachmentID: attachmentID, Source: "SES",
-			Filename: att.Filename, ContentType: att.ContentType, S3Key: att.S3Key, FileSize: att.SizeBytes,
+		queued = append(queued, queuedRule{
+			attachmentID: attachmentID,
+			filename:     att.Filename,
+			contentType:  att.ContentType,
+			s3Key:        att.S3Key,
+			fileSize:     att.SizeBytes,
 		})
-
-		// Trigger transformation rules worker
-		go ProcessAttachmentRules(context.Background(), pool, matchedInboxID, messageID, attachmentID, att.Filename, att.S3Key)
 	}
 
-	ingestDetail, _ := json.Marshal(map[string]string{
+	ingestDetail, err := json.Marshal(map[string]string{
 		"s3_raw_key": msg.S3RawKey,
 		"source":     "SES",
 	})
-	_, _ = pool.Exec(ctx, `
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO email_svc.processing_log (message_id, step, status, detail)
 		VALUES ($1::uuid, 'INGEST', 'OK', $2::jsonb)
-	`, messageID, string(ingestDetail))
+	`, messageID, string(ingestDetail)); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	for _, att := range queued {
+		logAttachmentIngest(ctx, pool, attachmentIngestInfo{
+			MessageID: messageID, AttachmentID: att.attachmentID, Source: "SES",
+			Filename: att.filename, ContentType: att.contentType, S3Key: att.s3Key, FileSize: att.fileSize,
+		})
+		inboxID, messageID, attachmentID, filename, s3Key := matchedInboxID, messageID, att.attachmentID, att.filename, att.s3Key
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[email-poller] attachment rules panic: %v", rec)
+				}
+			}()
+			runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+			defer cancel()
+			ProcessAttachmentRules(runCtx, pool, inboxID, messageID, attachmentID, filename, s3Key)
+		}()
+	}
 	return nil
 }
 

@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/utils"
@@ -220,7 +221,7 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to start tx: " + err.Error()})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to start tx: " + errtext.Text(err)})
 				continue
 			}
 
@@ -228,7 +229,7 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			sp := "sp_" + strings.ReplaceAll(uuid.New().String(), "-", "_")
 			if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to create savepoint: " + err.Error()})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to create savepoint: " + errtext.Text(err)})
 				continue
 			}
 
@@ -236,7 +237,7 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp); err != nil {
 					logger.LogError("CreatePayableReceivableTypes: rollback to savepoint failed (type_id generation): %v", err)
 				}
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to generate type_id: " + err.Error(), "type_name": rrow.TypeName})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to generate type_id: " + errtext.Text(err), "type_name": rrow.TypeName})
 				if err := tx.Commit(ctx); err != nil {
 					logger.LogError("CreatePayableReceivableTypes: commit failed (type_id generation): %v", err)
 				}
@@ -312,7 +313,7 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp); err != nil {
 					logger.LogError("CreatePayableReceivableTypes: rollback to savepoint failed (insert): %v", err)
 				}
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "type_name": rrow.TypeName})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errtext.Text(err), "type_name": rrow.TypeName})
 				if err := tx.Commit(ctx); err != nil {
 					logger.LogError("CreatePayableReceivableTypes: commit failed (insert): %v", err)
 				}
@@ -322,13 +323,13 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			auditQ := `INSERT INTO auditactionpayablereceivable (type_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
 			if _, err := tx.Exec(ctx, auditQ, id, nil, createdBy); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "id": id})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + errtext.Text(err), "id": id})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "id": id})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + errtext.Text(err), "id": id})
 				continue
 			}
 			created = append(created, map[string]interface{}{constants.ValueSuccess: true, "type_id": id, "type_name": rrow.TypeName})
@@ -776,7 +777,7 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			})
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -822,7 +823,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + errtext.Text(err)})
 				continue
 			}
 			committed := false
@@ -889,7 +890,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&existingSapTaxCode, &existingOracleLedger, &existingOracleTransactionType, &existingOracleDistributionSet, &existingOracleSource,
 					&existingTallyVoucherType, &existingTallyTaxClass, &existingTallyLedgerGroup, &existingSageNominalControl, &existingSageAnalysisCode, &existingExternalCode, &existingSegment, &existingStatus,
 				); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "type_id": row.TypeID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + errtext.Text(err), "type_id": row.TypeID})
 					return
 				}
 
@@ -982,7 +983,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE masterpayablereceivabletype SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE type_id=$%d RETURNING type_id", pos)
 					args = append(args, row.TypeID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + err.Error(), "type_id": row.TypeID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + errtext.Text(err), "type_id": row.TypeID})
 						return
 					}
 				}
@@ -990,12 +991,12 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// audit
 				auditQ := `INSERT INTO auditactionpayablereceivable (type_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
 				if _, err := tx.Exec(ctx, auditQ, updatedID, row.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "audit failed: " + err.Error(), "type_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "audit failed: " + errtext.Text(err), "type_id": updatedID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "type_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + errtext.Text(err), "type_id": updatedID})
 					return
 				}
 				committed = true
@@ -1079,7 +1080,7 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if _, err := tx.Exec(ctx, q, tid, req.Reason, requestedBy); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 		}
@@ -1122,7 +1123,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1131,7 +1132,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1142,7 +1143,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		for rows.Next() {
 			var aid, tid, pstatus string
 			if err := rows.Scan(&aid, &tid, &pstatus); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan audit rows: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan audit rows: "+errtext.Detail(w, err))
 				return
 			}
 			foundTypes[tid] = true
@@ -1169,10 +1170,10 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 
-		upd := `UPDATE auditactionpayablereceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id, type_id`
+		upd := `UPDATE auditactionpayablereceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, type_id`
 		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, actionIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to update audit rows: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to update audit rows: "+errtext.Detail(w, err))
 			return
 		}
 		defer urows.Close()
@@ -1190,7 +1191,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -1219,7 +1220,7 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1227,7 +1228,7 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, actiontype, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch audit rows: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1241,7 +1242,7 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		for rows.Next() {
 			var aid, tid, atype, pstatus string
 			if err := rows.Scan(&aid, &tid, &atype, &pstatus); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan audit rows: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan audit rows: "+errtext.Detail(w, err))
 				return
 			}
 			foundTypes[tid] = true
@@ -1289,10 +1290,10 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			return
 		}
 
-		upd := `UPDATE auditactionpayablereceivable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id, type_id, actiontype`
+		upd := `UPDATE auditactionpayablereceivable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, type_id, actiontype`
 		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, actionIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to update audit rows: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to update audit rows: "+errtext.Detail(w, err))
 			return
 		}
 		defer urows.Close()
@@ -1319,13 +1320,13 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			}
 			softDelQ := `UPDATE masterpayablereceivabletype SET is_deleted = true WHERE type_id = ANY($1)`
 			if _, err := tx.Exec(ctx, softDelQ, deleteTypeIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to soft-delete master rows: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to soft-delete master rows: "+errtext.Detail(w, err))
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+errtext.Detail(w, err))
 			return
 		}
 
@@ -1437,7 +1438,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				storedFileName = s3storage.BuildUploadedFilename(fh.Filename, userName, time.Now().UTC())
 				s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToStoreFile+errtext.Detail(w, err))
 					return
 				}
 			}
@@ -1465,7 +1466,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_payablereceivable`)
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error: "+errtext.Detail(w, err))
 				return
 			}
 			mapping := make(map[string]string)
@@ -1538,7 +1539,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_payablereceivable_table"}, columns, pgx.CopyFromRows(reducedRows))
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1649,7 +1650,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err := tx.Query(ctx, insertSQL, batchID, s3KeyPtr)
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+errtext.Detail(w, err))
 				return
 			}
 			var newIDs []string
@@ -1660,14 +1661,14 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				} else {
 					rows.Close()
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed reading inserted ids: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed reading inserted ids: "+errtext.Detail(w, err))
 					return
 				}
 			}
 			if err := rows.Err(); err != nil {
 				rows.Close()
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Error iterating inserted rows: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "Error iterating inserted rows: "+errtext.Detail(w, err))
 				return
 			}
 			rows.Close()
@@ -1676,13 +1677,13 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditSQL := `INSERT INTO auditactionpayablereceivable (type_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT type_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterpayablereceivabletype WHERE type_id = ANY($2)`
 				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+errtext.Detail(w, err))
 					return
 				}
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 				return
 			}
 			committed = true
