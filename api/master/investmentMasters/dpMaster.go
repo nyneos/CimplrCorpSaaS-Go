@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -863,6 +864,30 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.auditactiondp
+			WHERE dp_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.DPIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyDPError(err, constants.ErrTxBeginFailedCapitalized)
@@ -1017,6 +1042,30 @@ func BulkRejectDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.auditactiondp
+			WHERE dp_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.DPIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyDPError(err, constants.ErrTxBeginFailedCapitalized)

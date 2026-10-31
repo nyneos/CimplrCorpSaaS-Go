@@ -6,9 +6,7 @@ import (
 	"CimplrCorpSaas/internal/observability"
 	"context"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -26,20 +24,8 @@ func NewCashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	host := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	sslMode := strings.TrimSpace(os.Getenv("DB_SSLMODE"))
-	if sslMode == "" {
-		sslMode = "require"
-	}
-	u := &url.URL{
-		Scheme: "postgres",
-		User:   url.UserPassword(user, pass),
-		Host:   net.JoinHostPort(host, dbPort),
-		Path:   "/" + name,
-	}
-	q := url.Values{}
-	q.Set("sslmode", sslMode)
-	u.RawQuery = q.Encode()
-	pgxPool, err := dbutil.NewTracedPool(context.Background(), u.String(), serviceName)
+	dsn := dbutil.BuildPostgresDSN(user, pass, host, dbPort, name, dbutil.EffectiveSSLMode(host))
+	pgxPool, err := dbutil.NewTracedPool(context.Background(), dsn, serviceName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to pgxpool DB: %w", err)
 	}
@@ -52,7 +38,6 @@ func NewCashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	}
 	RegisterCashRoutes(mux, serviceName, pgxPool)
 
-	// No WriteTimeout: statement conversion streams the converter response for minutes.
 	server := &http.Server{
 		Addr:              ":" + port,
 		Handler:           observability.WrapHTTP(serviceName, cashJSONActionResponses(mux)),

@@ -10,8 +10,6 @@ const (
 	fxJSONBodyLimit      = 8 << 20
 )
 
-// limitFXRequestBody caps every request body: uploads at fxMultipartBodyLimit,
-// everything else at fxJSONBodyLimit. Reads past the cap fail inside the handler.
 func limitFXRequestBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {

@@ -174,8 +174,6 @@ func processAutoRenewalFD(ctx context.Context, p AutoRenewalFDParams) error {
 	// net_payout_amount = full rollover amount (principal + net interest)
 	netPayout := rolloverAmount
 
-	// Closure, rollover detail, new booking, fd_master link and renewal log commit
-	// together; the FD row lock plus the closure_request_id check make reruns idempotent.
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)

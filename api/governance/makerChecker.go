@@ -8,13 +8,10 @@ import (
 	"CimplrCorpSaas/api"
 )
 
-// ErrSelfApproval is returned when the checker is the maker of the request.
 var ErrSelfApproval = errors.New("you cannot approve or reject a request you submitted")
 
-// ErrNoChecker is returned when the checker identity is missing.
 var ErrNoChecker = errors.New("checker identity is required")
 
-// EnsureNotMaker fails when checker and maker are the same user.
 func EnsureNotMaker(makerUserID, checkerUserID string) error {
 	checker := strings.TrimSpace(checkerUserID)
 	if checker == "" {
@@ -26,7 +23,6 @@ func EnsureNotMaker(makerUserID, checkerUserID string) error {
 	return nil
 }
 
-// IsSelfApproval reports whether the checker is also one of the makers.
 func IsSelfApproval(checkerUserID string, makers ...string) bool {
 	for _, m := range makers {
 		if EnsureNotMaker(m, checkerUserID) == ErrSelfApproval {
@@ -36,8 +32,6 @@ func IsSelfApproval(checkerUserID string, makers ...string) bool {
 	return false
 }
 
-// CheckerAliases returns the identifiers a maker column may hold for the caller:
-// user id, email and display name from the session.
 func CheckerAliases(ctx context.Context) []string {
 	out := []string{}
 	add := func(v string) {
@@ -54,7 +48,6 @@ func CheckerAliases(ctx context.Context) []string {
 	return out
 }
 
-// IsSelfApprovalCtx reports whether any maker value names the calling user.
 func IsSelfApprovalCtx(ctx context.Context, makers ...string) bool {
 	aliases := CheckerAliases(ctx)
 	for _, m := range makers {
@@ -69,4 +62,12 @@ func IsSelfApprovalCtx(ctx context.Context, makers ...string) bool {
 		}
 	}
 	return false
+}
+
+// DenySelfApprovalCtx is true when the checker matches a maker and admin override is not active.
+func DenySelfApprovalCtx(ctx context.Context, makers ...string) bool {
+	if api.IsAdminOverride(ctx) {
+		return false
+	}
+	return IsSelfApprovalCtx(ctx, makers...)
 }

@@ -3,7 +3,9 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
+	"CimplrCorpSaas/api/utils"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
 	"bufio"
@@ -1329,7 +1331,7 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		sel := `
-			SELECT DISTINCT ON (amc_id) action_id, amc_id, actiontype, processing_status
+			SELECT DISTINCT ON (amc_id) action_id, amc_id, actiontype, processing_status, COALESCE(requested_by, '')
 			FROM investment.auditactionamc
 			WHERE amc_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY amc_id, requested_at DESC`
@@ -1343,15 +1345,21 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		actionIDs := []string{}
 		editAMCIDs := []string{}
+		var makers []string
 		for rows.Next() {
-			var aid, cid, actionType, ps string
-			_ = rows.Scan(&aid, &cid, &actionType, &ps)
-			if strings.ToUpper(ps) != constants.StatusApproved {
+			var aid, cid, actionType, ps, maker string
+			_ = rows.Scan(&aid, &cid, &actionType, &ps, &maker)
+			if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(ps)), "PENDING") {
 				actionIDs = append(actionIDs, aid)
+				makers = append(makers, maker)
 				if strings.EqualFold(actionType, "EDIT") && strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusPendingEditApproval {
 					editAMCIDs = append(editAMCIDs, cid)
 				}
 			}
+		}
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
 		}
 
 		if len(actionIDs) == 0 {
@@ -1362,7 +1370,7 @@ func BulkRejectAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		upd := `
 			UPDATE investment.auditactionamc
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE action_id = ANY($3)`
+			WHERE action_id = ANY($3) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text))`
 		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, actionIDs); err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrUpdateFailed)
 			api.RespondWithError(w, status, msg)
@@ -1436,7 +1444,7 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		sel := `
 			SELECT DISTINCT ON (amc_id) 
-				action_id, amc_id, actiontype, processing_status
+				action_id, amc_id, actiontype, processing_status, COALESCE(requested_by, '')
 			FROM investment.auditactionamc
 			WHERE amc_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY amc_id, requested_at DESC`
@@ -1451,28 +1459,31 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var deleteIDs []string = []string{}
 		var actionIDs []string = []string{}
 		var markDeletedActionIDs []string
+		var makers []string
 
 		for rows.Next() {
-			var actionID, amcID, actionType, pStatus string
-			if err := rows.Scan(&actionID, &amcID, &actionType, &pStatus); err != nil {
+			var actionID, amcID, actionType, pStatus, maker string
+			if err := rows.Scan(&actionID, &amcID, &actionType, &pStatus, &maker); err != nil {
 				continue
 			}
 
 			statusUpper := strings.ToUpper(pStatus)
-			// actionUpper := strings.ToUpper(actionType)
 
 			switch statusUpper {
 			case constants.StatusPendingDeleteApproval:
-				//  Mark as DELETED in audit + is_deleted in master
 				markDeletedActionIDs = append(markDeletedActionIDs, actionID)
 				deleteIDs = append(deleteIDs, amcID)
+				makers = append(makers, maker)
 			case constants.StatusPendingApproval, constants.StatusPendingEditApproval:
-				// Normal approve → set APPROVED
 				actionIDs = append(actionIDs, actionID)
+				makers = append(makers, maker)
 			default:
-				// Already approved/rejected/cancelled/deleted → skip
 				continue
 			}
+		}
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
 		}
 
 		if len(actionIDs) == 0 && len(markDeletedActionIDs) == 0 {
@@ -1486,7 +1497,7 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			upd := `
 				UPDATE investment.auditactionamc
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id = ANY($3)`
+				WHERE action_id = ANY($3) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text))`
 			if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, actionIDs); err != nil {
 				msg, status := getUserFriendlyAMCError(err, "Approve update failed")
 				api.RespondWithError(w, status, msg)
@@ -1512,7 +1523,7 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			updDel := `
 				UPDATE investment.auditactionamc
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
-				WHERE action_id = ANY($3)`
+				WHERE action_id = ANY($3) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text))`
 			if _, err := tx.Exec(ctx, updDel, checkerBy, req.Comment, canDeleteActionIDs); err != nil {
 				msg, status := getUserFriendlyAMCError(err, "Delete approve update failed")
 				api.RespondWithError(w, status, msg)
@@ -1597,8 +1608,13 @@ func GetApprovedActiveAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		lq, err := utils.DecodeListQueryBody(r, nil)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			return
+		}
 
-		q := `
+		cte := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.amc_id)
 					a.amc_id,
@@ -1627,7 +1643,57 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"') END) AS deleted_at
 				FROM investment.auditactionamc
 				GROUP BY amc_id
-			)
+			)`
+		fromSQL := `
+			FROM investment.masteramc m
+			LEFT JOIN latest_audit l ON l.amc_id = m.amc_id
+			LEFT JOIN history h ON h.amc_id = m.amc_id
+			WHERE COALESCE(m.is_deleted,false)=false`
+		args := []interface{}{}
+		argIdx := 1
+		if pat := utils.SearchPattern(lq.Search); pat != "" {
+			col := strings.ToLower(lq.SearchColumn)
+			switch col {
+			case "amc_name":
+				fromSQL += fmt.Sprintf(" AND COALESCE(m.amc_name,'') ILIKE $%d ESCAPE '\\'", argIdx)
+			case "internal_amc_code":
+				fromSQL += fmt.Sprintf(" AND COALESCE(m.internal_amc_code,'') ILIKE $%d ESCAPE '\\'", argIdx)
+			case "processing_status":
+				fromSQL += fmt.Sprintf(" AND COALESCE(l.processing_status,'') ILIKE $%d ESCAPE '\\'", argIdx)
+			default:
+				fromSQL += fmt.Sprintf(` AND (
+					COALESCE(m.amc_name,'') ILIKE $%d ESCAPE '\' OR
+					COALESCE(m.internal_amc_code,'') ILIKE $%d ESCAPE '\' OR
+					COALESCE(m.status,'') ILIKE $%d ESCAPE '\' OR
+					COALESCE(l.processing_status,'') ILIKE $%d ESCAPE '\'
+				)`, argIdx, argIdx, argIdx, argIdx)
+			}
+			args = append(args, pat)
+			argIdx++
+		}
+		if lq.ProcessingStatus != "" {
+			fromSQL += fmt.Sprintf(" AND COALESCE(l.processing_status,'') = $%d", argIdx)
+			args = append(args, lq.ProcessingStatus)
+			argIdx++
+		}
+
+		total, err := utils.CountTotal(ctx, pgxPool, cte+" SELECT COUNT(*) "+fromSQL, args...)
+		if err != nil {
+			msg, status := getUserFriendlyAMCError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
+			return
+		}
+
+		defaultOrder := "ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+		sortCols := map[string]string{
+			"amc_name":            "m.amc_name",
+			"internal_amc_code":   "m.internal_amc_code",
+			"status":              "m.status",
+			"processing_status":   "l.processing_status",
+		}
+		orderSQL := utils.OrderBySQL(lq.Sort, lq.SortDir, sortCols, defaultOrder)
+
+		q := cte + `
 			SELECT
 				m.amc_id,
 				COALESCE(CASE WHEN l.actiontype='EDIT' AND l.processing_status='REJECTED' THEN COALESCE(l.old_values->>'amc_name', m.amc_name) ELSE m.amc_name END,'') AS amc_name,
@@ -1677,16 +1743,11 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(h.edited_at,'') AS edited_at,
 				COALESCE(h.deleted_by,'') AS deleted_by,
 				COALESCE(h.deleted_at,'') AS deleted_at
+			` + fromSQL + `
+			` + orderSQL + fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+		listArgs := append(append([]interface{}{}, args...), lq.Limit, lq.Offset)
 
-			FROM investment.masteramc m
-			LEFT JOIN latest_audit l ON l.amc_id = m.amc_id
-			LEFT JOIN history h ON h.amc_id = m.amc_id
-			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
-	
-		`
-
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, listArgs...)
 		if err != nil {
 			msg, status := getUserFriendlyAMCError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, status, msg)
@@ -1695,7 +1756,7 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		fields := rows.FieldDescriptions()
-		out := make([]map[string]interface{}, 0, 1000)
+		out := make([]map[string]interface{}, 0, lq.Limit)
 
 		for rows.Next() {
 			vals, _ := rows.Values()
@@ -1715,6 +1776,6 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out, "total": total})
 	}
 }

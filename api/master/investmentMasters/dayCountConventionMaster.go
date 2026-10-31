@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -37,7 +38,7 @@ func getUserFriendlyDayCountError(err error, context string) (string, int) {
 
 	if strings.Contains(errStr, strings.ToLower(constants.ErrTxBeginFailed)) ||
 		strings.Contains(errStr, strings.ToLower(constants.ErrAuditInsertFailed)) {
-		return err.Error(), http.StatusOK
+		return errtext.Text(err), http.StatusOK
 	}
 
 	if strings.Contains(errStr, "uniq_day_count_name_active") {
@@ -77,10 +78,10 @@ func getUserFriendlyDayCountError(err error, context string) (string, int) {
 		return "Database connection issue", http.StatusServiceUnavailable
 	}
 
-	// Commit / tx end failures: surface driver message so uploads aren't opaque "Commit failed".
+	// Commit / tx end failures: surface sanitized message so uploads aren't opaque "Commit failed".
 	if strings.Contains(strings.ToLower(context), "commit") {
 		log.Printf("[DAYCOUNT-DB] commit_error context=%q err=%v", context, err)
-		return context + ": " + err.Error(), http.StatusInternalServerError
+		return context + ": " + errtext.Text(err), http.StatusInternalServerError
 	}
 
 	// Unmapped DB/driver error: log full detail for debugging (client still gets safe message).
@@ -1280,6 +1281,30 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_day_count_convention
+			WHERE day_count_code = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.DayCountCodes)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrTransactionFailed)
@@ -1389,6 +1414,30 @@ func BulkRejectDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_day_count_convention
+			WHERE day_count_code = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.DayCountCodes)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, constants.ErrTransactionFailed)
@@ -1396,6 +1445,27 @@ func BulkRejectDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.fd_day_count_convention_master m SET
+				day_count_name = COALESCE(a.old_day_count_name, m.day_count_name),
+				convention_type = COALESCE(a.old_convention_type, m.convention_type),
+				description = COALESCE(a.old_description, m.description),
+				formula_example = COALESCE(a.old_formula_example, m.formula_example),
+				is_active = COALESCE(a.old_is_active, m.is_active)
+			FROM (
+				SELECT DISTINCT ON (day_count_code) *
+				FROM investment.fd_audit_day_count_convention
+				WHERE day_count_code = ANY($1::text[])
+				  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+				ORDER BY day_count_code, requested_at DESC
+			) a
+			WHERE m.day_count_code = a.day_count_code`, req.DayCountCodes); err != nil {
+			msg, status := getUserFriendlyDayCountError(err, "Edit revert failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
 
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_day_count_convention

@@ -4,9 +4,11 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/bsasync"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/dependency"
+	"CimplrCorpSaas/internal/uploadlimit"
 
 	// "bufio"
 	"context"
@@ -14,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -128,11 +129,12 @@ func getUserFriendlyCashFlowCategoryError(err error, context string) (string, in
 		return "Database connection error. Please try again.", http.StatusServiceUnavailable
 	}
 
-	// Return original error with context - SERVER ERROR (500)
+	// Never return driver/raw err.Error() to clients (AUD-209).
+	api.LogError("cashFlowCategory: %s: %v", context, err)
 	if context != "" {
-		return context + ": " + errStr, http.StatusInternalServerError
+		return context, http.StatusInternalServerError
 	}
-	return errStr, http.StatusInternalServerError
+	return "internal error", http.StatusInternalServerError
 }
 
 type CashFlowCategoryRequest struct {
@@ -320,11 +322,9 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Get approved cash flow categories from context
 		approvedCategories := api.GetCashFlowCategoriesFromCtx(ctx)
-		fmt.Printf("[DEBUG] Loaded %d approved categories from context\n", len(approvedCategories))
 
 		// If context is empty (middleware not running), load from database
 		if len(approvedCategories) == 0 {
-			fmt.Println("[DEBUG] Context empty, loading from database...")
 			query := `
 				WITH latest_approved AS (
 					SELECT DISTINCT ON (category_id) 
@@ -360,16 +360,9 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						})
 					}
 				}
-				fmt.Printf("[DEBUG] Loaded %d categories from database fallback\n", len(approvedCategories))
 			} else {
-				fmt.Printf("[DEBUG] Database fallback query failed: %v\n", err)
+				api.LogError("cash flow category fallback query failed: %v", err)
 			}
-		}
-
-		// Log all loaded categories
-		fmt.Println("[DEBUG] Approved categories:")
-		for _, cat := range approvedCategories {
-			fmt.Printf("  - %s (ID: %s, Type: %s)\n", cat["category_name"], cat["category_id"], cat["category_type"])
 		}
 
 		for _, cat := range req.Categories {
@@ -380,7 +373,6 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Validate parent category exists in approved categories with matching category_type
 			if cat.ParentCategoryName != "" {
-				fmt.Printf("[DEBUG] Validating parent '%s' for child '%s' (type: %s)\n", cat.ParentCategoryName, cat.CategoryName, cat.CategoryType)
 				parentFound := false
 				parentCategoryType := ""
 
@@ -398,7 +390,6 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				if !parentFound {
-					fmt.Printf("[DEBUG] Parent '%s' NOT FOUND in approved categories\n", cat.ParentCategoryName)
 					created = append(created, map[string]interface{}{
 						constants.ValueSuccess: false,
 						constants.ValueError:   fmt.Sprintf("parent_category_name not found or not approved (must be Active status): %s", cat.ParentCategoryName),
@@ -406,12 +397,8 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					})
 					continue
 				}
-				fmt.Printf("[DEBUG] Parent '%s' found with type '%s'\n", cat.ParentCategoryName, parentCategoryType)
-
 				// Validate category_type matches
 				if !strings.EqualFold(strings.TrimSpace(parentCategoryType), strings.TrimSpace(cat.CategoryType)) {
-					fmt.Printf("[DEBUG] TYPE MISMATCH: Parent '%s' type='%s', Child '%s' type='%s'\n",
-						cat.ParentCategoryName, parentCategoryType, cat.CategoryName, cat.CategoryType)
 					created = append(created, map[string]interface{}{
 						constants.ValueSuccess: false,
 						constants.ValueError: fmt.Sprintf("Parent category '%s' has type '%s' but child '%s' has type '%s'. Parent and child must have matching category_type.",
@@ -420,7 +407,6 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					})
 					continue
 				}
-				fmt.Printf("[DEBUG] Parent validation PASSED for '%s'\n", cat.CategoryName)
 			}
 
 			tx, err := pgxPool.Begin(ctx)
@@ -527,26 +513,27 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Auto-correct category_level based on parent hierarchy
 		hierarchySQL := `
 WITH RECURSIVE category_hierarchy AS (
-	-- Start with root categories (no parent)
 	SELECT 
 		category_id, 
 		category_name, 
 		parent_category_name,
-		0 AS calculated_level
+		0 AS calculated_level,
+		ARRAY[category_name]::text[] AS path
 	FROM mastercashflowcategory
 	WHERE parent_category_name IS NULL OR parent_category_name = ''
 	
 	UNION ALL
 	
-	-- Recursively find children and increment level
 	SELECT 
 		m.category_id,
 		m.category_name,
 		m.parent_category_name,
-		CASE WHEN h.calculated_level + 1 > 3 THEN 3 ELSE h.calculated_level + 1 END
+		CASE WHEN h.calculated_level + 1 > 3 THEN 3 ELSE h.calculated_level + 1 END,
+		h.path || m.category_name
 	FROM mastercashflowcategory m
 	INNER JOIN category_hierarchy h ON m.parent_category_name = h.category_name
 	WHERE h.calculated_level < 3
+	  AND NOT (m.category_name = ANY(h.path))
 )
 UPDATE mastercashflowcategory m
 SET 
@@ -565,12 +552,8 @@ WHERE m.category_id = h.category_id
 			}
 		}
 		if len(createdIDs) > 0 {
-			fmt.Printf("[DEBUG] Auto-correcting levels for %d created categories: %v\\n", len(createdIDs), createdIDs)
-			result, err := pgxPool.Exec(ctx, hierarchySQL, createdIDs)
-			if err != nil {
-				fmt.Printf("[DEBUG] Level auto-correction failed: %v\\n", err)
-			} else {
-				fmt.Printf("[DEBUG] Level auto-correction updated %d rows\\n", result.RowsAffected())
+			if _, err := pgxPool.Exec(ctx, hierarchySQL, createdIDs); err != nil {
+				api.LogError("cash flow category level correction failed: %v", err)
 			}
 		}
 
@@ -1461,6 +1444,30 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactioncashflowcategory
+			WHERE category_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.CategoryIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		session := api.GetSessionFromCtx(ctx)
 		if session == nil || session.UserID != req.UserID {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
@@ -1538,7 +1545,29 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		query := `UPDATE auditactioncashflowcategory SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (category_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, category_id`
+		if _, err := pgxPool.Exec(ctx, `
+			UPDATE mastercashflowcategory m SET
+				category_name = COALESCE(m.old_category_name, m.category_name),
+				category_type = COALESCE(m.old_category_type, m.category_type),
+				parent_category_name = COALESCE(m.old_parent_category_name, m.parent_category_name),
+				default_mapping = COALESCE(m.old_default_mapping, m.default_mapping),
+				cashflow_nature = COALESCE(m.old_cashflow_nature, m.cashflow_nature),
+				usage_flag = COALESCE(m.old_usage_flag, m.usage_flag),
+				description = COALESCE(m.old_description, m.description),
+				status = COALESCE(m.old_status, m.status),
+				category_level = COALESCE(m.old_category_level, m.category_level)
+			WHERE m.category_id IN (
+				SELECT category_id FROM auditactioncashflowcategory
+				WHERE category_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+			)`, allToReject); err != nil {
+			api.LogErrorForResponse(w, "cashflow category reject revert: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		query := `UPDATE auditactioncashflowcategory SET processing_status='REJECTED'
+, checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (category_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, category_id`
 		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to reject category actions")
@@ -1585,6 +1614,30 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactioncashflowcategory
+			WHERE category_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.CategoryIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		session := api.GetSessionFromCtx(ctx)
 		if session == nil || session.UserID != req.UserID {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
@@ -1807,7 +1860,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		userName := session.Name
 
-		if err := r.ParseMultipartForm(32 << 20); err != nil {
+		if err := r.ParseMultipartForm(uploadlimit.MaxBytes()); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
@@ -1823,7 +1876,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file: "+fileHeader.Filename)
 				return
 			}
-			fileBytes, err := io.ReadAll(file)
+			fileBytes, err := uploadlimit.ReadAllLimited(file)
 			file.Close()
 			if err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fileHeader.Filename)
@@ -2064,9 +2117,9 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			rows, err := tx.Query(ctx, insertSQL, batchID, s3KeyPtr)
 			if err != nil {
-				// Make error message user-friendly
-				errorMsg := err.Error()
-				if strings.Contains(errorMsg, "unique_category_name_not_deleted") || strings.Contains(errorMsg, constants.ErrDuplicateKey) {
+				api.LogErrorForResponse(w, "cash flow category insert: %v", err)
+				errorMsg := errtext.Detail(w, err)
+				if strings.Contains(err.Error(), "unique_category_name_not_deleted") || strings.Contains(err.Error(), constants.ErrDuplicateKey) {
 					errorMsg = "One or more category names already exist. Please ensure all category names are unique."
 				}
 				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+errorMsg)
@@ -2160,7 +2213,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		userName := session.Name
 
-		if err := r.ParseMultipartForm(64 << 20); err != nil {
+		if err := r.ParseMultipartForm(uploadlimit.MaxBytes()); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form: "+errtext.Detail(w, err))
 			return
 		}
@@ -2174,7 +2227,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		fileBytes, err := io.ReadAll(file)
+		fileBytes, err := uploadlimit.ReadAllLimited(file)
 		file.Close()
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
@@ -2267,9 +2320,6 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		if _, err := tx.Exec(ctx, "SET LOCAL synchronous_commit TO OFF"); err != nil {
-			log.Printf("UploadCashFlowCategorySimple: set synchronous_commit failed: %v", err)
-		}
 		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '5min'"); err != nil {
 			log.Printf("UploadCashFlowCategorySimple: set statement_timeout failed: %v", err)
 		}
@@ -2386,12 +2436,12 @@ WHERE m.category_name IS NULL;
 `
 		insertStart := time.Now()
 		if _, err := tx.Exec(ctx, insertSQL); err != nil {
-			// Make error message user-friendly
-			errorMsg := err.Error()
-			if strings.Contains(errorMsg, "unique_category_name_not_deleted") || strings.Contains(errorMsg, constants.ErrDuplicateKey) {
+			api.LogErrorForResponse(w, "cash flow category simple insert: %v", err)
+			errorMsg := errtext.Detail(w, err)
+			if strings.Contains(err.Error(), "unique_category_name_not_deleted") || strings.Contains(err.Error(), constants.ErrDuplicateKey) {
 				errorMsg = "One or more category names already exist. Please ensure all category names are unique."
 			}
-			api.RespondWithError(w, 500, "Insert failed: "+errorMsg)
+			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+errorMsg)
 			return
 		}
 		if s3Key != "" {
@@ -2432,15 +2482,17 @@ AND (
 
 		hierarchySQL := `
 WITH RECURSIVE affected AS (
-	SELECT m.category_id, m.category_name, m.parent_category_name, 0 AS lvl
+	SELECT m.category_id, m.category_name, m.parent_category_name, 0 AS lvl, ARRAY[m.category_name]::text[] AS path
 	FROM mastercashflowcategory m
 	WHERE m.category_name IN (SELECT category_name FROM tmp_mcc)
 	UNION ALL
 	SELECT c.category_id, c.category_name, c.parent_category_name,
-	       CASE WHEN a.lvl + 1 > 3 THEN 3 ELSE a.lvl + 1 END
+	       CASE WHEN a.lvl + 1 > 3 THEN 3 ELSE a.lvl + 1 END,
+	       a.path || c.category_name
 	FROM mastercashflowcategory c
 	JOIN affected a ON c.parent_category_name = a.category_name
 	WHERE a.lvl < 3
+	  AND NOT (c.category_name = ANY(a.path))
 )
 UPDATE mastercashflowcategory m
 SET category_level = a.lvl,

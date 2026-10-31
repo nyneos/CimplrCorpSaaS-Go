@@ -319,7 +319,7 @@ ORDER BY inflow DESC, outflow DESC;
 
 		catRows, err := pgxPool.Query(ctx, categorySQL, args...)
 		if err != nil {
-			http.Error(w, "error querying category aggregation: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error querying category aggregation: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		defer catRows.Close()
@@ -407,7 +407,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 
 		entityRows, err := pgxPool.Query(ctx, entitySQL, args...)
 		if err != nil {
-			http.Error(w, "error querying entity breakdown: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error querying entity breakdown: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		defer entityRows.Close()
@@ -478,7 +478,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 
 		txnRows, err := pgxPool.Query(ctx, txnSQL, args...)
 		if err != nil {
-			http.Error(w, "error querying transactions: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error querying transactions: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		defer txnRows.Close()
@@ -589,7 +589,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		var highestBank *BankBalanceKPI
 		highestRows, err := pgxPool.Query(ctx, highestSQL, kpiArgs...)
 		if err != nil {
-			http.Error(w, "error querying highest contributing bank: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error querying highest contributing bank: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		defer highestRows.Close()
@@ -626,7 +626,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		var lowestAcct *LowestBalanceAccount
 		lowestRows, err := pgxPool.Query(ctx, lowestSQL, kpiArgs...)
 		if err != nil {
-			http.Error(w, "error querying lowest balance account: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error querying lowest balance account: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		defer lowestRows.Close()
@@ -776,7 +776,7 @@ LIMIT ` + strconv.Itoa(txnLimit) + `;
 
 		misclassifiedRows, err := pgxPool.Query(ctx, misclassifiedSQL, args...)
 		if err != nil {
-			http.Error(w, "error querying misclassified transactions: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error querying misclassified transactions: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		defer misclassifiedRows.Close()

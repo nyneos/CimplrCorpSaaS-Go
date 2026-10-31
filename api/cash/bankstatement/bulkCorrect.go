@@ -62,6 +62,16 @@ func BulkCorrectHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		ctx := r.Context()
+		txnIDs := make([]int64, 0)
+		for _, group := range req.Corrections {
+			if group.CategoryID == "" || group.CategoryID == "UNALLOCATED" {
+				continue
+			}
+			txnIDs = append(txnIDs, group.TransactionIDs...)
+		}
+		if !requireTxnScope(ctx, w, pool, txnIDs) {
+			return
+		}
 		applied, failed := 0, 0
 
 		for _, group := range req.Corrections {

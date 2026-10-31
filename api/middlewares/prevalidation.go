@@ -4,12 +4,13 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	usersession "CimplrCorpSaas/internal/session"
+	"CimplrCorpSaas/internal/uploadlimit"
 	"CimplrCorpSaas/internal/validation"
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 
 	"net/http"
@@ -28,7 +29,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 
-			r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // 10 MB limit
+			r.Body = http.MaxBytesReader(w, r.Body, uploadlimit.MaxBytes())
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				if err.Error() == "http: request body too large" {
@@ -66,11 +67,11 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 					return
 				}
 				if isInfraError(err) {
-					logger.LogError("Session validation unavailable for user_id=%s: %v", userID, err)
-					api.RespondWithError(w, http.StatusServiceUnavailable, "Service temporarily unavailable, please retry")
+					api.LogErrorForResponse(w, "session validation unavailable: %v", err)
+					api.RespondEnvelopeError(w, http.StatusServiceUnavailable, "Service temporarily unavailable, please retry", "")
 					return
 				}
-				api.RespondWithError(w, http.StatusUnauthorized, "Validation failed: "+err.Error())
+				api.RespondEnvelopeError(w, http.StatusUnauthorized, errtext.Detail(w, err), "")
 				return
 			}
 
@@ -80,7 +81,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 					api.RespondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit, "")
 					return
 				}
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve entity hierarchy: "+err.Error())
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 				return
 			}
 
@@ -123,7 +124,8 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				if !roleMatched {
 					isRoleAdmin, dbMatched, roleErr := IsUserInAdminRole(ctx, db, userID)
 					if roleErr != nil {
-						ctx = context.WithValue(ctx, "admin_override_load_errors", []string{"role_lookup: " + roleErr.Error()})
+						api.LogErrorForResponse(w, "admin role lookup: %v", roleErr)
+						ctx = context.WithValue(ctx, "admin_override_load_errors", []string{"role_lookup failed"})
 					}
 					if isRoleAdmin {
 						roleMatched = true
@@ -151,8 +153,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 					ctx = context.WithValue(ctx, "is_admin_override", true)
 					ctx = context.WithValue(ctx, "admin_override_by", "role")
 					ctx = context.WithValue(ctx, "admin_override_role", matchedRoles)
-					// audit log
-					fmt.Printf("[AUDIT] AdminOverride applied for user=%s by=role matched=%v", userID, matchedRoles)
+					logger.LogAudit("AdminOverride applied by role")
 					adminOverrideApplied = true
 				}
 			}
@@ -395,14 +396,18 @@ func resolveEntityHierarchy(ctx context.Context, db *pgxpool.Pool, rootEntityId 
 
 	query1 := `
 	WITH RECURSIVE descendants AS (
-		SELECT entity_id, entity_name
+		SELECT entity_id, entity_name, 1 AS depth, ARRAY[entity_id::text] AS visited
 		FROM masterentitycash
 		WHERE entity_id = $1
+		  AND COALESCE(is_deleted, false) = false
 		UNION ALL
-		SELECT me.entity_id, me.entity_name
+		SELECT me.entity_id, me.entity_name, d.depth + 1, d.visited || me.entity_id::text
 		FROM masterentitycash me
 		INNER JOIN cashentityrelationships er ON me.entity_name = er.child_entity_name
 		INNER JOIN descendants d ON er.parent_entity_name = d.entity_name
+		WHERE COALESCE(me.is_deleted, false) = false
+		  AND NOT (me.entity_id::text = ANY(d.visited))
+		  AND d.depth < 32
 	)
 	SELECT DISTINCT entity_id, entity_name FROM descendants
 	`
@@ -424,14 +429,18 @@ func resolveEntityHierarchy(ctx context.Context, db *pgxpool.Pool, rootEntityId 
 
 	query2 := `
 	WITH RECURSIVE descendants AS (
-		SELECT entity_id, entity_name
+		SELECT entity_id, entity_name, 1 AS depth, ARRAY[entity_id::text] AS visited
 		FROM masterEntity
 		WHERE entity_id = $1
+		  AND COALESCE(is_deleted, false) = false
 		UNION ALL
-		SELECT me.entity_id, me.entity_name
+		SELECT me.entity_id, me.entity_name, d.depth + 1, d.visited || me.entity_id::text
 		FROM masterEntity me
 		INNER JOIN entityRelationships er ON me.entity_id = er.child_entity_id
 		INNER JOIN descendants d ON er.parent_entity_id = d.entity_id
+		WHERE COALESCE(me.is_deleted, false) = false
+		  AND NOT (me.entity_id::text = ANY(d.visited))
+		  AND d.depth < 32
 	)
 	SELECT DISTINCT entity_id, entity_name FROM descendants
 	`

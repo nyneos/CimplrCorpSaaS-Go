@@ -54,6 +54,22 @@ func RegisterMasterRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpo
 	midInvestFD := func(h http.Handler) http.Handler {
 		return middlewares.SessionMiddleware(pgxPool)(middlewares.GlobalIndependentMiddleware(pgxPool)(middlewares.GlobalDependentMiddleware(pgxPool)(middlewares.InvestmentFDMiddleware(pgxPool)(h))))
 	}
+	// RBAC: page keys match UI usePermissions / useAllTabPermissions. Default PERMISSION_ENFORCE=log.
+	permIndep := func(page, action string, h http.Handler) http.Handler {
+		return midGlobalIndep(middlewares.RequirePermission(pgxPool, page, action)(h))
+	}
+	permDep := func(page, action string, h http.Handler) http.Handler {
+		return midGlobalDep(middlewares.RequirePermission(pgxPool, page, action)(h))
+	}
+	permCash := func(page, action string, h http.Handler) http.Handler {
+		return midCash(middlewares.RequirePermission(pgxPool, page, action)(h))
+	}
+	permInvestMF := func(page, action string, h http.Handler) http.Handler {
+		return midInvestMF(middlewares.RequirePermission(pgxPool, page, action)(h))
+	}
+	permInvestFD := func(page, action string, h http.Handler) http.Handler {
+		return midInvestFD(middlewares.RequirePermission(pgxPool, page, action)(h))
+	}
 	// ----------------------------------------------
 
 	// Cost / Profit Center Master routes
@@ -82,95 +98,87 @@ func RegisterMasterRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpo
 	mux.Handle("/master/payablereceivable/audit-history", midCash(allMaster.GetPayableReceivableAuditHistory(pgxPool)))
 
 	// Counterparty Master routes
-	mux.Handle("/master/v2/counterparty/create", midCash(allMaster.CreateCounterparties(pgxPool)))
+	mux.Handle("/master/v2/counterparty/create", permCash("counterparty-master", middlewares.PermCreate, allMaster.CreateCounterparties(pgxPool)))
 	mux.Handle("/master/v2/counterparty/names", midCash(allMaster.GetCounterpartyNamesWithID(pgxPool)))
-	mux.Handle("/master/v2counterparty/updatebulk", midCash(allMaster.UpdateCounterpartyBulk(pgxPool)))
-	mux.Handle("/master/counterparty/delete", midCash(allMaster.DeleteCounterparty(pgxPool)))
-	mux.Handle("/master/v2/counterparty/bulk-approve", midCash(allMaster.BulkApproveCounterpartyActions(pgxPool)))
-	mux.Handle("/master/counterparty/bulk-reject", midCash(allMaster.BulkRejectCounterpartyActions(pgxPool)))
-	mux.Handle("/master/v2/counterparty/upload", midCash(allMaster.UploadCounterparty(pgxPool)))
+	mux.Handle("/master/v2counterparty/updatebulk", permCash("counterparty-master", middlewares.PermEdit, allMaster.UpdateCounterpartyBulk(pgxPool)))
+	mux.Handle("/master/counterparty/delete", permCash("counterparty-master", middlewares.PermDelete, allMaster.DeleteCounterparty(pgxPool)))
+	mux.Handle("/master/v2/counterparty/bulk-approve", permCash("counterparty-master", middlewares.PermApprove, allMaster.BulkApproveCounterpartyActions(pgxPool)))
+	mux.Handle("/master/counterparty/bulk-reject", permCash("counterparty-master", middlewares.PermReject, allMaster.BulkRejectCounterpartyActions(pgxPool)))
+	mux.Handle("/master/v2/counterparty/upload", permCash("counterparty-master", middlewares.PermCreate, allMaster.UploadCounterparty(pgxPool)))
 
-	mux.Handle("/master/counterparty/upload-simple", midCash(allMaster.UploadCounterpartySimple(pgxPool)))
+	mux.Handle("/master/counterparty/upload-simple", permCash("counterparty-master", middlewares.PermCreate, allMaster.UploadCounterpartySimple(pgxPool)))
 	mux.Handle("/master/counterparty/audit-history", midCash(allMaster.GetCounterpartyAuditHistory(pgxPool)))
-	mux.Handle("/master/counterparty/banks/upload-simple", midCash(allMaster.UploadCounterpartyBankSimple(pgxPool)))
+	mux.Handle("/master/counterparty/banks/upload-simple", permCash("counterparty-master", middlewares.PermCreate, allMaster.UploadCounterpartyBankSimple(pgxPool)))
 
 	mux.Handle("/master/counterparty/approved-active", midCash(allMaster.GetApprovedActiveCounterparties(pgxPool)))
 
 	mux.Handle("/master/v2/counterparty/banks", midCash(allMaster.GetCounterpartyBanks(pgxPool)))
-	mux.Handle("/master/v2/counterparty/banks/updatebulk", midCash(allMaster.UpdateCounterpartyBanksBulk(pgxPool)))
+	mux.Handle("/master/v2/counterparty/banks/updatebulk", permCash("counterparty-master", middlewares.PermEdit, allMaster.UpdateCounterpartyBanksBulk(pgxPool)))
 
 	// GL Account Master routes
-	mux.Handle("/master/v2/glaccount/create", midGlobalDep(allMaster.CreateGLAccounts(pgxPool)))
+	mux.Handle("/master/v2/glaccount/create", permDep("gl-account-master", middlewares.PermCreate, allMaster.CreateGLAccounts(pgxPool)))
 	mux.Handle("/master/v2/glaccount/hierarchy", midGlobalDep(allMaster.GetGLAccountNamesWithID(pgxPool)))
-	mux.Handle("/master/v2/glaccount/updatebulk", midGlobalDep(allMaster.UpdateAndSyncGLAccounts(pgxPool)))
-	mux.Handle("/master/v2/glaccount/delete", midGlobalDep(allMaster.DeleteGLAccount(pgxPool)))
-	mux.Handle("/master/v2/glaccount/bulk-approve", midGlobalDep(allMaster.BulkApproveGLAccountActions(pgxPool)))
-	mux.Handle("/master/v2/glaccount/bulk-reject", midGlobalDep(allMaster.BulkRejectGLAccountActions(pgxPool)))
-	mux.Handle("/master/glaccount/upload", midGlobalDep(allMaster.UploadGLAccount(pgxPool)))
+	mux.Handle("/master/v2/glaccount/updatebulk", permDep("gl-account-master", middlewares.PermEdit, allMaster.UpdateAndSyncGLAccounts(pgxPool)))
+	mux.Handle("/master/v2/glaccount/delete", permDep("gl-account-master", middlewares.PermDelete, allMaster.DeleteGLAccount(pgxPool)))
+	mux.Handle("/master/v2/glaccount/bulk-approve", permDep("gl-account-master", middlewares.PermApprove, allMaster.BulkApproveGLAccountActions(pgxPool)))
+	mux.Handle("/master/v2/glaccount/bulk-reject", permDep("gl-account-master", middlewares.PermReject, allMaster.BulkRejectGLAccountActions(pgxPool)))
+	mux.Handle("/master/glaccount/upload", permDep("gl-account-master", middlewares.PermCreate, allMaster.UploadGLAccount(pgxPool)))
 	mux.Handle("/master/glaccount/approved-active", midGlobalDep(allMaster.GetApprovedActiveGLAccounts(pgxPool)))
 	mux.Handle("/master/v2/glaccount/find-parent-at-level", midGlobalDep(allMaster.FindParentGLAccountAtLevel(pgxPool)))
-	mux.Handle("/master/glaccount/upload-simple", midGlobalDep(allMaster.UploadGLAccountSimple(pgxPool)))
+	mux.Handle("/master/glaccount/upload-simple", permDep("gl-account-master", middlewares.PermCreate, allMaster.UploadGLAccountSimple(pgxPool)))
 	mux.Handle("/master/glaccount/audit-history", midGlobalDep(allMaster.GetGLAccountMasterAuditHistory(pgxPool)))
 
 	// Cash Flow Category Master routes
-	mux.Handle("/master/cashflow-category/delete", midCash(allMaster.DeleteCashFlowCategory(pgxPool)))
+	mux.Handle("/master/cashflow-category/delete", permCash("cashflow-category-master", middlewares.PermDelete, allMaster.DeleteCashFlowCategory(pgxPool)))
 	mux.Handle("/master/v2/cashflow-category/hierarchy", midCash(allMaster.GetCashFlowCategoryHierarchyPGX(pgxPool)))
 	mux.Handle("/master/cashflow-category/find-parent-at-level", midCash(allMaster.FindParentCashFlowCategoryAtLevel(pgxPool)))
 	mux.Handle("/master/cashflow-category/names", midCash(allMaster.GetCashFlowCategoryNamesWithID(pgxPool)))
-	mux.Handle("/master/v2/cashflow-category/updatebulk", midCash(allMaster.UpdateCashFlowCategoryBulk(pgxPool)))
-	mux.Handle("/master/cashflow-category/bulk-reject", midCash(allMaster.BulkRejectCashFlowCategoryActions(pgxPool)))
-	mux.Handle("/master/cashflow-category/bulk-approve", midCash(allMaster.BulkApproveCashFlowCategoryActions(pgxPool)))
+	mux.Handle("/master/v2/cashflow-category/updatebulk", permCash("cashflow-category-master", middlewares.PermEdit, allMaster.UpdateCashFlowCategoryBulk(pgxPool)))
+	mux.Handle("/master/cashflow-category/bulk-reject", permCash("cashflow-category-master", middlewares.PermReject, allMaster.BulkRejectCashFlowCategoryActions(pgxPool)))
+	mux.Handle("/master/cashflow-category/bulk-approve", permCash("cashflow-category-master", middlewares.PermApprove, allMaster.BulkApproveCashFlowCategoryActions(pgxPool)))
 	mux.Handle("/master/cashflow-category/audit-history", midCash(allMaster.GetCashFlowCategoryAuditHistory(pgxPool)))
-	mux.Handle("/master/v2/cashflow-category/bulk-create-sync", midCash(allMaster.CreateAndSyncCashFlowCategories(pgxPool)))
-	mux.Handle("/master/cashflow-category/upload", midCash(allMaster.UploadCashFlowCategory(pgxPool)))
+	mux.Handle("/master/v2/cashflow-category/bulk-create-sync", permCash("cashflow-category-master", middlewares.PermCreate, allMaster.CreateAndSyncCashFlowCategories(pgxPool)))
+	mux.Handle("/master/cashflow-category/upload", permCash("cashflow-category-master", middlewares.PermCreate, allMaster.UploadCashFlowCategory(pgxPool)))
 
-	mux.Handle("/master/cashflow-category/upload-simple", midCash(allMaster.UploadCashFlowCategorySimple(pgxPool)))
+	mux.Handle("/master/cashflow-category/upload-simple", permCash("cashflow-category-master", middlewares.PermCreate, allMaster.UploadCashFlowCategorySimple(pgxPool)))
 	// Currency Master routes (pgx-backed)
-	mux.Handle("/master/currency/create", midGlobalIndep(allMaster.CreateCurrencyMaster(pgxPool)))
+	mux.Handle("/master/currency/create", permIndep("currency-master", middlewares.PermCreate, allMaster.CreateCurrencyMaster(pgxPool)))
 	mux.Handle("/master/currency/all", midGlobalIndep(allMaster.GetAllCurrencyMaster(pgxPool)))
-	mux.Handle("/master/currency/update", midGlobalIndep(allMaster.UpdateCurrencyMasterBulk(pgxPool)))
-	mux.Handle("/master/currency/bulk-approve", midGlobalIndep(allMaster.BulkApproveAuditActions(pgxPool)))
-	mux.Handle("/master/currency/bulk-reject", midGlobalIndep(allMaster.BulkRejectAuditActions(pgxPool)))
-	mux.Handle("/master/currency/bulk-delete", midGlobalIndep(allMaster.BulkDeleteCurrencyAudit(pgxPool)))
+	mux.Handle("/master/currency/update", permIndep("currency-master", middlewares.PermEdit, allMaster.UpdateCurrencyMasterBulk(pgxPool)))
+	mux.Handle("/master/currency/bulk-approve", permIndep("currency-master", middlewares.PermApprove, allMaster.BulkApproveAuditActions(pgxPool)))
+	mux.Handle("/master/currency/bulk-reject", permIndep("currency-master", middlewares.PermReject, allMaster.BulkRejectAuditActions(pgxPool)))
+	mux.Handle("/master/currency/bulk-delete", permIndep("currency-master", middlewares.PermDelete, allMaster.BulkDeleteCurrencyAudit(pgxPool)))
 	mux.Handle("/master/currency/audit-history", midGlobalIndep(allMaster.GetCurrencyMasterAuditHistory(pgxPool)))
 	mux.Handle("/master/currency/active-approved", midGlobalIndep(allMaster.GetActiveApprovedCurrencyCodes(pgxPool)))
 
 	// Bank Master routes (pgx-backed)
-	mux.Handle("/master/bank/create", midGlobalIndep(allMaster.CreateBankMaster(pgxPool)))
-	mux.Handle("/master/bank/upload", midGlobalIndep(allMaster.UploadBank(pgxPool)))
+	mux.Handle("/master/bank/create", permIndep("bank-master", middlewares.PermCreate, allMaster.CreateBankMaster(pgxPool)))
+	mux.Handle("/master/bank/upload", permIndep("bank-master", middlewares.PermCreate, allMaster.UploadBank(pgxPool)))
 	mux.Handle("/master/bank/all", midGlobalIndep(allMaster.GetAllBankMaster(pgxPool)))
 	mux.Handle("/master/bank/names", midGlobalIndep(allMaster.GetBankNamesWithID(pgxPool)))
-	mux.Handle("/master/bank/update", midGlobalIndep(allMaster.UpdateBankMasterBulk(pgxPool)))
-	mux.Handle("/master/bank/bulk-approve", midGlobalIndep(allMaster.BulkApproveBankAuditActions(pgxPool)))
-	mux.Handle("/master/bank/bulk-reject", midGlobalIndep(allMaster.BulkRejectBankAuditActions(pgxPool)))
-	mux.Handle("/master/bank/bulk-delete", midGlobalIndep(allMaster.BulkDeleteBankAudit(pgxPool)))
+	mux.Handle("/master/bank/update", permIndep("bank-master", middlewares.PermEdit, allMaster.UpdateBankMasterBulk(pgxPool)))
+	mux.Handle("/master/bank/bulk-approve", permIndep("bank-master", middlewares.PermApprove, allMaster.BulkApproveBankAuditActions(pgxPool)))
+	mux.Handle("/master/bank/bulk-reject", permIndep("bank-master", middlewares.PermReject, allMaster.BulkRejectBankAuditActions(pgxPool)))
+	mux.Handle("/master/bank/bulk-delete", permIndep("bank-master", middlewares.PermDelete, allMaster.BulkDeleteBankAudit(pgxPool)))
 	mux.Handle("/master/bank/audit-history", midGlobalIndep(allMaster.GetBankMasterAuditHistory(pgxPool)))
 
 	// Bank Account Master routes
-	mux.Handle("/master/bankaccount/create", midCash(allMaster.CreateBankAccountMaster(pgxPool)))
-	mux.Handle("/master/bankaccount/upload", midCash(allMaster.UploadBankAccount(pgxPool)))
+	mux.Handle("/master/bankaccount/create", permCash("bank-account-master", middlewares.PermCreate, allMaster.CreateBankAccountMaster(pgxPool)))
+	mux.Handle("/master/bankaccount/upload", permCash("bank-account-master", middlewares.PermCreate, allMaster.UploadBankAccount(pgxPool)))
 	// mux.Handle("/master/bankaccount/all", midCash(allMaster.GetAllBankAccountMaster(pgxPool)))
-	mux.Handle("/master/bankaccount/update", midCash(allMaster.UpdateBankAccountMasterBulk(pgxPool)))
-	mux.Handle("/master/bankaccount/bulk-delete", midCash(allMaster.BulkDeleteBankAccountAudit(pgxPool)))
+	mux.Handle("/master/bankaccount/update", permCash("bank-account-master", middlewares.PermEdit, allMaster.UpdateBankAccountMasterBulk(pgxPool)))
+	mux.Handle("/master/bankaccount/bulk-delete", permCash("bank-account-master", middlewares.PermDelete, allMaster.BulkDeleteBankAccountAudit(pgxPool)))
 	mux.Handle("/master/bankaccount/audit-history", midCash(allMaster.GetBankAccountAuditHistory(pgxPool)))
-	mux.Handle("/master/bankaccount/bulk-reject", midCash(allMaster.BulkRejectBankAccountAuditActions(pgxPool)))
-	mux.Handle("/master/bankaccount/bulk-approve", midCash(allMaster.BulkApproveBankAccountAuditActions(pgxPool)))
+	mux.Handle("/master/bankaccount/bulk-reject", permCash("bank-account-master", middlewares.PermReject, allMaster.BulkRejectBankAccountAuditActions(pgxPool)))
+	mux.Handle("/master/bankaccount/bulk-approve", permCash("bank-account-master", middlewares.PermApprove, allMaster.BulkApproveBankAccountAuditActions(pgxPool)))
 	mux.Handle("/master/bankaccount/names", midCash(allMaster.GetBankNamesWithIDForAccount(pgxPool)))
 	mux.Handle("/master/bankaccount/approved-with-entity", midCash(allMaster.GetApprovedBankAccountsWithBankEntity(pgxPool)))
 	mux.Handle("/master/bankaccount/pre-populate", midCash(allMaster.GetApprovedBankAccountsSimple(pgxPool)))
 	mux.Handle("/master/bankaccount/all", midCash(allMaster.GetBankAccountMetaAll(pgxPool)))
 	mux.Handle("/master/bankaccount/for-user", midCash(allMaster.GetBankAccountsForUser(pgxPool)))
 
-	// Entity Master routes
-	mux.Handle("/master/entity/bulk-create-sync", midGlobalIndep(allMaster.CreateAndSyncEntities(pgxPool)))
-	mux.Handle("/master/entity/hierarchy", midGlobalIndep(allMaster.GetEntityHierarchy(pgxPool)))
-	mux.Handle("/master/entity/delete", midGlobalIndep(allMaster.DeleteEntity(pgxPool)))
-	mux.Handle("/master/entity/findParentAtLevel", midGlobalIndep(allMaster.FindParentAtLevel(pgxPool)))
-	mux.Handle("/master/entity/approve", midGlobalIndep(allMaster.ApproveEntity(pgxPool)))
-	mux.Handle("/master/entity/reject-bulk", midGlobalIndep(allMaster.RejectEntitiesBulk(pgxPool)))
-	mux.Handle("/master/entity/update", midGlobalIndep(allMaster.UpdateEntity(pgxPool)))
-	mux.Handle("/master/entity/all-names", midGlobalIndep(allMaster.GetAllEntityNames(pgxPool)))
-	mux.Handle("/master/entity/render-vars-hierarchical", midGlobalIndep(allMaster.GetRenderVarsHierarchical(pgxPool)))
+	// Entity Master (/master/entity/*) deprecated 2026-10-31 — product surface removed.
+	// public.masterentity retained for JOIN fallbacks (e.g. bankAccountMaster). Use /master/entitycash/*.
 
 	// Entity Cash Master routes (pgx-backed)
 	mux.Handle("/master/entitycash/bulk-create-sync", midCash(allMaster.CreateAndSyncCashEntities(pgxPool)))
@@ -188,27 +196,27 @@ func RegisterMasterRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpo
 	mux.Handle("/master/entitycash/all-names", midCash(allMaster.GetCashEntityNamesWithID(pgxPool)))
 
 	//Amc Master routes
-	mux.Handle("/master/amc/create", midGlobalDep(investmentMasters.CreateAMCsingle(pgxPool)))
-	mux.Handle("/master/amc/bulk-create", midGlobalDep(investmentMasters.CreateAMC(pgxPool)))
-	mux.Handle("/master/amc/bulk-update", midGlobalDep(investmentMasters.UpdateAMCBulk(pgxPool)))
-	mux.Handle("/master/amc/update", midGlobalDep(investmentMasters.UpdateAMC(pgxPool)))
-	mux.Handle("/master/amc/bulk-delete", midGlobalDep(investmentMasters.DeleteAMC(pgxPool)))
-	mux.Handle("/master/amc/bulk-approve", midGlobalDep(investmentMasters.BulkApproveAMCActions(pgxPool)))
-	mux.Handle("/master/amc/bulk-reject", midGlobalDep(investmentMasters.BulkRejectAMCActions(pgxPool)))
+	mux.Handle("/master/amc/create", permDep("amc-master", middlewares.PermCreate, investmentMasters.CreateAMCsingle(pgxPool)))
+	mux.Handle("/master/amc/bulk-create", permDep("amc-master", middlewares.PermCreate, investmentMasters.CreateAMC(pgxPool)))
+	mux.Handle("/master/amc/bulk-update", permDep("amc-master", middlewares.PermEdit, investmentMasters.UpdateAMCBulk(pgxPool)))
+	mux.Handle("/master/amc/update", permDep("amc-master", middlewares.PermEdit, investmentMasters.UpdateAMC(pgxPool)))
+	mux.Handle("/master/amc/bulk-delete", permDep("amc-master", middlewares.PermDelete, investmentMasters.DeleteAMC(pgxPool)))
+	mux.Handle("/master/amc/bulk-approve", permDep("amc-master", middlewares.PermApprove, investmentMasters.BulkApproveAMCActions(pgxPool)))
+	mux.Handle("/master/amc/bulk-reject", permDep("amc-master", middlewares.PermReject, investmentMasters.BulkRejectAMCActions(pgxPool)))
 	mux.Handle("/master/amc/all", midGlobalDep(investmentMasters.GetAMCsWithAudit(pgxPool)))
 	mux.Handle("/master/amc/approved-active", midGlobalDep(investmentMasters.GetApprovedActiveAMCs(pgxPool)))
-	mux.Handle("/master/amc/upload", midGlobalDep(investmentMasters.UploadAMCSimple(pgxPool)))
+	mux.Handle("/master/amc/upload", permDep("amc-master", middlewares.PermCreate, investmentMasters.UploadAMCSimple(pgxPool)))
 	mux.Handle("/master/amc/audit-history", midGlobalDep(investmentMasters.GetAMCAuditHistory(pgxPool)))
 
 	// Scheme Master routes
-	mux.Handle("/master/scheme/upload", midInvestMF(investmentMasters.UploadSchemeSimple(pgxPool)))
-	mux.Handle("/master/scheme/create", midInvestMF(investmentMasters.CreateSchemeSingle(pgxPool)))
-	mux.Handle("/master/scheme/bulk-create", midInvestMF(investmentMasters.CreateScheme(pgxPool)))
-	mux.Handle("/master/scheme/update", midInvestMF(investmentMasters.UpdateScheme(pgxPool)))
-	mux.Handle("/master/scheme/bulk-update", midInvestMF(investmentMasters.UpdateSchemeBulk(pgxPool)))
-	mux.Handle("/master/scheme/bulk-delete", midInvestMF(investmentMasters.DeleteScheme(pgxPool)))
-	mux.Handle("/master/scheme/bulk-approve", midInvestMF(investmentMasters.BulkApproveSchemeActions(pgxPool)))
-	mux.Handle("/master/scheme/bulk-reject", midInvestMF(investmentMasters.BulkRejectSchemeActions(pgxPool)))
+	mux.Handle("/master/scheme/upload", permInvestMF("scheme-master", middlewares.PermCreate, investmentMasters.UploadSchemeSimple(pgxPool)))
+	mux.Handle("/master/scheme/create", permInvestMF("scheme-master", middlewares.PermCreate, investmentMasters.CreateSchemeSingle(pgxPool)))
+	mux.Handle("/master/scheme/bulk-create", permInvestMF("scheme-master", middlewares.PermCreate, investmentMasters.CreateScheme(pgxPool)))
+	mux.Handle("/master/scheme/update", permInvestMF("scheme-master", middlewares.PermEdit, investmentMasters.UpdateScheme(pgxPool)))
+	mux.Handle("/master/scheme/bulk-update", permInvestMF("scheme-master", middlewares.PermEdit, investmentMasters.UpdateSchemeBulk(pgxPool)))
+	mux.Handle("/master/scheme/bulk-delete", permInvestMF("scheme-master", middlewares.PermDelete, investmentMasters.DeleteScheme(pgxPool)))
+	mux.Handle("/master/scheme/bulk-approve", permInvestMF("scheme-master", middlewares.PermApprove, investmentMasters.BulkApproveSchemeActions(pgxPool)))
+	mux.Handle("/master/scheme/bulk-reject", permInvestMF("scheme-master", middlewares.PermReject, investmentMasters.BulkRejectSchemeActions(pgxPool)))
 	mux.Handle("/master/scheme/approved-active", midInvestMF(investmentMasters.GetApprovedActiveSchemes(pgxPool)))
 	mux.Handle("/master/scheme/all", midInvestMF(investmentMasters.GetSchemesWithAudit(pgxPool)))
 	mux.Handle("/master/scheme/by-amc", midInvestMF(investmentMasters.GetApprovedActiveSchemesByAMC(pgxPool)))
@@ -285,17 +293,17 @@ func RegisterMasterRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpo
 	mux.Handle("/master/compounding-frequency/get", midInvestFD(investmentMasters.GetCompoundingFrequency(pgxPool)))
 
 	// TDS Plan Master routes
-	mux.Handle("/master/tds-plan/create", midInvestFD(investmentMasters.CreateTDSPlanSingle(pgxPool)))
-	mux.Handle("/master/tds-plan/bulk-create", midInvestFD(investmentMasters.CreateTDSPlan(pgxPool)))
-	mux.Handle("/master/tds-plan/update", midInvestFD(investmentMasters.UpdateTDSPlan(pgxPool)))
-	mux.Handle("/master/tds-plan/bulk-update", midInvestFD(investmentMasters.UpdateTDSPlanBulk(pgxPool)))
-	mux.Handle("/master/tds-plan/bulk-delete", midInvestFD(investmentMasters.DeleteTDSPlan(pgxPool)))
-	mux.Handle("/master/tds-plan/bulk-approve", midInvestFD(investmentMasters.BulkApproveTDSPlan(pgxPool)))
-	mux.Handle("/master/tds-plan/bulk-reject", midInvestFD(investmentMasters.BulkRejectTDSPlan(pgxPool)))
+	mux.Handle("/master/tds-plan/create", permInvestFD("tds-master", middlewares.PermCreate, investmentMasters.CreateTDSPlanSingle(pgxPool)))
+	mux.Handle("/master/tds-plan/bulk-create", permInvestFD("tds-master", middlewares.PermCreate, investmentMasters.CreateTDSPlan(pgxPool)))
+	mux.Handle("/master/tds-plan/update", permInvestFD("tds-master", middlewares.PermEdit, investmentMasters.UpdateTDSPlan(pgxPool)))
+	mux.Handle("/master/tds-plan/bulk-update", permInvestFD("tds-master", middlewares.PermEdit, investmentMasters.UpdateTDSPlanBulk(pgxPool)))
+	mux.Handle("/master/tds-plan/bulk-delete", permInvestFD("tds-master", middlewares.PermDelete, investmentMasters.DeleteTDSPlan(pgxPool)))
+	mux.Handle("/master/tds-plan/bulk-approve", permInvestFD("tds-master", middlewares.PermApprove, investmentMasters.BulkApproveTDSPlan(pgxPool)))
+	mux.Handle("/master/tds-plan/bulk-reject", permInvestFD("tds-master", middlewares.PermReject, investmentMasters.BulkRejectTDSPlan(pgxPool)))
 	mux.Handle("/master/tds-plan/approved-active", midInvestFD(investmentMasters.GetTDSPlansApprovedActive(pgxPool)))
 	mux.Handle("/master/tds-plan/all", midInvestFD(investmentMasters.GetTDSPlansWithAudit(pgxPool)))
 	mux.Handle("/master/tds-plan/audit-history", midInvestFD(investmentMasters.GetTDSPlanAuditHistory(pgxPool)))
-	mux.Handle("/master/tds-plan/upload", midInvestFD(investmentMasters.UploadTDSPlanSimple(pgxPool)))
+	mux.Handle("/master/tds-plan/upload", permInvestFD("tds-master", middlewares.PermCreate, investmentMasters.UploadTDSPlanSimple(pgxPool)))
 	mux.Handle("/master/tds-plan/get", midInvestFD(investmentMasters.GetTDSPlan(pgxPool)))
 
 	// Folio Master routes
@@ -508,16 +516,8 @@ func RegisterMasterRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpo
 	mux.Handle("/master/entitycash/additional-files/approve-delete", midCash(entityCashMF.ApproveDelete))
 	mux.Handle("/master/entitycash/additional-files/reject-delete", midCash(entityCashMF.RejectDelete))
 
-	// Entity Master
-	entityMF := allMaster.EntityMasterFilesHandlers(pgxPool)
-	mux.Handle("/master/entity/additional-files/list", midGlobalIndep(entityMF.List))
-	mux.Handle("/master/entity/additional-files/upload", midGlobalIndep(entityMF.Upload))
-	mux.Handle("/master/entity/additional-files/download", midGlobalIndep(entityMF.Download))
-	mux.Handle("/master/entity/additional-files/download-bulk", midGlobalIndep(entityMF.DownloadBulk))
-	mux.Handle("/master/entity/additional-files/delete", midGlobalIndep(entityMF.Delete))
-	mux.Handle("/master/entity/additional-files/audit", midGlobalIndep(entityMF.Audit))
-	mux.Handle("/master/entity/additional-files/approve-delete", midGlobalIndep(entityMF.ApproveDelete))
-	mux.Handle("/master/entity/additional-files/reject-delete", midGlobalIndep(entityMF.RejectDelete))
+	// Entity Master additional-files (/master/entity/additional-files/*) deprecated 2026-10-31.
+	// Use /master/entitycash/additional-files/*.
 
 	// AMC Master
 	amcMF := investmentMasters.AMCMasterFilesHandlers(pgxPool)

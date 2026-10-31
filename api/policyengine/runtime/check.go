@@ -288,7 +288,7 @@ func RunCheck(ctx context.Context, pool *pgxpool.Pool, req CheckRequest) (CheckR
 		if err := persistExecutionRun(ctx, pool, run, nil, nil); err != nil {
 			return CheckResult{RunID: runID}, err
 		}
-		return CheckResult{RunID: runID}, nil
+		return CheckResult{RunID: runID}, fmt.Errorf("no applicable policy")
 	}
 
 	conflictReport := AnalyzeHardBlockThresholdConflicts(ConstraintsFromPolicySnapshots(policies))

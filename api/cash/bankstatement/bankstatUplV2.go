@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shakinm/xlsReader/xls"
@@ -113,7 +114,101 @@ func synthesizeStatementRowsFromLLM(maps []map[string]interface{}) [][]string {
 	return out
 }
 
-// UploadBankStatementV2WithCategorization wraps UploadBankStatementV2 and adds category intelligence and KPIs to the response.
+type statementRowsContextKey struct{}
+
+type statementRowsContext struct {
+	rows  [][]string
+	isCSV bool
+}
+
+func prepareStatementRows(fileBytes []byte) (rows [][]string, isCSV bool, ok bool) {
+	norm := fileBytes
+	if extracted := tryExtractNumbersAsXLSX(fileBytes); extracted != nil {
+		norm = extracted
+	}
+	parsed, csv, err := parseStatementBytes(norm)
+	if err != nil {
+		return nil, false, false
+	}
+	return parsed, csv, true
+}
+
+func parseStatementBytes(fileBytes []byte) ([][]string, bool, error) {
+	var rows [][]string
+	xl, xlErr := excelize.OpenReader(bytes.NewReader(fileBytes))
+	if xlErr == nil {
+		defer xl.Close()
+		sheetName := xl.GetSheetName(0)
+		rawRows, err := xl.GetRows(sheetName)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to get rows: %w", err)
+		}
+		if len(rawRows) < 2 {
+			return nil, false, errors.New("excel must have at least one data row")
+		}
+		rows = make([][]string, len(rawRows))
+		for i, rawRow := range rawRows {
+			rows[i] = make([]string, len(rawRow))
+			for j := range rawRow {
+				colName, _ := excelize.ColumnNumberToName(j + 1)
+				cellRef := fmt.Sprintf("%s%d", colName, i+1)
+				cellValue, cellErr := xl.GetCellValue(sheetName, cellRef)
+				if cellErr == nil && cellValue != "" {
+					rows[i][j] = cellValue
+				} else {
+					rows[i][j] = rawRow[j]
+				}
+			}
+		}
+		return rows, false, nil
+	}
+
+	var xlsErr error
+	tmpXlsFile, tmpErr := os.CreateTemp("", "bankstmt-*.xls")
+	if tmpErr == nil {
+		defer os.Remove(tmpXlsFile.Name())
+		defer tmpXlsFile.Close()
+		_, writeErr := tmpXlsFile.Write(fileBytes)
+		if writeErr == nil {
+			tmpXlsFile.Close()
+			var xlsBook xls.Workbook
+			xlsBook, xlsErr = xls.OpenFile(tmpXlsFile.Name())
+			if xlsErr == nil {
+				sheet, sheetErr := xlsBook.GetSheet(0)
+				if sheetErr == nil && sheet != nil {
+					for _, xlsRow := range sheet.GetRows() {
+						var rowVals []string
+						for _, col := range xlsRow.GetCols() {
+							rowVals = append(rowVals, col.GetString())
+						}
+						rows = append(rows, rowVals)
+					}
+					if len(rows) < 2 {
+						return nil, false, errors.New("xls must have at least one data row")
+					}
+					return rows, false, nil
+				}
+				xlsErr = errors.New("failed to get xls sheet")
+			}
+		} else {
+			xlsErr = writeErr
+		}
+	} else {
+		xlsErr = tmpErr
+	}
+
+	if xlsErr != nil {
+		parsed, err := parseDelimitedTextRows(fileBytes)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to parse excel, xls, or csv: %w", xlErr)
+		}
+		if len(parsed) < 2 {
+			return nil, false, errors.New("csv must have at least one data row")
+		}
+		return parsed, true, nil
+	}
+	return nil, false, fmt.Errorf("failed to parse excel, xls, or csv: %w", xlErr)
+}
 
 func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.Pool, file multipart.File, fileHash string, opts UploadOpts) (map[string]interface{}, error) {
 	useMapping := opts.UseMapping
@@ -147,91 +242,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 
 	var rows [][]string
 	var isCSV bool
-
-	//var isXLS bool Try Excel first
-	xl, xlErr := excelize.OpenReader(bytes.NewReader(tmpFile))
-	if xlErr == nil {
-		defer xl.Close()
-		sheetName := xl.GetSheetName(0)
-		// Use GetCellValue instead of GetRows to properly handle formulas and formatting
-		rawRows, err := xl.GetRows(sheetName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get rows: %w", err)
-		}
-		if len(rawRows) < 2 {
-			return nil, errors.New("excel must have at least one data row")
-		}
-
-		// Re-read each cell using GetCellValue to evaluate formulas and handle special formatting
-		rows = make([][]string, len(rawRows))
-		for i, rawRow := range rawRows {
-			rows[i] = make([]string, len(rawRow))
-			for j := range rawRow {
-				// Convert column index to Excel column name (0->A, 1->B, etc.)
-				colName, _ := excelize.ColumnNumberToName(j + 1)
-				cellRef := fmt.Sprintf("%s%d", colName, i+1)
-				cellValue, cellErr := xl.GetCellValue(sheetName, cellRef)
-				if cellErr == nil && cellValue != "" {
-					rows[i][j] = cellValue
-				} else {
-					// Fallback to raw row value if GetCellValue fails
-					rows[i][j] = rawRow[j]
-				}
-			}
-		}
-
-		isCSV = false
-
+	if opts.RowsReady {
+		rows = opts.ParsedRows
+		isCSV = opts.ParsedCSV
 	} else {
-		// Try XLS (legacy Excel) using shakinm/xlsReader which properly handles formulas and formatting
-		// Write to temp file since xlsReader works with file paths
-		var xlsErr error
-		tmpXlsFile, tmpErr := os.CreateTemp("", "bankstmt-*.xls")
-		if tmpErr == nil {
-			defer os.Remove(tmpXlsFile.Name())
-			defer tmpXlsFile.Close()
-			_, writeErr := tmpXlsFile.Write(tmpFile)
-			if writeErr == nil {
-				tmpXlsFile.Close() // Close before reading
-				var xlsBook xls.Workbook
-				xlsBook, xlsErr = xls.OpenFile(tmpXlsFile.Name())
-				if xlsErr == nil {
-					sheet, sheetErr := xlsBook.GetSheet(0)
-					if sheetErr == nil && sheet != nil {
-						xlsRows := sheet.GetRows()
-						for _, xlsRow := range xlsRows {
-							var rowVals []string
-							cols := xlsRow.GetCols()
-							for _, col := range cols {
-								rowVals = append(rowVals, col.GetString())
-							}
-							rows = append(rows, rowVals)
-						}
-						if len(rows) < 2 {
-							return nil, errors.New("xls must have at least one data row")
-						}
-						isCSV = false
-					} else {
-						xlsErr = errors.New("failed to get xls sheet")
-					}
-				}
-			} else {
-				xlsErr = writeErr
-			}
-		} else {
-			xlsErr = tmpErr
-		}
-
-		// If XLS failed, try CSV / TSV
-		if xlsErr != nil {
-			rows, err = parseDelimitedTextRows(tmpFile)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse excel, xls, or csv: %w", xlErr)
-			}
-			if len(rows) < 2 {
-				return nil, errors.New("csv must have at least one data row")
-			}
-			isCSV = true
+		var parseErr error
+		rows, isCSV, parseErr = parseStatementBytes(tmpFile)
+		if parseErr != nil {
+			return nil, parseErr
 		}
 	}
 
@@ -498,16 +516,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 	}
 
 	// Lookup entity_id and bank_name from masterbankaccount/masterbank
+	// (account_number + scoped entity_id — same dual key as AUD-294 list joins)
 	var bankName string
 	logger.LogInfo("[BANK-UPLOAD-DEBUG] Looking up account in masterbankaccount for accountNumber=%q", accountNumber)
-	err = pool.QueryRow(ctx, `
-		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
-		FROM public.masterbankaccount mba
-		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-		WHERE mba.account_number = $1 AND mba.is_deleted = false
-	`, accountNumber).Scan(&entityID, &bankName, &accountName)
+	entityID, bankName, accountName, err = lookupMasterBankAccountForUpload(ctx, pool, accountNumber)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 			// Primary candidate not found.
 			//
 			// Strategy (in priority order):
@@ -621,26 +635,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			// Single batch DB query instead of N serial round-trips
 			matched := false
 			if len(candidates) > 0 {
-				rows2, qErr := pool.Query(ctx, `
-    SELECT mba.account_number, mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
-    FROM public.masterbankaccount mba
-    LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-    WHERE mba.account_number = ANY($1) AND mba.is_deleted = false
-`, candidates)
+				dbMatches, qErr := lookupMasterBankAccountsByCandidates(ctx, pool, candidates)
 				if qErr != nil {
 					return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, qErr)
 				}
-				// Build a map of accountNumber → (entityID, bankName, accountName) for all DB matches
-				type acctRow struct{ eID, bName, aName string }
-				dbMatches := map[string]acctRow{}
-				for rows2.Next() {
-					var acNum string
-					var ar acctRow
-					if sErr := rows2.Scan(&acNum, &ar.eID, &ar.bName, &ar.aName); sErr == nil {
-						dbMatches[acNum] = ar
-					}
-				}
-				rows2.Close()
 				// Pick the first candidate (in priority order) that the DB confirmed
 				for _, cand := range candidates {
 					if ar, ok := dbMatches[cand]; ok {
@@ -691,7 +689,11 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 	// Currency enforcement (entity -> bank -> account -> currency)
 	var acctCurrency sql.NullString
 	if curCodes := ctxApprovedCurrencies(ctx); len(curCodes) > 0 {
-		_ = pool.QueryRow(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
+		_ = pool.QueryRow(ctx, `
+			SELECT mba.currency FROM public.masterbankaccount mba
+			WHERE mba.account_number = $1 AND mba.entity_id::text = $2
+			  AND COALESCE(mba.is_deleted, false) = false
+			LIMIT 1`, accountNumber, entityID).Scan(&acctCurrency)
 		if acctCurrency.Valid && strings.TrimSpace(acctCurrency.String) != "" {
 			if !ctxutil.FromContext(ctx).HasApprovedCurrency(acctCurrency.String) {
 				return nil, errors.New(constants.ErrCurrencyNotAllowed)
@@ -1703,6 +1705,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 	dataRows := rows[txnHeaderIdx+1:]
 	dataRows = MergeMultiLineDescriptions(dataRows, mergeDateIdx, mergeDescIdx)
 
+	// AUD-239: one preferred date layout for this upload (not shared across files).
+	dateCache := &DateLayoutCache{}
+
 	// iterate with index so we can log original row number
 	for ri, row := range dataRows {
 		rowNum := txnHeaderIdx + 1 + ri
@@ -1814,8 +1819,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			}
 			valueDateStr := row[colIdx[valueDateHeader]]
 			transactionDateStr := row[colIdx["Date"]]
-			valueDate, _ = parseDateDDMMFirst(valueDateStr)
-			transactionDate, _ = parseDateDDMMFirst(transactionDateStr)
+			valueDate, _ = parseDateDDMMFirstCached(dateCache, valueDateStr)
+			transactionDate, _ = parseDateDDMMFirstCached(dateCache, transactionDateStr)
 			// If only one of the two dates parsed, mirror it to the other to avoid skipping
 			if valueDate.IsZero() && !transactionDate.IsZero() {
 				valueDate = transactionDate
@@ -2070,9 +2075,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 			}
 			valueDateStr = sanitizeDateStr(valueDateStr)
 			transactionDateStr = sanitizeDateStr(transactionDateStr)
-			valueDate = tryParseDateWithExcelSerial(valueDateStr)
-			transactionDate = tryParseDateWithExcelSerial(transactionDateStr)
-			postedDate = tryParseDateWithExcelSerial(postedDateStr)
+			valueDate = tryParseDateWithExcelSerialCached(dateCache, valueDateStr)
+			transactionDate = tryParseDateWithExcelSerialCached(dateCache, transactionDateStr)
+			postedDate = tryParseDateWithExcelSerialCached(dateCache, postedDateStr)
 			// Prefer posted date when one of the dates is missing but posted date exists
 			if valueDate.IsZero() && !postedDate.IsZero() {
 				valueDate = postedDate
@@ -3170,11 +3175,16 @@ func UploadMultiAccountBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 			return
 		}
 
-		// Parse CSV / XLSX / XLS → uniform [][]string
-		rows, parseErr := parseFileToRows(fileBytes)
-		if parseErr != nil {
-			apictx.RespondEnvelopeError(w, http.StatusBadRequest, "Unable to parse file. Please upload a valid CSV, XLSX, or XLS file.", "")
-			return
+		var rows [][]string
+		if cached, ok := r.Context().Value(statementRowsContextKey{}).(statementRowsContext); ok && len(cached.rows) > 0 {
+			rows = cached.rows
+		} else {
+			var parseErr error
+			rows, parseErr = parseFileToRows(fileBytes)
+			if parseErr != nil {
+				apictx.RespondEnvelopeError(w, http.StatusBadRequest, "Unable to parse file. Please upload a valid CSV, XLSX, or XLS file.", "")
+				return
+			}
 		}
 		if len(rows) < 1 {
 			apictx.RespondEnvelopeError(w, http.StatusBadRequest, "File contains no rows.", "")

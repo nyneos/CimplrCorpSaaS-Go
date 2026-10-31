@@ -22,13 +22,20 @@ func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, chain func(http.Hand
 	mux.Handle("/domain-catalog/dms-binding", chain(http.HandlerFunc(HandleDmsBinding(pool))))
 
 	// Write side — seeding/admin, no maker-checker (see upsert.go).
-	mux.Handle("/domain-catalog/module/upsert", chain(api.RequireAdminOverride(http.HandlerFunc(HandleModuleUpsert(pool)))))
-	mux.Handle("/domain-catalog/module-alias/upsert", chain(api.RequireAdminOverride(http.HandlerFunc(HandleModuleAliasUpsert(pool)))))
-	mux.Handle("/domain-catalog/sub-module/upsert", chain(api.RequireAdminOverride(http.HandlerFunc(HandleSubModuleUpsert(pool)))))
-	mux.Handle("/domain-catalog/sub-module-alias/upsert", chain(api.RequireAdminOverride(http.HandlerFunc(HandleSubModuleAliasUpsert(pool)))))
-	mux.Handle("/domain-catalog/part/upsert", chain(api.RequireAdminOverride(http.HandlerFunc(HandlePartUpsert(pool)))))
-	mux.Handle("/domain-catalog/part-alias/upsert", chain(api.RequireAdminOverride(http.HandlerFunc(HandlePartAliasUpsert(pool)))))
-	mux.Handle("/domain-catalog/field/upsert", chain(api.RequireAdminOverride(http.HandlerFunc(HandleFieldUpsert(pool)))))
-	mux.Handle("/domain-catalog/field-alias/upsert", chain(api.RequireAdminOverride(http.HandlerFunc(HandleFieldAliasUpsert(pool)))))
-	mux.Handle("/domain-catalog/fields/bulk-upsert", chain(api.RequireAdminOverride(http.HandlerFunc(HandleBulkFieldsUpsert(pool)))))
+	mux.Handle("/domain-catalog/module/upsert", chain(limitCatalogBody(api.RequireAdminOverride(http.HandlerFunc(HandleModuleUpsert(pool))))))
+	mux.Handle("/domain-catalog/module-alias/upsert", chain(limitCatalogBody(api.RequireAdminOverride(http.HandlerFunc(HandleModuleAliasUpsert(pool))))))
+	mux.Handle("/domain-catalog/sub-module/upsert", chain(limitCatalogBody(api.RequireAdminOverride(http.HandlerFunc(HandleSubModuleUpsert(pool))))))
+	mux.Handle("/domain-catalog/sub-module-alias/upsert", chain(limitCatalogBody(api.RequireAdminOverride(http.HandlerFunc(HandleSubModuleAliasUpsert(pool))))))
+	mux.Handle("/domain-catalog/part/upsert", chain(limitCatalogBody(api.RequireAdminOverride(http.HandlerFunc(HandlePartUpsert(pool))))))
+	mux.Handle("/domain-catalog/part-alias/upsert", chain(limitCatalogBody(api.RequireAdminOverride(http.HandlerFunc(HandlePartAliasUpsert(pool))))))
+	mux.Handle("/domain-catalog/field/upsert", chain(limitCatalogBody(api.RequireAdminOverride(http.HandlerFunc(HandleFieldUpsert(pool))))))
+	mux.Handle("/domain-catalog/field-alias/upsert", chain(limitCatalogBody(api.RequireAdminOverride(http.HandlerFunc(HandleFieldAliasUpsert(pool))))))
+	mux.Handle("/domain-catalog/fields/bulk-upsert", chain(limitCatalogBody(api.RequireAdminOverride(http.HandlerFunc(HandleBulkFieldsUpsert(pool))))))
+}
+
+func limitCatalogBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		next.ServeHTTP(w, r)
+	})
 }

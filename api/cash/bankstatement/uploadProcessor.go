@@ -85,13 +85,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, pool *pgxpool.Pool, reque
 // dedup and KPI computation for structured input (no file I/O or header detection).
 // pool is used for ingestion and for the post-commit smart categorization trigger.
 func ProcessBankStatementFromStructuredInput(ctx context.Context, pool *pgxpool.Pool, input StructuredBankStatement, fileHash string, requestedIP string) (map[string]interface{}, error) {
-	var entityID, accountName, bankName string
-	err := pool.QueryRow(ctx, `
-		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
-		FROM public.masterbankaccount mba
-		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-		WHERE mba.account_number = $1 AND mba.is_deleted = false
-	`, input.AccountNumber).Scan(&entityID, &bankName, &accountName)
+	entityID, _, accountName, err := lookupMasterBankAccountForUpload(ctx, pool, input.AccountNumber)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("account %s not found in master data", input.AccountNumber)
@@ -110,7 +104,10 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, pool *pgxpool.
 	}
 
 	var acctCurrency sql.NullString
-	if err := pool.QueryRow(ctx, `SELECT currency FROM public.masterbankaccount WHERE account_number = $1`, input.AccountNumber).Scan(&acctCurrency); err != nil {
+	if err := pool.QueryRow(ctx, `
+		SELECT currency FROM public.masterbankaccount
+		WHERE account_number = $1 AND entity_id::text = $2
+		  AND COALESCE(is_deleted, false) = false`, input.AccountNumber, entityID).Scan(&acctCurrency); err != nil {
 		logger.LogError("[bankstatement upload] account currency query row failed for account=%s: %v", input.AccountNumber, err)
 	}
 

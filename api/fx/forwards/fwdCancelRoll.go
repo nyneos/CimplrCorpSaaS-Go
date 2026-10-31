@@ -228,9 +228,6 @@ func fxApprovalGate(ctx context.Context, pool *pgxpool.Pool, userID, userEmail, 
 	})
 }
 
-// rejectPendingCancelRoll marks the pending request Rejected and restores the parent
-// booking from its pending state in one transaction. table and dateColumn are fixed
-// identifiers supplied by callers, never request input.
 func rejectPendingCancelRoll(ctx context.Context, pool *pgxpool.Pool, table, dateColumn, pendingBookingStatus, bookingID, requestDate string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -250,9 +247,6 @@ func rejectPendingCancelRoll(ctx context.Context, pool *pgxpool.Pool, table, dat
 	return tx.Commit(ctx)
 }
 
-// lockBookingAndNextLedger locks the booking row for the life of tx and returns the
-// current open amount and the next ledger sequence, so concurrent approvals on the
-// same booking serialise instead of writing the same ledger_sequence.
 func lockBookingAndNextLedger(ctx context.Context, tx pgx.Tx, bookingID string) (float64, int, error) {
 	var bookingAmount float64
 	if err := tx.QueryRow(ctx, `SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1 FOR UPDATE`, bookingID).Scan(&bookingAmount); err != nil {
@@ -283,8 +277,6 @@ func executeCancellationApproval(ctx context.Context, pool *pgxpool.Pool, userID
 	return nil
 }
 
-// applyCancellationApproval applies a pending cancellation atomically using the stored
-// amount_cancelled and returns the stored cancellation reason.
 func applyCancellationApproval(ctx context.Context, pool *pgxpool.Pool, bookingID, requestDate string) (string, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -352,9 +344,6 @@ func executeRolloverApproval(ctx context.Context, pool *pgxpool.Pool, userID, bo
 	return nil
 }
 
-// applyRolloverApproval applies a pending rollover atomically using the stored
-// amount_rolled_over: ledger entry, request status, booking status and the new
-// forward booking with its opening ledger row either all commit or none do.
 func applyRolloverApproval(ctx context.Context, pool *pgxpool.Pool, bookingID, requestDate string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {

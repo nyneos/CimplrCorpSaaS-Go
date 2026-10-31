@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/utils"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -43,7 +45,7 @@ func getUserFriendlyInterestTypeError(err error, context string) (string, int) {
 	if strings.Contains(errStr, constants.ErrTxBeginFailed) ||
 		strings.Contains(errStr, constants.ErrCommitFailedCapitalized) ||
 		strings.Contains(errStr, constants.ErrAuditInsertFailed) {
-		return err.Error(), http.StatusOK
+		return errtext.Text(err), http.StatusOK
 	}
 
 	// Constraint violations - Business logic error (200 OK)
@@ -1474,6 +1476,30 @@ func BulkApproveInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_interest_type
+			WHERE interest_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.InterestIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyInterestTypeError(err, "Begin transaction failed")
@@ -1588,6 +1614,30 @@ func BulkRejectInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_interest_type
+			WHERE interest_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.InterestIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyInterestTypeError(err, "Begin transaction failed")
@@ -1596,7 +1646,30 @@ func BulkRejectInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// Bulk reject by interest IDs
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.fd_interest_type_master m SET
+				interest_type_code = COALESCE(a.old_interest_type_code, m.interest_type_code),
+				interest_type_name = COALESCE(a.old_interest_type_name, m.interest_type_name),
+				calculation_method = COALESCE(a.old_calculation_method, m.calculation_method),
+				min_tenor_days = COALESCE(a.old_min_tenor_days, m.min_tenor_days),
+				max_tenor_days = COALESCE(a.old_max_tenor_days, m.max_tenor_days),
+				is_default = COALESCE(a.old_is_default, m.is_default),
+				description = COALESCE(a.old_description, m.description),
+				is_active = COALESCE(a.old_is_active, m.is_active)
+			FROM (
+				SELECT DISTINCT ON (interest_id) *
+				FROM investment.fd_audit_interest_type
+				WHERE interest_id = ANY($1::text[])
+				  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+				ORDER BY interest_id, requested_at DESC
+			) a
+			WHERE m.interest_id = a.interest_id`, req.InterestIDs); err != nil {
+			msg, status := getUserFriendlyInterestTypeError(err, "Edit revert failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_interest_type 
 			SET processing_status = 'REJECTED', checker_by = $1, checker_at = now(), checker_comment = $2
@@ -1692,6 +1765,11 @@ func GetInterestTypesApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetInterestTypesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		lq, err := utils.DecodeListQueryBody(r, nil)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			return
+		}
 
 		q := `
 			WITH latest_audit AS (
@@ -1771,11 +1849,39 @@ func GetInterestTypesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_interest_type_master m
 			LEFT JOIN latest_audit l ON l.interest_id = m.interest_id
 			LEFT JOIN history h ON h.interest_id = m.interest_id
-			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
-		`
+			WHERE COALESCE(m.is_deleted,false)=false`
 
-		rows, err := pgxPool.Query(ctx, q)
+		args := []interface{}{}
+		argIdx := 1
+		if pat := utils.SearchPattern(lq.Search); pat != "" {
+			q += fmt.Sprintf(` AND (
+				COALESCE(m.interest_type_code,'') ILIKE $%d ESCAPE '\' OR
+				COALESCE(m.interest_type_name,'') ILIKE $%d ESCAPE '\' OR
+				COALESCE(m.calculation_method,'') ILIKE $%d ESCAPE '\' OR
+				COALESCE(l.processing_status,'') ILIKE $%d ESCAPE '\'
+			)`, argIdx, argIdx, argIdx, argIdx)
+			args = append(args, pat)
+			argIdx++
+		}
+		if lq.ProcessingStatus != "" {
+			q += fmt.Sprintf(" AND COALESCE(l.processing_status,'') = $%d", argIdx)
+			args = append(args, lq.ProcessingStatus)
+			argIdx++
+		}
+
+		total, err := utils.CountTotal(ctx, pgxPool, "SELECT COUNT(*) FROM ("+q+") c", args...)
+		if err != nil {
+			msg, status := getUserFriendlyInterestTypeError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
+			return
+		}
+
+		q += `
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC` +
+			fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+		listArgs := append(append([]interface{}{}, args...), lq.Limit, lq.Offset)
+
+		rows, err := pgxPool.Query(ctx, q, listArgs...)
 		if err != nil {
 			msg, status := getUserFriendlyInterestTypeError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, status, msg)
@@ -1784,7 +1890,7 @@ func GetInterestTypesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		fields := rows.FieldDescriptions()
-		out := make([]map[string]interface{}, 0, 1000)
+		out := make([]map[string]interface{}, 0, lq.Limit)
 
 		for rows.Next() {
 			vals, _ := rows.Values()
@@ -1805,8 +1911,8 @@ func GetInterestTypesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
-		api.LogInfo("Retrieved %d interest types with audit data", len(out))
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out, "total": total})
+		api.LogInfo("Retrieved %d interest types with audit data (total=%d)", len(out), total)
 	}
 }
 

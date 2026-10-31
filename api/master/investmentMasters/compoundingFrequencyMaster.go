@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -37,7 +38,7 @@ func getUserFriendlyCompoundingFrequencyError(err error, context string) (string
 	if strings.Contains(errStr, constants.ErrTxBeginFailed) ||
 		strings.Contains(errStr, constants.ErrCommitFailedCapitalized) ||
 		strings.Contains(errStr, constants.ErrAuditInsertFailed) {
-		return err.Error(), http.StatusOK
+		return errtext.Text(err), http.StatusOK
 	}
 
 	// Compounding Frequency-specific constraint violations - Business logic error (200 OK)
@@ -1236,6 +1237,30 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_compounding_frequency
+			WHERE frequency_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.FrequencyIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Begin transaction failed")
@@ -1349,6 +1374,30 @@ func BulkRejectCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_compounding_frequency
+			WHERE frequency_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.FrequencyIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Begin transaction failed")
@@ -1356,6 +1405,29 @@ func BulkRejectCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.fd_compounding_frequency_master m SET
+				frequency_code = COALESCE(a.old_frequency_code, m.frequency_code),
+				frequency_name = COALESCE(a.old_frequency_name, m.frequency_name),
+				frequency_type = COALESCE(a.old_frequency_type, m.frequency_type),
+				compounding_periods_per_year = COALESCE(a.old_compounding_periods_per_year, m.compounding_periods_per_year),
+				days_per_period = COALESCE(a.old_days_per_period, m.days_per_period),
+				description = COALESCE(a.old_description, m.description),
+				is_active = COALESCE(a.old_is_active, m.is_active)
+			FROM (
+				SELECT DISTINCT ON (frequency_id) *
+				FROM investment.fd_audit_compounding_frequency
+				WHERE frequency_id = ANY($1::text[])
+				  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+				ORDER BY frequency_id, requested_at DESC
+			) a
+			WHERE m.frequency_id = a.frequency_id`, req.FrequencyIDs); err != nil {
+			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Edit revert failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
 
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_compounding_frequency

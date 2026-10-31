@@ -102,8 +102,6 @@ func (c *Client) dial(ctx context.Context, cfg Config) (*client.Client, error) {
 	return imapClient, nil
 }
 
-// run executes fn on one IMAP connection. Cancelling ctx closes the connection
-// so the command goroutine cannot outlive the caller.
 func (c *Client) run(ctx context.Context, cfg Config, fn func(*client.Client) error) error {
 	imapClient, err := c.dial(ctx, cfg)
 	if err != nil {
@@ -128,7 +126,6 @@ func (c *Client) run(ctx context.Context, cfg Config, fn func(*client.Client) er
 	}
 }
 
-// TestConnection verifies IMAP credentials and folder access.
 func (c *Client) TestConnection(ctx context.Context, cfg Config, mailboxAddress string) error {
 	if err := cfg.Resolve(mailboxAddress); err != nil {
 		return err
@@ -146,7 +143,6 @@ func (c *Client) TestConnection(ctx context.Context, cfg Config, mailboxAddress 
 	})
 }
 
-// MaxUID returns the highest UID in folder (0 if empty).
 func (c *Client) MaxUID(ctx context.Context, cfg Config, folder string) (uint32, error) {
 	var max uint32
 	err := c.run(ctx, cfg, func(imapClient *client.Client) error {

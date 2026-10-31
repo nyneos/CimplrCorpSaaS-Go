@@ -11,6 +11,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/dash/ticker"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -324,7 +325,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q, qArgs...)
 
 		if err != nil {
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 			return
 		}
 		defer rows.Close()
@@ -343,13 +344,13 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var a, n, cur, bank, ent, country string
 			var bal float64
 			if err := rows.Scan(&a, &n, &cur, &bal, &bank, &ent, &country); err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 				return
 			}
 			balRows = append(balRows, balRow{Account: a, Nickname: n, Currency: cur, Balance: bal, Bank: bank, Entity: ent, Country: country})
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 			return
 		}
 		logger.LogInfo("[TIMING] cash/1-balance: %v (rows=%d)", time.Since(t0Balance), len(balRows))
@@ -459,7 +460,7 @@ GROUP BY COALESCE(NULLIF(cpi.currency_code,''), COALESCE(cp.base_currency_code,'
 				var cur string
 				if err := aggRows.Scan(&si, &so, &cur); err != nil {
 					aggRows.Close()
-					api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 					return
 				}
 				projectedInflowsINR += toINR(si, cur)
@@ -467,7 +468,7 @@ GROUP BY COALESCE(NULLIF(cpi.currency_code,''), COALESCE(cp.base_currency_code,'
 			}
 			aggRows.Close()
 			if err := aggRows.Err(); err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 				return
 			}
 		}
@@ -501,7 +502,7 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 				var ctype, cur string
 				if err := projRows.Scan(&yr, &mon, &amt, &ctype, &cur); err != nil {
 					projRows.Close()
-					api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 					return
 				}
 				daysInMonth := time.Date(yr, time.Month(mon)+1, 0, 0, 0, 0, 0, time.UTC).Day()
@@ -524,7 +525,7 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 			}
 			projRows.Close()
 			if err := projRows.Err(); err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 				return
 			}
 		}
@@ -656,10 +657,9 @@ GROUP BY t.value_date::date`
 				var dep, wdl float64
 				if err := bwRows.Scan(&txnDate, &dep, &wdl); err != nil {
 					bwRows.Close()
-					api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 					return
 				}
-				// Assign to the week-start that contains this date.
 				for _, wb := range weekSlots {
 					if !txnDate.Before(wb.ws) && !txnDate.After(wb.we) {
 						key := wb.ws.Format(constants.DateFormat)
@@ -673,7 +673,7 @@ GROUP BY t.value_date::date`
 			}
 			bwRows.Close()
 			if err := bwRows.Err(); err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 				return
 			}
 		}

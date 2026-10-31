@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -23,18 +23,6 @@ import (
 func main() {
 	_ = godotenv.Overload("../.env") // Overload forces .env to win over stale shell exports
 
-	fmt.Println("ENV CHECK:")
-	fmt.Println("  DB_USER:", os.Getenv("DB_USER"))
-	fmt.Println("  DB_HOST:", os.Getenv("DB_HOST"))
-	fmt.Println("  DB_PORT:", os.Getenv("DB_PORT"))
-	fmt.Println("  DB_NAME:", os.Getenv("DB_NAME"))
-
-	if os.Getenv("DB_PASSWORD") != "" {
-		fmt.Println("  DB_PASSWORD: [SET]")
-	} else {
-		fmt.Println("  DB_PASSWORD: [NOT SET!]")
-	}
-
 	// Initialize pgx pool for better performance
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
@@ -45,14 +33,9 @@ func main() {
 	// statement_timeout in the DSN: pgx sends it as a startup GUC and
 	// Supabase PgBouncer (port 6543) rejects it with
 	// FATAL: unsupported startup parameter: statement_timeout.
-	sslMode := os.Getenv("DB_SSLMODE")
-	if sslMode == "" {
-		sslMode = "require"
-	}
-	pgxConnStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10",
-		user, pass, host, port, name, sslMode,
-	)
+	extra := url.Values{}
+	extra.Set("connect_timeout", "10")
+	pgxConnStr := dbutil.BuildPostgresDSN(user, pass, host, port, name, dbutil.EffectiveSSLMode(host), extra)
 
 	ctx := context.Background()
 	pgxConfig, err := pgxpool.ParseConfig(pgxConnStr)
@@ -84,7 +67,6 @@ func main() {
 	if pingErr := pgxPool.Ping(ctx); pingErr != nil {
 		log.Fatalf("pgx pool ping failed — check DB_HOST/DB_PORT/DB_SSLMODE in .env: %v", pingErr)
 	}
-	log.Printf("DB connected: host=%s port=%s db=%s sslmode=%s", host, port, name, sslMode)
 
 	appmanager.SetPgxPool(pgxPool)
 
@@ -122,7 +104,7 @@ func main() {
 	<-sigs
 
 	if err := manager.StopAll(); err != nil {
-		log.Fatal("failed to stop:", err)
+		log.Printf("failed to stop: %v", err)
 	}
 
 	// Close pgx pool if initialized

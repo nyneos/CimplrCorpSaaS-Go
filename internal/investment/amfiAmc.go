@@ -102,10 +102,6 @@ func ResolveManyToSchemeAMCNames(ctx context.Context, db *pgxpool.Pool, names []
 	return out, nil
 }
 
-// resolveLoadedAMCName maps one name onto the already-loaded canonical set.
-// A "Foo Mutual Fund" NAV label matches the shortest canonical name that equals
-// "foo" or starts with "foo ". The choice is sorted, so the same input always
-// resolves to the same AMC.
 func resolveLoadedAMCName(names map[string]string, name string) string {
 	name = strings.TrimSpace(name)
 	if name == "" {

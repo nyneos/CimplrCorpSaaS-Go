@@ -364,7 +364,6 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		results := make([]map[string]interface{}, 0, len(holdings))
 		hadError := false
 
-		// STEP 2: market NAV was resolved before the transaction opened.
 		for i, h := range holdings {
 			nav := resolved[i]
 			if nav.skip {

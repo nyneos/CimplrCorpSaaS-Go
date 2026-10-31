@@ -36,45 +36,40 @@ var (
 var errMFALocked = errors.New("too many invalid codes, try again later")
 
 func requireSessionToken() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("AUTH_REQUIRE_SESSION_TOKEN")), "true")
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AUTH_REQUIRE_SESSION_TOKEN"))) {
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
-// callerSession resolves the logged-in session making the request. With a
-// session header the header decides; otherwise the body user_id is used unless
-// the token is required.
-func callerSession(r *http.Request, bodyUserID string) *UserSession {
-	if sid := strings.TrimSpace(r.Header.Get(headerSessionID)); sid != "" {
-		s := SessionByID(sid)
-		if !s.LoggedIn() {
-			return nil
-		}
-		return s
-	}
-	if requireSessionToken() {
+func callerSession(r *http.Request, _ string) *UserSession {
+	sid := strings.TrimSpace(r.Header.Get(headerSessionID))
+	if sid == "" || (requireSessionToken() && sid == "") {
 		return nil
 	}
-	return LoggedInSessionForUser(strings.TrimSpace(bodyUserID))
+	s := SessionByID(sid)
+	if !s.LoggedIn() {
+		return nil
+	}
+	return s
 }
 
-// pendingSession resolves the MFA-pending session for verify: by mfa_token when
-// sent, else by user_id unless the token is required.
-func pendingSession(mfaToken, userID string) *UserSession {
+func pendingSession(mfaToken, _ string) *UserSession {
 	if globalAuthService == nil {
+		return nil
+	}
+	t := strings.TrimSpace(mfaToken)
+	if t == "" {
 		return nil
 	}
 	a := globalAuthService
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if t := strings.TrimSpace(mfaToken); t != "" {
-		return a.users[t]
-	}
-	if requireSessionToken() {
-		return nil
-	}
-	return a.userPointers[strings.TrimSpace(userID)]
+	return a.users[t]
 }
 
-// checkTOTP validates a code once per time step with attempt limiting.
 func checkTOTP(userID, secret, code string) (bool, error) {
 	mfaAttemptsMu.Lock()
 	st := mfaAttempts[userID]
@@ -132,11 +127,22 @@ func mfaSecretKey() []byte {
 	return key
 }
 
-// sealMFASecret encrypts the TOTP secret when MFA_SECRET_KEY is configured.
+// mfaSecretKeyConfigured is true when MFA_SECRET_KEY is present and is a valid
+// 32-byte base64 key. Setup and verify fail closed when this is false.
+func mfaSecretKeyConfigured() bool {
+	return mfaSecretKey() != nil
+}
+
+func refuseMFASecretKeyMissing(w http.ResponseWriter) {
+	authEnvelopeError(w, http.StatusServiceUnavailable,
+		"MFA is unavailable: MFA_SECRET_KEY is not configured",
+		"MFA_SECRET_KEY_MISSING")
+}
+
 func sealMFASecret(secret string) (string, error) {
 	key := mfaSecretKey()
 	if key == nil {
-		return secret, nil
+		return "", errors.New("mfa secret key not configured")
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -154,7 +160,6 @@ func sealMFASecret(secret string) (string, error) {
 	return mfaSecretPrefix + base64.StdEncoding.EncodeToString(sealed), nil
 }
 
-// openMFASecret returns the plain TOTP secret for a stored value.
 func openMFASecret(stored string) (string, error) {
 	if !strings.HasPrefix(stored, mfaSecretPrefix) {
 		return stored, nil

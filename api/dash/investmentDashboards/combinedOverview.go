@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/constants"
 	portfoliopkg "CimplrCorpSaas/api/investment/portfolio"
 
@@ -91,7 +92,7 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, masterPortfolioQuery, nullIfEmpty(entityFilter), allowedEntities)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "portfolio query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "portfolio query failed: "+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -148,7 +149,7 @@ func GetCombinedInvestmentOverview(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DateTo:          toDate.Format(constants.DateFormat),
 		})
 		if txErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "transactions query failed: "+txErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "transactions query failed: "+errtext.Detail(w, txErr))
 			return
 		}
 		ytdBuys, ytdSells := portfoliopkg.SummarizeYTDFlows(txRows)

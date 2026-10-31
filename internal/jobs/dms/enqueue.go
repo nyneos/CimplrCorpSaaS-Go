@@ -165,8 +165,6 @@ func executeClaimedJob(ctx context.Context, pool *pgxpool.Pool, owner string, jo
 
 	var runID string
 	var runErr error
-	// Schedulers store run_id on the job before the long render. Reuse that row
-	// so this worker does not insert a second generation_run for the same tick.
 	claimedRunID := strings.TrimSpace(job.RunID)
 	switch strings.ToUpper(job.JobKind) {
 	case "RULE_SOURCE_IDS":
@@ -177,16 +175,11 @@ func executeClaimedJob(ctx context.Context, pool *pgxpool.Pool, owner string, jo
 		runID, runErr = runGeneration(runCtx, pool, job.RuleID, job.TriggerType, job.TriggeredBy, "", nil, claimedRunID)
 	}
 
-	// Drop the cancel hook before finish so a heartbeat that races the status
-	// update does not abort a run that already completed.
 	clearActiveGenerationLeaseCancel(job.JobID)
 
 	if runErr != nil {
 		var dispatchMiss *dispatchAfterGenerationError
 		if errors.As(runErr, &dispatchMiss) {
-			// Documents and the run row already exist. Mark the job done so the
-			// queue does not start another generation. StartDispatchWorker retries
-			// documents left GENERATED.
 			api.LogError("[DMS-QUEUE] job=%s run=%s generation done, dispatch failed — not requeueing generation: %v", job.JobID, runID, runErr)
 			if err := finishGenerationJob(ctx, pool, job.JobID, owner, job.AttemptCount, true, runID, runErr.Error(), false); err != nil {
 				api.LogError("[DMS-QUEUE] finish job=%s after dispatch failure: %v", job.JobID, err)

@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
@@ -36,7 +37,7 @@ func getUserFriendlyRateCardError(err error, context string) (string, int) {
 
 	if strings.Contains(errStr, constants.ErrTxBeginFailed) ||
 		strings.Contains(errStr, constants.ErrAuditInsertFailed) {
-		return err.Error(), http.StatusOK
+		return errtext.Text(err), http.StatusOK
 	}
 
 	if strings.Contains(errStr, "inv_rate_card_deposit_type_chk") ||
@@ -1279,6 +1280,30 @@ func BulkApproveBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_bank_rate_card
+			WHERE rate_card_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.RateCardIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyRateCardError(err, constants.ErrTransactionFailed)
@@ -1356,6 +1381,30 @@ func BulkRejectBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_bank_rate_card
+			WHERE rate_card_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.RateCardIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyRateCardError(err, constants.ErrTransactionFailed)
@@ -1363,6 +1412,38 @@ func BulkRejectBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.fd_bank_rate_card_master m SET
+				bank_code = COALESCE(a.old_bank_code, m.bank_code),
+				deposit_type = COALESCE(a.old_deposit_type, m.deposit_type),
+				min_tenor_days = COALESCE(a.old_min_tenor_days, m.min_tenor_days),
+				max_tenor_days = COALESCE(a.old_max_tenor_days, m.max_tenor_days),
+				interest_rate = COALESCE(a.old_interest_rate, m.interest_rate),
+				min_amount = COALESCE(a.old_min_amount, m.min_amount),
+				max_amount = COALESCE(a.old_max_amount, m.max_amount),
+				is_callable = COALESCE(a.old_is_callable, m.is_callable),
+				premature_withdrawal_allowed = COALESCE(a.old_premature_withdrawal_allowed, m.premature_withdrawal_allowed),
+				penalty_percentage = COALESCE(a.old_penalty_percentage, m.penalty_percentage),
+				effective_from = COALESCE(a.old_effective_from, m.effective_from),
+				effective_to = COALESCE(a.old_effective_to, m.effective_to),
+				rate_source = COALESCE(a.old_rate_source, m.rate_source),
+				special_offer = COALESCE(a.old_special_offer, m.special_offer),
+				offer_details = COALESCE(a.old_offer_details, m.offer_details),
+				is_active = COALESCE(a.old_is_active, m.is_active)
+			FROM (
+				SELECT DISTINCT ON (rate_card_id) *
+				FROM investment.fd_audit_bank_rate_card
+				WHERE rate_card_id = ANY($1::text[])
+				  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+				ORDER BY rate_card_id, requested_at DESC
+			) a
+			WHERE m.rate_card_id = a.rate_card_id`, req.RateCardIDs); err != nil {
+			msg, status := getUserFriendlyRateCardError(err, "Edit revert failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
 
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_bank_rate_card

@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/dependency"
@@ -1302,6 +1303,31 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "No GL accounts found to reject")
 			return
 		}
+		makerRows, err := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactionglaccount
+			WHERE gl_account_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, allToReject)
+		if err != nil {
+			api.LogErrorForResponse(w, "gl reject makers: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -1314,6 +1340,37 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `
+			UPDATE masterglaccount m SET
+				gl_account_code = COALESCE(m.old_gl_account_code, m.gl_account_code),
+				gl_account_name = COALESCE(m.old_gl_account_name, m.gl_account_name),
+				gl_account_type = COALESCE(m.old_gl_account_type, m.gl_account_type),
+				status = COALESCE(m.old_status, m.status),
+				source = COALESCE(m.old_source, m.source),
+				account_class = COALESCE(m.old_account_class, m.account_class),
+				normal_balance = COALESCE(m.old_normal_balance, m.normal_balance),
+				default_currency = COALESCE(m.old_default_currency, m.default_currency),
+				parent_gl_code = COALESCE(m.old_parent_gl_code, m.parent_gl_code),
+				gl_account_level = COALESCE(m.old_gl_account_level, m.gl_account_level),
+				effective_from = COALESCE(m.old_effective_from, m.effective_from),
+				effective_to = COALESCE(m.old_effective_to, m.effective_to),
+				tags = COALESCE(m.old_tags, m.tags),
+				erp_type = COALESCE(m.old_erp_type, m.erp_type),
+				external_code = COALESCE(m.old_external_code, m.external_code),
+				segment = COALESCE(m.old_segment, m.segment),
+				posting_allowed = COALESCE(m.old_posting_allowed, m.posting_allowed),
+				reconciliation_required = COALESCE(m.old_reconciliation_required, m.reconciliation_required),
+				is_cash_bank = COALESCE(m.old_is_cash_bank, m.is_cash_bank)
+			WHERE m.gl_account_id IN (
+				SELECT gl_account_id FROM auditactionglaccount
+				WHERE gl_account_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+			)`, allToReject); err != nil {
+			api.LogErrorForResponse(w, "gl reject revert: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
 
 		query := `UPDATE auditactionglaccount SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (gl_account_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, gl_account_id`
 		rows2, err := tx.Query(ctx, query, checkerBy, req.Comment, allToReject)
@@ -1411,6 +1468,31 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		allToApprove := getAllDescendants(req.GLAccountIDs)
 		if len(allToApprove) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "No GL accounts found to approve")
+			return
+		}
+		makerRows, err := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactionglaccount
+			WHERE gl_account_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, allToApprove)
+		if err != nil {
+			api.LogErrorForResponse(w, "gl approve makers: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
 			return
 		}
 
@@ -1769,15 +1851,16 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				-- Build recursive hierarchy
 				WITH RECURSIVE gl_hierarchy AS (
-				  SELECT gl_account_id, gl_account_code, parent_gl_code, 0 AS lvl
+				  SELECT gl_account_id, gl_account_code, parent_gl_code, 0 AS lvl, ARRAY[gl_account_code]::text[] AS path
 				  FROM masterglaccount
 				  WHERE parent_gl_code IS NULL OR TRIM(parent_gl_code) = ''
 
 				  UNION ALL
 
-				  SELECT c.gl_account_id, c.gl_account_code, c.parent_gl_code, p.lvl + 1
+				  SELECT c.gl_account_id, c.gl_account_code, c.parent_gl_code, p.lvl + 1, p.path || c.gl_account_code
 				  FROM masterglaccount c
 				  JOIN gl_hierarchy p ON c.parent_gl_code = p.gl_account_code
+				  WHERE NOT (c.gl_account_code = ANY(p.path)) AND p.lvl < 64
 				)
 				UPDATE masterglaccount m
 				SET gl_account_level = gh.lvl,
@@ -2171,15 +2254,16 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				-- Build recursive hierarchy
 				WITH RECURSIVE gl_hierarchy AS (
-				  SELECT gl_account_id, gl_account_code, parent_gl_code, 0 AS lvl
+				  SELECT gl_account_id, gl_account_code, parent_gl_code, 0 AS lvl, ARRAY[gl_account_code]::text[] AS path
 				  FROM masterglaccount
 				  WHERE parent_gl_code IS NULL OR TRIM(parent_gl_code) = ''
 
 				  UNION ALL
 
-				  SELECT c.gl_account_id, c.gl_account_code, c.parent_gl_code, p.lvl + 1
+				  SELECT c.gl_account_id, c.gl_account_code, c.parent_gl_code, p.lvl + 1, p.path || c.gl_account_code
 				  FROM masterglaccount c
 				  JOIN gl_hierarchy p ON c.parent_gl_code = p.gl_account_code
+				  WHERE NOT (c.gl_account_code = ANY(p.path)) AND p.lvl < 64
 				)
 				UPDATE masterglaccount m
 				SET gl_account_level = gh.lvl,

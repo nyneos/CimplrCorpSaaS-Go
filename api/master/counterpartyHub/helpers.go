@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/master/mastererrors"
 
 	"github.com/jackc/pgx/v5"
@@ -70,7 +71,7 @@ func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
 	errStr := strings.ToLower(err.Error())
 
 	if strings.Contains(errStr, "tx begin") || strings.Contains(errStr, "commit failed") || strings.Contains(errStr, "audit insert") {
-		return err.Error(), http.StatusOK
+		return errtext.Text(err), http.StatusOK
 	}
 	if strings.Contains(errStr, "duplicate key") || strings.Contains(errStr, "unique constraint") {
 		return "Duplicate entry detected. This record already exists in the system.", http.StatusOK

@@ -52,7 +52,10 @@ type UploadOpts struct {
 	// PgxPool is optional; when provided the smart categorization engine runs
 	// after the upload commit so that new transactions are classified via the
 	// full 10-step waterfall rather than the legacy engine.
-	PgxPool *pgxpool.Pool
+	PgxPool    *pgxpool.Pool
+	ParsedRows [][]string
+	ParsedCSV  bool
+	RowsReady  bool
 }
 
 // RecalculateInput matches the user's bank statement format

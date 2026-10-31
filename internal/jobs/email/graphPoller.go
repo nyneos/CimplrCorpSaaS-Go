@@ -217,6 +217,7 @@ func loadGraphInboxes(ctx context.Context, pool *pgxpool.Pool) ([]graphInboxRow,
 			&r.LastSync, &r.SentLastSync); err != nil {
 			return nil, err
 		}
+		r.Graph.ClientSecret = OpenSecret(r.Graph.ClientSecret)
 		out = append(out, r)
 	}
 	return out, rows.Err()

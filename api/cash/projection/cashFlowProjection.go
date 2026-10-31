@@ -6,6 +6,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,6 +18,25 @@ import (
 
 	"CimplrCorpSaas/internal/logger"
 )
+
+func requireCashflowProposalScope(ctx context.Context, w http.ResponseWriter, pool *pgxpool.Pool, proposalIDs []string) bool {
+	ids := make([]string, 0, len(proposalIDs))
+	for _, id := range proposalIDs {
+		if s := strings.TrimSpace(id); s != "" {
+			ids = append(ids, s)
+		}
+	}
+	if len(ids) == 0 {
+		api.RespondEnvelopeError(w, http.StatusBadRequest, "proposal_id is required", "ENTITY_REQUIRED")
+		return false
+	}
+	return api.RequireRecordsInScope(ctx, w, pool, `
+		SELECT i.entity_name::text
+		FROM unnest($1::text[]) AS pid
+		LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i
+		  ON i.proposal_id::text = pid AND COALESCE(i.is_deleted, false) = false
+	`, ids)
+}
 
 func ifaceToBool(v interface{}) bool {
 	switch val := v.(type) {
@@ -126,6 +146,9 @@ func GetProjectionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "proposal_id required")
 			return
 		}
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, []string{req.ProposalID}) {
+			return
+		}
 
 		ctx := r.Context()
 		var uploadS3Key interface{}
@@ -165,6 +188,9 @@ func GetProjectionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(req.ProposalIDs) == 0 {
 			api.RespondWithResult(w, false, constants.ErrProposalIDsRequired)
+			return
+		}
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, req.ProposalIDs) {
 			return
 		}
 
@@ -243,6 +269,9 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrProposalIDsRequired)
 			return
 		}
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, req.ProposalIDs) {
+			return
+		}
 		if strings.TrimSpace(req.Reason) == "" {
 			api.RespondWithResult(w, false, "comment required")
 			return
@@ -315,6 +344,9 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if checkerBy == "" {
 			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			return
+		}
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, req.ProposalIDs) {
 			return
 		}
 
@@ -415,6 +447,9 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 		if checkerBy == "" {
 			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			return
+		}
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, req.ProposalIDs) {
 			return
 		}
 		if len(req.ProposalIDs) == 0 {
@@ -523,7 +558,6 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				  AND aa.processing_status = 'APPROVED'
 				  AND p.proposal_id = ANY($1)
 			`
-			// A failed statement aborts the transaction, so retrying inside it can never succeed.
 			if _, err := tx.Exec(ctx, delQ, deleteProposalIDs); err != nil {
 				api.RespondWithResult(w, false, "Failed to delete proposals: "+err.Error())
 				return
@@ -847,11 +881,21 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			baseQuery += fmt.Sprintf(" AND cp.proposal_id = $%d", paramCount)
 			params = append(params, req.ProposalID)
 		}
-		if req.Entity != "" {
-			paramCount++
-			baseQuery += fmt.Sprintf(" AND cp.entity_name = $%d", paramCount)
-			params = append(params, req.Entity)
+		entityInput := api.GetEntityNamesFromCtx(r.Context())
+		if strings.TrimSpace(req.Entity) != "" {
+			entityInput = []string{strings.TrimSpace(req.Entity)}
 		}
+		entityScope := api.FilterEntitiesInScope(r.Context(), entityInput)
+		if len(entityScope) == 0 {
+			api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+				"user_id":     req.UserID,
+				"projections": []map[string]interface{}{},
+			})
+			return
+		}
+		paramCount++
+		baseQuery += fmt.Sprintf(" AND cpi.entity_name = ANY($%d)", paramCount)
+		params = append(params, entityScope)
 		if req.Department != "" {
 			paramCount++
 			baseQuery += fmt.Sprintf(" AND cp.department_id = $%d", paramCount)
@@ -1080,6 +1124,9 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if strings.TrimSpace(req.ProposalID) == "" {
 			api.RespondWithResult(w, false, "proposal_id required")
+			return
+		}
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, []string{req.ProposalID}) {
 			return
 		}
 
@@ -1407,6 +1454,11 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		names := api.FilterEntitiesInScope(ctx, api.GetEntityNamesFromCtx(ctx))
+		if len(names) == 0 {
+			api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"proposals": []interface{}{}})
+			return
+		}
 
 		q := `
 			SELECT 
@@ -1425,10 +1477,16 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC, action_id DESC
 				LIMIT 1
 			) a ON TRUE
+			WHERE EXISTS (
+				SELECT 1 FROM cashflow_proposal_item i
+				WHERE i.proposal_id = p.proposal_id
+				  AND COALESCE(i.is_deleted, false) = false
+				  AND i.entity_name = ANY($1)
+			)
 			ORDER BY p.effective_date DESC, p.proposal_id
 		`
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, names)
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to query proposals: "+err.Error())
 			return
@@ -1502,6 +1560,9 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		proposalID := ifaceToString(req.Header["proposal_id"])
+		if !requireCashflowProposalScope(ctx, w, pgxPool, []string{proposalID}) {
+			return
+		}
 
 		var curName, curCurrency, curType string
 		var curEffDate time.Time

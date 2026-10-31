@@ -105,12 +105,14 @@ type Config struct {
 	// for files that are shown under multiple parents so they share ONE lifecycle
 	// across every screen. file_id must be globally unique for this to be safe.
 	AuditByFileIDOnly bool
-	// ParentAccess, when set, must allow the caller to act on the parent record.
-	ParentAccess func(ctx context.Context, pool *pgxpool.Pool, parentID string) (bool, error)
+	ParentAccess      func(ctx context.Context, pool *pgxpool.Pool, parentID string) (bool, error)
+	ParentScopeSQL    string
 }
 
-// parentAllowed writes a 403 (or 500) and returns false when ParentAccess denies the parent.
 func parentAllowed(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, cfg Config, parentID string) bool {
+	if strings.TrimSpace(cfg.ParentScopeSQL) != "" {
+		return api.RequireRecordsInScope(r.Context(), w, pool, cfg.ParentScopeSQL, parentID)
+	}
 	if cfg.ParentAccess == nil {
 		return true
 	}

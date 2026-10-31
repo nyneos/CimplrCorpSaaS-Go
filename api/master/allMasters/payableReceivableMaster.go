@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/utils"
@@ -1121,6 +1122,30 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		checkerBy := session.Name
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactionpayablereceivable
+			WHERE type_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.TypeIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
@@ -1170,7 +1195,26 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 
-		upd := `UPDATE auditactionpayablereceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, type_id`
+		if _, err := tx.Exec(ctx, `
+			UPDATE masterpayablereceivabletype m SET
+				type_code = COALESCE(m.old_type_code, m.type_code),
+				type_name = COALESCE(m.old_type_name, m.type_name),
+				direction = COALESCE(m.old_direction, m.direction),
+				default_currency = COALESCE(m.old_default_currency, m.default_currency),
+				status = COALESCE(m.old_status, m.status),
+				category = COALESCE(m.old_category, m.category),
+				cash_flow_category = COALESCE(m.old_cash_flow_category, m.cash_flow_category)
+			WHERE m.type_id IN (
+				SELECT type_id FROM auditactionpayablereceivable
+				WHERE action_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+			)`, actionIDs); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to revert edit: "+errtext.Detail(w, err))
+			return
+		}
+		upd := `UPDATE auditactionpayablereceivable SET processing_status='REJECTED'
+, checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, type_id`
 		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, actionIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to update audit rows: "+errtext.Detail(w, err))
@@ -1218,6 +1262,30 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		checkerBy := session.Name
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactionpayablereceivable
+			WHERE type_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.TypeIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))

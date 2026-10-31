@@ -527,8 +527,6 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Claim the run atomically so two concurrent execute calls cannot both write
-		// ledger rows for the same run.
 		claim, claimErr := pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_run SET run_status='IN_PROGRESS', started_at=now(), updated_at=now()
 			WHERE run_id=$1 AND run_status='VALIDATED'`, req.RunID)
@@ -542,12 +540,9 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// The ledger is written FD by FD; a client disconnect must not stop it halfway.
 		execCtx := context.WithoutCancel(ctx)
 		calculated, failed, err := executeAccrualRun(execCtx, pgxPool, req.RunID, userEmail)
 		if err != nil {
-			// Errors raised before any ledger write leave the run IN_PROGRESS; return it
-			// to VALIDATED so it can be retried. Later failures already set FAILED.
 			if _, rerr := pgxPool.Exec(execCtx, `
 				UPDATE investment.fd_accrual_run SET run_status='VALIDATED', updated_at=now()
 				WHERE run_id=$1 AND run_status='IN_PROGRESS' AND COALESCE(fds_calculated,0)=0 AND COALESCE(fds_failed,0)=0`, req.RunID); rerr != nil {
@@ -5100,7 +5095,6 @@ func CheckPeriodLockStatus(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// succeededRunIDs returns the run ids of bulk results not marked success=false.
 func succeededRunIDs(results []map[string]interface{}) []string {
 	ids := make([]string, 0, len(results))
 	for _, res := range results {

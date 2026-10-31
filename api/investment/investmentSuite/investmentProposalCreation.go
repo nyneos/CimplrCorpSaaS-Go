@@ -3,6 +3,7 @@ package investmentsuite
 import (
 	"CimplrCorpSaas/api"
 	approvalengine "CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/investment/portfolio"
 	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
@@ -559,13 +560,13 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 		skipped := append([]string{}, invalidIDs...)
 		const latestAuditSQL = `
 			WITH ranked AS (
-				SELECT action_id, proposal_id, actiontype, processing_status,
+				SELECT action_id, proposal_id, actiontype, processing_status, requested_by,
 					ROW_NUMBER() OVER (PARTITION BY proposal_id ORDER BY GREATEST(COALESCE(checker_at, requested_at), requested_at) DESC NULLS LAST) AS rn
 				FROM investment.auditactionproposal
 				WHERE proposal_id = ANY($1)
 				  AND UPPER(COALESCE(actiontype, '')) <> 'UPLOAD_FILE'
 			)
-			SELECT action_id, proposal_id, actiontype, processing_status
+			SELECT action_id, proposal_id, actiontype, processing_status, COALESCE(requested_by, '')
 			FROM ranked
 			WHERE rn = 1
 		`
@@ -582,12 +583,13 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			proposalID string
 			actionType string
 			status     string
+			maker      string
 		}
 
 		latest := make(map[string]auditSnapshot)
 		for rows.Next() {
 			var snap auditSnapshot
-			if err := rows.Scan(&snap.actionID, &snap.proposalID, &snap.actionType, &snap.status); err != nil {
+			if err := rows.Scan(&snap.actionID, &snap.proposalID, &snap.actionType, &snap.status, &snap.maker); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read audit rows")
 				return
 			}
@@ -613,6 +615,10 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 				continue
 			}
 			if !strings.HasPrefix(snap.status, "PENDING") {
+				skipped = append(skipped, proposalID)
+				continue
+			}
+			if governance.IsSelfApprovalCtx(ctx, snap.maker) {
 				skipped = append(skipped, proposalID)
 				continue
 			}

@@ -9,6 +9,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -29,9 +30,18 @@ func HandleGoogleWorkspaceTest(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
+		userID := strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context()))
+		if userID == "" {
+			emailcommon.RespondUnauthorized(w, "user context missing")
+			return
+		}
 		fields := req.MailboxGoogleWorkspaceFields
 		mailbox := strings.TrimSpace(strings.ToLower(req.MailboxAddress))
 		if inboxID := strings.TrimSpace(req.InboxID); inboxID != "" {
+			if !emailcommon.CanManageInbox(r.Context(), pool, inboxID, userID) {
+				emailcommon.RespondForbidden(w, "inbox not accessible")
+				return
+			}
 			stored, err := LoadMailboxGoogleWorkspaceFields(r.Context(), pool, inboxID)
 			if err != nil {
 				emailcommon.RespondBadRequest(w, "mailbox not found")
@@ -43,8 +53,10 @@ func HandleGoogleWorkspaceTest(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			fields = merged
-			if mailbox == "" {
-				_ = pool.QueryRow(r.Context(), `SELECT mailbox_address FROM email_svc.inbox_config WHERE inbox_id = $1::uuid`, inboxID).Scan(&mailbox)
+			var storedMailbox string
+			_ = pool.QueryRow(r.Context(), `SELECT mailbox_address FROM email_svc.inbox_config WHERE inbox_id = $1::uuid`, inboxID).Scan(&storedMailbox)
+			if strings.TrimSpace(storedMailbox) != "" {
+				mailbox = strings.ToLower(strings.TrimSpace(storedMailbox))
 			}
 		}
 		if mailbox == "" {

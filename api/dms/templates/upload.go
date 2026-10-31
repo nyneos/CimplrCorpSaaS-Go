@@ -16,7 +16,9 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/dms/common"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -25,7 +27,6 @@ const maxTemplateUploadBytes = 25 << 20 // 25 MB
 
 const errFailedUploadTemplate = "failed to upload template"
 
-// templateUploadTypes is the set the studio import accepts.
 var templateUploadTypes = map[string]string{
 	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 	".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -110,9 +111,28 @@ func HandleUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, errtext.Detail(w, err), "VALIDATION_ERROR")
 			return
 		}
+		if strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context())) == "" {
+			api.RespondEnvelopeError(w, http.StatusUnauthorized, "user context missing", "UNAUTHORIZED")
+			return
+		}
 
 		templateID := strings.TrimSpace(r.FormValue("template_id"))
-		actor, ip := requestActorAndIP(r, r.FormValue("actor_id"))
+		entityID := strings.TrimSpace(r.FormValue("entity_id"))
+		entityName := strings.TrimSpace(r.FormValue("entity_name"))
+		if templateID != "" {
+			if !common.RequireRecordsEntityAccess(w, r, pool, common.TemplateEntityQuery, []string{templateID}) {
+				return
+			}
+		} else {
+			if (entityID == "") != (entityName == "") {
+				api.RespondEnvelopeError(w, http.StatusBadRequest, "entity_id and entity_name must both be set or both empty", "VALIDATION_ERROR")
+				return
+			}
+			if !common.RequireEntityAccess(w, ctxutil.FromContext(r.Context()), entityID) {
+				return
+			}
+		}
+		actor, ip := requestActorAndIP(r, "")
 
 		sum := sha256.Sum256(body)
 		s3Key := s3storage.BuildModuleS3Key("dms", "templates", hex.EncodeToString(sum[:]), ext)
@@ -152,10 +172,10 @@ func HandleUpload(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			if err := tx.QueryRow(r.Context(), `
-				INSERT INTO dms_svc.template (name, description, module_code, sub_module_code, status, processing_status, created_by)
-				VALUES ($1, $2, $3, $4, 'PendingApproval', 'PENDING_APPROVAL', $5)
+				INSERT INTO dms_svc.template (name, description, module_code, sub_module_code, entity_id, entity_name, status, processing_status, created_by)
+				VALUES ($1, $2, $3, $4, NULLIF($5,''), NULLIF($6,''), 'PendingApproval', 'PENDING_APPROVAL', $7)
 				RETURNING template_id::text`,
-				name, r.FormValue("description"), moduleCode, subModuleCode, actor,
+				name, r.FormValue("description"), moduleCode, subModuleCode, entityID, entityName, actor,
 			).Scan(&templateID); err != nil {
 				api.LogErrorForResponse(w, "dms template upload create: %v", err)
 				api.RespondEnvelopeError(w, http.StatusConflict, "failed to create template (duplicate name, or unknown module/sub_module?)", "DMS_TEMPLATE_UPLOAD_FAILED")
@@ -209,6 +229,8 @@ func HandleUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			a.set("processing_status", "PENDING_APPROVAL")
 			a.set("new_status", "PendingApproval")
 			a.set("new_is_deleted", false)
+			a.set("new_entity_id", common.NullIfEmpty(entityID))
+			a.set("new_entity_name", common.NullIfEmpty(entityName))
 		} else {
 			a.set("processing_status", "PENDING_EDIT_APPROVAL")
 		}

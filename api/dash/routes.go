@@ -75,7 +75,7 @@ func RegisterDashRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool
 	mux.HandleFunc("/dash/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Dashboard Service is active"))
 	})
-	mux.Handle("/dash/metrics", observability.MetricsHandler(serviceName))
+	mux.Handle("/dash/metrics", middlewares.SessionMiddleware(pgxPool)(api.RequireAdminOverride(observability.MetricsHandler(serviceName))))
 
 	// Real-time Balances KPI Route
 	mux.Handle("/dash/realtime-balances/kpi", midDashFull(realtimebalances.GetKpiHandler(pgxPool)))

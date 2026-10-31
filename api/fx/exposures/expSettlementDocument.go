@@ -527,8 +527,6 @@ func replaceSettlementLines(ctx context.Context, pool *pgxpool.Pool, settlementI
 	return err
 }
 
-// settlementDB is satisfied by both *pgxpool.Pool and pgx.Tx so the settlement
-// effects can run inside the approval transaction.
 type settlementDB interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -559,8 +557,6 @@ func reduceExposureOpenAmount(ctx context.Context, db settlementDB, exposureHead
 // just been reduced by an approval. A pending draft that no longer fits within the
 // exposure's remaining open amount can never be approved as drafted, so it is bounced
 // back to the maker instead of sitting in the approval queue forever. A draft that still
-// fits within what's left is untouched and stays pending. It returns the rejected ids so
-// the caller can cancel their approval instances after the transaction commits.
 func invalidateStalePendingSettlements(ctx context.Context, db settlementDB, exposureHeaderID, approvedSettlementID, actor string) ([]string, error) {
 	exposureHeaderID = strings.TrimSpace(exposureHeaderID)
 	if exposureHeaderID == "" {
@@ -864,11 +860,6 @@ func validateSettlementBusinessRules(
 	return nil
 }
 
-// applySettlementOnApprove applies the financial effects of an approved settlement
-// (open-amount reduction, hedge-link consumption, forward ledger, rollover exposure)
-// on db, which the caller runs inside the approval transaction. Any failure is
-// returned so the whole approval rolls back. It returns settlement ids that were
-// auto-rejected so their approval instances can be cancelled after commit.
 func applySettlementOnApprove(ctx context.Context, db settlementDB, settlementID, actor string) ([]string, error) {
 	var method, entity, currency string
 	var newExpType *string
@@ -983,9 +974,6 @@ func applySettlementOnApprove(ctx context.Context, db settlementDB, settlementID
 					return nil, fmt.Errorf("hedge link update %s/%s: %w", lr.ExposureID, lr.BookingID, err)
 				}
 			}
-			// Both PAYMENT (utilisation) and CANCELLATION consume the forward's
-			// open amount; the ledger keeps the sign of the movement. The booking
-			// row is locked first so concurrent settlements cannot reuse a sequence.
 			var bookingAmount float64
 			if err := db.QueryRow(ctx, `SELECT COALESCE(booking_amount,0) FROM public.forward_bookings WHERE system_transaction_id::text = $1 FOR UPDATE`, lr.BookingID).Scan(&bookingAmount); err != nil {
 				return nil, fmt.Errorf("lock forward booking %s: %w", lr.BookingID, err)
@@ -1111,9 +1099,6 @@ func applySettlementOnApprove(ctx context.Context, db settlementDB, settlementID
 			return nil, fmt.Errorf("create rollover exposure line: %w", err)
 		}
 
-		// Move active hedge links from the old exposures to the new exposure in two
-		// set-based statements; inside the transaction a failure cannot leave a hedge
-		// deactivated without its replacement.
 		oldIDs := make([]string, 0, len(touched))
 		for _, lr := range lines {
 			if id := strings.TrimSpace(lr.ExposureID); id != "" {
@@ -1957,9 +1942,6 @@ func updateExposureSettlementStatuses(ctx context.Context, pool *pgxpool.Pool, p
 	return settlementStatusResult{Count: count, Awaiting: awaiting}, nil
 }
 
-// approveAndApplySettlement flips a pending settlement to the approved status and
-// applies its financial effects in one transaction. The status update only matches
-// while the row is still in prevStatus, so two concurrent approvals cannot both apply.
 func approveAndApplySettlement(ctx context.Context, pool *pgxpool.Pool, id, prevStatus, status, comments, actor string) ([]string, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {

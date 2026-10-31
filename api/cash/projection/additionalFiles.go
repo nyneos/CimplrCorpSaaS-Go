@@ -71,6 +71,7 @@ func projectionAdditionalFilesConfig() additionalfiles.Config {
 		SoftDeleteTx:            deleteProjectionAdditionalFileTx,
 		RecordMainUploadAudit:   recordProjectionMainUploadAudit,
 		RecordMainDownloadAudit: recordProjectionMainDownloadAudit,
+		ParentScopeSQL:          `SELECT NULLIF(btrim(i.entity_name::text), '') FROM (SELECT $1::text AS pid) x LEFT JOIN cimplrcorpsaas.cashflow_proposal_item i ON i.proposal_id::text = x.pid AND COALESCE(i.is_deleted, false) = false`,
 	}
 }
 

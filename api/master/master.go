@@ -23,8 +23,7 @@ func NewMasterServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	host := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	sslMode := dbutil.EffectiveSSLMode(host)
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
+	dsn := dbutil.BuildPostgresDSN(user, pass, host, dbPort, name, dbutil.EffectiveSSLMode(host))
 	pgxPool, err := dbutil.NewTracedPool(context.Background(), dsn, serviceName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to pgxpool DB: %w", err)
@@ -32,7 +31,9 @@ func NewMasterServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := pgxPool.Ping(pingCtx); err != nil {
+		pgxPool.Close()
 		logger.LogError("Master: failed to verify pgxpool DB connectivity at startup: %v", err)
+		return nil, nil, fmt.Errorf("master database ping failed: %w", err)
 	}
 
 	RegisterMasterRoutes(mux, serviceName, pgxPool)

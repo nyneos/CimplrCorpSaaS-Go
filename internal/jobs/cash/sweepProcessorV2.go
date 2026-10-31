@@ -99,8 +99,6 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int, loc *time.Location
 		loc = time.UTC
 	}
 
-	// One run at a time across overlapping cron ticks and replicas. Transaction-scoped
-	// lock on a held connection, which stays correct on the Supabase transaction pooler.
 	lockConn, err := db.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire sweep lock connection: %w", err)
@@ -238,7 +236,6 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int, loc *time.Location
 				return
 			}
 
-			// ALL sweeps now require initiation -> approval -> execution workflow
 			// Create initiation with auto-approval for scheduled sweeps
 			if ok, msg := enforceScheduledSweepFire(ctx, db, sweep.sweepID, "", "createScheduledInitiation"); !ok {
 				logger.LogError("[SWEEP V2] %s - Policy blocked scheduled initiation: %s", sweep.sweepID, msg)
@@ -290,8 +287,6 @@ func shouldExecuteSweepV2ByFrequency(frequency string, effectiveDate sql.NullStr
 		return true, nil
 
 	case "WEEKLY":
-		// Execute every 7th calendar day from effective_date (or requested_at),
-		// counted in the scheduler's time zone so time-of-day never shifts the day.
 		referenceDate := requestedAt.In(now.Location())
 		if effectiveDate.Valid && effectiveDate.String != "" {
 			parsed, err := time.ParseInLocation(constants.DateFormat, effectiveDate.String, now.Location())
@@ -358,10 +353,6 @@ func getTargetDayForMonthV2(targetDay, year, month int) int {
 	return targetDay
 }
 
-// createScheduledInitiation creates a SCHEDULED initiation record for a sweep with auto-approval.
-// The existence check and the inserts run in one transaction under a per-sweep advisory lock, so
-// two overlapping runs (or the two matching minutes of the schedule window) create at most one
-// initiation per sweep per day.
 func createScheduledInitiation(ctx context.Context, db *pgxpool.Pool, sweepID string) error {
 	tx, err := db.Begin(ctx)
 	if err != nil {
@@ -550,14 +541,11 @@ func logSweepFailure(ctx context.Context, db *pgxpool.Pool, info SweepFailureInf
 	logger.LogError("[SWEEP V2] %s  FAILED | Reason: %s", info.Params.SweepID, info.Reason)
 }
 
-// sweepBalanceRow is the latest bank_balances_manual row of an account, locked for update.
 type sweepBalanceRow struct {
 	balanceID string
 	closing   decimal.Decimal
 }
 
-// lockSweepBalances locks the latest balance rows of both accounts in balance_id order so
-// two sweeps between the same accounts in opposite directions cannot deadlock.
 func lockSweepBalances(ctx context.Context, tx pgx.Tx, sourceAccount, targetAccount string) (sweepBalanceRow, sweepBalanceRow, error) {
 	var src, tgt sweepBalanceRow
 	latestID := func(account string) (string, error) {
@@ -622,9 +610,6 @@ func decimalFromPtr(v *float64) (decimal.Decimal, bool) {
 	return decimal.NewFromFloat(*v), true
 }
 
-// computeSweepAmount applies the sweep-type rules to the locked balance. Every result,
-// including an overridden amount, must leave at least the buffer behind (ZBA has no
-// buffer floor but can never sweep more than the balance).
 func computeSweepAmount(sweepType string, balance, buffer decimal.Decimal, sweepAmount, overriddenAmount *float64) (decimal.Decimal, error) {
 	typ := strings.ToUpper(strings.TrimSpace(sweepType))
 	if balance.LessThanOrEqual(buffer) {
@@ -661,13 +646,8 @@ func computeSweepAmount(sweepType string, balance, buffer decimal.Decimal, sweep
 	return amount, nil
 }
 
-// ErrSweepInitiationBusy is returned when the initiation is already being executed by another
-// worker or has already succeeded.
 var ErrSweepInitiationBusy = errors.New("initiation is being executed by another worker or already succeeded")
 
-
-// SweepAuditOptions controls how balance audit rows are attributed and whether the job-level
-// success notification is sent.
 type SweepAuditOptions struct {
 	AuditStatus string
 	RequestedBy string
@@ -675,7 +655,6 @@ type SweepAuditOptions struct {
 	Notify      bool
 }
 
-// SweepResult is the outcome of a successful sweep execution.
 type SweepResult struct {
 	Amount        decimal.Decimal
 	BalanceBefore decimal.Decimal
@@ -691,9 +670,6 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params Sw
 	return err
 }
 
-// ExecuteSweepInitiation executes one approved initiation atomically: the initiation is
-// claimed with SKIP LOCKED, a prior SUCCESS is re-checked inside the transaction, both balance
-// rows are locked before the amount is computed, and every write must hit exactly one row.
 func ExecuteSweepInitiation(ctx context.Context, db *pgxpool.Pool, params SweepExecParams, opts SweepAuditOptions) (SweepResult, error) {
 	sweepID := params.SweepID
 	initiationID := params.InitiationID
@@ -747,19 +723,12 @@ func ExecuteSweepInitiation(ctx context.Context, db *pgxpool.Pool, params SweepE
 	newBalance := src.closing.Sub(amount)
 	targetNewBalance := tgt.closing.Add(amount)
 
-	updateBalance := func(balanceID, totalsColumn string, newClosing decimal.Decimal) error {
-		tag, err := tx.Exec(ctx, fmt.Sprintf(`
+	updateBalance := func(balanceID string, newClosing decimal.Decimal) error {
+		tag, err := tx.Exec(ctx, `
 			UPDATE bank_balances_manual
-			SET old_opening_balance = opening_balance,
-				old_closing_balance = closing_balance,
-				old_balance_amount = balance_amount,
-				old_%[1]s = %[1]s,
-				opening_balance = closing_balance,
-				closing_balance = $1::numeric,
-				balance_amount = $1::numeric,
-				%[1]s = COALESCE(%[1]s, 0) + $2::numeric
-			WHERE balance_id::text = $3
-		`, totalsColumn), newClosing.String(), amount.String(), balanceID)
+			SET closing_balance = $1::numeric
+			WHERE balance_id::text = $2
+		`, newClosing.String(), balanceID)
 		if err != nil {
 			return err
 		}
@@ -777,13 +746,13 @@ func ExecuteSweepInitiation(ctx context.Context, db *pgxpool.Pool, params SweepE
 		return err
 	}
 
-	if err := updateBalance(src.balanceID, "total_debits", newBalance); err != nil {
+	if err := updateBalance(src.balanceID, newBalance); err != nil {
 		return result, fail(src.closing, fmt.Sprintf("SYSTEM ERROR: failed to update source account: %v", err))
 	}
 	if err := insertAudit(src.balanceID, fmt.Sprintf("Sweep V2 execution (initiation: %s): %s", initiationID, sweepID)); err != nil {
 		return result, fail(src.closing, fmt.Sprintf("SYSTEM ERROR: failed to create audit for source account: %v", err))
 	}
-	if err := updateBalance(tgt.balanceID, "total_credits", targetNewBalance); err != nil {
+	if err := updateBalance(tgt.balanceID, targetNewBalance); err != nil {
 		return result, fail(src.closing, fmt.Sprintf("SYSTEM ERROR: failed to update target account: %v", err))
 	}
 	if err := insertAudit(tgt.balanceID, fmt.Sprintf("Sweep V2 receipt (initiation: %s): %s", initiationID, sweepID)); err != nil {

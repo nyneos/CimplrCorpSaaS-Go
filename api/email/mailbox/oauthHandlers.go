@@ -17,6 +17,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	emailjobs "CimplrCorpSaas/internal/jobs/email"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
@@ -88,7 +89,15 @@ type OAuthTokenSet struct {
 }
 
 func SaveMailboxOAuthTokens(ctx context.Context, pool *pgxpool.Pool, inboxID string, tokens OAuthTokenSet) error {
-	_, err := pool.Exec(ctx, `
+	refresh, err := SealCredential(tokens.RefreshToken)
+	if err != nil {
+		return err
+	}
+	access, err := SealCredential(tokens.AccessToken)
+	if err != nil {
+		return err
+	}
+	_, err = pool.Exec(ctx, `
 		UPDATE email_svc.inbox_config
 		SET oauth_provider = $2,
 		    oauth_refresh_token = $3,
@@ -98,7 +107,7 @@ func SaveMailboxOAuthTokens(ctx context.Context, pool *pgxpool.Pool, inboxID str
 		    oauth_connected_at = COALESCE(oauth_connected_at, now()),
 		    updated_at = now()
 		WHERE inbox_id = $1::uuid
-	`, inboxID, tokens.Provider, tokens.RefreshToken, tokens.AccessToken, tokens.Scopes, tokens.ExpiresAt.UTC())
+	`, inboxID, tokens.Provider, refresh, access, tokens.Scopes, tokens.ExpiresAt.UTC())
 	return err
 }
 
@@ -109,8 +118,6 @@ func oauthFrontendRedirectBase() string {
 	return strings.TrimRight(strings.TrimSpace(os.Getenv("FRONTEND_URL")), "/")
 }
 
-// oauthCallbackRedirectURI is the provider callback URL. It comes from
-// configuration only. Request Host and X-Forwarded-Host are never used.
 func oauthCallbackRedirectURI() (string, error) {
 	if u := strings.TrimSpace(os.Getenv("MAIL_OAUTH_REDIRECT_URI")); u != "" {
 		return u, nil
@@ -291,6 +298,12 @@ func HandleOAuthCallback(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		_, _ = pool.Exec(r.Context(), `DELETE FROM email_svc.oauth_connect_state WHERE state = $1`, state)
 
+		sessionUser := strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context()))
+		if sessionUser == "" || !strings.EqualFold(sessionUser, strings.TrimSpace(userID)) {
+			redirectFail("oauth state does not match the signed-in user")
+			return
+		}
+
 		rt := mailruntime.NewRuntime()
 		if !rt.Ready() {
 			redirectFail(constants.ErrMailProcessingUnavailable)
@@ -337,6 +350,11 @@ func HandleOAuthCallback(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND (COALESCE(owner_user_id,'') = $2 OR COALESCE(submitted_by,'') = $2)
 				ORDER BY created_at DESC LIMIT 1
 			`, email, userID).Scan(&inboxID)
+		}
+
+		if inboxID != "" && !emailcommon.CanManageInbox(r.Context(), pool, inboxID, sessionUser) {
+			redirectFail("inbox not accessible")
+			return
 		}
 
 		if inboxID != "" {

@@ -110,18 +110,12 @@ type owItemResult struct {
 }
 
 const (
-	// Written immediately before the HTTP call. A stale row still carrying this
-	// may already have been accepted, so the reaper must not send it again.
-	owLastErrDispatching = "dispatching:"
-	// Written after the endpoint reports success, before the SENT status update.
-	// The reaper finishes SENT from this marker and does not send again.
+	owLastErrDispatching  = "dispatching:"
 	owLastErrSendAccepted = "send accepted"
 	owAmbiguousSendPrefix = "ambiguous send:"
-	// Added to the client timeout. Default timeout is 120s, so the lease is 3 minutes.
-	owStaleMargin = 60 * time.Second
+	owStaleMargin         = 60 * time.Second
 )
 
-// errAmbiguousSend marks a call whose request may have been accepted.
 var errAmbiguousSend = errors.New("ambiguous send")
 
 func owSendTimeout() time.Duration {
@@ -248,8 +242,6 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 		logger.LogError("[outbox-worker] rows iteration error: %v", rows.Err())
 	}
 
-	// Claim while the SKIP LOCKED row locks are still held. The status predicate
-	// stays conditional so a second worker cannot send the same row.
 	var toSend []owOutboxRow
 	for _, row := range batch {
 		row.LeaseToken = "claimed:" + row.OutboxID + ":" + strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -305,12 +297,12 @@ func owProcessBatch(ctx context.Context, pool *pgxpool.Pool, endpointURL string,
 			Attachments:     atts,
 		}
 		if len(atts) > 0 {
-			p0, p1, p2, p3, credErr := packProbeBundle(backendByOutbox[row.OutboxID])
+			region, bucket, credErr := packProbeBundle(backendByOutbox[row.OutboxID])
 			if credErr != nil {
 				owHandleFailure(ctx, pool, row, "probe pack: "+credErr.Error())
 				continue
 			}
-			p.X7k, p.M2p, p.Z1q, p.B9r = p0, p1, p2, p3
+			p.Z1q, p.B9r = region, bucket
 		}
 		ready = append(ready, row)
 		payloads = append(payloads, p)

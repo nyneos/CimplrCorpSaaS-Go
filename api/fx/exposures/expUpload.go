@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -515,7 +516,18 @@ func hasNonEmptyUploadValue(v interface{}) bool {
 	}
 }
 
+var exposureHeaderUploadBatchIDCache struct {
+	mu    sync.Mutex
+	set   bool
+	value bool
+}
+
 func exposureHeadersHasUploadBatchID(ctx context.Context, pool *pgxpool.Pool) bool {
+	exposureHeaderUploadBatchIDCache.mu.Lock()
+	defer exposureHeaderUploadBatchIDCache.mu.Unlock()
+	if exposureHeaderUploadBatchIDCache.set {
+		return exposureHeaderUploadBatchIDCache.value
+	}
 	var exists bool
 	if err := pool.QueryRow(ctx, `
 		SELECT EXISTS (
@@ -527,6 +539,8 @@ func exposureHeadersHasUploadBatchID(ctx context.Context, pool *pgxpool.Pool) bo
 		logger.LogError("[FX-DOWNLOAD] failed to detect exposure_headers.upload_batch_id: %v", err)
 		return false
 	}
+	exposureHeaderUploadBatchIDCache.value = exists
+	exposureHeaderUploadBatchIDCache.set = true
 	return exists
 }
 
@@ -566,15 +580,19 @@ func lookupExposureUploadS3Key(ctx context.Context, pool *pgxpool.Pool, recordID
 	return sql.NullString{}, sql.ErrNoRows
 }
 
-// exposureEditableFields are the exposure fields the exposure request screen lets a
-// user edit (config.ts editableKeys); document_date is mapped to value_date.
 var exposureEditableFields = map[string]bool{
 	"document_id": true, "exposure_type": true, "entity": true, "counterparty_name": true, "currency": true,
 	"total_original_amount": true, "total_open_amount": true, "amount_in_local_currency": true,
 	"value_date": true, "document_date": true,
 }
 
+var publicTableColumnCache sync.Map
+
 func publicTableColumns(ctx context.Context, pool *pgxpool.Pool, table string) (map[string]bool, error) {
+	if cached, ok := publicTableColumnCache.Load(table); ok {
+		cols, _ := cached.(map[string]bool)
+		return cols, nil
+	}
 	rows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`, table)
 	if err != nil {
 		return nil, err
@@ -588,7 +606,39 @@ func publicTableColumns(ctx context.Context, pool *pgxpool.Pool, table string) (
 		}
 		cols[col] = true
 	}
-	return cols, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	publicTableColumnCache.Store(table, cols)
+	return cols, nil
+}
+
+var informationSchemaColumnCache sync.Map
+
+func informationSchemaColumns(ctx context.Context, pool *pgxpool.Pool, table string) map[string]bool {
+	if cached, ok := informationSchemaColumnCache.Load(table); ok {
+		cols, _ := cached.(map[string]bool)
+		if cols != nil {
+			return cols
+		}
+	}
+	rows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_name = $1`, table)
+	if err != nil {
+		return map[string]bool{}
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var colName string
+		if scanErr := rows.Scan(&colName); scanErr == nil {
+			cols[colName] = true
+		}
+	}
+	if rows.Err() != nil {
+		return map[string]bool{}
+	}
+	informationSchemaColumnCache.Store(table, cols)
+	return cols
 }
 
 // Handler
@@ -2167,17 +2217,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					logger.LogInfo("[FX-STAGING] S3 DISABLED - file will not be uploaded to S3!")
 				}
 
-				tableColumnsRes, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_name = $1`, field.TableName)
-				validColumns := make(map[string]bool)
-				if err == nil {
-					defer tableColumnsRes.Close()
-					for tableColumnsRes.Next() {
-						var colName string
-						if err := tableColumnsRes.Scan(&colName); err == nil {
-							validColumns[colName] = true
-						}
-					}
-				}
+				validColumns := informationSchemaColumns(ctx, pool, field.TableName)
 
 				tx, err = pool.Begin(ctx)
 				if err != nil {
@@ -2185,17 +2225,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					return
 				}
 
-				hasHeaderUploadBatchID := false
-				if err := tx.QueryRow(ctx, `
-					SELECT EXISTS (
-						SELECT 1
-						FROM information_schema.columns
-						WHERE table_name = 'exposure_headers' AND column_name = 'upload_batch_id'
-					)
-				`).Scan(&hasHeaderUploadBatchID); err != nil {
-					logger.LogError("[FX-STAGING] failed to detect exposure_headers.upload_batch_id; proceeding without it: %v", err)
-					hasHeaderUploadBatchID = false
-				}
+				hasHeaderUploadBatchID := exposureHeadersHasUploadBatchID(ctx, pool)
 
 				persistedS3Key := ""
 				if uploadedNewObject {

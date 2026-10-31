@@ -83,6 +83,44 @@ func init() {
 	approvalengine.RegisterPostFinalizeHook("EMAIL_INBOX_DELETE", finalizeEmailInboxApproval)
 }
 
+func maskInboxPendingJSON(raw string) json.RawMessage {
+	var detail map[string]interface{}
+	if json.Unmarshal([]byte(raw), &detail) != nil {
+		return nil
+	}
+	maskInboxCredentialValue(detail)
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+func maskInboxCredentialValue(v interface{}) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for _, key := range []string{
+			"graph_client_secret", "google_workspace_private_key", "imap_password",
+			"oauth_access_token", "oauth_refresh_token",
+		} {
+			raw, ok := t[key]
+			if !ok {
+				continue
+			}
+			s, _ := raw.(string)
+			t["has_"+key] = strings.TrimSpace(s) != ""
+			delete(t, key)
+		}
+		for _, child := range t {
+			maskInboxCredentialValue(child)
+		}
+	case []interface{}:
+		for _, child := range t {
+			maskInboxCredentialValue(child)
+		}
+	}
+}
+
 func sesRuleNameForInbox(inboxID string) string {
 	short := strings.ReplaceAll(inboxID, "-", "")
 	if len(short) > 12 {
@@ -140,7 +178,6 @@ type inboxAuditEntry struct {
 	Detail  map[string]interface{}
 }
 
-// inboxDB is the pool or transaction used for inbox writes that must commit together.
 type inboxDB interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
@@ -186,8 +223,6 @@ func respondInboxSubmitFailed(w http.ResponseWriter) {
 	emailcommon.RespondInternal(w, "Failed to submit inbox for approval")
 }
 
-// abandonUnsubmittedInbox retires a create that committed before its approval
-// instance could be created, so the row is not left PENDING_APPROVAL.
 func abandonUnsubmittedInbox(ctx context.Context, pool *pgxpool.Pool, inboxID, userID string) error {
 	return inInboxTx(ctx, pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `
@@ -414,6 +449,18 @@ func applyInboxDecisionDB(ctx context.Context, pool *pgxpool.Pool, db inboxDB, i
 				googleFinal = merged
 			}
 		}
+		sealedGraphSecret, sealErr := emailmailbox.SealCredential(graphFinal.ClientSecret)
+		if sealErr != nil {
+			return "", sealErr
+		}
+		sealedGoogleKey, sealErr := emailmailbox.SealCredential(googleFinal.WorkspacePrivateKey)
+		if sealErr != nil {
+			return "", sealErr
+		}
+		sealedIMAPPass, sealErr := emailmailbox.SealCredential(imapFinal.Password)
+		if sealErr != nil {
+			return "", sealErr
+		}
 		_, err := db.Exec(ctx, `
 			UPDATE email_svc.inbox_config
 			SET display_name = COALESCE(NULLIF($2,''), display_name),
@@ -440,11 +487,11 @@ func applyInboxDecisionDB(ctx context.Context, pool *pgxpool.Pool, db inboxDB, i
 			WHERE inbox_id = $1::uuid
 		`, inboxID, edit.DisplayName, emailcommon.NullableJSON(edit.FiltersJSON), edit.PollIntervalSecs,
 			edit.Module,
-			graphFinal.TenantKey, graphFinal.TenantLabel, graphFinal.TenantID, graphFinal.ClientID, graphFinal.ClientSecret,
+			graphFinal.TenantKey, graphFinal.TenantLabel, graphFinal.TenantID, graphFinal.ClientID, sealedGraphSecret,
 			googleFinal.WorkspaceTenantKey, googleFinal.WorkspaceTenantLabel, googleFinal.WorkspaceServiceAccountEmail,
-			googleFinal.WorkspaceClientID, googleFinal.WorkspacePrivateKey,
+			googleFinal.WorkspaceClientID, sealedGoogleKey,
 			imapFinal.Provider, imapFinal.Host, imapFinal.Port,
-			imapFinal.Username, imapFinal.Password,
+			imapFinal.Username, sealedIMAPPass,
 			imapFinal.InboxFolder, imapFinal.SentFolder, imapFinal.UseTLS,
 			constants.StatusApproved, actorID, comment)
 		return "", err
@@ -571,7 +618,7 @@ func userCanAccessInbox(ctx context.Context, pool *pgxpool.Pool, inboxID, userID
 	var owner, ent, mailbox string
 	err := pool.QueryRow(ctx, `
 		SELECT COALESCE(owner_user_id,''), COALESCE(entity_id,''), COALESCE(mailbox_address,'')
-		FROM email_svc.inbox_config WHERE inbox_id = $1::uuid
+		FROM email_svc.inbox_config WHERE inbox_id = $1::uuid AND is_deleted = false
 	`, inboxID).Scan(&owner, &ent, &mailbox)
 	if err != nil {
 		return false
@@ -605,6 +652,10 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		userID, userEmail, entityID, entityIDs := emailcommon.RequestIdentity(r, req.UserID, req.EntityID)
+		if userID == "" {
+			emailcommon.RespondUnauthorized(w, "user context missing")
+			return
+		}
 		admin := emailcommon.IsEmailAdmin(r.Context(), userID)
 
 		emailjobs.SyncEmailServiceStatus(r.Context(), pool)
@@ -737,20 +788,14 @@ func HandleWorkflowInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 				emailcommon.RespondInternal(w, "database operation failed")
 				return
 			}
+			item.ClientSecret = ""
+			item.Password = ""
+			item.MailboxGoogleWorkspaceFields.WorkspacePrivateKey = ""
+			item.GraphSecretSet = strings.TrimSpace(graphSecret) != ""
+			item.GooglePrivateKeySet = strings.TrimSpace(googlePrivateKey) != ""
+			item.IMAPPasswordSet = strings.TrimSpace(imapPassword) != ""
 			if pendingText != "" && pendingText != "null" {
-				item.PendingEditJSON = json.RawMessage(pendingText)
-			}
-			if graphSecret != "" {
-				item.ClientSecret = graphSecret
-				item.GraphSecretSet = true
-			}
-			if googlePrivateKey != "" {
-				item.MailboxGoogleWorkspaceFields.WorkspacePrivateKey = googlePrivateKey
-				item.GooglePrivateKeySet = true
-			}
-			if imapPassword != "" {
-				item.Password = imapPassword
-				item.IMAPPasswordSet = true
+				item.PendingEditJSON = maskInboxPendingJSON(pendingText)
 			}
 			item.OAuthProvider = oauthProvider
 			item.OAuthMailTransport = oauthMailTransport
@@ -908,6 +953,18 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			var inboxID string
 			err := inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+				sealedGraphSecret, err := emailmailbox.SealCredential(graphFields.ClientSecret)
+				if err != nil {
+					return err
+				}
+				sealedGoogleKey, err := emailmailbox.SealCredential(googleFields.WorkspacePrivateKey)
+				if err != nil {
+					return err
+				}
+				sealedIMAPPass, err := emailmailbox.SealCredential(imapFields.Password)
+				if err != nil {
+					return err
+				}
 				if err := tx.QueryRow(r.Context(), `
 					INSERT INTO email_svc.inbox_config (
 						mailbox_address, display_name, domain, filters_json, poll_interval_secs,
@@ -930,9 +987,9 @@ func HandleWorkflowInboxCreate(pool *pgxpool.Pool) http.HandlerFunc {
 					RETURNING inbox_id::text
 				`, addr, item.DisplayName, domain, string(item.FiltersJSON), item.PollIntervalSecs,
 					item.Module, entityID, constants.StatusPendingApproval, sourceType,
-					graphTenantKey, graphFields.TenantLabel, graphFields.TenantID, graphFields.ClientID, graphFields.ClientSecret,
-					googleTenantKey, googleFields.WorkspaceTenantLabel, googleFields.WorkspaceServiceAccountEmail, googleFields.WorkspaceClientID, googleFields.WorkspacePrivateKey,
-					imapFields.Provider, imapFields.Host, imapFields.Port, imapFields.Username, imapFields.Password,
+					graphTenantKey, graphFields.TenantLabel, graphFields.TenantID, graphFields.ClientID, sealedGraphSecret,
+					googleTenantKey, googleFields.WorkspaceTenantLabel, googleFields.WorkspaceServiceAccountEmail, googleFields.WorkspaceClientID, sealedGoogleKey,
+					imapFields.Provider, imapFields.Host, imapFields.Port, imapFields.Username, sealedIMAPPass,
 					imapFields.InboxFolder, imapFields.SentFolder, imapFields.UseTLS,
 					strings.TrimSpace(item.OAuthProvider), strings.TrimSpace(item.OAuthMailTransport),
 					userID, userID, "",
@@ -1181,7 +1238,6 @@ func HandleWorkflowInboxDeleteRequest(pool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				// Cancel any open create/edit approval instances; submit a delete instance.
-				// The approval API accepts a pool, so this runs after the inbox transaction commits.
 				if err := approvalengine.CancelPendingInstances(r.Context(), pool, emailInboxModuleCode, inboxID, userEmail); err != nil {
 					api.LogErrorForResponse(w, "inbox delete cancel pending failed inbox=%s: %v", inboxID, err)
 					if rbErr := restoreInboxProcessingStatus(r.Context(), pool, inboxStatusRestore{
@@ -1381,6 +1437,18 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 							googleFinal = merged
 						}
 						err = inInboxTx(r.Context(), pool, func(tx pgx.Tx) error {
+							sealedGraphSecret, sealErr := emailmailbox.SealCredential(graphFinal.ClientSecret)
+							if sealErr != nil {
+								return sealErr
+							}
+							sealedGoogleKey, sealErr := emailmailbox.SealCredential(googleFinal.WorkspacePrivateKey)
+							if sealErr != nil {
+								return sealErr
+							}
+							sealedIMAPPass, sealErr := emailmailbox.SealCredential(imapFinal.Password)
+							if sealErr != nil {
+								return sealErr
+							}
 							if _, err := tx.Exec(r.Context(), `
 								UPDATE email_svc.inbox_config
 								SET display_name = COALESCE(NULLIF($2,''), display_name),
@@ -1407,11 +1475,11 @@ func HandleWorkflowInboxApprove(pool *pgxpool.Pool) http.HandlerFunc {
 								WHERE inbox_id = $1::uuid
 							`, inboxID, edit.DisplayName, emailcommon.NullableJSON(edit.FiltersJSON), edit.PollIntervalSecs,
 								edit.Module,
-								graphFinal.TenantKey, graphFinal.TenantLabel, graphFinal.TenantID, graphFinal.ClientID, graphFinal.ClientSecret,
+								graphFinal.TenantKey, graphFinal.TenantLabel, graphFinal.TenantID, graphFinal.ClientID, sealedGraphSecret,
 								googleFinal.WorkspaceTenantKey, googleFinal.WorkspaceTenantLabel, googleFinal.WorkspaceServiceAccountEmail,
-								googleFinal.WorkspaceClientID, googleFinal.WorkspacePrivateKey,
+								googleFinal.WorkspaceClientID, sealedGoogleKey,
 								imapFinal.Provider, imapFinal.Host, imapFinal.Port,
-								imapFinal.Username, imapFinal.Password,
+								imapFinal.Username, sealedIMAPPass,
 								imapFinal.InboxFolder, imapFinal.SentFolder, imapFinal.UseTLS,
 								constants.StatusApproved, userID, req.Comment); err != nil {
 								return err
@@ -1683,6 +1751,7 @@ func HandleWorkflowInboxAuditLog(pool *pgxpool.Pool) http.HandlerFunc {
 			if len(rawDetail) > 0 {
 				_ = json.Unmarshal(rawDetail, &row.Detail)
 			}
+			maskInboxCredentialValue(row.Detail)
 			items = append(items, row)
 		}
 		if items == nil {

@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
@@ -392,6 +393,30 @@ func BulkApproveCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM apibox.audit_ccp_csd
+			WHERE ccp_csd_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.CcpCsdIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
@@ -473,6 +498,30 @@ func BulkRejectCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM apibox.audit_ccp_csd
+			WHERE ccp_csd_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.CcpCsdIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
@@ -480,6 +529,25 @@ func BulkRejectCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE apibox.ccp_csd_master m SET
+				entity_sub_type = COALESCE(a.old_entity_sub_type, m.entity_sub_type),
+				lei = COALESCE(a.old_lei, m.lei),
+				participant_id = COALESCE(a.old_participant_id, m.participant_id)
+			FROM (
+				SELECT DISTINCT ON (ccp_csd_id) *
+				FROM apibox.audit_ccp_csd
+				WHERE ccp_csd_id = ANY($1::text[])
+				  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+				ORDER BY ccp_csd_id, requested_at DESC
+			) a
+			WHERE m.ccp_csd_id = a.ccp_csd_id`, req.CcpCsdIDs); err != nil {
+			msg, status := getUserFriendlyCounterpartyError(err, "Edit revert failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
 
 		res, err := tx.Exec(ctx, `
 			UPDATE apibox.audit_ccp_csd SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2

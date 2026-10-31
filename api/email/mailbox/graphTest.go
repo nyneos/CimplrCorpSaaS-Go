@@ -9,6 +9,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,17 +29,31 @@ func HandleGraphTest(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
+		userID := strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context()))
+		if userID == "" {
+			emailcommon.RespondUnauthorized(w, "user context missing")
+			return
+		}
 		fields := req.MailboxGraphFields
 		if inboxID := strings.TrimSpace(req.InboxID); inboxID != "" {
+			if !emailcommon.CanManageInbox(r.Context(), pool, inboxID, userID) {
+				emailcommon.RespondForbidden(w, "inbox not accessible")
+				return
+			}
 			stored, err := LoadMailboxGraphFields(r.Context(), pool, inboxID)
 			if err != nil {
 				emailcommon.RespondBadRequest(w, "mailbox not found")
 				return
 			}
+			storedTenant := strings.TrimSpace(stored.TenantID)
+			fields.TenantID = ""
 			merged, mergeErr := MergeGraphFields(stored, fields)
 			if mergeErr != nil {
 				emailcommon.RespondBadRequest(w, errtext.Detail(w, mergeErr))
 				return
+			}
+			if storedTenant != "" || strings.TrimSpace(stored.ClientSecret) != "" {
+				merged.TenantID = stored.TenantID
 			}
 			fields = merged
 		}

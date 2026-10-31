@@ -30,10 +30,6 @@ const errFragDoesNotExist = "does not exist"
 // successful/partial run, attaching the S3 objects, writing
 // generated_document_dispatch rows, and flipping docs to DISPATCHED once
 // outbox rows exist. Idempotent: docs already DISPATCHED are skipped.
-//
-// A per-run advisory lock stops the inline generation caller and the 30s
-// poller (and a second replica) from dispatching the same run together.
-// If the lock is already held, this call skips the run.
 func DispatchRun(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 	if pool == nil || strings.TrimSpace(runID) == "" {
 		return fmt.Errorf("pool and run_id required")
@@ -55,13 +51,6 @@ func DispatchRun(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 	return nil
 }
 
-// withDispatchRunLock runs fn only when this process holds a transaction-scoped
-// advisory lock named for the run. Package dmsjobs cannot import internal/jobs:
-// scheduler.go already imports this package, so WithAdvisoryLock would cycle.
-// The lock matches that helper: pg_try_advisory_xact_lock(hashtext($1)) on a
-// checked-out connection, released when the transaction rolls back. fn uses
-// other pool connections; this connection stays checked out until fn returns.
-// ran is false when another caller already holds the lock.
 func withDispatchRunLock(ctx context.Context, pool *pgxpool.Pool, runID string, fn func() error) (ran bool, err error) {
 	lockName := "dms-dispatch-run:" + strings.TrimSpace(runID)
 	conn, err := pool.Acquire(ctx)
@@ -340,13 +329,6 @@ func dispatchOneEmailDestination(ctx context.Context, pool *pgxpool.Pool, p emai
 	}
 	enrichDispatchPayload(ctx, pool, p.RunID, payload)
 
-	// Catalog insert is already idempotent: INSERT ... ON CONFLICT
-	// (correlation_id, channel, audit_id, recipient_user_id) against
-	// uq_outbox_idempotency, and it does not rewrite subject/body once a row
-	// has left PENDING. Skip that insert when this destination already has
-	// EMAIL rows so a later destination failure cannot queue destinations
-	// 1..N-1 again. DispatchRun holds the per-run advisory lock across this
-	// check and the insert, so two callers cannot both observe an empty outbox.
 	outboxes, err := loadOutboxByCorrelation(ctx, pool, corr)
 	if err != nil {
 		return nil, fmt.Errorf("load outbox for correlation %s: %w", corr, err)
@@ -364,8 +346,6 @@ func dispatchOneEmailDestination(ctx context.Context, pool *pgxpool.Pool, p emai
 		return nil, fmt.Errorf("no outbox rows created for EMAIL destination %s", p.DestinationID)
 	}
 
-	// Cc and cover land only on rows still PENDING. The outbox worker may
-	// already have claimed a row (PROCESSING/SENT); those are left as sent.
 	if len(ccEmails) > 0 {
 		if err := updatePendingOutbox(ctx, pool, corr, "apply Cc recipients", `
 			UPDATE notification_svc.outbox
@@ -759,11 +739,6 @@ func recordChannelDeliveries(
 	return nil
 }
 
-// updatePendingOutbox applies a cc/cover write only to EMAIL rows still PENDING.
-// Exec errors are returned. Rows already PROCESSING or SENT are not updated.
-// A zero-row update is success when nothing is PENDING anymore (the worker
-// already claimed them): the caller must not insert that destination again.
-// It is an error when PENDING rows are still present but none were updated.
 func updatePendingOutbox(ctx context.Context, pool *pgxpool.Pool, corr, action, sql string, args ...interface{}) error {
 	tag, err := pool.Exec(ctx, sql, args...)
 	if err != nil {

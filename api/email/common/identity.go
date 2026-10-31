@@ -11,8 +11,9 @@ import (
 func RequestIdentity(r *http.Request, reqUserID, reqEntityID string) (userID string, userEmail string, entityID string, entityIDs []string) {
 	userID = middlewares.GetUserIDFromContext(r.Context())
 	if userID == "" {
-		userID = strings.TrimSpace(reqUserID)
+		return "", "", "", nil
 	}
+	_ = reqUserID
 	userEmail = api.GetUserEmailFromCtx(r.Context())
 	if userEmail == "" {
 		userEmail = userID

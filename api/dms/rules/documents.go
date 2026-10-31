@@ -8,6 +8,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/dms/common"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -100,6 +101,7 @@ func HandleListDocuments(pool *pgxpool.Pool) http.HandlerFunc {
 			n := strconv.Itoa(len(args))
 			query += " AND COALESCE(r.sub_module_code, t.sub_module_code) = $" + n
 		}
+		query, args = common.AppendEntityScopeFilter(query, args, "COALESCE(r.entity_id, t.entity_id)", ctxutil.FromContext(r.Context()))
 		query += " ORDER BY gd.created_at DESC"
 		if req.Limit > 0 {
 			args = append(args, req.Limit)

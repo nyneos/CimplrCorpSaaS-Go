@@ -16,7 +16,7 @@ sonarqube:
   # 1️⃣ Create .env file
   # -----------------------------
   - echo "Creating .env file..."
-  - echo 'CRYPTO_KEY="3f4c9744c90d004d3e10a0b1fd9b93c75bb34b789395d4a1ff19a9b70de1a179"' >> .env
+  - echo "CRYPTO_KEY=\"${CRYPTO_KEY}\"" >> .env
   - echo 'USER_JOURNEY_LOGS_PATH="/usr/src/app/frontend_logs/"' >> .env
 
   # -----------------------------
@@ -81,7 +81,6 @@ quality_gate:
     - echo "Checking SonarQube Quality Gate..."
     - |
       echo "host: $SONAR_HOST_URL"
-      echo "SONAR_TOKEN: $SONAR_TOKEN"
       echo "SONAR_PROJECT_KEY: $SONAR_PROJECT_KEY"
       API_RESPONSE=$(curl -s -u $SONAR_TOKEN: "$SONAR_HOST_URL/api/qualitygates/project_status?projectKey=$SONAR_PROJECT_KEY" | jq -r .projectStatus.status) 
       echo "Full API Response: $API_RESPONSE"

@@ -188,12 +188,19 @@ func HandleAttachmentUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondBadRequest(w, "message_id is required")
 			return
 		}
-
-		var exists bool
-		if err := pool.QueryRow(r.Context(), `
-			SELECT EXISTS(SELECT 1 FROM email_svc.message WHERE message_id = $1::uuid)
-		`, messageID).Scan(&exists); err != nil || !exists {
-			emailcommon.RespondNotFound(w, "message not found")
+		if strings.TrimSpace(apipreval.GetUserIDFromContext(r.Context())) == "" {
+			emailcommon.RespondUnauthorized(w, "user context missing")
+			return
+		}
+		if !emailcommon.RequireMessageAccess(w, r, pool, emailcommon.MessageByIDQuery, messageID) {
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT COALESCE(NULLIF(m.entity_id, ''), NULLIF(i.entity_id, ''))
+			FROM email_svc.message m
+			LEFT JOIN email_svc.inbox_config i ON i.inbox_id = m.inbox_id
+			WHERE m.message_id = $1::uuid
+		`, messageID) {
 			return
 		}
 
@@ -227,7 +234,18 @@ func HandleAttachmentUpload(pool *pgxpool.Pool) http.HandlerFunc {
 		hashHex := hex.EncodeToString(hash[:])
 		now := time.Now().UTC()
 		s3Key := fmt.Sprintf("email/inbound/attachments/manual/%04d/%02d/%02d/%s/%s-%s",
-			now.Year(), now.Month(), now.Day(), messageID, hashHex[:12], filename)
+			now.Year(), now.Month(), now.Day(), messageID, hashHex, filename)
+		var keyTaken bool
+		if err := pool.QueryRow(r.Context(), `
+			SELECT EXISTS(SELECT 1 FROM email_svc.message_attachment WHERE s3_key = $1)
+		`, s3Key).Scan(&keyTaken); err != nil {
+			respondUploadInternal(w, err)
+			return
+		}
+		if keyTaken {
+			s3Key = fmt.Sprintf("email/inbound/attachments/manual/%04d/%02d/%02d/%s/%s-%d-%s",
+				now.Year(), now.Month(), now.Day(), messageID, hashHex, now.UnixNano(), filename)
+		}
 
 		if err := s3storage.PutObjectToS3(r.Context(), s3Key, body, contentType); err != nil {
 			respondUploadInternal(w, err)

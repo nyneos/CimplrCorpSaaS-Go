@@ -62,8 +62,8 @@ type CanonicalRow struct {
 	DocumentDate     string                   `json:"DocumentDate"`
 	PostingDate      string                   `json:"PostingDate"`
 	NetDueDate       string                   `json:"NetDueDate"`
-	AmountDoc        decimal.Decimal          `json:"AmountDoc"` // canonical decimal
-	AmountFloat      float64                  `json:"-"`         // hot-loop float
+	AmountDoc        decimal.Decimal          `json:"AmountDoc"`
+	AmountValid      bool                     `json:"-"`
 	LineItems        []map[string]interface{} `json:"LineItems,omitempty"`
 	// Structured non-qualified metadata (preferred)
 	IsNonQualified     bool   `json:"is_non_qualified,omitempty"`
@@ -126,7 +126,7 @@ type KnockoffInfo struct {
 type knockFloatInput struct {
 	BaseDoc  string
 	KnockDoc string
-	AmtFloat float64
+	Amt      decimal.Decimal
 	Currency string
 }
 
@@ -231,7 +231,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			httpError(w, http.StatusBadRequest, "multipart parse error: "+errtext.Detail(w, err))
+			httpError(w, http.StatusBadRequest, "multipart parse error: "+errtext.Text(err))
 			return
 		}
 		if !policyruntime.Enforce(r.Context(), w, r, pool, policyruntime.EnforceInput{
@@ -250,7 +250,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		results, elapsed, policySummary, status, err := processBatchUploadStagingData(r.Context(), pool, r)
 		if err != nil {
-			httpError(w, status, errtext.Detail(w, err))
+			httpError(w, status, errtext.Text(err))
 			return
 		}
 		if line := strings.TrimSpace(policySummary); line != "" {
@@ -544,7 +544,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					logger.LogError("[FBUP-S3] cleanup after acquire failure failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
-			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrDBAcquire, err.Error())
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrDBAcquire, errtext.Text(err))
 		}
 		tx, err := conn.Begin(ctx)
 		if err != nil {
@@ -554,7 +554,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					logger.LogError("[FBUP-S3] cleanup after tx begin failure failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
-			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrTxBegin, err.Error())
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrTxBegin, errtext.Text(err))
 		}
 		committed := false
 		cleanupUploadedObject := uploadedNewObject
@@ -612,8 +612,6 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		totalRows := 0
 		dn := newDateNormalizer()
 
-		// process rows; stop producing as soon as the copy consumer has exited or the
-		// request is cancelled, otherwise a full channel would block this send forever.
 		copyStopped := false
 	rowLoop:
 		for rowIdx := 1; rowIdx < len(allRows); rowIdx++ {
@@ -661,21 +659,12 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				break rowLoop
 			}
 
-			c, _ := mapObjectToCanonical(mapped, src, currencyAliases)
-
-			// parse the amount exactly as decimal; an amount that is present but not a
-			// number is flagged non-qualified instead of silently becoming zero
-			c.AmountDoc = decimal.Zero
-			c.AmountFloat = 0.0
-			if raw, present := mapped["AmountDoc"]; present && raw != nil {
-				if amtText := strings.ReplaceAll(strings.TrimSpace(fmt.Sprintf("%v", raw)), ",", ""); amtText != "" {
-					if d, derr := decimal.NewFromString(amtText); derr == nil {
-						c.AmountDoc = d
-						c.AmountFloat, _ = d.Float64()
-					} else {
-						c.IsNonQualified = true
-						c.NonQualifiedReason = fmt.Sprintf("Document amount %q is not a valid number", amtText)
-					}
+			c, amtErr := mapObjectToCanonical(mapped, src, currencyAliases)
+			if amtErr != nil {
+				c.AmountValid = false
+				c.IsNonQualified = true
+				if strings.TrimSpace(c.NonQualifiedReason) == "" {
+					c.NonQualifiedReason = amtErr.Error()
 				}
 			}
 
@@ -715,12 +704,22 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		logger.LogInfo("[DEBUG] After parsing: canonicals=%d, batch=%s file=%s", len(canonicals), batchID.String(), fh.Filename)
 		if len(canonicals) > 0 {
 			sample := canonicals[0]
-			logger.LogInfo("[DEBUG] Sample canonical[0]: CompanyCode='%s', Party='%s', Currency='%s', Amount=%s, AmountFloat=%f, NetDueDate='%s'",
-				sample.CompanyCode, sample.Party, sample.DocumentCurrency, sample.AmountDoc.String(), sample.AmountFloat, sample.NetDueDate)
+			logger.LogInfo("[DEBUG] Sample canonical[0]: CompanyCode='%s', Party='%s', Currency='%s', Amount=%s, NetDueDate='%s'",
+				sample.CompanyCode, sample.Party, sample.DocumentCurrency, sample.AmountDoc.String(), sample.NetDueDate)
+		}
+
+		allocatable := make([]CanonicalRow, 0, len(canonicals))
+		heldAmounts := make([]CanonicalRow, 0)
+		for _, c := range canonicals {
+			if !c.AmountValid || c.AmountDoc.IsZero() {
+				heldAmounts = append(heldAmounts, c)
+				continue
+			}
+			allocatable = append(allocatable, c)
 		}
 
 		// allocate (produces unallocated exposures and knockoffs)
-		exposuresFloat, knocksFloat := allocateFIFOFloat(canonicals, receivableLogic, payableLogic)
+		exposuresFloat, knocksFloat := allocateFIFOFloat(allocatable, receivableLogic, payableLogic)
 
 		// ---- Informational Summary for Auto-Offset / Self-Allocation ----
 		autoKnockCount := len(knocksFloat)
@@ -744,10 +743,10 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		logger.LogInfo("[DEBUG] After allocation: exposuresFloat=%d, knocksFloat=%d, batch=%s", len(exposuresFloat), len(knocksFloat), batchID.String())
 
 		// net-exposure non-qualified pass
-		netMap := make(map[string]float64)
+		netMap := make(map[string]decimal.Decimal)
 		for _, e := range exposuresFloat {
 			key := fmt.Sprintf(constants.FormatPipelineTriple, e.Source, e.CompanyCode, e.Party)
-			netMap[key] += e.AmountFloat
+			netMap[key] = netMap[key].Add(e.AmountDoc)
 		}
 		flaggedCount := 0
 		for i := range exposuresFloat {
@@ -756,9 +755,9 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			net := netMap[key]
 			switch e.Source {
 			case "FBL1N", "FBL3N":
-				if net > 0 {
+				if net.IsPositive() {
 					e.IsNonQualified = true
-					e.NonQualifiedReason = fmt.Sprintf("Vendor net exposure %.4f > 0", net)
+					e.NonQualifiedReason = fmt.Sprintf("Vendor net exposure %s > 0", net.StringFixed(4))
 					if e._raw == nil {
 						e._raw = make(map[string]interface{})
 					}
@@ -767,9 +766,9 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 					flaggedCount++
 				}
 			case "FBL5N":
-				if net < 0 {
+				if net.IsNegative() {
 					e.IsNonQualified = true
-					e.NonQualifiedReason = fmt.Sprintf("Customer net exposure %.4f < 0", net)
+					e.NonQualifiedReason = fmt.Sprintf("Customer net exposure %s < 0", net.StringFixed(4))
 					if e._raw == nil {
 						e._raw = make(map[string]interface{})
 					}
@@ -781,21 +780,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		}
 		logger.LogInfo("[DEBUG] After net-exposure pass: flagged=%d out of %d exposuresFloat, batch=%s", flaggedCount, len(exposuresFloat), batchID.String())
 
-		// build canonical exposures slice (decimal amounts) - ONLY documents with remaining > 0
-		exposures := make([]CanonicalRow, 0, len(exposuresFloat))
-		for _, e := range exposuresFloat {
-			if e.AmountFloat == 0 {
-				e.AmountDoc = decimal.Zero
-			} else {
-				efmt := strconv.FormatFloat(e.AmountFloat, 'f', 4, 64)
-				if d, derr := decimal.NewFromString(efmt); derr == nil {
-					e.AmountDoc = d
-				} else {
-					e.AmountDoc = decimal.NewFromFloat(e.AmountFloat)
-				}
-			}
-			exposures = append(exposures, e)
-		}
+		exposures := exposuresFloat
 
 		// entity / currency non-qualified pass
 		entityMiss := 0
@@ -848,18 +833,20 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		// build knockMap for preview (knockoffs grouped by base doc)
 		knockMap := map[string][]KnockoffInfo{}
 		for _, kf := range knocksFloat {
-			afmt := strconv.FormatFloat(kf.AmtFloat, 'f', 4, 64)
-			d, _ := decimal.NewFromString(afmt)
 			k := KnockoffInfo{
 				BaseDoc:  kf.BaseDoc,
 				KnockDoc: kf.KnockDoc,
-				AmtAbs:   d,
+				AmtAbs:   kf.Amt,
 			}
 			knockMap[kf.BaseDoc] = append(knockMap[kf.BaseDoc], k)
 		}
 
 		// validation: separate qualified and nonQualified (struct NonQualified)
 		qualified, nonQualified := validateExposures(exposures)
+		if len(heldAmounts) > 0 {
+			_, heldBad := validateExposures(heldAmounts)
+			nonQualified = append(nonQualified, heldBad...)
+		}
 
 		logger.LogInfo("[DEBUG] After validation: qualified=%d, nonQualified=%d, batch=%s", len(qualified), len(nonQualified), batchID.String())
 		if len(nonQualified) > 0 && len(nonQualified) <= 5 {
@@ -1143,23 +1130,17 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			"source", "document_date", "posting_date", "net_due_date", "effective_due_date",
 			"exchange_rate", "amount_local_signed", "mapped_payload",
 		}
-		docSignByNumber := make(map[string]float64, len(canonicals))
+		docSignByNumber := make(map[string]int, len(canonicals))
 		for _, c := range canonicals {
-			if c.DocumentNumber == "" {
+			if c.DocumentNumber == "" || !c.AmountValid {
 				continue
 			}
-			sign := 1.0
-			if c.AmountFloat < 0 {
-				sign = -1
-			} else if c.AmountFloat > 0 {
-				sign = 1
-			}
-			docSignByNumber[c.DocumentNumber] = sign
+			docSignByNumber[c.DocumentNumber] = c.AmountDoc.Sign()
 		}
 
 		allocRows := make([][]any, 0, len(knocksFloat))
 		for _, k := range knocksFloat {
-			if k.AmtFloat == 0 {
+			if !k.Amt.IsPositive() {
 				continue
 			}
 			var companyVal interface{}
@@ -1212,7 +1193,10 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			if baseSign == 0 {
 				baseSign = 1
 			}
-			signedAlloc := decimal.NewFromFloat(math.Abs(k.AmtFloat) * baseSign)
+			signedAlloc := k.Amt
+			if baseSign < 0 {
+				signedAlloc = signedAlloc.Neg()
+			}
 
 			allocRows = append(allocRows, []any{
 				uuid.New(),
@@ -1220,7 +1204,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				fileHash,
 				k.BaseDoc,
 				k.KnockDoc,
-				decimal.NewFromFloat(math.Abs(k.AmtFloat)).StringFixed(4),
+				k.Amt.StringFixed(4),
 				k.Currency,
 				signedAlloc.StringFixed(4),
 				time.Now(),
@@ -1319,6 +1303,10 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			mp, _ := json.Marshal(nq.Row._raw)
 			mp = sanitizeUTF8(mp)
 			reason := strings.Join(nq.Issues, "; ")
+			var unqualifiedAmount interface{}
+			if nq.Row.AmountValid {
+				unqualifiedAmount = nq.Row.AmountDoc.StringFixed(4)
+			}
 			unqualRows = append(unqualRows, []any{
 				uuid.New(),
 				batchID,
@@ -1331,7 +1319,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				parseDateOrNil(nq.Row.DocumentDate),
 				parseDateOrNil(nq.Row.PostingDate),
 				parseDateOrNil(nq.Row.NetDueDate),
-				nq.Row.AmountDoc.StringFixed(4),
+				unqualifiedAmount,
 				nq.Issues,
 				reason,
 				mp,
@@ -1398,12 +1386,12 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			persisted, persistErr := exposureBatchUploadS3KeyPersisted(ctx, pool, batchID, s3Key)
 			if persistErr != nil {
 				cleanupUploadedObject = false
-				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("%s%s (unable to verify persisted upload_s3_key: %v)", constants.ErrCommitFailed, err.Error(), persistErr)
+				return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("%s%s (unable to verify persisted upload_s3_key)", constants.ErrCommitFailed, errtext.Text(err))
 			}
 			if persisted {
 				cleanupUploadedObject = false
 			}
-			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrCommitFailed, err.Error())
+			return nil, 0, "", http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrCommitFailed, errtext.Text(err))
 		}
 		committed = true
 		cleanupUploadedObject = false
@@ -1604,10 +1592,10 @@ func allocateFIFOFloat(rows []CanonicalRow, receivableLogic, payableLogic string
 func filterBySignFloat(rows []CanonicalRow, sign int) []CanonicalRow {
 	out := make([]CanonicalRow, 0)
 	for _, r := range rows {
-		if sign < 0 && r.AmountFloat < 0 {
-			out = append(out, r)
+		if !r.AmountValid {
+			continue
 		}
-		if sign > 0 && r.AmountFloat > 0 {
+		if r.AmountDoc.Sign() == sign {
 			out = append(out, r)
 		}
 	}
@@ -1617,44 +1605,45 @@ func filterBySignFloat(rows []CanonicalRow, sign int) []CanonicalRow {
 func allocateFIFOFloatCore(baseItems []CanonicalRow, knocks []CanonicalRow) ([]CanonicalRow, []knockFloatInput) {
 	type it struct {
 		ref    CanonicalRow
-		amtAbs float64
+		amtAbs decimal.Decimal
 	}
 	b := make([]it, len(baseItems))
 	for i, v := range baseItems {
-		b[i] = it{ref: v, amtAbs: math.Abs(v.AmountFloat)}
+		b[i] = it{ref: v, amtAbs: v.AmountDoc.Abs()}
 	}
 	k := make([]it, len(knocks))
 	for i, v := range knocks {
-		k[i] = it{ref: v, amtAbs: math.Abs(v.AmountFloat)}
+		k[i] = it{ref: v, amtAbs: v.AmountDoc.Abs()}
 	}
 	exposures := make([]CanonicalRow, 0)
 	knockoffs := make([]knockFloatInput, 0)
 	for i := range b {
 		remaining := b[i].amtAbs
 		for j := range k {
-			if remaining <= 0 {
+			if !remaining.IsPositive() {
 				break
 			}
-			if k[j].amtAbs <= 0 {
+			if !k[j].amtAbs.IsPositive() {
 				continue
 			}
-			if remaining <= k[j].amtAbs+1e-12 {
-				knockoffs = append(knockoffs, knockFloatInput{BaseDoc: b[i].ref.DocumentNumber, KnockDoc: k[j].ref.DocumentNumber, AmtFloat: remaining})
-				k[j].amtAbs = k[j].amtAbs - remaining
-				remaining = 0
+			if remaining.LessThanOrEqual(k[j].amtAbs) {
+				knockoffs = append(knockoffs, knockFloatInput{BaseDoc: b[i].ref.DocumentNumber, KnockDoc: k[j].ref.DocumentNumber, Amt: remaining})
+				k[j].amtAbs = k[j].amtAbs.Sub(remaining)
+				remaining = decimal.Zero
 			} else {
-				knockoffs = append(knockoffs, knockFloatInput{BaseDoc: b[i].ref.DocumentNumber, KnockDoc: k[j].ref.DocumentNumber, AmtFloat: k[j].amtAbs})
-				remaining = remaining - k[j].amtAbs
-				k[j].amtAbs = 0
+				knockoffs = append(knockoffs, knockFloatInput{BaseDoc: b[i].ref.DocumentNumber, KnockDoc: k[j].ref.DocumentNumber, Amt: k[j].amtAbs})
+				remaining = remaining.Sub(k[j].amtAbs)
+				k[j].amtAbs = decimal.Zero
 			}
 		}
-		if remaining > 0 {
+		if remaining.IsPositive() {
 			e := b[i].ref
-			if b[i].ref.AmountFloat < 0 {
-				e.AmountFloat = -remaining
+			if b[i].ref.AmountDoc.IsNegative() {
+				e.AmountDoc = remaining.Neg()
 			} else {
-				e.AmountFloat = remaining
+				e.AmountDoc = remaining
 			}
+			e.AmountValid = true
 			exposures = append(exposures, e)
 		}
 	}
@@ -1806,29 +1795,35 @@ func mapObjectToCanonical(obj map[string]interface{}, src string, aliasMap map[s
 		}
 		return ""
 	}
-	getD := func(k string) decimal.Decimal {
-		if v, ok := obj[k]; ok {
-			switch t := v.(type) {
-			case float64:
-				return decimal.NewFromFloat(t)
-			case string:
-				s := strings.ReplaceAll(strings.TrimSpace(t), ",", "")
-				if s == "" {
-					return decimal.Zero
-				}
-				d, _ := decimal.NewFromString(s)
-				return d
-			default:
-				d, _ := decimal.NewFromString(fmt.Sprintf("%v", t))
-				return d
-			}
+	getD := func(k string) (decimal.Decimal, error) {
+		v, ok := obj[k]
+		if !ok || v == nil {
+			return decimal.Decimal{}, fmt.Errorf("document amount is required")
 		}
-		return decimal.Zero
+		var text string
+		switch t := v.(type) {
+		case string:
+			text = t
+		case json.Number:
+			text = t.String()
+		default:
+			return decimal.Decimal{}, fmt.Errorf("document amount %q is not a valid number", strings.TrimSpace(fmt.Sprint(t)))
+		}
+		text = strings.ReplaceAll(strings.TrimSpace(text), ",", "")
+		if text == "" {
+			return decimal.Decimal{}, fmt.Errorf("document amount is required")
+		}
+		d, err := decimal.NewFromString(text)
+		if err != nil {
+			return decimal.Decimal{}, fmt.Errorf("document amount %q is not a valid number", text)
+		}
+		return d, nil
 	}
 	cur := strings.TrimSpace(strings.ToUpper(getS("DocumentCurrency")))
 	if v, ok := aliasMap[cur]; ok {
 		cur = v
 	}
+	amount, amountErr := getD("AmountDoc")
 	c := CanonicalRow{
 		Source:           src,
 		CompanyCode:      getS("CompanyCode"),
@@ -1838,8 +1833,13 @@ func mapObjectToCanonical(obj map[string]interface{}, src string, aliasMap map[s
 		DocumentDate:     getS("DocumentDate"),
 		PostingDate:      getS("PostingDate"),
 		NetDueDate:       getS("NetDueDate"),
-		AmountDoc:        getD("AmountDoc"),
+		AmountDoc:        amount,
+		AmountValid:      amountErr == nil,
 		_raw:             obj,
+	}
+	if amountErr != nil {
+		c.IsNonQualified = true
+		c.NonQualifiedReason = amountErr.Error()
 	}
 	if v, ok := obj["LineItems"]; ok {
 		switch t := v.(type) {
@@ -1855,7 +1855,7 @@ func mapObjectToCanonical(obj map[string]interface{}, src string, aliasMap map[s
 			c.LineItems = arr
 		}
 	}
-	return c, nil
+	return c, amountErr
 }
 
 func NormalizeDate(dateStr string) (string, error) {
@@ -2012,7 +2012,11 @@ func validateExposures(inputs []CanonicalRow) ([]CanonicalRow, []NonQualified) {
 		if strings.TrimSpace(it.NetDueDate) == "" {
 			issues = append(issues, "Net due date is required and must be a valid date")
 		}
-		if it.AmountDoc.Equal(decimal.Zero) {
+		if !it.AmountValid {
+			if strings.TrimSpace(it.NonQualifiedReason) == "" {
+				issues = append(issues, "Document amount is not a valid number")
+			}
+		} else if it.AmountDoc.IsZero() {
 			issues = append(issues, "Document amount must be non-zero")
 		}
 		// honor programmatic non-qualified flag (structured)
@@ -2548,7 +2552,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		var req EditAllocationRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			httpError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err))
+			httpError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+errtext.Text(err))
 			return
 		}
 
@@ -2590,14 +2594,14 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		conn, err := pool.Acquire(ctx)
 		if err != nil {
-			httpError(w, 500, constants.ErrDBAcquire+errtext.Detail(w, err))
+			httpError(w, 500, constants.ErrDBAcquire+errtext.Text(err))
 			return
 		}
 		defer conn.Release()
 
 		tx, err := conn.Begin(ctx)
 		if err != nil {
-			httpError(w, 500, constants.ErrTxBegin+errtext.Detail(w, err))
+			httpError(w, 500, constants.ErrTxBegin+errtext.Text(err))
 			return
 		}
 		committed := false
@@ -2614,7 +2618,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				httpError(w, 404, constants.ErrBatchNotFound)
 				return
 			}
-			httpError(w, 500, "batch lookup: "+errtext.Detail(w, err))
+			httpError(w, 500, "batch lookup: "+errtext.Text(err))
 			return
 		}
 		if strings.ToLower(batchStatus) != "completed" {
@@ -2671,7 +2675,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			_ = tx.Rollback(ctx)
 			previewRes, statusCode, err := buildPreviewForBatch(pool, ctx, batchUUID, overrideSource)
 			if err != nil {
-				httpError(w, 500, constants.ErrPreviewBuild+errtext.Detail(w, err))
+				httpError(w, 500, constants.ErrPreviewBuild+errtext.Text(err))
 				return
 			}
 			previewRes.Errors = append(previewRes.Errors, "no allocations supplied")
@@ -2688,7 +2692,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			_ = tx.Rollback(ctx)
 			previewRes, _, err := buildPreviewForBatch(pool, ctx, batchUUID, overrideSource)
 			if err != nil {
-				httpError(w, 500, constants.ErrPreviewBuild+errtext.Detail(w, err))
+				httpError(w, 500, constants.ErrPreviewBuild+errtext.Text(err))
 				return
 			}
 			previewRes.Errors = append(previewRes.Errors, errorsList...)
@@ -2812,7 +2816,7 @@ GROUP BY
 `, batchUUID)
 
 		if err != nil {
-			httpError(w, 500, "fetch base docs: "+errtext.Detail(w, err))
+			httpError(w, 500, "fetch base docs: "+errtext.Text(err))
 			return
 		}
 		defer rows.Close()
@@ -2888,7 +2892,7 @@ GROUP BY
 			_ = tx.Rollback(ctx)
 			previewRes, _, err := buildPreviewForBatch(pool, ctx, batchUUID, overrideSource)
 			if err != nil {
-				httpError(w, 500, constants.ErrPreviewBuild+errtext.Detail(w, err))
+				httpError(w, 500, constants.ErrPreviewBuild+errtext.Text(err))
 				return
 			}
 			previewRes.Errors = append(previewRes.Errors, errorsList...)
@@ -3069,7 +3073,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now(),now(),$16,$17)
 			)
 			if err != nil {
 				_ = tx.Rollback(ctx)
-				httpError(w, 500, "insert alloc: "+errtext.Detail(w, err))
+				httpError(w, 500, "insert alloc: "+errtext.Text(err))
 				return
 			}
 			insertedCount++
@@ -3240,14 +3244,14 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now(),now(),$16,$17)
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			httpError(w, 500, constants.ErrCommitFailed+errtext.Detail(w, err))
+			httpError(w, 500, constants.ErrCommitFailed+errtext.Text(err))
 			return
 		}
 		committed = true
 
 		previewRes, _, err := buildPreviewForBatch(pool, ctx, batchUUID, overrideSource)
 		if err != nil {
-			httpError(w, 500, constants.ErrPreviewBuild+errtext.Detail(w, err))
+			httpError(w, 500, constants.ErrPreviewBuild+errtext.Text(err))
 			return
 		}
 		previewRes.Info = append(previewRes.Info,
@@ -4218,7 +4222,7 @@ func GetBatchDetailV91(pool *pgxpool.Pool) http.HandlerFunc {
 				respondEnvelopeError(w, http.StatusNotFound, constants.ErrBatchNotFound, v91ErrorCode(http.StatusNotFound))
 				return
 			}
-			respondEnvelopeError(w, http.StatusInternalServerError, "batch lookup: "+errtext.Detail(w, err), v91ErrorCode(http.StatusInternalServerError))
+			respondEnvelopeError(w, http.StatusInternalServerError, "batch lookup: "+errtext.Text(err), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		if uploadedBy.Valid {
@@ -4230,7 +4234,7 @@ func GetBatchDetailV91(pool *pgxpool.Pool) http.HandlerFunc {
 
 		preview, _, err := buildPreviewForBatch(pool, ctx, batchUUID, nil)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrPreviewBuild+errtext.Detail(w, err), v91ErrorCode(http.StatusInternalServerError))
+			respondEnvelopeError(w, http.StatusInternalServerError, constants.ErrPreviewBuild+errtext.Text(err), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 
@@ -4421,7 +4425,7 @@ func GetBatchExposureAuditV91(pool *pgxpool.Pool) http.HandlerFunc {
 			 ORDER BY a.requested_at DESC NULLS LAST, a.action_id DESC
 		`, batchIDStr)
 		if err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, "failed to fetch batch audit: "+errtext.Detail(w, err), v91ErrorCode(http.StatusInternalServerError))
+			respondEnvelopeError(w, http.StatusInternalServerError, "failed to fetch batch audit: "+errtext.Text(err), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 		defer rows.Close()
@@ -4470,7 +4474,7 @@ func GetBatchExposureAuditV91(pool *pgxpool.Pool) http.HandlerFunc {
 			logs = append(logs, entry)
 		}
 		if err := rows.Err(); err != nil {
-			respondEnvelopeError(w, http.StatusInternalServerError, "batch audit scan: "+errtext.Detail(w, err), v91ErrorCode(http.StatusInternalServerError))
+			respondEnvelopeError(w, http.StatusInternalServerError, "batch audit scan: "+errtext.Text(err), v91ErrorCode(http.StatusInternalServerError))
 			return
 		}
 

@@ -21,11 +21,14 @@ package fdMaster
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/investment/rounding"
+
+	"github.com/shopspring/decimal"
 )
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -121,9 +124,10 @@ func engDivisorAndDays(conventionType string, start, end time.Time, cfg *BankCon
 
 // engCapDivisorAndDays returns (divisor, days) for a CAPITALIZATION or PAYOUT period.
 // Cap/payout boundaries are governed by period_boundary_definition only:
-//   INCL_BOTH        → raw (end−start) + 1
-//   EXCL_BOTH        → raw (end−start) − 1
-//   INCL_START_EXCL_END / EXCL_START_INCL_END / default → raw (end−start)
+//
+//	INCL_BOTH        → raw (end−start) + 1
+//	EXCL_BOTH        → raw (end−start) − 1
+//	INCL_START_EXCL_END / EXCL_START_INCL_END / default → raw (end−start)
 //
 // accrual_start/end_convention is intentionally NOT applied here — those fields
 // are accrual-row controls (like weekend_accrual / holiday_accrual).
@@ -423,19 +427,82 @@ func engFormula(label string, p engFormulaParams) string {
 
 // ── SI schedule ───────────────────────────────────────────────────────────────
 
+type siPostedAmount struct {
+	when  time.Time
+	gross decimal.Decimal
+	tds   decimal.Decimal
+}
+
+func decAmount(v float64) decimal.Decimal {
+	d, err := decimal.NewFromString(strconv.FormatFloat(v, 'f', -1, 64))
+	if err != nil {
+		return decimal.Zero
+	}
+	return d
+}
+
+func decFloat(d decimal.Decimal) float64 {
+	f, _ := d.Float64()
+	return f
+}
+
+func siInterest(principal, rate decimal.Decimal, days, divisor int) decimal.Decimal {
+	if days == 0 || divisor == 0 {
+		return decimal.Zero
+	}
+	return principal.Mul(rate).Mul(decimal.NewFromInt(int64(days))).Div(decimal.NewFromInt(int64(divisor)))
+}
+
+func siRound(raw decimal.Decimal, rnd rounding.Config, final bool) decimal.Decimal {
+	if rounding.NormalizeFrequency(rnd.Frequency) == "AT_MATURITY" && !final {
+		if raw.IsNegative() {
+			return decimal.Zero
+		}
+		return raw
+	}
+	places := int32(rounding.NormalizeDecimals(rnd.Decimals))
+	if places > 12 {
+		places = 12
+	}
+	var out decimal.Decimal
+	switch rounding.NormalizeMethod(rnd.Method) {
+	case "TRUNCATE", "ROUND_DOWN":
+		out = raw.RoundDown(places)
+	case "ROUND_UP":
+		out = raw.RoundUp(places)
+	case "BANKERS":
+		out = raw.RoundBank(places)
+	default:
+		out = raw.Round(places)
+	}
+	if out.IsNegative() {
+		return decimal.Zero
+	}
+	return out
+}
+
+func siPerDay(rate decimal.Decimal, divisor int) float64 {
+	if divisor == 0 {
+		return 0
+	}
+	return decFloat(rate.Div(decimal.NewFromInt(int64(divisor))))
+}
+
 // engSISchedule generates the full cashflow schedule for a Simple Interest FD.
 func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 	fd := p.FD
 	tdsCfg := p.TDSCfg
 	dcCode := firstNonEmpty(p.DCInfo.DayCountCode, fd.DayCountConvention, p.Cfg.DayCountCode, "DC-ACT-365")
 
-	P := fd.PrincipalAmount
-	r := fd.InterestRate / 100.0 // convert % to decimal
-	var tRate float64
+	principal := decAmount(fd.PrincipalAmount)
+	rate := decAmount(fd.InterestRate).Div(decimal.NewFromInt(100))
+	var tdsRate decimal.Decimal
 	hasTDS := tdsCfg != nil && tdsCfg.TDSRate > 0
 	if hasTDS {
-		tRate = tdsCfg.TDSRate / 100.0
+		tdsRate = decAmount(tdsCfg.TDSRate).Div(decimal.NewFromInt(100))
 	}
+	P := decFloat(principal)
+	r := decFloat(rate)
 	convention := firstNonEmpty(p.DCInfo.ConventionType, normConventionStatic(p.Cfg.DayCountCode), "ACT_365")
 	rnd := engRoundingFromCfg(p.Cfg)
 
@@ -483,23 +550,21 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 
 	prevRowDate := fd.ValueDate
 	lastPayoutDate := fd.ValueDate
+	var postedSI []siPostedAmount
 
 	for _, pd := range payoutDates {
 		isMaturity := pd.Equal(fd.MaturityDate)
 
-		// Emit all accrual rows in (lastPayoutDate, pd]
 		for _, ad := range accrualDates {
 			if ad.After(lastPayoutDate) && !ad.After(pd) {
 				periodDivisor, periodDays := engDivisorAndDays(convention, prevRowDate, ad, p.Cfg, p.CalInfo)
-				rawGross := P * r * float64(periodDays) / float64(periodDivisor)
-				gross := rnd.RoundInterest(rawGross)
-				if gross < 0 {
-					gross = 0
-				}
-				var provTDS float64
+				rawGross := siInterest(principal, rate, periodDays, periodDivisor)
+				gross := siRound(rawGross, rnd, false)
+				var provTDS decimal.Decimal
 				if hasTDS {
-					provTDS = rnd.RoundInterest(gross * tRate)
+					provTDS = siRound(gross.Mul(tdsRate), rnd, false)
 				}
+				postedSI = append(postedSI, siPostedAmount{when: ad, gross: gross, tds: provTDS})
 				rows = append(rows, CashflowRow{
 					EventType:         "ACCRUAL",
 					EventDate:         ad,
@@ -509,53 +574,49 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 					PeriodEndDate:     ad,
 					PeriodDays:        periodDays,
 					OpeningPrincipal:  P,
-					InterestAccrued:   gross,
+					InterestAccrued:   decFloat(gross),
 					ClosingPrincipal:  P,
-					TDSAmount:         provTDS, // provisional TDS — not actually deducted on SI accrual
-					NetCashFlow:       gross,   // net = gross for SI accrual
+					TDSAmount:         decFloat(provTDS),
+					NetCashFlow:       decFloat(gross),
 					DayCountCode:      dcCode,
 					Divisor:           periodDivisor,
-					FormulaUsed:       engFormula("[SI ACCRUAL]", engFormulaParams{Principal: P, Rate: r, Days: periodDays, Divisor: periodDivisor, Raw: rawGross, Rounded: gross, Rnd: rnd}),
-					AccrualRatePerDay: r / float64(periodDivisor),
+					FormulaUsed:       engFormula("[SI ACCRUAL]", engFormulaParams{Principal: P, Rate: r, Days: periodDays, Divisor: periodDivisor, Raw: decFloat(rawGross), Rounded: decFloat(gross), Rnd: rnd}),
+					AccrualRatePerDay: siPerDay(rate, periodDivisor),
 				})
 				prevRowDate = ad
 			}
 		}
 
-		// Compute payout row (Interest Payout or Maturity)
 		payoutDivisor, payoutDays := engCapDivisorAndDays(convention, lastPayoutDate, pd, p.Cfg)
-		payoutRaw := P * r * float64(payoutDays) / float64(payoutDivisor)
-		var payoutGross float64
-		if isMaturity {
-			payoutGross = rnd.RoundFinal(payoutRaw)
-		} else {
-			payoutGross = rnd.RoundInterest(payoutRaw)
-		}
-		if payoutGross < 0 {
-			payoutGross = 0
-		}
-		var payoutTDS float64
+		payoutRaw := siInterest(principal, rate, payoutDays, payoutDivisor)
+		payoutGross := siRound(payoutRaw, rnd, isMaturity)
+		var payoutTDS decimal.Decimal
 		if hasTDS {
-			if isMaturity {
-				payoutTDS = rnd.RoundFinal(payoutGross * tRate)
-			} else {
-				payoutTDS = rnd.RoundInterest(payoutGross * tRate)
-			}
+			payoutTDS = siRound(payoutGross.Mul(tdsRate), rnd, isMaturity)
 		}
-		payoutNet := payoutGross - payoutTDS
+		payoutNet := payoutGross.Sub(payoutTDS)
+		if payoutNet.IsNegative() {
+			payoutNet = decimal.Zero
+		}
 
-		// K = sum of gross from accrual rows in (lastPayoutDate, pd]
-		var accrRevK, tdsRevL float64
-		for _, r2 := range rows {
-			if r2.EventType == "ACCRUAL" && r2.EventDate.After(lastPayoutDate) && !r2.EventDate.After(pd) {
-				accrRevK += r2.InterestAccrued
-				tdsRevL += r2.TDSAmount
+		var accrRevK, tdsRevL decimal.Decimal
+		for _, posted := range postedSI {
+			if posted.when.After(lastPayoutDate) && !posted.when.After(pd) {
+				accrRevK = accrRevK.Add(posted.gross)
+				tdsRevL = tdsRevL.Add(posted.tds)
 			}
 		}
-		dueNotAccr := payoutGross - accrRevK
-		if dueNotAccr < 0 {
-			dueNotAccr = 0
+		dueNotAccr := payoutGross.Sub(accrRevK)
+		if dueNotAccr.IsNegative() {
+			dueNotAccr = decimal.Zero
 		}
+		payoutGrossF := decFloat(payoutGross)
+		payoutTDSF := decFloat(payoutTDS)
+		payoutNetF := decFloat(payoutNet)
+		accrRevKF := decFloat(accrRevK)
+		tdsRevLF := decFloat(tdsRevL)
+		dueNotAccrF := decFloat(dueNotAccr)
+		payoutRawF := decFloat(payoutRaw)
 
 		if isMaturity {
 			// SI Maturity: valueDate = eventDate (no T+2)
@@ -568,17 +629,17 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 				PeriodEndDate:     pd,
 				PeriodDays:        payoutDays,
 				OpeningPrincipal:  P,
-				InterestAccrued:   payoutGross,
+				InterestAccrued:   payoutGrossF,
 				ClosingPrincipal:  P,
-				TDSAmount:         payoutTDS,
-				NetCashFlow:       payoutNet,
-				AccrRevK:          accrRevK,
-				TDSRevL:           tdsRevL,
-				DueNotAccrued:     dueNotAccr,
+				TDSAmount:         payoutTDSF,
+				NetCashFlow:       payoutNetF,
+				AccrRevK:          accrRevKF,
+				TDSRevL:           tdsRevLF,
+				DueNotAccrued:     dueNotAccrF,
 				DayCountCode:      dcCode,
 				Divisor:           payoutDivisor,
-				FormulaUsed:       engFormula("[SI MATURITY]", engFormulaParams{Principal: P, Rate: r, Days: payoutDays, Divisor: payoutDivisor, Raw: payoutRaw, Rounded: payoutGross, Rnd: rnd}),
-				AccrualRatePerDay: r / float64(payoutDivisor),
+				FormulaUsed:       engFormula("[SI MATURITY]", engFormulaParams{Principal: P, Rate: r, Days: payoutDays, Divisor: payoutDivisor, Raw: payoutRawF, Rounded: payoutGrossF, Rnd: rnd}),
+				AccrualRatePerDay: siPerDay(rate, payoutDivisor),
 			})
 			// Principal Return
 			rows = append(rows, CashflowRow{
@@ -605,17 +666,17 @@ func engSISchedule(p CashflowScheduleParams) []CashflowRow {
 				PeriodEndDate:     pd,
 				PeriodDays:        payoutDays,
 				OpeningPrincipal:  P,
-				InterestAccrued:   payoutGross,
+				InterestAccrued:   payoutGrossF,
 				ClosingPrincipal:  P,
-				TDSAmount:         payoutTDS,
-				NetCashFlow:       payoutNet,
-				AccrRevK:          accrRevK,
-				TDSRevL:           tdsRevL,
-				DueNotAccrued:     dueNotAccr,
+				TDSAmount:         payoutTDSF,
+				NetCashFlow:       payoutNetF,
+				AccrRevK:          accrRevKF,
+				TDSRevL:           tdsRevLF,
+				DueNotAccrued:     dueNotAccrF,
 				DayCountCode:      dcCode,
 				Divisor:           payoutDivisor,
-				FormulaUsed:       engFormula("[SI PAYOUT]", engFormulaParams{Principal: P, Rate: r, Days: payoutDays, Divisor: payoutDivisor, Raw: payoutRaw, Rounded: payoutGross, Rnd: rnd}),
-				AccrualRatePerDay: r / float64(payoutDivisor),
+				FormulaUsed:       engFormula("[SI PAYOUT]", engFormulaParams{Principal: P, Rate: r, Days: payoutDays, Divisor: payoutDivisor, Raw: payoutRawF, Rounded: payoutGrossF, Rnd: rnd}),
+				AccrualRatePerDay: siPerDay(rate, payoutDivisor),
 			})
 		}
 

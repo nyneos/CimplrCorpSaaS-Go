@@ -47,6 +47,7 @@ func LoadGoogleWorkspaceTenant(ctx context.Context, pool *pgxpool.Pool, tenantKe
 		}
 		return row, fmt.Errorf("google workspace tenant %q not found", key)
 	}
+	row.PrivateKey = OpenSecret(row.PrivateKey)
 	return row, nil
 }
 
@@ -63,6 +64,7 @@ func LoadDefaultGoogleWorkspaceTenant(ctx context.Context, pool *pgxpool.Pool) (
 	if err != nil {
 		return row, fmt.Errorf("no default google workspace tenant configured")
 	}
+	row.PrivateKey = OpenSecret(row.PrivateKey)
 	return row, nil
 }
 

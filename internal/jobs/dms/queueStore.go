@@ -14,10 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Jobs this process has claimed and not yet finished. reclaimExpiredLeases
-// skips them so a slow batch is not flipped back to PENDING while it is still
-// running here. The lease heartbeat is what keeps other processes from
-// reclaiming those rows; this set is only same-process safety.
 var (
 	activeLeaseMu sync.Mutex
 	activeLeases  = map[string]*generationLeaseHold{}
@@ -160,9 +156,6 @@ func clearActiveGenerationLeaseCancel(jobID string) {
 	setActiveGenerationLeaseCancel(jobID, nil)
 }
 
-// cancelRunningGenerationLease aborts the in-flight run when the lease row is
-// no longer ours. Returns false when this process is not currently executing
-// that job (already finished, or still waiting to start).
 func cancelRunningGenerationLease(jobID string) bool {
 	activeLeaseMu.Lock()
 	h, ok := activeLeases[jobID]
@@ -195,8 +188,6 @@ func leaseHeartbeatInterval() time.Duration {
 	return interval
 }
 
-// renewGenerationLease pushes lease_expires_at out for the row this owner
-// still holds. owned is false when no row matched (lost lease or already finished).
 func renewGenerationLease(ctx context.Context, pool *pgxpool.Pool, jobID, owner string) (owned bool, err error) {
 	if pool == nil || strings.TrimSpace(jobID) == "" || strings.TrimSpace(owner) == "" {
 		return false, fmt.Errorf("lease renew: job and owner required")
@@ -231,9 +222,6 @@ func renewActiveGenerationLeases(ctx context.Context, pool *pgxpool.Pool, owner 
 	}
 }
 
-// startGenerationLeaseHeartbeat extends every lease this process still holds
-// until stop is called. The first renew runs immediately so a job waiting
-// behind a long sibling does not sit on the original claim expiry.
 func startGenerationLeaseHeartbeat(ctx context.Context, pool *pgxpool.Pool, owner string) func() {
 	ticker := time.NewTicker(leaseHeartbeatInterval())
 	done := make(chan struct{})
@@ -360,10 +348,6 @@ func claimGenerationJobs(ctx context.Context, pool *pgxpool.Pool, owner string, 
 	return out, nil
 }
 
-// finishGenerationJob writes the terminal status only when this worker still
-// owns the row (same lease_owner and attempt_count it claimed). A stale
-// worker whose lease was reclaimed updates 0 rows and must not overwrite the
-// newer attempt. errMsg is stored in last_error; pass "" on a clean success.
 func finishGenerationJob(ctx context.Context, pool *pgxpool.Pool, jobID, leaseOwner string, attempt int, success bool, runID, errMsg string, retry bool) error {
 	var updated int64
 	var err error

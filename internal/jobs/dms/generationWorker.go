@@ -113,8 +113,6 @@ func runGeneration(
 ) (runID string, err error) {
 	claimedRunID = strings.TrimSpace(claimedRunID)
 	if claimedRunID != "" {
-		// Schedulers insert the run before quota/render so another replica's
-		// dedupe sees it. A queue retry must not render that run a second time.
 		done, guardErr := claimedRunAlreadyFinished(ctx, pool, claimedRunID)
 		if guardErr != nil {
 			return claimedRunID, guardErr
@@ -383,13 +381,9 @@ func runGeneration(
 	if status == "FAILED" {
 		return runID, fmt.Errorf("all attachments failed: %s", strings.Join(errDetails, "; "))
 	}
-	// Documents exist. Count them once even when the email handoff fails, so a
-	// later dispatch retry does not have to generate a second run to record quota.
 	incrementDocSvcQuotaForRun(ctx, pool, runID, triggeredBy)
 	// Phase 4 — queue emails for GENERATED docs (notification after successful storage).
 	if err := DispatchRun(ctx, pool, runID); err != nil {
-		// Leave docs as GENERATED so StartDispatchWorker can retry. This is not a
-		// generation failure: the queue must not requeue the whole run.
 		api.LogError("[DMS] DispatchRun after generation run=%s: %v", runID, err)
 		return runID, &dispatchAfterGenerationError{RunID: runID, Err: err}
 	}
@@ -397,10 +391,6 @@ func runGeneration(
 	return runID, nil
 }
 
-// dispatchAfterGenerationError means the run's documents were generated and
-// generation_run is already SUCCESS or PARTIAL, but DispatchRun failed.
-// StartDispatchWorker retries documents left GENERATED. The generation queue
-// must finish the job instead of starting another attempt.
 type dispatchAfterGenerationError struct {
 	RunID string
 	Err   error
@@ -1534,8 +1524,6 @@ type runInsert struct {
 	WindowEnd   *string
 }
 
-// claimedRunAlreadyFinished reports whether a scheduler-inserted run already
-// has documents or a terminal status. Queue retries must not render it again.
 func claimedRunAlreadyFinished(ctx context.Context, pool *pgxpool.Pool, runID string) (bool, error) {
 	var status string
 	var docs int

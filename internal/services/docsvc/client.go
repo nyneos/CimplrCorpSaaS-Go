@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 )
+
+const maxDocResponseBytes = 32 << 20 // 32 MiB (render payloads can be large)
 
 type Client struct {
 	base  string
@@ -20,11 +23,15 @@ type Client struct {
 }
 
 func NewFromEnv() *Client {
-	return &Client{
+	c := &Client{
 		base:  strings.TrimRight(materializeRelayWire(), "/"),
 		token: strings.TrimSpace(os.Getenv("DOCUMENT_SERVICE_KEY")),
 		http:  &http.Client{Timeout: 30 * time.Second},
 	}
+	if c.token == "" {
+		log.Printf("docsvc: DOCUMENT_SERVICE_KEY is empty — calls will fail closed")
+	}
+	return c
 }
 
 func renderHTTPClient() *http.Client {
@@ -65,6 +72,9 @@ type QuotaCheckData struct {
 	HourLimit         int64  `json:"hour_limit"`
 }
 
+// QuotaCheck reports current usage. Check then Increment is inherently racy
+// across processes (TOCTOU); Document-Service must enforce limits atomically
+// on increment. Callers should treat Increment failure as authoritative.
 func (c *Client) QuotaCheck(ctx context.Context) (QuotaCheckData, error) {
 	var wrap struct {
 		Success bool           `json:"success"`
@@ -98,8 +108,13 @@ func (c *Client) QuotaIncrement(ctx context.Context, generationCount, byteCount 
 	if err != nil {
 		return err
 	}
-	if !wrap.Success && wrap.Error != "" {
-		return fmt.Errorf("%s", wrap.Error)
+	// Fail closed: HTTP 200 with success=false (or missing success) must not be treated as OK.
+	if !wrap.Success {
+		msg := strings.TrimSpace(wrap.Error)
+		if msg == "" {
+			msg = "document-service quota increment rejected"
+		}
+		return fmt.Errorf("%s", msg)
 	}
 	return nil
 }
@@ -383,25 +398,29 @@ func (c *Client) postWithClient(ctx context.Context, httpClient *http.Client, pa
 	}
 	res, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("document-service unreachable: %w", err)
+		return fmt.Errorf("document-service unreachable")
 	}
 	defer res.Body.Close()
-	b, _ := io.ReadAll(res.Body)
+	b, err := io.ReadAll(io.LimitReader(res.Body, maxDocResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("document-service read failed")
+	}
+	if len(b) > maxDocResponseBytes {
+		return fmt.Errorf("document-service response too large")
+	}
 	if res.StatusCode == http.StatusUnauthorized {
 		return fmt.Errorf("DOCUMENT_SERVICE_UNAUTHORIZED: key mismatch or missing")
+	}
+	if res.StatusCode >= 400 {
+		log.Printf("docsvc %s: status=%d body_bytes=%d", path, res.StatusCode, len(b))
+		return fmt.Errorf("document-service status %d", res.StatusCode)
 	}
 	if out == nil {
 		return nil
 	}
 	if err := json.Unmarshal(b, out); err != nil {
-		return fmt.Errorf("docsvc %s: status=%d body=%s", path, res.StatusCode, truncate(string(b), 300))
+		log.Printf("docsvc %s: unmarshal failed status=%d body_bytes=%d", path, res.StatusCode, len(b))
+		return fmt.Errorf("document-service invalid response")
 	}
 	return nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }

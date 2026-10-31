@@ -245,21 +245,15 @@ func redemptionMFDematRefs(ctx context.Context) []string {
 // CreateRedemptionSingle
 // ---------------------------
 
-// redemptionUnitBlock identifies the holding and the number of units to block.
 type redemptionUnitBlock struct {
 	SchemeID, FolioID, DematID, EntityName string
 	Units                                  float64
 }
 
-// blockRedemptionUnits blocks units against buy lots in FIFO order and returns the
-// units actually blocked. Candidate lots are locked first and availability is computed
-// from the locked row versions, so concurrent redemptions cannot over-block a holding.
 type redemptionMethodQueryer interface {
 	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
 }
 
-// redemptionMethodForScheme returns the lot-selection method configured on the scheme
-// master (FIFO, LIFO or WEIGHTED_AVERAGE). FIFO is used only when the scheme has none.
 func redemptionMethodForScheme(ctx context.Context, q redemptionMethodQueryer, schemeID string) (string, error) {
 	var method string
 	err := q.QueryRow(ctx, `

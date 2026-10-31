@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 
+	"CimplrCorpSaas/internal/ctxutil"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -37,14 +39,23 @@ func lookupAccountNumberFromContent(ctx context.Context, pool *pgxpool.Pool, row
 	if len(candidates) == 0 {
 		return ""
 	}
-	var accountNumber string
-	if err := pool.QueryRow(ctx, `
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
+	q := `
 		SELECT account_number
 		FROM public.masterbankaccount
 		WHERE COALESCE(is_deleted, false) = false
-		  AND (TRIM(account_number) = ANY($1) OR ltrim(TRIM(account_number), '0') = ANY($1))
+		  AND (TRIM(account_number) = ANY($1) OR ltrim(TRIM(account_number), '0') = ANY($1))`
+	args := []interface{}{candidates}
+	if len(entityIDs) > 0 {
+		q += `
+		  AND entity_id::text = ANY($2)`
+		args = append(args, entityIDs)
+	}
+	q += `
 		ORDER BY length(TRIM(account_number)) DESC
-		LIMIT 1`, candidates).Scan(&accountNumber); err != nil {
+		LIMIT 1`
+	var accountNumber string
+	if err := pool.QueryRow(ctx, q, args...).Scan(&accountNumber); err != nil {
 		return ""
 	}
 	return strings.TrimSpace(accountNumber)
@@ -61,12 +72,8 @@ func lookupEntityIDForAccount(ctx context.Context, pool *pgxpool.Pool, accountNu
 	if accountNumber == "" || pool == nil {
 		return ""
 	}
-	var entityID string
-	if err := pool.QueryRow(ctx, `
-		SELECT COALESCE(entity_id, '')
-		FROM public.masterbankaccount
-		WHERE account_number = $1 AND is_deleted = false
-		LIMIT 1`, accountNumber).Scan(&entityID); err != nil {
+	entityID, _, _, err := lookupMasterBankAccountForUpload(ctx, pool, accountNumber)
+	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(entityID)

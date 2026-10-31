@@ -253,13 +253,11 @@ func RoundUnits(value float64, precision int, roundingMode string) float64 {
 	case "CEILING":
 		d = d.RoundCeil(places)
 	default:
-		// Half away from zero, the behaviour callers have always had for unset modes.
 		d = d.Round(places)
 	}
 	return d.InexactFloat64()
 }
 
-// RoundAmount rounds monetary amounts half away from zero.
 func RoundAmount(value float64, precision int) float64 {
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return value

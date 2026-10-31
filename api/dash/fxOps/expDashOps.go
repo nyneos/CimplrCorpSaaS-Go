@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/dash/ticker"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,8 +21,6 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
-// toUSD returns how many USD equal 1 unit of cur, using rates from rate.json.
-// A currency without a rate returns 0, so its amounts are left out rather than valued as USD.
 func toUSD(cur string) float64 {
 	rate, err := ticker.RateBetween(cur, "USD")
 	if err != nil || rate == 0 {
@@ -56,7 +55,7 @@ func GetTopCurrenciesFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			var amount sql.NullFloat64
 			var currency sql.NullString
 			if err := rows.Scan(&amount, &currency); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 				return
 			}
 			cur := strings.ToUpper(currency.String)
@@ -69,7 +68,7 @@ func GetTopCurrenciesFromHeaders(db *pgxpool.Pool) http.HandlerFunc {
 			currencyTotals[cur] += usdValue
 		}
 		if err := rows.Err(); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		// Sort currencies by value descending and take top 5
@@ -153,7 +152,7 @@ func GetTodayBookingAmountSum(db *pgxpool.Pool) http.HandlerFunc {
 			var txnDate sql.NullTime
 
 			if err := rows.Scan(&amount, &currency, &txnDate); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 				return
 			}
 
@@ -179,7 +178,7 @@ func GetTodayBookingAmountSum(db *pgxpool.Pool) http.HandlerFunc {
 
 		// Check if rows.Next() had any errors
 		if err := rows.Err(); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 
@@ -250,7 +249,7 @@ func GetMaturityBucketsByCurrencyPair(db *pgxpool.Pool) http.HandlerFunc {
 			var currencyPair string
 			var maturityDate time.Time
 			if err := rows.Scan(&amount, &currencyPair, &maturityDate); err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 
@@ -279,7 +278,7 @@ func GetMaturityBucketsByCurrencyPair(db *pgxpool.Pool) http.HandlerFunc {
 
 		// Check if rows.Next() had any errors
 		if err := rows.Err(); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 

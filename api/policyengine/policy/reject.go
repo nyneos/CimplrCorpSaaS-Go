@@ -12,9 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// HandleReject bulk-rejects pending CREATE/EDIT/DELETE requests. An EDIT reject
-// restores the master row and its children from the audit row's old_* values;
-// a CREATE reject marks the policy Inactive; a DELETE reject only settles the request.
 func HandleReject(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !common.RequirePOST(w, r) {

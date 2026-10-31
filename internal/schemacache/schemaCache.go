@@ -1,5 +1,3 @@
-// Package schemacache keeps short-lived copies of information_schema lookups so
-// handlers that adapt to legacy column layouts do not query the catalog per request.
 package schemacache
 
 import (
@@ -25,8 +23,6 @@ var (
 	tables  = map[string]existsEntry{}
 )
 
-// Columns returns the cached column set for key, calling load on a miss or after expiry.
-// Errors are not cached. The returned map is shared and must be treated as read-only.
 func Columns(key string, load func() (map[string]bool, error)) (map[string]bool, error) {
 	now := time.Now()
 	mu.RLock()
@@ -45,8 +41,6 @@ func Columns(key string, load func() (map[string]bool, error)) (map[string]bool,
 	return cols, nil
 }
 
-// TableExists returns the cached existence flag for key, calling load on a miss or after expiry.
-// A lookup error reports false and is not cached.
 func TableExists(key string, load func() (bool, error)) bool {
 	now := time.Now()
 	mu.RLock()

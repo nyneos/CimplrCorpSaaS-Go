@@ -3,6 +3,7 @@ package bankstatement
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 	"archive/zip"
 	"bytes"
@@ -277,13 +278,19 @@ func resolveMasterBankAccountForPreview(ctx context.Context, pool *pgxpool.Pool,
 		}
 	}
 
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	for _, cand := range candidates {
-		qErr := pool.QueryRow(ctx, `
+		q := `
 			SELECT mba.account_number, mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
 			FROM public.masterbankaccount mba
 			LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-			WHERE mba.account_number = $1 AND COALESCE(mba.is_deleted, false) = false
-		`, cand).Scan(&matchedAccount, &entityID, &bankName, &currency)
+			WHERE mba.account_number = $1 AND COALESCE(mba.is_deleted, false) = false`
+		args := []interface{}{cand}
+		if len(entityIDs) > 0 {
+			q += ` AND mba.entity_id::text = ANY($2)`
+			args = append(args, entityIDs)
+		}
+		qErr := pool.QueryRow(ctx, q, args...).Scan(&matchedAccount, &entityID, &bankName, &currency)
 		if qErr == nil {
 			return matchedAccount, entityID, bankName, currency, nil
 		}
@@ -911,13 +918,14 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, p pro
 
 	dataRows := rows[txnHeaderIdx+1:]
 	dataRows = MergeMultiLineDescriptions(dataRows, mergeDateIdx, mergeDescIdx)
+	dateCache := &DateLayoutCache{}
 
 	// Detect newest-first ordering (e.g. PNB) and reverse so processing is always oldest-first.
 	if mergeDateIdx >= 0 {
 		var first, last time.Time
 		for _, r := range dataRows {
 			if mergeDateIdx < len(r) {
-				if t, err := parseDate(strings.TrimSpace(r[mergeDateIdx])); err == nil && !t.IsZero() {
+				if t, err := dateCache.Parse(strings.TrimSpace(r[mergeDateIdx])); err == nil && !t.IsZero() {
 					first = t
 					break
 				}
@@ -926,7 +934,7 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, p pro
 		for i := len(dataRows) - 1; i >= 0; i-- {
 			r := dataRows[i]
 			if mergeDateIdx < len(r) {
-				if t, err := parseDate(strings.TrimSpace(r[mergeDateIdx])); err == nil && !t.IsZero() {
+				if t, err := dateCache.Parse(strings.TrimSpace(r[mergeDateIdx])); err == nil && !t.IsZero() {
 					last = t
 					break
 				}
@@ -1061,20 +1069,20 @@ func processSingleFilePreviewFlat(ctx context.Context, pool *pgxpool.Pool, p pro
 			tranIDStr = strings.TrimSpace(rowAt(idx))
 		}
 
-		// Parse dates
+		// Parse dates (AUD-239: prefer layout that worked on earlier rows of this file)
 		var transactionDate, valueDate time.Time
 		if idx, ok := colIdx[constants.TransactionDateAlt]; ok && idx < len(row) {
-			if dt, err := parseDate(rowAt(idx)); err == nil {
+			if dt, err := dateCache.Parse(rowAt(idx)); err == nil {
 				transactionDate = dt
 			}
 		}
 		if idx, ok := colIdx[constants.ValueDateAlt]; ok && idx < len(row) {
-			if dt, err := parseDate(rowAt(idx)); err == nil {
+			if dt, err := dateCache.Parse(rowAt(idx)); err == nil {
 				valueDate = dt
 			}
 		}
 		if idx, ok := colIdx["Date"]; ok && idx < len(row) && transactionDate.IsZero() && valueDate.IsZero() {
-			if dt, err := parseDate(rowAt(idx)); err == nil {
+			if dt, err := dateCache.Parse(rowAt(idx)); err == nil {
 				transactionDate = dt
 				valueDate = dt
 			}
@@ -1571,12 +1579,19 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, pool *pgxpool.Pool, 
 
 	// Use background context for initial load (not tied to HTTP request timeout)
 	loadCtx := context.Background()
-	accountRows, err := pool.Query(loadCtx, `
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
+	acctLoadQ := `
 		SELECT mba.account_number, mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
 		FROM public.masterbankaccount mba
 		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-		WHERE COALESCE(mba.is_deleted, false) = false
-	`)
+		WHERE COALESCE(mba.is_deleted, false) = false`
+	acctLoadArgs := []interface{}{}
+	if len(entityIDs) > 0 {
+		acctLoadQ += `
+		  AND mba.entity_id::text = ANY($1)`
+		acctLoadArgs = append(acctLoadArgs, entityIDs)
+	}
+	accountRows, err := pool.Query(loadCtx, acctLoadQ, acctLoadArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load accounts: %w", err)
 	}
@@ -1607,6 +1622,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, pool *pgxpool.Pool, 
 	skippedNoDate := 0
 	skippedUnknownAccount := 0
 	processed := 0
+	dateCache := &DateLayoutCache{}
 
 	// Process each data row (NO MORE DB QUERIES - just map lookups)
 	for ri := 1; ri < len(rows); ri++ {
@@ -1647,15 +1663,15 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, pool *pgxpool.Pool, 
 			txn["tran_id"] = strings.TrimSpace(row[tranIDIdx])
 		}
 
-		// Parse dates
+		// Parse dates (AUD-239: prefer layout that worked on earlier rows)
 		var transactionDate, valueDate time.Time
 		if dateIdx >= 0 && dateIdx < len(row) {
-			if dt, err := parseDate(row[dateIdx]); err == nil {
+			if dt, err := dateCache.Parse(row[dateIdx]); err == nil {
 				transactionDate = dt
 			}
 		}
 		if valDateIdx >= 0 && valDateIdx < len(row) {
-			if dt, err := parseDate(row[valDateIdx]); err == nil {
+			if dt, err := dateCache.Parse(row[valDateIdx]); err == nil {
 				valueDate = dt
 			}
 		}
@@ -1773,7 +1789,7 @@ func processPDFPreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileBytes []
 	}
 	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
 
-	client := &http.Client{Timeout: 0} // NO timeout, same as upload
+	client := &http.Client{Timeout: storageTransferTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call external parser: %w", err)
@@ -1819,12 +1835,18 @@ func processPDFPreviewFlat(ctx context.Context, pool *pgxpool.Pool, fileBytes []
 
 		// DB READ: Lookup account metadata if we have account number
 		if accountNumber != "" {
-			err := pool.QueryRow(ctx, `
+			entityIDs := ctxutil.FromContext(ctx).EntityIDs
+			q := `
 				SELECT mba.entity_id, COALESCE(mb.bank_name, ''), COALESCE(mba.currency, 'INR')
 				FROM public.masterbankaccount mba
 				LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-				WHERE mba.account_number = $1 AND COALESCE(mba.is_deleted, false) = false
-			`, accountNumber).Scan(&entityID, &bankName, &currency)
+				WHERE mba.account_number = $1 AND COALESCE(mba.is_deleted, false) = false`
+			args := []interface{}{accountNumber}
+			if len(entityIDs) > 0 {
+				q += ` AND mba.entity_id::text = ANY($2)`
+				args = append(args, entityIDs)
+			}
+			err := pool.QueryRow(ctx, q, args...).Scan(&entityID, &bankName, &currency)
 
 			if err != nil && !(errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows)) {
 				return nil, fmt.Errorf("failed to lookup account: %w", err)

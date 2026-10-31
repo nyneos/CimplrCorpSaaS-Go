@@ -2,6 +2,7 @@ package approvalengine
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/governance"
 	"context"
 	"fmt"
 	"os"
@@ -12,7 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// selfApprovalAllowed keeps the old behaviour only when explicitly configured.
+// selfApprovalAllowed is the explicit product opt-in (APPROVAL_ALLOW_SELF_APPROVAL=true).
+// Default is fail-closed: makers cannot act on their own pending instances.
 func selfApprovalAllowed() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("APPROVAL_ALLOW_SELF_APPROVAL")), "true")
 }
@@ -22,7 +24,20 @@ func isSubmitter(submittedBy, actorUserID, actorEmail string) bool {
 	if sb == "" {
 		return false
 	}
-	return strings.EqualFold(sb, strings.TrimSpace(actorUserID)) || strings.EqualFold(sb, strings.TrimSpace(actorEmail))
+	return strings.EqualFold(sb, strings.TrimSpace(actorUserID)) ||
+		strings.EqualFold(sb, strings.TrimSpace(actorEmail))
+}
+
+// denyMakerSelfApproval blocks the maker unless the env opt-in is set or admin override is active.
+// Matches governance.DenySelfApprovalCtx, and also checks ActionRequest actor fields used by ActOnPending.
+func denyMakerSelfApproval(ctx context.Context, submittedBy, submittedByEmail, actorUserID, actorEmail string) bool {
+	if selfApprovalAllowed() || api.IsAdminOverride(ctx) {
+		return false
+	}
+	if isSubmitter(submittedBy, actorUserID, actorEmail) || isSubmitter(submittedByEmail, actorUserID, actorEmail) {
+		return true
+	}
+	return governance.IsSelfApprovalCtx(ctx, submittedBy, submittedByEmail)
 }
 
 // canUserActOnEye returns true if the given user is eligible to act on the
@@ -161,8 +176,8 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 	if instanceStatus != InstStatusPending {
 		return fmt.Errorf("instance is not pending (current status: %s)", instanceStatus)
 	}
-	if !selfApprovalAllowed() && (isSubmitter(submittedBy, req.ActorUserID, req.ActorEmail) || isSubmitter(submittedByEmail, req.ActorUserID, req.ActorEmail)) {
-		return fmt.Errorf("unauthorized: you cannot approve or reject a request you submitted")
+	if denyMakerSelfApproval(ctx, submittedBy, submittedByEmail, req.ActorUserID, req.ActorEmail) {
+		return fmt.Errorf("unauthorized: %s", governance.ErrSelfApproval.Error())
 	}
 
 	// Step 3: Validate actor eligibility.
@@ -191,20 +206,8 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 		return fmt.Errorf("user %s has already acted on this eye", req.ActorUserID)
 	}
 
-	// Step 5: INSERT action record.
+	// Step 5: INSERT action record. Actor role is not taken from the client.
 	var actorRoleID *string
-	if req.ActorRoleID != "" {
-		var held int
-		if err := tx.QueryRow(ctx,
-			`SELECT COUNT(*) FROM public.user_roles WHERE role_id::text = $1 AND user_id::text = $2`,
-			req.ActorRoleID, req.ActorUserID,
-		).Scan(&held); err != nil {
-			return fmt.Errorf("RecordAction role check: %w", err)
-		}
-		if held > 0 {
-			actorRoleID = &req.ActorRoleID
-		}
-	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO uam.approval_instance_action (
 			instance_id, instance_eye_id, actor_user_id, actor_email,

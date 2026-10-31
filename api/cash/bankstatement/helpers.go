@@ -56,8 +56,6 @@ func readBankStatementZipBytes(file multipart.File, header *multipart.FileHeader
 	return data, nil
 }
 
-// pgErrorCodeConstraint extracts the SQLSTATE and constraint name from a Postgres error
-// raised through either pgx (pgconn.PgError) or lib/pq, including wrapped errors.
 func pgErrorCodeConstraint(err error) (code, constraint string, ok bool) {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
@@ -81,7 +79,7 @@ func pqUserFriendlyMessage(err error) string {
 	switch code {
 	case "23505":
 		switch constraint {
-		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
+		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key", "uniq_file_hash_active", "bank_statements_file_hash_active_uidx":
 			return constants.ErrBankStatementFileAlreadyUploaded
 		case "uniq_stmt", "uniq_stmt_active":
 			return msgStatementPeriodAlreadyUploaded
@@ -954,7 +952,7 @@ func userFriendlyUploadError(err error) string {
 		switch pqErr.Constraint {
 		case "uniq_stmt", "uniq_stmt_active":
 			return msgStatementAccountPeriodAlreadyUploaded
-		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
+		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key", "uniq_file_hash_active", "bank_statements_file_hash_active_uidx":
 			return constants.ErrBankStatementFileAlreadyUploaded
 		default:
 			if strings.HasPrefix(string(pqErr.Constraint), "uniq_stmt") {
@@ -967,7 +965,7 @@ func userFriendlyUploadError(err error) string {
 		switch pgErr.ConstraintName {
 		case "uniq_stmt", "uniq_stmt_active":
 			return msgStatementAccountPeriodAlreadyUploaded
-		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
+		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key", "uniq_file_hash_active", "bank_statements_file_hash_active_uidx":
 			return constants.ErrBankStatementFileAlreadyUploaded
 		default:
 			if strings.HasPrefix(pgErr.ConstraintName, "uniq_stmt") {

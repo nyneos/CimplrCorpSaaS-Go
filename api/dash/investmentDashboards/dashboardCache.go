@@ -62,6 +62,11 @@ func CacheDashboardHandler(next http.Handler) http.Handler {
 		r.Body.Close()
 		r.Body = io.NopCloser(bytes.NewReader(body))
 
+		if strings.TrimSpace(api.GetUserIDFromCtx(r.Context())) == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		key := investmentDashboardCacheKey(r, body)
 		now := time.Now()
 
@@ -136,6 +141,7 @@ func investmentDashboardCacheKey(r *http.Request, body []byte) string {
 		r.Method,
 		r.URL.Path,
 		string(normalizedBody),
+		strings.TrimSpace(api.GetUserIDFromCtx(r.Context())),
 		strings.Join(allowedEntities, "|"),
 		strings.Join(allowedEntityIDs, "|"),
 		strconv.FormatBool(contextBool(r, "is_admin_override")),

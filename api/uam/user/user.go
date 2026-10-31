@@ -303,9 +303,10 @@ func CreateUser(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// --- Password provisioning -----------------------------------------------
-		cimplr := req.Password
-		autoPassword := req.PasswordType == "auto" || cimplr == ""
-		if autoPassword {
+		// Require an explicit password, or generate a random one. Never fall back
+		// to a shared/default secret, and never return plaintext to the API client.
+		cimplr := strings.TrimSpace(req.Password)
+		if req.PasswordType == "auto" || cimplr == "" {
 			generated, genErr := generateRandomPassword(16)
 			if genErr != nil {
 				respondWithError(w, http.StatusInternalServerError, "Failed to generate password")
@@ -437,15 +438,14 @@ func CreateUser(pool *pgxpool.Pool) http.HandlerFunc {
 					"EmployeeName": req.EmployeeName,
 					"Email":        req.Email,
 					"Role":         req.Role,
-					"Password":     cimplr,
+					"Message":      "A password reset is required before first login",
 				},
 			)
 		}
 
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
-			"user_id":        userId,
-			"role_id":        roleId,
-			"plain_password": cimplr,
+			"user_id": userId,
+			"role_id": roleId,
 		})
 	}
 }
@@ -873,9 +873,21 @@ func UpdateUser(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(newEntityMappings) > 0 {
-			if _, err := tx.Exec(ctx, "UPDATE user_entity_mappings SET is_deleted = true WHERE user_id = $1", id); err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Failed to soft-delete old mappings: "+errtext.Detail(w, err))
-				return
+			// Soft-delete only mappings inside the caller's entity scope (admin override may clear all).
+			if isAdminOverride {
+				if _, err := tx.Exec(ctx, "UPDATE user_entity_mappings SET is_deleted = true WHERE user_id = $1", id); err != nil {
+					respondWithError(w, http.StatusInternalServerError, "Failed to soft-delete old mappings: "+errtext.Detail(w, err))
+					return
+				}
+			} else {
+				if _, err := tx.Exec(ctx,
+					`UPDATE user_entity_mappings SET is_deleted = true
+					 WHERE user_id = $1 AND entity_id = ANY($2::text[])`,
+					id, entityIDs,
+				); err != nil {
+					respondWithError(w, http.StatusInternalServerError, "Failed to soft-delete old mappings: "+errtext.Detail(w, err))
+					return
+				}
 			}
 
 			for _, em := range newEntityMappings {
@@ -1024,7 +1036,7 @@ func ApproveMultipleUsers(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		toDelete, toApprove, skipped := []string{}, []string{}, []string{}
 		for _, t := range targets {
-			if t.id == api.GetUserIDFromCtx(ctx) || governance.IsSelfApprovalCtx(ctx, t.maker) {
+			if t.id == api.GetUserIDFromCtx(ctx) || governance.DenySelfApprovalCtx(ctx, t.maker) {
 				skipped = append(skipped, t.id+": "+governance.ErrSelfApproval.Error())
 				continue
 			}
@@ -1080,7 +1092,6 @@ type pendingUser struct {
 	maker  string
 }
 
-// lockPendingUsers locks the requested in-scope users that are waiting for a decision.
 func lockPendingUsers(ctx context.Context, tx pgx.Tx, ids, entityIDs []string) ([]pendingUser, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT u.id::text, COALESCE(u.status, ''), COALESCE(NULLIF(u.updated_by, ''), u.created_by, '')
@@ -1169,7 +1180,7 @@ func RejectMultipleUsers(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ids, skipped := []string{}, []string{}
 		for _, t := range targets {
-			if t.id == api.GetUserIDFromCtx(ctx) || governance.IsSelfApprovalCtx(ctx, t.maker) {
+			if t.id == api.GetUserIDFromCtx(ctx) || governance.DenySelfApprovalCtx(ctx, t.maker) {
 				skipped = append(skipped, t.id+": "+governance.ErrSelfApproval.Error())
 				continue
 			}

@@ -1377,8 +1377,6 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// applyApprovedBookingStatus moves a fully approved booking to SENT_TO_BANK and applies an
-// approved DELETE, in one transaction.
 func applyApprovedBookingStatus(ctx context.Context, pool *pgxpool.Pool, bookingID string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -1482,7 +1480,6 @@ func applyApprovedBookingStatus(ctx context.Context, pool *pgxpool.Pool, booking
 // 					Comment:       req.Comment,
 // 				}); err != nil {
 // 					api.LogError("[FDBooking] RecordAction approve failed for booking %s: %v", bID, err)
-// 					errors = append(errors, bID+": "+errtext.Text(err))
 // 					continue
 // 				}
 
@@ -1741,8 +1738,6 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
-		// Notify only bookings that were actually fully approved, from one bounded
-		// goroutine instead of one per requested id.
 		go func(ids []string, uEmail, uID string) {
 			defer func() {
 				if rec := recover(); rec != nil {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -50,7 +51,7 @@ func GetBuMaturityCurrencySummaryJoinedFromHeaders(db *pgxpool.Pool) http.Handle
 			var totalOpenAmount sql.NullFloat64
 			var month1, month2, month3, month4, month46, month6plus sql.NullFloat64
 			if err := rows.Scan(&bu, &currency, &exposureType, &totalOpenAmount, &month1, &month2, &month3, &month4, &month46, &month6plus); err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 				return
 			}
 			bu = strings.TrimSpace(bu)
@@ -98,7 +99,7 @@ func GetBuMaturityCurrencySummaryJoinedFromHeaders(db *pgxpool.Pool) http.Handle
 			}
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 			return
 		}
 		response := []map[string]interface{}{}
@@ -164,7 +165,7 @@ func GetExposureRowsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			)
 
 			if err := rows.Scan(&bu, &currency, &exposureType, &documentID, &client, &amount, &maturityDate); err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 				return
 			}
 
@@ -239,7 +240,7 @@ func GetExposureRowsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 			return
 		}
 

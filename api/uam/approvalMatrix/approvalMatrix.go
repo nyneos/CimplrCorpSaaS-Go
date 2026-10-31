@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/domaincatalog"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"encoding/json"
@@ -58,7 +59,8 @@ func getUserFriendlyApprovalMatrixError(err error, context string) (string, int)
 			case "uam_appr_member_escalation_slot_chk":
 				return "Escalation members must be at slot order 1.", http.StatusBadRequest
 			default:
-				return fmt.Sprintf("Check constraint failed: %s", pgErr.ConstraintName), http.StatusBadRequest
+				api.LogError("approval matrix check constraint: %v", err)
+				return "Invalid value", http.StatusBadRequest
 			}
 		case "23503":
 			if strings.Contains(pgErr.ConstraintName, "role") {
@@ -69,7 +71,8 @@ func getUserFriendlyApprovalMatrixError(err error, context string) (string, int)
 			}
 			return "Referenced record not found.", http.StatusBadRequest
 		}
-		return fmt.Sprintf("Database error [%s]: %s", pgErr.Code, pgErr.Message), http.StatusInternalServerError
+		api.LogError("approval matrix database error: %v", err)
+		return "Internal server error", http.StatusInternalServerError
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "Record not found.", http.StatusNotFound
@@ -1008,6 +1011,45 @@ func DeleteApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // CTE trick: we capture DELETE matrix_ids from the audit table BEFORE updating
 // status (inside the same tx) so the subquery sees the old PENDING status.
 
+func matrixPendingMakers(ctx context.Context, tx pgx.Tx, matrixIDs []string) ([]string, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT COALESCE(requested_by, '') FROM uam.audit_approval_matrix_master
+		WHERE matrix_id = ANY($1) AND processing_status LIKE 'PENDING%'
+		UNION
+		SELECT COALESCE(requested_by, '') FROM uam.audit_approval_matrix_eye
+		WHERE matrix_id = ANY($1) AND processing_status LIKE 'PENDING%'
+		UNION
+		SELECT COALESCE(requested_by, '') FROM uam.audit_approval_matrix_eye_member
+		WHERE matrix_id = ANY($1) AND processing_status LIKE 'PENDING%'`, matrixIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var makers []string
+	for rows.Next() {
+		var maker string
+		if err := rows.Scan(&maker); err != nil {
+			return nil, err
+		}
+		makers = append(makers, maker)
+	}
+	return makers, rows.Err()
+}
+
+func denyMatrixSelfApproval(w http.ResponseWriter, ctx context.Context, tx pgx.Tx, matrixIDs []string) bool {
+	makers, err := matrixPendingMakers(ctx, tx, matrixIDs)
+	if err != nil {
+		api.LogErrorForResponse(w, "approval matrix makers: %v", err)
+		api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+		return true
+	}
+	if governance.DenySelfApprovalCtx(ctx, makers...) {
+		api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+		return true
+	}
+	return false
+}
+
 func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1036,6 +1078,9 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+		if denyMatrixSelfApproval(w, ctx, tx, req.MatrixIDs) {
+			return
+		}
 
 		// Step 1: Capture DELETE-pending matrix IDs BEFORE approving (still PENDING here)
 		deleteRows, err := tx.Query(ctx, `
@@ -1062,7 +1107,7 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		masterTag, err := tx.Exec(ctx, `
 			UPDATE uam.audit_approval_matrix_master
 			SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE matrix_id=ANY($3) AND processing_status LIKE 'PENDING%'`,
+			WHERE matrix_id=ANY($3) AND processing_status LIKE 'PENDING%' AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text))`,
 			userEmail, req.Comment, req.MatrixIDs,
 		)
 		if err != nil {
@@ -1074,7 +1119,7 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		eyeTag, err := tx.Exec(ctx, `
 			UPDATE uam.audit_approval_matrix_eye
 			SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE matrix_id=ANY($3) AND processing_status LIKE 'PENDING%'`,
+			WHERE matrix_id=ANY($3) AND processing_status LIKE 'PENDING%' AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text))`,
 			userEmail, req.Comment, req.MatrixIDs,
 		)
 		if err != nil {
@@ -1086,7 +1131,7 @@ func BulkApproveMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		memberTag, err := tx.Exec(ctx, `
 			UPDATE uam.audit_approval_matrix_eye_member
 			SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE matrix_id=ANY($3) AND processing_status LIKE 'PENDING%'`,
+			WHERE matrix_id=ANY($3) AND processing_status LIKE 'PENDING%' AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text))`,
 			userEmail, req.Comment, req.MatrixIDs,
 		)
 		if err != nil {
@@ -1164,12 +1209,15 @@ func BulkRejectMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+		if denyMatrixSelfApproval(w, ctx, tx, req.MatrixIDs) {
+			return
+		}
 
 		// Reject master audit rows
 		masterTag, err := tx.Exec(ctx, `
 			UPDATE uam.audit_approval_matrix_master
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE matrix_id=ANY($3) AND processing_status LIKE 'PENDING%'`,
+			WHERE matrix_id=ANY($3) AND processing_status LIKE 'PENDING%' AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text))`,
 			userEmail, req.Comment, req.MatrixIDs,
 		)
 		if err != nil {
@@ -1184,7 +1232,7 @@ func BulkRejectMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		eyeTag, err := tx.Exec(ctx, `
 			UPDATE uam.audit_approval_matrix_eye
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE matrix_id=ANY($3) AND processing_status LIKE 'PENDING%'`,
+			WHERE matrix_id=ANY($3) AND processing_status LIKE 'PENDING%' AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text))`,
 			userEmail, req.Comment, req.MatrixIDs,
 		)
 		if err != nil {
@@ -1199,7 +1247,7 @@ func BulkRejectMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		memberTag, err := tx.Exec(ctx, `
 			UPDATE uam.audit_approval_matrix_eye_member
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
-			WHERE matrix_id=ANY($3) AND processing_status LIKE 'PENDING%'`,
+			WHERE matrix_id=ANY($3) AND processing_status LIKE 'PENDING%' AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text))`,
 			userEmail, req.Comment, req.MatrixIDs,
 		)
 		if err != nil {

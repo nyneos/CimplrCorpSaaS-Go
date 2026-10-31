@@ -128,7 +128,6 @@ func withCORS(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// GetSessionByUserIDHandler returns the caller's own session.
 func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -160,7 +159,6 @@ func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
 	RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"sessions": []interface{}{fields}})
 }
 
-// StreamTicketHandler issues a single-use ticket for opening /events.
 func StreamTicketHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -192,8 +190,6 @@ func sessionFields(s *auth.UserSession) (map[string]interface{}, error) {
 	return out, nil
 }
 
-// withSessionIdentity binds proxied requests to the session named by the
-// X-Session-Id header: the session's user replaces any user_id the client sent.
 func withSessionIdentity(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions || isPublicProxyPath(r.URL.Path) {
@@ -201,15 +197,7 @@ func withSessionIdentity(h http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		s, present := usersession.HeaderSession(r)
-		if !present {
-			if usersession.RequireToken() {
-				writeJSONError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
-				return
-			}
-			h(w, r)
-			return
-		}
-		if s == nil {
+		if !present || s == nil {
 			writeJSONError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
@@ -230,32 +218,34 @@ func withSessionIdentity(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func authenticateStream(r *http.Request) (string, bool) {
-	if ticket := strings.TrimSpace(r.URL.Query().Get("ticket")); ticket != "" {
-		if s := auth.RedeemStreamTicket(ticket); s != nil {
-			return s.UserID, true
-		}
+	ticket := strings.TrimSpace(r.URL.Query().Get("ticket"))
+	if ticket == "" {
 		return "", false
 	}
-	if usersession.RequireToken() {
+	s := auth.RedeemStreamTicket(ticket)
+	if s == nil {
 		return "", false
 	}
-	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
-	if auth.LoggedInSessionForUser(userID) == nil {
-		return "", false
-	}
-	return userID, true
+	return s.UserID, true
 }
 
 func streamAllowedOrigin() string {
-	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("SSE_ALLOWED_ORIGIN")), "/"); v != "" {
+	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("SSE_ALLOWED_ORIGIN")), "/"); v != "" && v != allowOriginAll {
 		return v
 	}
-	return allowOriginAll
+	return strings.TrimRight(strings.TrimSpace(os.Getenv("FRONTEND_URL")), "/")
 }
 
 func isPublicProxyPath(p string) bool {
 	switch {
-	case strings.HasSuffix(p, "/health"),
+	case p == "/auth/login",
+		p == "/auth/forgot-password",
+		p == "/auth/reset-password",
+		p == "/auth/validate-reset-token",
+		strings.HasPrefix(p, "/auth/sso/"),
+		strings.HasSuffix(p, "/health"),
+		p == "/health/db",
+		strings.HasSuffix(p, "/oauth/callback"),
 		p == "/email/oauth/callback",
 		p == "/notification/push-subscription/vapid-public-key":
 		return true
@@ -339,40 +329,10 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	sid := strings.TrimSpace(r.Header.Get(usersession.HeaderSessionID))
 	if sid == "" {
-		if v, ok := raw["session_id"].(string); ok {
-			sid = strings.TrimSpace(v)
-		}
-	}
-	if sid != "" {
-		if err := authService.LogoutSession(r.Context(), sid); err != nil {
-			RespondWithError(w, http.StatusUnauthorized, "Logout failed")
-			return
-		}
-		RespondEnvelopeSuccess(w, "Logout successful", nil)
-		return
-	}
-	if usersession.RequireToken() || raw == nil {
 		RespondWithError(w, http.StatusUnauthorized, "Logout failed")
 		return
 	}
-	userID := ""
-	if v, ok := raw["user_id"]; ok {
-		switch val := v.(type) {
-		case string:
-			userID = val
-		case float64:
-			userID = fmt.Sprintf("%.0f", val)
-		default:
-			http.Error(w, "Invalid user_id type", http.StatusBadRequest)
-			return
-		}
-	} else {
-		http.Error(w, constants.ErrUserIDRequired, http.StatusBadRequest)
-		return
-	}
-	err := authService.Logout(r.Context(), userID)
-	if err != nil {
-		logger.LogError("Logout failed for userID %s: %v", userID, err)
+	if err := authService.LogoutSession(r.Context(), sid); err != nil {
 		RespondWithError(w, http.StatusUnauthorized, "Logout failed")
 		return
 	}
@@ -666,7 +626,6 @@ func hexDecode(s string) ([]byte, error) {
 	return hex.DecodeString(s)
 }
 
-// LoggingMiddleware logs each request line without its body.
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/events" {
@@ -831,6 +790,8 @@ func NewGatewayServer(port string, pathPrefix string) (*http.Server, string, str
 		Addr:              ":" + port,
 		Handler:           handler,
 		ReadHeaderTimeout: 15 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      5 * time.Minute,
 		IdleTimeout:       120 * time.Second,
 	}
 	return server, cert, key

@@ -171,63 +171,72 @@ func LoadEverythingIntoContext(ctx context.Context, db *pgxpool.Pool) (map[strin
 
 	banks, err := loadApprovedBanks(ctx, db)
 	if err != nil {
-		errs = append(errs, "loadApprovedBanks: "+err.Error())
+		logger.LogError("loadApprovedBanks: %v", err)
+		errs = append(errs, "loadApprovedBanks failed")
 		banks = []map[string]string{}
 	}
 	result["BankInfo"] = banks
 
 	currencies, err := loadApprovedCurrencies(ctx, db)
 	if err != nil {
-		errs = append(errs, "loadApprovedCurrencies: "+err.Error())
+		logger.LogError("loadApprovedCurrencies: %v", err)
+		errs = append(errs, "loadApprovedCurrencies failed")
 		currencies = []map[string]string{}
 	}
 	result["ActiveCurrencies"] = currencies
 
 	cashFlowCategories, err := loadApprovedCashFlowCategories(ctx, db)
 	if err != nil {
-		errs = append(errs, "loadApprovedCashFlowCategories: "+err.Error())
+		logger.LogError("loadApprovedCashFlowCategories: %v", err)
+		errs = append(errs, "loadApprovedCashFlowCategories failed")
 		cashFlowCategories = []map[string]string{}
 	}
 	result["CashFlowCategories"] = cashFlowCategories
 
 	amcs, err := loadApprovedAMCs(ctx, db)
 	if err != nil {
-		errs = append(errs, "loadApprovedAMCs: "+err.Error())
+		logger.LogError("loadApprovedAMCs: %v", err)
+		errs = append(errs, "loadApprovedAMCs failed")
 		amcs = []map[string]string{}
 	}
 	result["ApprovedAMCs"] = amcs
 
 	schemes, err := loadApprovedSchemes(ctx, db)
 	if err != nil {
-		errs = append(errs, "loadApprovedSchemes: "+err.Error())
+		logger.LogError("loadApprovedSchemes: %v", err)
+		errs = append(errs, "loadApprovedSchemes failed")
 		schemes = []map[string]string{}
 	}
 	result["ApprovedSchemes"] = schemes
 
 	dps, err := loadApprovedDPs(ctx, db)
 	if err != nil {
-		errs = append(errs, "loadApprovedDPs: "+err.Error())
+		logger.LogError("loadApprovedDPs: %v", err)
+		errs = append(errs, "loadApprovedDPs failed")
 		dps = []map[string]string{}
 	}
 	result["ApprovedDPs"] = dps
 
-    bankAccounts, err := loadApprovedBankAccounts(ctx, db)
-    if err != nil {
-        errs = append(errs, "loadApprovedBankAccounts: "+err.Error())
-        bankAccounts = []map[string]string{}
-    }
-    result[approvedBankAccountsKey] = bankAccounts // key defined in prevalidation.go
+	bankAccounts, err := loadApprovedBankAccounts(ctx, db)
+	if err != nil {
+		logger.LogError("loadApprovedBankAccounts: %v", err)
+		errs = append(errs, "loadApprovedBankAccounts failed")
+		bankAccounts = []map[string]string{}
+	}
+	result[approvedBankAccountsKey] = bankAccounts
 
 	folios, err := loadApprovedFolios(ctx, db)
 	if err != nil {
-		errs = append(errs, "loadApprovedFolios: "+err.Error())
+		logger.LogError("loadApprovedFolios: %v", err)
+		errs = append(errs, "loadApprovedFolios failed")
 		folios = []map[string]string{}
 	}
 	result["ApprovedFolios"] = folios
 
 	demats, err := loadApprovedDemats(ctx, db)
 	if err != nil {
-		errs = append(errs, "loadApprovedDemats: "+err.Error())
+		logger.LogError("loadApprovedDemats: %v", err)
+		errs = append(errs, "loadApprovedDemats failed")
 		demats = []map[string]string{}
 	}
 	result["ApprovedDemats"] = demats

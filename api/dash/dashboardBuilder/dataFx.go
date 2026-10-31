@@ -13,9 +13,6 @@ import (
 // (no line-item JOIN), entity scope, pending approval_instance status overlay.
 //
 // Dashboard-only enrichments (still one row per header, safe to SUM):
-//
-//	hedged_amount / unhedged_amount from exposure_hedge_links
-//	line_item_amount / line_item_count rolled up from exposure_line_items
 func queryFXExposureHeadersLineItems(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int) ([]map[string]any, error) {
 	_ = entityIDs
 	args, ef := withEntityNameFilter(limitOffsetArgs(limit, offset), ctx, "h", "entity")

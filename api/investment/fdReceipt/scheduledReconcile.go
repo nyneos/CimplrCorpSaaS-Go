@@ -8,9 +8,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// RunScheduledReconciliation executes a reconcile run created by the scheduled worker
-// over all pending receipts of its entity, and marks the run FAILED when it errors so
-// it never stays RUNNING.
 func RunScheduledReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 	if err := runReconciliation(ctx, pool, runID, nil, nil); err != nil {
 		if _, uerr := pool.Exec(context.WithoutCancel(ctx),

@@ -70,24 +70,24 @@ func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			InstanceEyeID: req.InstanceEyeID,
 			ActorUserID:   req.UserID,
 			ActorEmail:    userEmail,
-			ActorRoleID:   req.ActorRoleID,
 			ActionType:    req.ActionType,
 			Comment:       req.Comment,
 		})
 		if err != nil {
-			msg := err.Error()
-			lower := strings.ToLower(msg)
+			raw := err.Error()
+			safe := errtext.Detail(w, err)
+			lower := strings.ToLower(raw)
 			switch {
 			case strings.Contains(lower, substrNotFound):
-				api.RespondWithError(w, http.StatusNotFound, msg)
-			case strings.Contains(lower, "unauthorized"):
-				api.RespondWithError(w, http.StatusForbidden, msg)
+				api.RespondWithError(w, http.StatusNotFound, safe)
+			case strings.Contains(lower, "unauthorized"), strings.Contains(lower, "cannot approve"):
+				api.RespondWithError(w, http.StatusForbidden, safe)
 			case strings.Contains(lower, "not active"), strings.Contains(lower, "not pending"):
-				api.RespondWithError(w, http.StatusBadRequest, msg)
+				api.RespondWithError(w, http.StatusBadRequest, safe)
 			case strings.Contains(lower, "already acted"):
-				api.RespondWithError(w, http.StatusConflict, msg)
+				api.RespondWithError(w, http.StatusConflict, safe)
 			default:
-				api.RespondWithError(w, http.StatusInternalServerError, "Approval action failed: "+msg)
+				api.RespondWithError(w, http.StatusInternalServerError, "Approval action failed: "+safe)
 			}
 			return
 		}

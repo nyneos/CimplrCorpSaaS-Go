@@ -1105,9 +1105,6 @@ func GetOpenAmountToBookingRatioSimple(db *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Hedge ratio is hedged amount / open exposure, both in USD.
-		// Exposures and the bookings behind hedge links must be approved, and only
-		// currencies in the caller's approved set are included.
 		rows, err := db.Query(r.Context(), `
 			SELECT COALESCE(eh.currency, ''),
 			       COALESCE(eh.total_open_amount, 0)::float8,
@@ -1118,6 +1115,8 @@ func GetOpenAmountToBookingRatioSimple(db *pgxpool.Pool) http.HandlerFunc {
 			           WHERE ehl.exposure_header_id = eh.exposure_header_id
 			             AND COALESCE(ehl.is_active, true) = true
 			             AND COALESCE(fb.is_deleted, false) = false
+			             AND fb.entity_level_0 = ANY($1)
+			             AND LOWER(TRIM(COALESCE(eh.approval_status, ''))) = 'approved'
 			             AND LOWER(COALESCE(fb.processing_status, '')) = 'approved'
 			       ), 0)::float8
 			FROM exposure_headers eh

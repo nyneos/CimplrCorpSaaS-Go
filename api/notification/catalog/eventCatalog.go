@@ -153,10 +153,11 @@ func CreateEventSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.ModuleCode, req.SubModuleCode, req.EventCode, req.EventName, req.Description, req.SourceRoute, req.IsActive, entityNameVal,
 		).Scan(&eventID)
 		if err != nil {
-			if strings.Contains(err.Error(), "uq_event") || strings.Contains(err.Error(), "unique") {
+			safe := errtext.Detail(w, err)
+			if safe == "duplicate record" || strings.Contains(strings.ToLower(err.Error()), "uq_event") {
 				respondWithError(w, http.StatusConflict, "duplicate event: the combination of (module_code, sub_module_code, event_code, entity_name) or (event_display_name, entity_name) or (source_route, entity_name) already exists")
 			} else {
-				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				respondWithError(w, http.StatusInternalServerError, safe)
 			}
 			return
 		}
@@ -273,10 +274,11 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Without this check tx.Commit() returns "commit unexpectedly resulted in rollback".
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			if strings.Contains(err.Error(), "uq_event") || strings.Contains(err.Error(), "unique") {
+			safe := errtext.Detail(w, err)
+			if safe == "duplicate record" || strings.Contains(strings.ToLower(err.Error()), "uq_event") {
 				respondWithError(w, http.StatusConflict, "duplicate event: the combination of (module_code, sub_module_code, event_code, entity_name) or (event_display_name, entity_name) or (source_route, entity_name) already exists")
 			} else {
-				respondWithError(w, http.StatusConflict, "event insert failed: "+errtext.Detail(w, err))
+				respondWithError(w, http.StatusConflict, "event insert failed: "+safe)
 			}
 			return
 		}
@@ -845,7 +847,6 @@ func DeleteEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// verifyQ := `SELECT event_id FROM notification_svc.event WHERE event_id = ANY($1::text[]) AND action_type != 'DELETE' AND COALESCE(is_deleted, false) = false`
 		// rows, err := tx.Query(ctx, verifyQ, req.EventIDs)
 		// if err != nil {
-		// 	respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 		// 	return
 		// }
 		// defer rows.Close()

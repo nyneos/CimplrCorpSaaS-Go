@@ -27,6 +27,9 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
+	middlewares "CimplrCorpSaas/api/middlewares"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -62,18 +65,18 @@ func resolveAsOfDate(raw string) string {
 	return time.Now().UTC().Format(constants.DateFormat)
 }
 
-func resolveActor(ctx context.Context, fallbackUserID string) (userID, name, email, role string) {
+func resolveActor(ctx context.Context) (userID, name, email, role string) {
+	userID = strings.TrimSpace(middlewares.GetUserIDFromContext(ctx))
 	if s := api.GetSessionFromCtx(ctx); s != nil {
-		userID = s.UserID
+		if userID == "" {
+			userID = strings.TrimSpace(s.UserID)
+		}
 		name = s.Name
 		email = s.Email
 		role = s.Role
 		if role == "" {
 			role = s.RoleCode
 		}
-	}
-	if userID == "" {
-		userID = fallbackUserID
 	}
 	return
 }
@@ -92,7 +95,7 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 
 		var req checklistSavePayload
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			api.RespondEnvelopeError(w, http.StatusBadRequest, errtext.Detail(w, err), "VALIDATION_ERROR")
 			return
 		}
 		if len(req.Items) == 0 {
@@ -104,7 +107,7 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		asOf := resolveAsOfDate(req.AsOfDate)
 		ctx := r.Context()
-		actorID, actorName, actorEmail, actorRole := resolveActor(ctx, req.UserID)
+		actorID, actorName, actorEmail, actorRole := resolveActor(ctx)
 		if actorID == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -118,14 +121,11 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "begin tx: "+err.Error())
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 			return
 		}
 		defer tx.Rollback(ctx)
 
-		// Mode is not part of either conflict key, so a BOD write updates the EOD
-		// row for the same entity and date (and the reverse). Reject that before
-		// any insert. A repeat save of the same mode still upserts.
 		itemIDs := make([]string, 0, len(req.Items))
 		for _, it := range req.Items {
 			if id := strings.TrimSpace(it.ID); id != "" {
@@ -182,6 +182,47 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		makerByItem := map[string]string{}
+		if len(itemIDs) > 0 {
+			makerRows, makerErr := tx.Query(ctx, `
+				SELECT item_id, COALESCE(updated_by, '')
+				FROM investment.fd_eod_checklist_item_status
+				WHERE entity_id = $1
+				  AND as_of_date = $2::date
+				  AND item_id = ANY($3::text[])
+				  AND COALESCE(is_deleted, false) = false
+			`, req.EntityID, asOf, itemIDs)
+			if makerErr != nil {
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, makerErr), "")
+				return
+			}
+			for makerRows.Next() {
+				var itemID, maker string
+				if scanErr := makerRows.Scan(&itemID, &maker); scanErr != nil {
+					makerRows.Close()
+					api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, scanErr), "")
+					return
+				}
+				makerByItem[itemID] = maker
+			}
+			if rowsErr := makerRows.Err(); rowsErr != nil {
+				makerRows.Close()
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, rowsErr), "")
+				return
+			}
+			makerRows.Close()
+		}
+		for _, it := range req.Items {
+			if !it.Done || strings.TrimSpace(it.ID) == "" {
+				continue
+			}
+			maker := strings.TrimSpace(makerByItem[strings.TrimSpace(it.ID)])
+			if maker == "" || governance.IsSelfApprovalCtx(ctx, maker) {
+				api.RespondEnvelopeError(w, http.StatusForbidden, "you cannot check a checklist row you prepared", "SELF_APPROVAL")
+				return
+			}
+		}
+
 		saved := make([]map[string]interface{}, 0, len(req.Items))
 		for _, it := range req.Items {
 			if strings.TrimSpace(it.ID) == "" {
@@ -212,12 +253,11 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 					updated_at       = NOW()
 				RETURNING status_id`,
 				nullIfBlank(req.EntityID), asOf, req.Mode, it.ID, nullIfBlank(it.Label), nullIfBlank(it.Owner),
-				it.Done, it.Critical, nullIfBlank(it.Comment),
+				it.Done, isChecklistItemCritical(it.ID), nullIfBlank(it.Comment),
 				actorID, nullIfBlank(actorName), nullIfBlank(actorEmail), nullIfBlank(actorRole),
 			).Scan(&statusID)
 			if err != nil {
-				api.LogError("[BodEodChecklist] upsert item %s failed: %v", it.ID, err)
-				api.RespondWithError(w, http.StatusInternalServerError, "save failed: "+err.Error())
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 				return
 			}
 			if _, err = tx.Exec(ctx, `
@@ -227,7 +267,7 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 					actor_user_id, actor_name, actor_email, actor_role, action_at
 				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())`,
 				statusID, nullIfBlank(req.EntityID), asOf, it.ID, nullIfBlank(it.Label),
-				it.Done, it.Critical, nullIfBlank(it.Comment), pickAction(it.Done),
+				it.Done, isChecklistItemCritical(it.ID), nullIfBlank(it.Comment), pickAction(it.Done),
 				actorID, nullIfBlank(actorName), nullIfBlank(actorEmail), nullIfBlank(actorRole),
 			); err != nil {
 				api.LogErrorForResponse(w, "[BodEodChecklist] audit insert failed item=%s: %v", it.ID, err)
@@ -245,12 +285,30 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 		// Optionally finalise the EOD sign-off in the same call.
 		var signOffID string
 		if req.SignedOff {
-			completed, total, criticalPending := summariseItems(req.Items)
+			overrides := map[string]bool{}
+			for _, it := range req.Items {
+				if id := strings.TrimSpace(it.ID); id != "" {
+					overrides[id] = it.Done
+				}
+			}
+			var criticalPending int
+			var critErr error
+			if strings.EqualFold(strings.TrimSpace(req.Mode), "EOD") {
+				criticalPending, critErr = countCriticalPendingLive(ctx, pool, req.EntityID, asOf, overrides)
+			} else {
+				_, _, criticalPending = summariseItems(req.Items)
+			}
+			if critErr != nil {
+				api.LogErrorForResponse(w, "[BodEodChecklist] critical recompute failed: %v", critErr)
+				api.RespondWithError(w, http.StatusInternalServerError, "checklist criticals could not be verified")
+				return
+			}
 			if criticalPending > 0 {
 				api.RespondWithError(w, http.StatusBadRequest,
 					fmt.Sprintf("cannot sign off: %d critical item(s) still pending", criticalPending))
 				return
 			}
+			completed, total, _ := summariseItems(req.Items)
 			err = tx.QueryRow(ctx, `
 				INSERT INTO investment.fd_eod_checklist_signoff (
 					entity_id, as_of_date, mode, total_items, completed_items, critical_pending,
@@ -273,14 +331,13 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 				nullIfBlank(req.SignOffNote), actorID, nullIfBlank(actorName), nullIfBlank(actorEmail), nullIfBlank(actorRole),
 			).Scan(&signOffID)
 			if err != nil {
-				api.LogError("[BodEodChecklist] signoff insert failed: %v", err)
-				api.RespondWithError(w, http.StatusInternalServerError, "signoff failed: "+err.Error())
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 			return
 		}
 
@@ -297,6 +354,103 @@ func SaveBodEodChecklistItems(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // ─── helpers (local to this file) ─────────────────────────────────────────────
+
+// Server-authoritative critical checklist IDs for EOD (must match fdBodEodDashboard).
+var eodChecklistCriticalIDs = map[string]bool{
+	"C1": true,
+	"C2": true,
+	"C3": true,
+	"C6": true,
+}
+
+func isChecklistItemCritical(itemID string) bool {
+	return eodChecklistCriticalIDs[strings.TrimSpace(itemID)]
+}
+
+// countCriticalPendingLive recomputes EOD critical Done from live data + persisted/overrides.
+// Client Critical/Done flags are not trusted for sign-off.
+func countCriticalPendingLive(ctx context.Context, pool *pgxpool.Pool, entityID, asOf string, overrides map[string]bool) (int, error) {
+	entityFilter := strings.TrimSpace(entityID)
+	if entityFilter == "" {
+		return 0, fmt.Errorf("entity required")
+	}
+
+	var unmatchedCount, openVariance, failedPostings, pendingMaturities int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_interest_receipt
+		WHERE is_deleted=false AND DATE(created_at)=$1::date
+		AND COALESCE(reconciliation_status,'UNMATCHED') IN ('UNMATCHED','PENDING','')
+		AND (entity_id = ANY(string_to_array($2, ',')))`, asOf, entityFilter).Scan(&unmatchedCount); err != nil {
+		return 0, err
+	}
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_confirmation
+		WHERE is_deleted=false AND variance_flag=true
+		AND COALESCE(variance_action,'PENDING') = 'PENDING'
+		AND EXISTS(
+		    SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=fd_confirmation.booking_id AND (b.entity_id = ANY(string_to_array($1, ',')))
+		)`, entityFilter).Scan(&openVariance); err != nil {
+		return 0, err
+	}
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_cashflow_schedule cf
+		JOIN investment.fd_master m ON m.fd_id=cf.fd_id AND m.is_deleted=false
+		WHERE cf.is_deleted=false AND cf.posting_status='FAILED'
+		AND (m.entity_id = ANY(string_to_array($1, ',')))`, entityFilter).Scan(&failedPostings); err != nil {
+		return 0, err
+	}
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.fd_master m
+		WHERE m.is_deleted=false AND m.maturity_date=$1::date
+		AND m.fd_status IN ('ACTIVE','MATURED')
+		AND NOT (`+sqlAnyClosureProcessed+`)
+		AND (m.entity_id = ANY(string_to_array($2, ',')))`, asOf, entityFilter).Scan(&pendingMaturities); err != nil {
+		return 0, err
+	}
+
+	liveDone := map[string]bool{
+		"C1": unmatchedCount == 0,
+		"C2": openVariance == 0,
+		"C3": failedPostings == 0,
+		"C6": pendingMaturities == 0,
+	}
+
+	// Overlay persisted operator marks from DB.
+	rows, err := pool.Query(ctx, `
+		SELECT item_id, is_done
+		FROM investment.fd_eod_checklist_item_status
+		WHERE entity_id = $1 AND as_of_date = $2::date
+		  AND COALESCE(is_deleted, false) = false
+		  AND item_id = ANY($3::text[])`,
+		entityID, asOf, []string{"C1", "C2", "C3", "C6"})
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var done bool
+		if err := rows.Scan(&id, &done); err != nil {
+			return 0, err
+		}
+		if done {
+			liveDone[id] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for id, done := range overrides {
+		if isChecklistItemCritical(id) && done {
+			liveDone[id] = true
+		}
+	}
+
+	pending := 0
+	for id := range eodChecklistCriticalIDs {
+		if !liveDone[id] {
+			pending++
+		}
+	}
+	return pending, nil
+}
+
 
 func nullIfBlank(s string) interface{} {
 	if strings.TrimSpace(s) == "" {
@@ -315,9 +469,10 @@ func pickAction(done bool) string {
 func summariseItems(items []checklistItemPayload) (completed, total, criticalPending int) {
 	for _, it := range items {
 		total++
+		critical := isChecklistItemCritical(it.ID)
 		if it.Done {
 			completed++
-		} else if it.Critical {
+		} else if critical {
 			criticalPending++
 		}
 	}

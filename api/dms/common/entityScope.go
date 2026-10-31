@@ -45,8 +45,6 @@ func RequireEntityAccess(w http.ResponseWriter, scope ctxutil.RequestScope, enti
 	return false
 }
 
-// RecordsEntityAllowed runs query (one nullable entity id per row) and reports
-// whether every row is org-wide or inside the caller's entity scope.
 func RecordsEntityAllowed(ctx context.Context, db api.RowQuerier, query string, args ...any) (bool, error) {
 	scope := ctxutil.FromContext(ctx)
 	if scope.IsAdminOverride {
@@ -69,7 +67,6 @@ func RecordsEntityAllowed(ctx context.Context, db api.RowQuerier, query string, 
 	return true, rows.Err()
 }
 
-// RequireRecordsEntityAccess writes a 403 (or 500) unless RecordsEntityAllowed passes.
 func RequireRecordsEntityAccess(w http.ResponseWriter, r *http.Request, db api.RowQuerier, query string, args ...any) bool {
 	ok, err := RecordsEntityAllowed(r.Context(), db, query, args...)
 	if err != nil {

@@ -3,7 +3,6 @@ package limit
 import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
-	"CimplrCorpSaas/internal/ctxutil"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -365,11 +364,8 @@ func validateUtilizationAuditAccess(ctx context.Context, pgxPool *pgxpool.Pool, 
 }
 
 func validateLimitAuditEntityAccess(ctx context.Context, entityName string) (int, string) {
-	if len(api.GetEntityNamesFromCtx(ctx)) == 0 && len(ctxutil.FromContext(ctx).EntityIDs) == 0 {
-		return 0, ""
-	}
-	if !ctxutil.FromContext(ctx).HasEntityAccess(entityName) {
-		return http.StatusForbidden, "unauthorized entity: " + entityName
+	if strings.TrimSpace(entityName) == "" || !api.EntityInScope(ctx, entityName) {
+		return http.StatusForbidden, "unauthorized entity"
 	}
 	return 0, ""
 }

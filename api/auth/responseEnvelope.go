@@ -13,8 +13,8 @@ import (
 //
 // api/auth CANNOT import "CimplrCorpSaas/api" to call those directly: the
 // root api package already imports api/auth (see api/gateway.go,
-// api/cashMiddleware.go, api/middleware.go, api/contextHelpers.go,
-// api/requestMetadata.go), so api/auth -> api would be a Go import cycle.
+// api/middleware.go, api/contextHelpers.go, api/requestMetadata.go),
+// so api/auth -> api would be a Go import cycle.
 //
 // These functions produce a byte-for-byte identical JSON shape to their
 // api/envelope.go counterparts. If envelope.go's shape ever changes, update

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"CimplrCorpSaas/internal/secretaes"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -23,9 +25,11 @@ type RuleDestination struct {
 	SftpPort         int    `json:"sftp_port,omitempty"`
 	SftpUser         string `json:"sftp_user,omitempty"`
 	SftpPassword     string `json:"sftp_password"`
+	HasSftpPassword  bool   `json:"has_sftp_password,omitempty"`
 	SftpFolder       string `json:"sftp_folder,omitempty"`
 	APIURL           string `json:"api_url,omitempty"`
 	APIAuthToken     string `json:"api_auth_token"`
+	HasAPIAuthToken  bool   `json:"has_api_auth_token,omitempty"`
 	IsActive         *bool  `json:"is_active,omitempty"`
 	IsDeleted        bool   `json:"is_deleted,omitempty"`
 }
@@ -180,6 +184,8 @@ func listDestinations(ctx context.Context, pool *pgxpool.Pool, ruleID string) ([
 		); err != nil {
 			return nil, err
 		}
+		d.SftpPassword = secretaes.MustOpen(d.SftpPassword)
+		d.APIAuthToken = secretaes.MustOpen(d.APIAuthToken)
 		d.AppendDatetime = boolPtr(appendDT)
 		d.IsActive = boolPtr(isActive)
 		out = append(out, d)
@@ -227,15 +233,15 @@ func insertDestinationAudit(
 	newD *RuleDestination,
 ) error {
 	var (
-		destID, ruleID string
-		oldSort, newSort                                               *int
-		oldType, newType, oldPrefix, newPrefix                         *string
-		oldAppend, newAppend                                           *bool
-		oldS3, newS3, oldLocal, newLocal                               *string
-		oldHost, newHost, oldUser, newUser, oldFolder, newFolder       *string
-		oldPort, newPort                                               *int
-		oldAPI, newAPI                                                 *string
-		oldActive, newActive, oldDel, newDel                           *bool
+		destID, ruleID                                           string
+		oldSort, newSort                                         *int
+		oldType, newType, oldPrefix, newPrefix                   *string
+		oldAppend, newAppend                                     *bool
+		oldS3, newS3, oldLocal, newLocal                         *string
+		oldHost, newHost, oldUser, newUser, oldFolder, newFolder *string
+		oldPort, newPort                                         *int
+		oldAPI, newAPI                                           *string
+		oldActive, newActive, oldDel, newDel                     *bool
 	)
 	if newD != nil {
 		destID = newD.DestinationID
@@ -408,7 +414,15 @@ func replaceDestinations(
 			d.IsActive = boolPtr(true)
 		}
 		appendDT := appendDatetimeValue(d.AppendDatetime)
-		err := tx.QueryRow(ctx, `
+		sealedPass, err := secretaes.Seal(d.SftpPassword)
+		if err != nil {
+			return nil, err
+		}
+		sealedToken, err := secretaes.Seal(d.APIAuthToken)
+		if err != nil {
+			return nil, err
+		}
+		err = tx.QueryRow(ctx, `
 			INSERT INTO email_svc.transformation_rule_destinations (
 				rule_id, sort_order, destination_type, output_name_prefix, append_datetime,
 				s3_prefix, local_folder,
@@ -420,8 +434,8 @@ func replaceDestinations(
 			RETURNING destination_id::text
 		`, ruleID, d.SortOrder, d.DestinationType, d.OutputNamePrefix, appendDT,
 			d.S3Prefix, d.LocalFolder,
-			d.SftpHost, d.SftpPort, d.SftpUser, d.SftpPassword, d.SftpFolder,
-			d.APIURL, d.APIAuthToken, destActive(&d),
+			d.SftpHost, d.SftpPort, d.SftpUser, sealedPass, d.SftpFolder,
+			d.APIURL, sealedToken, destActive(&d),
 		).Scan(&d.DestinationID)
 		if err != nil {
 			return nil, err

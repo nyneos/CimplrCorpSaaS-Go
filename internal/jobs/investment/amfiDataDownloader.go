@@ -141,8 +141,6 @@ func NewDefaultConfig() *Config {
 	}
 }
 
-// tryAMFIJobLock takes a transaction-scoped advisory lock on a held connection so only
-// one replica runs the AMFI download and upsert at a time; the returned func releases it.
 func tryAMFIJobLock(db *pgxpool.Pool) (func(), bool) {
 	ctx := context.Background()
 	conn, err := db.Acquire(ctx)
@@ -652,8 +650,6 @@ func processNAVBatches(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int) 
 	copyDuration := time.Since(start)
 	logger.GlobalLogger.LogAudit(fmt.Sprintf("Bulk copy completed in %v", copyDuration))
 
-	// New schemes and NAV rows are loaded atomically: a failure part-way leaves the
-	// master and NAV history unchanged instead of half-loaded.
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin NAV load transaction: %w", err)

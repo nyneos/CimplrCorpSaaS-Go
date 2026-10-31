@@ -14,6 +14,18 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
+const onboardBatchEntitySQL = `SELECT src.entity_name FROM (
+	SELECT DISTINCT BTRIM(entity_name)::text AS entity_name
+	FROM investment.onboard_transaction
+	WHERE batch_id::text = $1 AND BTRIM(COALESCE(entity_name, '')) <> ''
+) src
+UNION ALL
+SELECT NULL::text
+WHERE NOT EXISTS (
+	SELECT 1 FROM investment.onboard_transaction
+	WHERE batch_id::text = $1 AND BTRIM(COALESCE(entity_name, '')) <> ''
+)`
+
 // DeleteOnboardBatch hard-resets a batch:
 //   - hard-deletes master records that were CREATED by this batch (batch_id matches)
 //   - leaves enriched (pre-existing) records untouched
@@ -34,7 +46,7 @@ func DeleteOnboardBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if !api.RequireRecordsInScope(ctx, w, pgxPool, `SELECT DISTINCT entity_name::text FROM investment.onboard_transaction WHERE batch_id::text = $1`, req.BatchID) {
+		if !api.RequireRecordsInScope(ctx, w, pgxPool, onboardBatchEntitySQL, req.BatchID) {
 			return
 		}
 

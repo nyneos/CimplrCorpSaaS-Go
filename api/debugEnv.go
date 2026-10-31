@@ -3,29 +3,27 @@ package api
 import (
 	"CimplrCorpSaas/api/constants"
 	usersession "CimplrCorpSaas/internal/session"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 )
 
 var debugEnvSensitiveKeys = map[string]bool{
-	"DB_PASSWORD":                 true,
-	"PAYLOAD_ENC_KEY":             true,
-	"RESPONSE_ENC_KEY":            true,
-	"AWS_SECRET_ACCESS_KEY":       true,
-	"EMAIL_SERVICE_KEY":           true,
-	"POLICY_SERVICE_KEY":          true,
-	"AZURE_CLIENT_SECRET":         true,
-	"GOOGLE_CLIENT_SECRET":        true,
-	"MAIL_OAUTH_MS_CLIENT_SECRET": true,
+	"DB_PASSWORD":                     true,
+	"PAYLOAD_ENC_KEY":                 true,
+	"RESPONSE_ENC_KEY":                true,
+	"AWS_SECRET_ACCESS_KEY":           true,
+	"EMAIL_SERVICE_KEY":               true,
+	"POLICY_SERVICE_KEY":              true,
+	"AZURE_CLIENT_SECRET":             true,
+	"GOOGLE_CLIENT_SECRET":            true,
+	"MAIL_OAUTH_MS_CLIENT_SECRET":     true,
 	"MAIL_OAUTH_GOOGLE_CLIENT_SECRET": true,
-	"GOOGLE_DWD_PRIVATE_KEY":      true,
-	"SMART_CAT_AI_KEY":            true,
-	"CONVERT_SVC_KEY":             true,
-	"VAPID_PRIVATE_KEY":           true,
+	"GOOGLE_DWD_PRIVATE_KEY":          true,
+	"SMART_CAT_AI_KEY":                true,
+	"CONVERT_SVC_KEY":                 true,
+	"VAPID_PRIVATE_KEY":               true,
 }
 
 var debugEnvProcessKeys = []string{
@@ -45,7 +43,7 @@ var debugEnvProcessKeys = []string{
 	"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
 	"AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_TENANT_ID", "AZURE_REDIRECT_URI", "AZURE_GRAPH_TENANT_LABEL",
 	"GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI",
-	"GOOGLE_DWD_SERVICE_ACCOUNT_EMAIL", "GOOGLE_DWD_PRIVATE_KEY", "GOOGLE_DWD_CLIENT_ID", 	"GOOGLE_WORKSPACE_TENANT_LABEL",
+	"GOOGLE_DWD_SERVICE_ACCOUNT_EMAIL", "GOOGLE_DWD_PRIVATE_KEY", "GOOGLE_DWD_CLIENT_ID", "GOOGLE_WORKSPACE_TENANT_LABEL",
 	"EMAIL_SERVICE_KEY",
 	"POLICY_SERVICE_KEY", "POLICY_ENGINE_ENABLED",
 	"EMAIL_POLLER_ENABLED", "EMAIL_POLL_INTERVAL_SECS",
@@ -79,14 +77,38 @@ func isDebugEnvSensitive(key string) bool {
 	return false
 }
 
-func maskDebugEnvValue(key, value string) (display, hexOut, urlOut string) {
+func maskDebugEnvValue(key, value string) string {
 	if isDebugEnvSensitive(key) {
 		if strings.TrimSpace(value) != "" {
-			return "[set]", "", ""
+			return "[set]"
 		}
-		return "", "", ""
+		return ""
 	}
-	return value, hex.EncodeToString([]byte(value)), url.QueryEscape(value)
+	return value
+}
+
+func debugEnvCallerIsAdmin(userID, role, roleCode string) bool {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false
+	}
+	for _, id := range strings.Split(os.Getenv("ADMIN_USER_IDS"), ",") {
+		if strings.TrimSpace(id) == userID {
+			return true
+		}
+	}
+	wantRole := strings.ToLower(strings.TrimSpace(role))
+	wantCode := strings.ToLower(strings.TrimSpace(roleCode))
+	for _, name := range strings.Split(os.Getenv("ADMIN_ROLES"), ",") {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		if name == wantRole || name == wantCode {
+			return true
+		}
+	}
+	return false
 }
 
 func readDebugEnvFile() (chosen string, fileStr string) {
@@ -119,16 +141,13 @@ func parseDebugEnvFileEntries(fileStr string) []map[string]string {
 			fv = fv[1 : len(fv)-1]
 		}
 		envVal := os.Getenv(key)
-		envOut, hexOut, urlOut := maskDebugEnvValue(key, envVal)
-		if debugEnvSensitiveKeys[key] && fv != "" {
+		if isDebugEnvSensitive(key) && fv != "" {
 			fv = "[set]"
 		}
 		entries = append(entries, map[string]string{
-			"key":                  key,
-			"file_value":           fv,
-			"env_value":            envOut,
-			"env_value_hex":        hexOut,
-			"env_value_urlencoded": urlOut,
+			"key":        key,
+			"file_value": fv,
+			"env_value":  maskDebugEnvValue(key, envVal),
 		})
 	}
 	return entries
@@ -142,13 +161,9 @@ func buildDebugEnvProcessEntries(filter map[string]struct{}) []map[string]string
 				continue
 			}
 		}
-		v := os.Getenv(k)
-		ev, eh, eu := maskDebugEnvValue(k, v)
 		envEntries = append(envEntries, map[string]string{
-			"key":                  k,
-			"env_value":            ev,
-			"env_value_hex":        eh,
-			"env_value_urlencoded": eu,
+			"key":       k,
+			"env_value": maskDebugEnvValue(k, os.Getenv(k)),
 		})
 	}
 	return envEntries
@@ -165,8 +180,13 @@ func DebugEnvHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
-	if s, _ := usersession.HeaderSession(r); s == nil {
+	s, _ := usersession.HeaderSession(r)
+	if s == nil {
 		RespondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, "")
+		return
+	}
+	if !debugEnvCallerIsAdmin(s.UserID, s.Role, s.RoleCode) {
+		RespondEnvelopeError(w, http.StatusForbidden, "Admin session required", "")
 		return
 	}
 

@@ -1326,9 +1326,6 @@ func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
 
 	api.LogInfo("[FDAccrual] Scheduler tick: %d due config(s)", len(due))
 	for _, c := range due {
-		// Claim the config by leasing next_run_at forward, conditioned on the value just
-		// read. Only one replica wins; a crashed or panicking run is retried after the
-		// lease instead of on every tick. updateLastRunStatus sets the real next run.
 		claim, err := pool.Exec(ctx, `
 			UPDATE investment.fd_accrual_schedule_config
 			SET next_run_at = now() + $3::interval, updated_at = now()
@@ -1379,6 +1376,46 @@ type FireScheduledParams struct {
 	AutoSubmit     bool
 	Granularity    string
 	ScheduledAt    time.Time
+}
+
+func accrualScheduleMoneyParams(ctx context.Context, pool *pgxpool.Pool, entityID, bankFilter string) (string, string, int) {
+	dayCount, rule, precision := "ACT_365", "ROUND", 2
+	var dc, rm string
+	var decimals int
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(b.day_count_code, ''), NULLIF(m.day_count_code, ''), ''),
+		       COALESCE(NULLIF(b.rounding_method, ''), ''),
+		       COALESCE(b.interest_rounding_decimals, -1)
+		FROM investment.fd_master m
+		LEFT JOIN investment.fd_bank_config_master b
+		  ON b.config_id = m.bank_config_id
+		 AND COALESCE(b.is_deleted, false) = false
+		WHERE m.entity_id = $1
+		  AND COALESCE(m.is_deleted, false) = false
+		  AND ($2 = '' OR m.bank_id = $2)
+		  AND (
+		    COALESCE(NULLIF(b.day_count_code, ''), NULLIF(m.day_count_code, ''), '') <> ''
+		    OR COALESCE(NULLIF(b.rounding_method, ''), '') <> ''
+		    OR b.interest_rounding_decimals IS NOT NULL
+		  )
+		ORDER BY m.fd_id
+		LIMIT 1`, entityID, strings.TrimSpace(bankFilter)).Scan(&dc, &rm, &decimals)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			api.LogError("[FDAccrual] Scheduler day-count lookup entity=%s: %v", entityID, err)
+		}
+		return dayCount, rule, precision
+	}
+	if strings.TrimSpace(dc) != "" {
+		dayCount = strings.TrimSpace(dc)
+	}
+	if strings.TrimSpace(rm) != "" {
+		rule = strings.TrimSpace(rm)
+	}
+	if decimals >= 0 {
+		precision = decimals
+	}
+	return dayCount, rule, precision
 }
 
 func fireScheduledRun(
@@ -1502,6 +1539,7 @@ func fireScheduledRun(
 		return
 	}
 
+	dayCount, roundingRule, precision := accrualScheduleMoneyParams(ctx, pool, entityID, bankFilter)
 	input := CreateAccrualRunInput{
 		RunType:            runType,
 		RunMode:            runMode,
@@ -1512,9 +1550,9 @@ func fireScheduledRun(
 		AccrualPeriodStart: periodStart,
 		AccrualPeriodEnd:   periodEnd,
 		FinancialPeriod:    financialPeriod,
-		DayCountConvention: "ACT_365",
-		RoundingRule:       "ROUND",
-		PrecisionDecimals:  2,
+		DayCountConvention: dayCount,
+		RoundingRule:       roundingRule,
+		PrecisionDecimals:  precision,
 		Granularity:        granularity,
 		CreatedBy:          "SCHEDULER",
 	}
@@ -1612,7 +1650,6 @@ func updateLastRunStatus(ctx context.Context, pool *pgxpool.Pool, configID, runI
 	if runID != "" {
 		runIDArg = runID
 	}
-	// Detached from the run's deadline so a timed-out run still records its outcome.
 	ctx = context.WithoutCancel(ctx)
 	nextRun := loadAndComputeNextRunAt(ctx, pool, configID)
 	if _, err := pool.Exec(ctx, `
@@ -1681,15 +1718,11 @@ func recalcScheduleNextRunErr(ctx context.Context, pool scheduleDB, configID str
 	return err
 }
 
-// scheduleDB is satisfied by both the pool and a transaction.
 type scheduleDB interface {
 	Exec(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error)
 	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
 }
 
-// startScheduleApproval starts the approval workflow for a schedule config change before
-// the caller responds, so a failure is reported instead of leaving a PENDING audit row
-// with no workflow.
 func startScheduleApproval(ctx context.Context, pool *pgxpool.Pool, req approvalengine.InstanceRequest) error {
 	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 	defer cancel()

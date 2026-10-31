@@ -5,9 +5,7 @@ import (
 	"CimplrCorpSaas/internal/observability"
 	"context"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"time"
 
@@ -15,19 +13,6 @@ import (
 
 	"CimplrCorpSaas/internal/logger"
 )
-
-func postgresDSN(user, pass, host, port, name, sslMode string) string {
-	u := &url.URL{
-		Scheme: "postgres",
-		User:   url.UserPassword(user, pass),
-		Host:   net.JoinHostPort(host, port),
-		Path:   "/" + name,
-	}
-	q := url.Values{}
-	q.Set("sslmode", sslMode)
-	u.RawQuery = q.Encode()
-	return u.String()
-}
 
 func NewDashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	const serviceName = "dash"
@@ -37,8 +22,7 @@ func NewDashServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	host := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	sslMode := dbutil.EffectiveSSLMode(host)
-	dsn := postgresDSN(user, pass, host, dbPort, name, sslMode)
+	dsn := dbutil.BuildPostgresDSN(user, pass, host, dbPort, name, dbutil.EffectiveSSLMode(host))
 	pgxPool, err := dbutil.NewTracedPool(context.Background(), dsn, serviceName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to connect to pgxpool DB: %w", err)

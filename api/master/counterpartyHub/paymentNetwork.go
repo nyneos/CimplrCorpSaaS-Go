@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
@@ -400,6 +401,30 @@ func BulkApprovePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM apibox.audit_payment_network
+			WHERE payment_network_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.PaymentNetworkIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
@@ -481,6 +506,30 @@ func BulkRejectPaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM apibox.audit_payment_network
+			WHERE payment_network_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.PaymentNetworkIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
@@ -488,6 +537,25 @@ func BulkRejectPaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE apibox.payment_network_master m SET
+				network_type = COALESCE(a.old_network_type, m.network_type),
+				routing_number = COALESCE(a.old_routing_number, m.routing_number),
+				bic_code = COALESCE(a.old_bic_code, m.bic_code)
+			FROM (
+				SELECT DISTINCT ON (payment_network_id) *
+				FROM apibox.audit_payment_network
+				WHERE payment_network_id = ANY($1::text[])
+				  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+				ORDER BY payment_network_id, requested_at DESC
+			) a
+			WHERE m.payment_network_id = a.payment_network_id`, req.PaymentNetworkIDs); err != nil {
+			msg, status := getUserFriendlyCounterpartyError(err, "Edit revert failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
 
 		res, err := tx.Exec(ctx, `
 			UPDATE apibox.audit_payment_network SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2

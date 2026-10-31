@@ -54,7 +54,7 @@ type unsubscribeRequest struct {
 // RegisterSubscriptionRoutes wires push-subscription routes onto the mux.
 // Call from api/notification/dino.go alongside RegisterPushInboxRoutes.
 func RegisterSubscriptionRoutes(mux *http.ServeMux, pool *pgxpool.Pool, chain func(http.Handler) http.Handler) {
-	mux.HandleFunc("/notification/push-subscription/vapid-public-key", handleVAPIDPublicKey)
+	mux.Handle("/notification/push-subscription/vapid-public-key", chain(http.HandlerFunc(handleVAPIDPublicKey)))
 	mux.Handle("/notification/push-subscription/register", chain(withPool(pool, handleSubscribe)))
 	mux.Handle("/notification/push-subscription/unregister", chain(withPool(pool, handleUnsubscribe)))
 }
@@ -98,11 +98,7 @@ func handleSubscribe(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool)
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	// user_id: body > context > query param
-	userID := req.UserID
-	if userID == "" {
-		userID = userIDFromCtx(r)
-	}
+	userID := userIDFromCtx(r)
 	if userID == "" {
 		writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 		return
@@ -149,10 +145,7 @@ func handleUnsubscribe(w http.ResponseWriter, r *http.Request, pool *pgxpool.Poo
 		writeErr(w, http.StatusBadRequest, "endpoint required")
 		return
 	}
-	userID := req.UserID
-	if userID == "" {
-		userID = userIDFromCtx(r)
-	}
+	userID := userIDFromCtx(r)
 	if userID == "" {
 		writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 		return

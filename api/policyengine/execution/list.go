@@ -43,8 +43,10 @@ func HandleList(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if !api.IsAdminOverride(ctx) {
+			// Non-admins only see runs whose entity_code is in session scope
+			// (entity ids or names). Empty entity_code rows are admin-only.
 			argN := len(countArgs) + 1
-			where += ` AND (COALESCE(entity_code, '') = '' OR entity_code = ANY($` + strconv.Itoa(argN) + `::text[]) OR entity_code = ANY($` + strconv.Itoa(argN+1) + `::text[]))`
+			where += ` AND (entity_code = ANY($` + strconv.Itoa(argN) + `::text[]) OR entity_code = ANY($` + strconv.Itoa(argN+1) + `::text[]))`
 			countArgs = append(countArgs, api.GetEntityIDsFromCtx(ctx), api.GetEntityNamesFromCtx(ctx))
 		}
 

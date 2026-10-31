@@ -72,6 +72,7 @@ func bankStatementAdditionalFilesConfig() additionalfiles.Config {
 		SoftDeleteTx:            deleteBankStatementAdditionalFileTx,
 		RecordMainUploadAudit:   recordBankStatementMainUploadAudit,
 		RecordMainDownloadAudit: recordBankStatementMainDownloadAudit,
+		ParentScopeSQL:          `SELECT NULLIF(btrim(s.entity_id::text), '') FROM (SELECT $1::text AS id) x LEFT JOIN cimplrcorpsaas.bank_statements s ON s.bank_statement_id::text = x.id`,
 	})
 }
 

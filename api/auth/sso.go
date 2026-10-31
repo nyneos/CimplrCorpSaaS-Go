@@ -3,12 +3,14 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -299,7 +301,7 @@ func SSOCallbackHandler(cfg *SSOConfig, pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Parse ID-token claims
-		claims, err := parseIDTokenClaims(tokenResp.IDToken)
+		claims, err := parseIDTokenClaims(provider, tokenResp.IDToken)
 		if err != nil {
 			if isGET {
 				frontendRedirectError(w, r, "Failed to read SSO identity")
@@ -356,8 +358,8 @@ func SSOCallbackHandler(cfg *SSOConfig, pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			if mfaPending {
-				target := fmt.Sprintf("%s/sso/callback?mfa_pending=true&user_id=%s&code=%s&provider=%s",
-					base, url.QueryEscape(session.UserID), url.QueryEscape(code), providerName)
+				target := fmt.Sprintf("%s/sso/callback?mfa_pending=true&code=%s&provider=%s",
+					base, url.QueryEscape(code), providerName)
 				http.Redirect(w, r, target, http.StatusFound)
 			} else {
 				target := fmt.Sprintf("%s/sso/callback?success=true&code=%s&provider=%s",
@@ -442,25 +444,16 @@ func (a *AuthService) LoginViaSSO(ctx context.Context, email string, clientIP st
 		return nil, false, errors.New("Account is not active")
 	}
 
+	primaryRole, primaryRoleCode, roleErr := a.lookupApprovedRole(ctx, dbUserID)
+	if roleErr != nil {
+		logger.LogError("[auth] sso role lookup failed for user %s: %v", dbUserID, roleErr)
+		return nil, false, errors.New("internal error")
+	}
+
 	a.forceLogoutUser(dbUserID)
 
 	if a.maxUsers > 0 && len(a.users) >= a.maxUsers {
 		return nil, false, errors.New("maximum concurrent users reached")
-	}
-
-	var primaryRole, primaryRoleCode string
-	if roleRows, err := a.pool.Query(ctx,
-		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 ORDER BY ur.id ASC LIMIT 1`,
-		dbUserID,
-	); err == nil {
-		defer roleRows.Close()
-		if roleRows.Next() {
-			var rn, rc sql.NullString
-			if roleRows.Scan(&rn, &rc) == nil {
-				primaryRole = rn.String
-				primaryRoleCode = rc.String
-			}
-		}
 	}
 
 	sessionID, err := generateSessionID()
@@ -553,15 +546,27 @@ func exchangeCodeForTokens(provider *SSOProvider, code string) (*tokenResponse, 
 	return &tr, nil
 }
 
-func parseIDTokenClaims(rawToken string) (*idTokenClaims, error) {
-	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
-	token, _, err := parser.ParseUnverified(rawToken, jwt.MapClaims{})
+func parseIDTokenClaims(provider *SSOProvider, rawToken string) (*idTokenClaims, error) {
+	if provider == nil || strings.TrimSpace(rawToken) == "" {
+		return nil, errors.New("id_token is required")
+	}
+	token, err := jwt.Parse(rawToken, func(t *jwt.Token) (interface{}, error) {
+		if t.Method == nil || t.Method.Alg() != jwt.SigningMethodRS256.Alg() {
+			return nil, fmt.Errorf("unexpected id_token signing method")
+		}
+		kid, _ := t.Header["kid"].(string)
+		return providerRSAKey(provider, kid)
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()}), jwt.WithAudience(provider.ClientID), jwt.WithExpirationRequired())
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse id_token: %w", err)
+		return nil, fmt.Errorf("failed to verify id_token: %w", err)
 	}
 	mc, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
+	if !ok || !token.Valid {
 		return nil, errors.New("unexpected claims type")
+	}
+	iss, _ := mc["iss"].(string)
+	if !idTokenIssuerAllowed(provider.Name, iss) {
+		return nil, errors.New("id_token issuer is not allowed")
 	}
 	claims := &idTokenClaims{}
 	if v, ok := mc["email"].(string); ok {
@@ -577,6 +582,118 @@ func parseIDTokenClaims(rawToken string) (*idTokenClaims, error) {
 		claims.Sub = v
 	}
 	return claims, nil
+}
+
+func idTokenIssuerAllowed(providerName, iss string) bool {
+	switch providerName {
+	case "google":
+		return iss == "https://accounts.google.com" || iss == "accounts.google.com"
+	case "microsoft":
+		return strings.HasPrefix(iss, "https://login.microsoftonline.com/")
+	default:
+		return false
+	}
+}
+
+func (p *SSOProvider) jwksURL() string {
+	switch p.Name {
+	case "google":
+		return "https://www.googleapis.com/oauth2/v3/certs"
+	case "microsoft":
+		base := strings.TrimSuffix(p.TokenURL, "/oauth2/v2.0/token")
+		if base == "" || base == p.TokenURL {
+			return ""
+		}
+		return base + "/discovery/v2.0/keys"
+	default:
+		return ""
+	}
+}
+
+var ssoKeyCache sync.Map
+
+type cachedRSAKey struct {
+	key       *rsa.PublicKey
+	fetchedAt time.Time
+}
+
+func providerRSAKey(provider *SSOProvider, kid string) (*rsa.PublicKey, error) {
+	jwksURL := provider.jwksURL()
+	if jwksURL == "" || kid == "" {
+		return nil, errors.New("id_token key id is missing")
+	}
+	cacheKey := jwksURL + "|" + kid
+	if cached, ok := ssoKeyCache.Load(cacheKey); ok {
+		item := cached.(cachedRSAKey)
+		if time.Since(item.fetchedAt) < time.Hour && item.key != nil {
+			return item.key, nil
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("jwks returned %d", resp.StatusCode)
+	}
+	var set struct {
+		Keys []struct {
+			Kid string `json:"kid"`
+			Kty string `json:"kty"`
+			N   string `json:"n"`
+			E   string `json:"e"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal(body, &set); err != nil {
+		return nil, err
+	}
+	var matched *rsa.PublicKey
+	now := time.Now()
+	for _, k := range set.Keys {
+		if k.Kty != "RSA" || k.Kid == "" || k.N == "" || k.E == "" {
+			continue
+		}
+		pub, err := rsaPublicKeyFromJWK(k.N, k.E)
+		if err != nil {
+			continue
+		}
+		ssoKeyCache.Store(jwksURL+"|"+k.Kid, cachedRSAKey{key: pub, fetchedAt: now})
+		if k.Kid == kid {
+			matched = pub
+		}
+	}
+	if matched == nil {
+		return nil, errors.New("id_token signing key was not found")
+	}
+	return matched, nil
+}
+
+func rsaPublicKeyFromJWK(nB64, eB64 string) (*rsa.PublicKey, error) {
+	nBytes, err := base64.RawURLEncoding.DecodeString(nB64)
+	if err != nil {
+		return nil, err
+	}
+	eBytes, err := base64.RawURLEncoding.DecodeString(eB64)
+	if err != nil {
+		return nil, err
+	}
+	n := new(big.Int).SetBytes(nBytes)
+	e := new(big.Int).SetBytes(eBytes)
+	if !e.IsInt64() || e.Int64() <= 0 {
+		return nil, errors.New("invalid jwk exponent")
+	}
+	return &rsa.PublicKey{N: n, E: int(e.Int64())}, nil
 }
 
 func generateRandomState() (string, error) {
@@ -651,8 +768,6 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	authEnvelopeSuccessCompat(w, message, fields)
 }
 
-// SSOExchangeHandler trades the one-time code from the SSO redirect for the session.
-// POST /auth/sso/exchange { "code": "..." }
 func SSOExchangeHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"success": false, "error": constants.ErrMethodNotAllowed})

@@ -158,7 +158,7 @@ func generateShortID() string {
 
 // ForgotPasswordHandler handles POST /auth/forgot-password
 // Accepts { "email": "..." }, generates a reset token, and enqueues a reset email
-// via the notification outbox. In DEVEL_MODE the token is also returned inline.
+// via the notification outbox.
 func ForgotPasswordHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -202,7 +202,6 @@ func ForgotPasswordHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		// Invalidate any existing unused tokens for this user
 		_, _ = pool.Exec(r.Context(), `UPDATE password_reset_tokens SET used = true WHERE user_id = $1 AND used = false`, userID)
 
-		// Insert new token (only its hash is stored)
 		_, err = pool.Exec(r.Context(),
 			`INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)`,
 			userID, hashResetToken(token), expiresAt,
@@ -215,7 +214,7 @@ func ForgotPasswordHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		LogSecurityEvent(r.Context(), pool, userID, "forgot_password", email, clientIP)
 
 		// Build reset link
-		frontendURL := os.Getenv("FRONTEND_URL")
+		frontendURL := strings.TrimRight(strings.TrimSpace(os.Getenv("FRONTEND_URL")), "/")
 		if frontendURL == "" {
 			frontendURL = "http://localhost:5173"
 		}
@@ -277,7 +276,6 @@ func ResetPasswordHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(r.Context())
 
-		// Consume the token atomically: only one request can flip it to used.
 		var userID string
 		err = tx.QueryRow(r.Context(), `
 			UPDATE password_reset_tokens SET used = true

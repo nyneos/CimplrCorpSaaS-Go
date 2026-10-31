@@ -10,7 +10,6 @@ import (
 	"CimplrCorpSaas/api/constants"
 	fdclosingcommon "CimplrCorpSaas/api/investment/fdMonthEndClosing/common"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
-	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -73,9 +72,8 @@ func DownloadEvidencePack(pool *pgxpool.Pool) http.HandlerFunc {
 			fdclosingcommon.RespondError(w, http.StatusNotFound, "Evidence pack not found")
 			return
 		}
-		if !ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
-			fdclosingcommon.RespondError(w, http.StatusForbidden,
-				"Entity ID '"+entityID+"' is not within your authorized access scope.")
+		if !api.EntityInScope(ctx, strings.TrimSpace(entityID)) {
+			fdclosingcommon.RespondError(w, http.StatusForbidden, "You do not have access to this record")
 			return
 		}
 

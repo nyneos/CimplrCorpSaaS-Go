@@ -6,13 +6,8 @@ package jobs
 // ────────────────────
 //
 // A) EVENT PUSH (every BROWSER_PUSH_POLL_SECS = 15s)
-//    Polls notification_svc.outbox WHERE channel='PUSH' AND processing_status='PENDING'.
-//    The claim is conditional and runs inside the SKIP LOCKED transaction.
-//    Rows stuck in PROCESSING longer than the 15s send timeout plus 60s are reaped.
-//    An ambiguous send timeout stays PROCESSING until that reaper and is not resent.
 //    For each row → lookup user's active push subscriptions → send VAPID push.
 //    On 410/404 from push service → permanently deactivate that subscription.
-//    Success/failure follows the same retry, backoff, and lease rules as the email outbox worker.
 //
 // B) DIGEST PUSH (every BROWSER_PUSH_DIGEST_MINS = 30 min)
 //    For each user with active push subscriptions AND unread in_app_notification rows:
@@ -147,16 +142,10 @@ type bpwOutboxRow struct {
 }
 
 const (
-	// Written immediately before the VAPID call. A stale row still carrying this
-	// may already have been accepted, so the reaper must not send it again.
 	bpwLastErrDispatching = "dispatching:"
-	// Written after a push is accepted, before the SENT status update.
-	// The reaper finishes SENT from this marker and does not send again.
 	bpwLastErrSendAccepted = "send accepted"
 	bpwAmbiguousSendPrefix = "ambiguous send:"
-	// Same 15s budget as the HTTP client in bpwSendVAPID.
 	bpwSendTimeout = 15 * time.Second
-	// Added to the send timeout before a PROCESSING row is treated as stale.
 	bpwStaleMargin = 60 * time.Second
 )
 
@@ -204,7 +193,6 @@ func bpwAmbiguousReason(err error) string {
 func bpwProcessOutbox(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig, batchSize int) {
 	bpwReapStaleProcessing(ctx, pool, batchSize)
 
-	// Fetch PENDING PUSH rows using FOR UPDATE SKIP LOCKED to prevent double-delivery.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		logger.LogError("[browser-push] begin tx: %v", err)
@@ -249,8 +237,6 @@ func bpwProcessOutbox(ctx context.Context, pool *pgxpool.Pool, cfg *vapidConfig,
 	}
 	rows.Close()
 
-	// Claim while the SKIP LOCKED row locks are still held. The status predicate
-	// stays conditional so a second worker cannot send the same row.
 	var toSend []bpwOutboxRow
 	for _, row := range batch {
 		row.LeaseToken = "claimed:" + row.OutboxID + ":" + strconv.FormatInt(time.Now().UnixNano(), 10)

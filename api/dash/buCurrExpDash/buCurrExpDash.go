@@ -2,7 +2,6 @@ package buCurrExpDash
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -68,10 +67,13 @@ func GetDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired, "")
-			return
+		if r.Body != nil {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+				api.RespondEnvelopeError(w, http.StatusBadRequest, "invalid request body", "VALIDATION_ERROR")
+				return
+			}
 		}
+		_ = req.UserID
 		buNames := api.GetEntityNamesFromCtx(r.Context())
 		if len(buNames) == 0 {
 			logger.LogError("%s", "Business units not found in context")

@@ -2,69 +2,29 @@ package validation
 
 import (
 	"CimplrCorpSaas/api/auth"
-	"CimplrCorpSaas/api/constants"
-	"bytes"
+	usersession "CimplrCorpSaas/internal/session"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ExtractUserID parses the request body ONCE and extracts user_id
-// This replaces repeated body parsing in every middleware
 func ExtractUserID(r *http.Request) (string, error) {
-	// Read body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read body: %w", err)
+	s, present := usersession.HeaderSession(r)
+	if !present || s == nil {
+		return "", usersession.ErrSessionRequired
 	}
-	defer r.Body.Close()
-
-	// Try JSON first (we already have bytes)
-	var reqMap map[string]interface{}
-	if err := json.Unmarshal(body, &reqMap); err == nil {
-		if userID, ok := reqMap["user_id"].(string); ok && userID != "" {
-			// restore body for caller
-			r.Body = io.NopCloser(bytes.NewBuffer(body))
-			return userID, nil
-		}
-	}
-
-	// Restore body so form parsing can read it
-	r.Body = io.NopCloser(bytes.NewBuffer(body))
-	ct := r.Header.Get(constants.ContentTypeText)
-	// If multipart, explicitly call ParseMultipartForm with a reasonable maxMemory
-	if strings.Contains(strings.ToLower(ct), constants.ContentTypeMultipart) {
-		if err := r.ParseMultipartForm(32 << 20); err == nil {
-			if userID := r.FormValue("user_id"); userID != "" {
-				// restore body for caller
-				r.Body = io.NopCloser(bytes.NewBuffer(body))
-				return userID, nil
-			}
-		}
-	} else {
-		if err := r.ParseForm(); err == nil {
-			if userID := r.FormValue("user_id"); userID != "" {
-				// restore body for caller
-				r.Body = io.NopCloser(bytes.NewBuffer(body))
-				return userID, nil
-			}
-		}
-	}
-
-	// Ensure body is available for caller
-	r.Body = io.NopCloser(bytes.NewBuffer(body))
-	return "", fmt.Errorf("user_id not found in request")
+	return s.UserID, nil
 }
 
-// ValidateSession checks if the user has an active session (in-memory check, no DB)
-// Returns the session object or nil if not found
-func ValidateSession(userID string) *auth.UserSession {
-	return auth.LoggedInSessionForUser(userID)
+func ValidateSession(sessionID string) *auth.UserSession {
+	s := auth.SessionByID(strings.TrimSpace(sessionID))
+	if !s.LoggedIn() {
+		return nil
+	}
+	return s
 }
 
 // GetUserEntities retrieves all accessible entities for a user (lazy loaded when needed)
@@ -72,8 +32,7 @@ func ValidateSession(userID string) *auth.UserSession {
 func GetUserEntities(ctx context.Context, db *pgxpool.Pool, userID string, businessUnit string) ([]string, error) {
 	query := `
 		WITH RECURSIVE entity_tree AS (
-			-- Base case: root entity for business unit
-			SELECT entity_id, entity_name, parent_entity_name, 1 as level
+			SELECT entity_id, entity_name, parent_entity_name, 1 AS level, ARRAY[entity_id::text] AS visited
 			FROM masterentitycash
 			WHERE entity_name = $1
 			  AND COALESCE(is_deleted, false) = false
@@ -81,12 +40,13 @@ func GetUserEntities(ctx context.Context, db *pgxpool.Pool, userID string, busin
 
 			UNION ALL
 
-			-- Recursive case: all child entities
-			SELECT e.entity_id, e.entity_name, e.parent_entity_name, et.level + 1
+			SELECT e.entity_id, e.entity_name, e.parent_entity_name, et.level + 1, et.visited || e.entity_id::text
 			FROM masterentitycash e
 			INNER JOIN entity_tree et ON e.parent_entity_name = et.entity_name
 			WHERE COALESCE(e.is_deleted, false) = false
 			  AND LOWER(e.active_status) = 'active'
+			  AND NOT (e.entity_id::text = ANY(et.visited))
+			  AND et.level < 32
 		)
 		SELECT entity_id FROM entity_tree
 		ORDER BY level, entity_name

@@ -745,9 +745,44 @@ func queryCashBankBalances(ctx context.Context, pool *pgxpool.Pool, entityIDs []
 	args = append(args, bfArgs...)
 	df, dfArgs := dateRangeFilter(ctx, "b", "as_of_date", len(args)+1)
 	args = append(args, dfArgs...)
-	if !api.IsAdminOverride(ctx) && api.GetUserIDFromCtx(ctx) != "" {
-		df += fmt.Sprintf(" AND b.account_no = ANY($%d::text[])", len(args)+1)
-		args = append(args, api.CtxApprovedAccountNumbers(ctx))
+	if !api.IsAdminOverride(ctx) {
+		scoped := make([]string, 0, len(entityIDs))
+		for _, id := range entityIDs {
+			id = strings.TrimSpace(id)
+			if id == "" || id == noEntityScope {
+				continue
+			}
+			scoped = append(scoped, id)
+		}
+		if api.GetUserIDFromCtx(ctx) != "" {
+			scoped = api.FilterEntitiesInScope(ctx, scoped)
+		}
+		if len(scoped) == 0 {
+			return []map[string]any{}, nil
+		}
+		accounts := api.CtxApprovedAccountNumbers(ctx)
+		if api.GetUserIDFromCtx(ctx) != "" && len(accounts) == 0 {
+			return []map[string]any{}, nil
+		}
+		df += fmt.Sprintf(` AND EXISTS (
+			SELECT 1 FROM masterbankaccount mba
+			WHERE mba.account_number = b.account_no
+			  AND COALESCE(mba.is_deleted, false) = false
+			  AND (
+			    mba.entity_id::text = ANY($%d::text[])
+			    OR EXISTS (
+			      SELECT 1 FROM masterentitycash ec
+			      WHERE ec.entity_id = mba.entity_id
+			        AND ec.entity_name = ANY($%d::text[])
+			        AND COALESCE(ec.is_deleted, false) = false
+			    )
+			  )
+		)`, len(args)+1, len(args)+1)
+		args = append(args, scoped)
+		if len(accounts) > 0 {
+			df += fmt.Sprintf(" AND b.account_no = ANY($%d::text[])", len(args)+1)
+			args = append(args, accounts)
+		}
 	}
 
 	q := fmt.Sprintf(`

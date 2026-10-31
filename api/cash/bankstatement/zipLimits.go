@@ -15,9 +15,6 @@ const (
 
 var errZipLimitExceeded = errors.New("zip archive exceeds the allowed size or number of files")
 
-// zipReadBudget enforces decompressed-size limits on the bytes actually read from an
-// archive, not on the sizes declared in its headers, so a small zip cannot expand
-// into gigabytes of memory.
 type zipReadBudget struct {
 	remaining int64
 }

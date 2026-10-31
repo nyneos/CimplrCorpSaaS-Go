@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -104,11 +103,6 @@ func GetRolePermissionsJsonByRoleName(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// UpsertRolePermissions stages permission changes for approval. Live
-// role_permissions rows are only written when a checker approves. The body may
-// carry the full "pages" tree or a "changes" list; only differences from the
-// live values become requests.
-
 func UpsertRolePermissions(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -138,7 +132,7 @@ func UpsertRolePermissions(pool *pgxpool.Pool) http.HandlerFunc {
 		// Step 1: Get role_id
 		var roleID string
 		if err := pool.QueryRow(ctx, `SELECT id FROM roles WHERE name = $1`, req.RoleName).Scan(&roleID); err != nil {
-			log.Print(err.Error())
+			_ = errtext.Text(err) // log sanitized driver detail server-side
 			respondWithError(w, http.StatusNotFound, "role not found")
 			return
 		}
@@ -300,7 +294,6 @@ func UpsertRolePermissions(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Step 4a: Snapshot live allowed values (for diff)
 		existingAllowed := make(map[int]sql.NullBool)
 		if len(permIDs) > 0 {
 			exRows, exErr := tx.Query(ctx,
@@ -328,7 +321,6 @@ func UpsertRolePermissions(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Step 4b: earlier pending requests for these permissions are replaced by this submission.
 		if len(permIDs) > 0 {
 			if _, err := tx.Exec(ctx, `
 				UPDATE public.role_permission_requests
@@ -341,7 +333,6 @@ func UpsertRolePermissions(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Step 4c: stage only changed rows; the live table is untouched until approval.
 		reqPermIDs := []int{}
 		reqOld := []*bool{}
 		reqNew := []bool{}
@@ -615,7 +606,7 @@ func UpdateRolePermissionsStatusByName(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		for _, t := range targets {
-			if governance.IsSelfApprovalCtx(ctx, t.SubmittedBy) || governance.IsSelfApproval(req.UserID, t.SubmittedBy) {
+			if governance.DenySelfApprovalCtx(ctx, t.SubmittedBy) || governance.IsSelfApproval(req.UserID, t.SubmittedBy) {
 				respondWithError(w, http.StatusForbidden, errtext.Detail(w, governance.ErrSelfApproval))
 				return
 			}

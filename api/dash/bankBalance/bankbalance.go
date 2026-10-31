@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -126,7 +127,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND upper(trim(COALESCE(lab.currency_code, ''))) = ANY($4)
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -138,7 +139,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var entity, bank, accountNumber, currency string
 			var openingBalance, closingBalance float64
 			if err := rows.Scan(&entity, &bank, &accountNumber, &currency, &openingBalance, &closingBalance); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 			spot := spotRates[currency]
@@ -157,7 +158,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -208,7 +209,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var closing float64
 				if err := dayRows.Scan(&day, &entityName, &bankName, &accountNo, &currency, &closing); err != nil {
 					dayRows.Close()
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 					return
 				}
 				spot := spotRates[currency]
@@ -224,7 +225,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			dayRows.Close()
 			if err := dayRows.Err(); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -304,7 +305,7 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY e.entity_name, b.bank_name, lab.account_no;
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -317,7 +318,7 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var closing float64
 
 			if err := rows.Scan(&entity, &bank, &accountNo, &currency, &closing); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 
@@ -338,7 +339,7 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -403,7 +404,7 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&closing,
 				); err != nil {
 					dayRows.Close()
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 					return
 				}
 
@@ -421,7 +422,7 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			dayRows.Close()
 			if err := dayRows.Err(); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -526,7 +527,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM latest_per_account;
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -538,7 +539,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var closing float64
 
 			if err := rows.Scan(&entity, &bankName, &accountNo, &currency, &closing); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 
@@ -557,7 +558,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -615,7 +616,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&day,
 				); err != nil {
 					dayRows.Close()
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 					return
 				}
 
@@ -636,7 +637,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			dayRows.Close()
 			if err := dayRows.Err(); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 		}
@@ -700,7 +701,7 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			GROUP BY e.entity_short_name, mb.bank_name, mb.currency_code;
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -710,7 +711,7 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var entity, bank, currency string
 			var balance float64
 			if err := rows.Scan(&entity, &bank, &currency, &balance); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 			if _, ok := entityMap[entity]; !ok {
@@ -725,7 +726,7 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			entityMap[entity][bank][currency] = b
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 

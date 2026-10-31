@@ -4,6 +4,7 @@ package commonpool
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/constants"
 	"bytes"
 	"context"
@@ -90,7 +91,7 @@ func GetTransactionPoolHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		transactions, err := FetchConsolidatedTransactionPool(ctx, pool, q)
 		if err != nil {
-			api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", transactions)

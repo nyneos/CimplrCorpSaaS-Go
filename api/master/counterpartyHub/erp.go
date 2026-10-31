@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
@@ -541,6 +542,30 @@ func BulkApproveERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM apibox.audit_erp_system
+			WHERE erp_system_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.ERPSystemIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
@@ -622,6 +647,30 @@ func BulkRejectERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM apibox.audit_erp_system
+			WHERE erp_system_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.ERPSystemIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
@@ -629,6 +678,25 @@ func BulkRejectERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE apibox.erp_system_master m SET
+				erp_type = COALESCE(a.old_erp_type, m.erp_type),
+				base_url = COALESCE(a.old_base_url, m.base_url),
+				version = COALESCE(a.old_version, m.version)
+			FROM (
+				SELECT DISTINCT ON (erp_system_id) *
+				FROM apibox.audit_erp_system
+				WHERE erp_system_id = ANY($1::text[])
+				  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+				ORDER BY erp_system_id, requested_at DESC
+			) a
+			WHERE m.erp_system_id = a.erp_system_id`, req.ERPSystemIDs); err != nil {
+			msg, status := getUserFriendlyCounterpartyError(err, "Edit revert failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
 
 		res, err := tx.Exec(ctx, `
 			UPDATE apibox.audit_erp_system SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2

@@ -25,7 +25,6 @@ func (c *SSEClient) close() {
 	c.closeOnce.Do(func() { close(c.done) })
 }
 
-// enqueue queues a frame without blocking; a full queue closes the client.
 func (c *SSEClient) enqueue(frame []byte) bool {
 	select {
 	case <-c.done:
@@ -50,9 +49,7 @@ type SSEServer struct {
 	// OnConnect is called in a goroutine after a user connects.
 	// Typically wired to jobs.PushUnreadCountToUser to avoid an import cycle.
 	OnConnect func(userID string)
-	// Authenticate resolves the connecting user; ok=false rejects the request.
 	Authenticate func(r *http.Request) (userID string, ok bool)
-	// AllowedOrigin is sent as Access-Control-Allow-Origin when set.
 	AllowedOrigin string
 }
 
@@ -83,7 +80,6 @@ func encodeFrame(data interface{}) ([]byte, error) {
 	return []byte(fmt.Sprintf("data: %s\n\n", b)), nil
 }
 
-// HandleSSE handles SSE connections. Only this goroutine writes to the response.
 func (s *SSEServer) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	if s.AllowedOrigin != "" {
 		w.Header().Set(constants.HeaderAccessControlAllowOrigin, s.AllowedOrigin)
@@ -252,7 +248,6 @@ func SendToUser(userID string, message []byte) {
 	}
 }
 
-// SendForceLogout sends a force logout message to a user and closes the stream.
 func SendForceLogout(userID, reason, newIP string) {
 	client := lookupClient(userID)
 	if client == nil {

@@ -1,6 +1,7 @@
 package appmanager
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -189,13 +190,27 @@ func (am *AppManager) StartAll() error {
 func (am *AppManager) StopAll() error {
 	am.mu.Lock()
 	defer am.mu.Unlock()
+	var errs []error
 	for i := len(am.services) - 1; i >= 0; i-- {
 		svc := am.services[i]
 		if err := svc.Stop(); err != nil {
-			return fmt.Errorf("failed to stop service %s: %w", svc.Name(), err)
+			errs = append(errs, fmt.Errorf("failed to stop service %s: %w", svc.Name(), err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+type stopOnce struct {
+	serviceiface.Service
+	once sync.Once
+	err  error
+}
+
+func (s *stopOnce) Stop() error {
+	s.once.Do(func() {
+		s.err = s.Service.Stop()
+	})
+	return s.err
 }
 
 // ------------------- YAML CONFIG -------------------
@@ -232,9 +247,16 @@ func (am *AppManager) AutoRegisterServices(configs []ServiceConfig) {
 	for _, svc := range configs {
 		if constructor, ok := serviceConstructors[svc.Name]; ok {
 			service := constructor(svc.Config)
+			if svc.Name == "auth" {
+				service = &stopOnce{Service: service}
+			}
 			am.RegisterService(service)
 			if svc.Name == "auth" {
-				if realAuthSvc, ok := service.(*auth.AuthService); ok {
+				authSvc := service
+				if wrapped, ok := service.(*stopOnce); ok {
+					authSvc = wrapped.Service
+				}
+				if realAuthSvc, ok := authSvc.(*auth.AuthService); ok {
 					api.SetAuthService(realAuthSvc)
 					auth.SetGlobalAuthService(realAuthSvc)
 				}
@@ -304,6 +326,9 @@ services:
 func (am *AppManager) GetServiceByName(name string) serviceiface.Service {
 	for _, svc := range am.services {
 		if svc.Name() == name {
+			if wrapped, ok := svc.(*stopOnce); ok {
+				return wrapped.Service
+			}
 			return svc
 		}
 	}

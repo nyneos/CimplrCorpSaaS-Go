@@ -182,7 +182,7 @@ func validatePolicyEngineEyes(eyes []EyeInput) ([]string, string) {
 	for i := range eyes {
 		eye := &eyes[i]
 		if err := validateEyeFields(eye.EyeCount, eye.Position, eye.SlaHours); err != nil {
-			return nil, fmt.Sprintf("eye[%d]: %s", i, err.Error())
+			return nil, fmt.Sprintf("eye[%d]: %s", i, errtext.Text(err))
 		}
 		if len(eye.Members) == 0 {
 			return nil, fmt.Sprintf("eye[%d] (position %d): at least 1 member is required", i, eye.Position)
@@ -198,7 +198,7 @@ func validatePolicyEngineEyes(eyes []EyeInput) ([]string, string) {
 				m.SlotOrder = 1
 			}
 			if err := validateMemberFields(m.MemberType, m.AssignmentType, m.RoleID, m.UserID, m.SlotOrder); err != nil {
-				return nil, fmt.Sprintf("eye[%d].member[%d]: %s", i, j, err.Error())
+				return nil, fmt.Sprintf("eye[%d].member[%d]: %s", i, j, errtext.Text(err))
 			}
 			switch m.MemberType {
 			case "APPROVER":

@@ -19,8 +19,6 @@ const (
 	scheduleWorkerPoll   = 60 * time.Second
 	scheduleTriggeredBy  = "SYSTEM:dms-scheduler"
 	scheduleCronSpecBits = cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor
-	// dmsRuleRunTimeout bounds one synchronous generation so a hung rule cannot
-	// stall every later rule in the same poll. Matches the generation job lease.
 	dmsRuleRunTimeout = 10 * time.Minute
 	dateRelativeActor = "SYSTEM:dms-date-trigger"
 )
@@ -97,8 +95,6 @@ func pollScheduledRules(ctx context.Context, pool *pgxpool.Pool, parser cron.Par
 			continue
 		}
 
-		// The intent row is already committed. This timeout belongs to this rule
-		// only, so a hung render cannot hold the rest of the list open.
 		ruleCtx, cancel := context.WithTimeout(ctx, dmsRuleRunTimeout)
 		finishedID, runErr := runGeneration(ruleCtx, pool, rule.RuleID, "SCHEDULED", scheduleTriggeredBy, "", nil, runID)
 		cancel()
@@ -150,17 +146,11 @@ func cronTickDue(schedule cron.Schedule, now time.Time, pollInterval time.Durati
 	return tick, true
 }
 
-// ruleTickLockName is the advisory-lock key for one rule and one tick window.
-// The tick is truncated to the poll minute so every replica computes the same name.
 func ruleTickLockName(kind, ruleID string, tick time.Time) string {
 	window := tick.Truncate(time.Minute).Format(time.RFC3339)
 	return fmt.Sprintf("dms-%s:%s:%s", kind, strings.TrimSpace(ruleID), window)
 }
 
-// withRuleTickLock runs fn only when this process wins pg_try_advisory_xact_lock.
-// The lock transaction covers the dedupe check and the intent insert, then commits
-// before any render, so a second replica skips instead of starting the same tick.
-// dmsjobs cannot import internal/jobs (scheduler.go already imports this package).
 func withRuleTickLock(ctx context.Context, pool *pgxpool.Pool, lockName string, fn func(context.Context, pgx.Tx) error) (bool, error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
@@ -191,9 +181,6 @@ func withRuleTickLock(ctx context.Context, pool *pgxpool.Pool, lockName string, 
 	return true, nil
 }
 
-// reserveScheduledTick inserts the generation_run (and the queue job, when queue
-// mode is on) for this cron minute before quota check or render. claimed is
-// false when another replica holds the lock or this tick was already recorded.
 func reserveScheduledTick(ctx context.Context, pool *pgxpool.Pool, ruleID string, tick time.Time) (runID, jobID string, claimed bool, err error) {
 	lockName := ruleTickLockName("schedule", ruleID, tick)
 	var reservedRun, reservedJob string
@@ -237,9 +224,6 @@ func scheduledTickTaken(ctx context.Context, tx pgx.Tx, ruleID string, tick time
 	return exists, err
 }
 
-// reserveDateRelativeTick records one local day's intent for the source rows
-// that have not already fired. The lock name uses the day start truncated to
-// the minute, so every replica shares it.
 func reserveDateRelativeTick(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -304,8 +288,6 @@ func dateSourceTaken(ctx context.Context, tx pgx.Tx, ruleID, sourceID string, da
 	return exists, err
 }
 
-// insertRuleTickIntent writes the generation_run the dedupe check looks for,
-// plus the generation_job when the queue is on, before quota or render.
 func insertRuleTickIntent(
 	ctx context.Context,
 	tx pgx.Tx,

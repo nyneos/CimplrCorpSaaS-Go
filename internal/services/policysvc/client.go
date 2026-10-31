@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"log"
 	"os"
 	"strings"
 	"sync"
 	"time"
 )
+
+const maxPolicyResponseBytes = 2 << 20
 
 const (
 	contentTypeHeader = "Content-Type"
@@ -27,11 +30,15 @@ type Client struct {
 }
 
 func NewFromEnv() *Client {
-	return &Client{
+	c := &Client{
 		wireRoot: strings.TrimRight(materializeRelayWire(), "/"),
 		token:    strings.TrimSpace(os.Getenv("POLICY_SERVICE_KEY")),
 		http:     &http.Client{Timeout: 30 * time.Second},
 	}
+	if c.token == "" {
+		log.Printf("policysvc: POLICY_SERVICE_KEY is empty — evaluate/test/health will fail closed")
+	}
+	return c
 }
 
 type EvaluateRequest struct {
@@ -104,7 +111,33 @@ type PelValidateResponse struct {
 }
 
 // ValidatePEL asks the Policy Service whether an expression compiles.
+func (c *Client) requireKey() error {
+	if strings.TrimSpace(c.token) == "" {
+		return fmt.Errorf("policy service key is not configured")
+	}
+	return nil
+}
+
+func readPolicyBody(resp *http.Response) ([]byte, error) {
+	limited := io.LimitReader(resp.Body, maxPolicyResponseBytes+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("policy relay read failed")
+	}
+	if len(raw) > maxPolicyResponseBytes {
+		return nil, fmt.Errorf("policy relay response too large")
+	}
+	if resp.StatusCode >= 400 {
+		log.Printf("policy relay status %d body bytes %d", resp.StatusCode, len(raw))
+		return nil, fmt.Errorf("policy relay status %d", resp.StatusCode)
+	}
+	return raw, nil
+}
+
 func (c *Client) ValidatePEL(ctx context.Context, expression, returnType string) (*PelValidateResponse, error) {
+	if err := c.requireKey(); err != nil {
+		return nil, err
+	}
 	req := PelValidateRequest{
 		ServiceKey: c.token,
 		Expression: strings.TrimSpace(expression),
@@ -119,26 +152,28 @@ func (c *Client) ValidatePEL(ctx context.Context, expression, returnType string)
 		return nil, err
 	}
 	httpReq.Header.Set(contentTypeHeader, contentTypeJSON)
-	if c.token != "" {
-		httpReq.Header.Set("Authorization", bearerPrefix+c.token)
-	}
+	httpReq.Header.Set("Authorization", bearerPrefix+c.token)
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("policy relay unreachable: %w", err)
+		log.Printf("policy relay unreachable: %v", err)
+		return nil, fmt.Errorf("policy relay unreachable")
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("policy relay status %d: %s", resp.StatusCode, string(raw))
+	raw, err := readPolicyBody(resp)
+	if err != nil {
+		return nil, err
 	}
 	var out PelValidateResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("policy relay invalid response")
 	}
 	return &out, nil
 }
 
 func (c *Client) post(ctx context.Context, route string, req EvaluateRequest) (*EvaluateResponse, error) {
+	if err := c.requireKey(); err != nil {
+		return nil, err
+	}
 	req.ServiceKey = c.token
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -149,35 +184,40 @@ func (c *Client) post(ctx context.Context, route string, req EvaluateRequest) (*
 		return nil, err
 	}
 	httpReq.Header.Set(contentTypeHeader, contentTypeJSON)
-	if c.token != "" {
-		httpReq.Header.Set("Authorization", bearerPrefix+c.token)
-	}
+	httpReq.Header.Set("Authorization", bearerPrefix+c.token)
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("policy relay unreachable: %w", err)
+		log.Printf("policy relay unreachable: %v", err)
+		return nil, fmt.Errorf("policy relay unreachable")
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("policy relay status %d: %s", resp.StatusCode, string(raw))
+	raw, err := readPolicyBody(resp)
+	if err != nil {
+		return nil, err
 	}
 	var out EvaluateResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("policy relay invalid response")
 	}
 	return &out, nil
 }
 
+const maxEvaluateManyConcurrency = 8
+
 // EvaluateMany runs multiple evaluate calls in parallel (no queue / no DB).
 // Each request is independent; results align with input order.
+// Concurrency is capped to avoid unbounded goroutine fan-out.
 func (c *Client) EvaluateMany(ctx context.Context, reqs []EvaluateRequest) ([]*EvaluateResponse, []error) {
 	out := make([]*EvaluateResponse, len(reqs))
 	errs := make([]error, len(reqs))
+	sem := make(chan struct{}, maxEvaluateManyConcurrency)
 	var wg sync.WaitGroup
 	for i := range reqs {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			res, err := c.Evaluate(ctx, reqs[i])
 			out[i] = res
 			errs[i] = err
@@ -188,7 +228,13 @@ func (c *Client) EvaluateMany(ctx context.Context, reqs []EvaluateRequest) ([]*E
 }
 
 func (c *Client) Health(ctx context.Context) error {
-	body, _ := json.Marshal(map[string]string{"service_key": c.token})
+	if err := c.requireKey(); err != nil {
+		return err
+	}
+	body, err := json.Marshal(map[string]string{"service_key": c.token})
+	if err != nil {
+		return err
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.wireRoot+"/v1/health", bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -202,8 +248,8 @@ func (c *Client) Health(ctx context.Context) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("policy relay probe status %d", resp.StatusCode)
+	if _, err := readPolicyBody(resp); err != nil {
+		return err
 	}
 	return nil
 }

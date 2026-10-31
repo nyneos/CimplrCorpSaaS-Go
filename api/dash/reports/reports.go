@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
-
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -92,7 +92,6 @@ func GetExposureSummary(db *pgxpool.Pool) http.HandlerFunc {
 				api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to read exposures", "")
 				return
 			}
-			// Skip exposures whose currency is not approved by PreValidation
 			if !api.CtxHasApprovedCurrency(r.Context(), e.Currency) {
 				continue
 			}
@@ -108,7 +107,6 @@ func GetExposureSummary(db *pgxpool.Pool) http.HandlerFunc {
 		// 4. Fetch all hedged values in one query
 		hedgeMap := make(map[string]float64)
 		if len(exposureIds) > 0 {
-			// A failed hedge lookup must not silently report every exposure as unhedged.
 			hedgeRows, err := db.Query(r.Context(), `SELECT exposure_header_id::text, COALESCE(SUM(hedged_amount), 0)::float8 AS hedged_value FROM exposure_hedge_links WHERE exposure_header_id::text = ANY($1) AND COALESCE(is_active, true) = true GROUP BY exposure_header_id`, exposureIds)
 			if err != nil {
 				api.LogErrorForResponse(w, "exposure summary hedges: %v", err)
@@ -140,14 +138,8 @@ func GetExposureSummary(db *pgxpool.Pool) http.HandlerFunc {
 			hedgedValue := hedgeMap[exp.ExposureHeaderID]
 			unhedgedValue := exp.TotalOpenAmount - hedgedValue
 			maturityMonth := ""
-			// Maturity is the value date; fall back to the document date when it is missing.
-			maturityDate := exp.ValueDate
-			if maturityDate == "" {
-				maturityDate = exp.DocumentDate
-			}
-			if maturityDate != "" {
-				// Format MM-YY from YYYY-MM-DD
-				parts := strings.Split(maturityDate, "-")
+			if exp.ValueDate != "" {
+				parts := strings.Split(exp.ValueDate, "-")
 				if len(parts) >= 2 {
 					mm := parts[1]
 					yy := ""
@@ -399,7 +391,7 @@ func GetLinkedSummaryByCategory(db *pgxpool.Pool) http.HandlerFunc {
 
 		bookings, err := fetchForwardBookings(r.Context(), db, buNames)
 		if err != nil {
-			api.RespondEnvelopeFailureWithData(w, http.StatusInternalServerError, "Failed to fetch forward bookings", "", map[string]interface{}{"detail": err.Error()})
+			api.RespondEnvelopeFailureWithData(w, http.StatusInternalServerError, "Failed to fetch forward bookings", "", map[string]interface{}{"detail": errtext.Detail(w, err)})
 			return
 		}
 

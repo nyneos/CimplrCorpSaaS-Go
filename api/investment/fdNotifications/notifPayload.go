@@ -821,8 +821,6 @@ func (p *AccrualNotifPayload) ToMap() map[string]interface{} {
 }
 
 // BuildAccrualNotifPayload constructs a rich notification payload for an accrual run.
-// Pass fdIDs = all FDs processed in the run, runDate = "YYYY-MM-DD" (the accrual period end).
-// Rows come from the accrual ledger the engine writes.
 func BuildAccrualNotifPayload(
 	ctx context.Context,
 	pool *pgxpool.Pool,

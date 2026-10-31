@@ -345,7 +345,7 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 
 		txn, err := pool.Begin(ctx)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		committed := false
@@ -357,12 +357,12 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 
 		_, err = txn.Exec(ctx, `DROP TABLE IF EXISTS `+tempTx+`; DROP TABLE IF EXISTS `+tempAb)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		_, err = txn.Exec(ctx, `CREATE TEMP TABLE `+tempTx+` ON COMMIT DROP AS `+warmTxSelect, args...)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 
@@ -441,7 +441,7 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 		`
 		_, err = txn.Exec(ctx, approvedFromTempSQL, evalAsOn)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 
@@ -454,7 +454,7 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 			GROUP BY mec.entity_name, b.bank_name
 			ORDER BY value DESC`)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		for vbRows.Next() {
@@ -477,7 +477,7 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 			GROUP BY currency_code
 			ORDER BY value DESC`)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		for dRows.Next() {
@@ -571,7 +571,7 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 
 		aggRows, err := txn.Query(ctx, aggSQL)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 
@@ -706,7 +706,7 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 		`, evalAsOn)
 		var acctCnt int64
 		if err := kpiRow.Scan(&kpi.TotalBalance, &kpi.Opening, &kpi.Closing, &acctCnt, &dayChangeAbs, &yesterdayClosing); err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		kpi.Delta = kpi.Closing - kpi.Opening
@@ -797,7 +797,7 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 
 		stmt2Rows, err := txn.Query(ctx, stmtSQL2)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		for stmt2Rows.Next() {
@@ -864,7 +864,7 @@ func GetKpiHandler(pool *pgxpool.Pool) http.Handler {
 		balanceTrend := []DayPoint{}
 
 		if err := txn.Commit(ctx); err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		committed = true

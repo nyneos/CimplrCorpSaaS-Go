@@ -280,7 +280,6 @@ func generateBonusJournal(ctx context.Context, tx DBExecutor, activityID string,
 		return fmt.Errorf("bonus ratio must be positive (got %v:%v)", rec.RatioNew, rec.RatioOld)
 	}
 
-	// Existing units per entity: each entity holding the scheme gets its own memo entry.
 	rows, err := tx.Query(ctx, `
 		SELECT COALESCE(entity_name, ''), COALESCE(SUM(total_units), 0)::text
 		FROM investment.portfolio_snapshot
@@ -319,11 +318,9 @@ func generateBonusJournal(ctx context.Context, tx DBExecutor, activityID string,
 	ratioNew := decimal.NewFromFloat(rec.RatioNew)
 	ratioOld := decimal.NewFromFloat(rec.RatioOld)
 	for _, h := range holdings {
-		// Bonus units: floor(existing units × ratio_new / ratio_old) to 3 decimals, in exact decimal.
 		bonusUnits := h.units.Mul(ratioNew).Div(ratioOld).RoundFloor(3)
 		bonusUnitsF, _ := bonusUnits.Float64()
 
-		// Create memo journal entry (₹0 transaction)
 		je := &JournalEntry{
 			ActivityID:       activityID,
 			EntityID:         h.entityName,
@@ -335,10 +332,8 @@ func generateBonusJournal(ctx context.Context, tx DBExecutor, activityID string,
 			Lines:            []JournalEntryLine{},
 		}
 
-		// Use 0.01 for memo entry to keep journal balanced
 		memoAmount := 0.01
 
-		// Debit: Investment Account (bonus units received)
 		je.Lines = append(je.Lines, JournalEntryLine{
 			LineNumber:    1,
 			AccountNumber: fmt.Sprintf(constants.FormatInvestmentID, rec.SourceSchemeID),
@@ -350,7 +345,6 @@ func generateBonusJournal(ctx context.Context, tx DBExecutor, activityID string,
 			Narration:     fmt.Sprintf("Bonus units issued: %.3f units at ₹0 cost", bonusUnitsF),
 		})
 
-		// Credit: Bonus Income / Capital Reserve
 		je.Lines = append(je.Lines, JournalEntryLine{
 			LineNumber:    2,
 			AccountNumber: "INC-BONUS",

@@ -143,6 +143,18 @@ func filterBatchInfoByScope(ctx context.Context, info *BatchInfo) {
 	if scope.IsAdminOverride || info == nil {
 		return
 	}
+	if len(scope.EntityNames) == 0 && len(scope.EntityIDs) == 0 {
+		info.Entities.AMC = nil
+		info.Entities.Scheme = nil
+		info.Entities.DP = nil
+		info.Entities.Demat = nil
+		info.Entities.Folio = nil
+		info.Mappings = nil
+		info.PortfolioMaps = nil
+		info.Snapshots = nil
+		info.Transactions = nil
+		return
+	}
 	demats := info.Entities.Demat[:0]
 	for _, row := range info.Entities.Demat {
 		if scope.HasEntityNameAccess(row.EntityName) {
@@ -493,6 +505,14 @@ func GetBatchInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.UserID == "" {
 			api.RespondWithError(w, 400, constants.ErrUserIDRequired)
+			return
+		}
+		scope := ctxutil.FromContext(ctx)
+		if !scope.IsAdminOverride && len(scope.EntityNames) == 0 && len(scope.EntityIDs) == 0 {
+			api.RespondEntityOutOfScope(w)
+			return
+		}
+		if !api.RequireRecordsInScope(ctx, w, pgxPool, onboardBatchEntitySQL, req.BatchID) {
 			return
 		}
 

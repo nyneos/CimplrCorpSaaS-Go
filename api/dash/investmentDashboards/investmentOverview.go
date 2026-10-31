@@ -231,7 +231,7 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		today := time.Now().UTC()
 		data, err := computeKPIs(ctx, pgxPool, entityFilter, allowedEntities, today)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		api.RespondWithPayload(w, true, "", data)
@@ -692,8 +692,6 @@ var (
 )
 
 // getMFAPIData fetches latest and previous NAV from MFAPI with caching and returns
-// (schemeName, latestNav, prevNav, latestDate, prevDate). Dates are the raw payload
-// values; callers must parse them and skip a point whose date does not parse.
 func getMFAPIData(ctx context.Context, code string) (string, float64, float64, string, string) {
 	if ctx == nil || code == "" {
 		return "", 0, 0, "", ""
@@ -793,8 +791,6 @@ func readMFAPIBody(ctx context.Context, apiURL string) ([]byte, error) {
 	return body, nil
 }
 
-// parseMFAPIDate parses an mfapi.in NAV date. It returns false when the payload
-// date is missing or not a known layout so callers skip that point.
 func parseMFAPIDate(raw string) (time.Time, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -808,7 +804,6 @@ func parseMFAPIDate(raw string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// lookupMFSchemeMeta loads scheme display fields in one query before any mfapi calls.
 func lookupMFSchemeMeta(ctx context.Context, pgxPool *pgxpool.Pool, codes []string) map[string]mfSchemeMeta {
 	out := make(map[string]mfSchemeMeta, len(codes))
 	if len(codes) == 0 {
@@ -901,7 +896,7 @@ func xirrErrString(err error) string {
 	if err == nil {
 		return ""
 	}
-	return err.Error()
+	return errtext.Text(err)
 }
 
 // package investmentdashboards
@@ -976,7 +971,7 @@ func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, nullIfEmpty(entityFilter), nullIfEmpty(req.AMCName), allowedParam, req.Limit)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1049,7 +1044,7 @@ func GetConsolidatedRisk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		data, err := computeConsolidatedRisk(ctx, pgxPool, entityFilter, allowedEntities)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		api.RespondWithPayload(w, true, "", data)
@@ -1154,7 +1149,7 @@ func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, nullIfEmpty(entityFilter), req.PeriodStart, req.PeriodEnd, allowedParam)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1297,7 +1292,7 @@ func GetAMCPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, nullIfEmpty(entityFilter), req.Limit, allowedParam)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1382,7 +1377,7 @@ func GetTopPerformingAssets(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		data, err := computeTopPerforming(ctx, pgxPool, entityFilter, allowedEntities, req.Limit)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		api.RespondWithPayload(w, true, "", data)
@@ -1563,7 +1558,7 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, batchQuery, nullIfEmpty(entityFilter), monthDates, allowedParam)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -1771,7 +1766,7 @@ func GetAUMMovementWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		err := pgxPool.QueryRow(ctx, waterfallQuery, nullIfEmpty(entityFilter), openingDate, req.PeriodStart, req.PeriodEnd, allowedParam).
 			Scan(&openingAUM, &inflows, &outflows, &income, &closingAUM)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -1895,7 +1890,7 @@ func GetAUMBreakdown(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2051,7 +2046,7 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		catRows, err := pgxPool.Query(ctx, categoryQuery, nullIfEmpty(entityFilter), allowedEntities)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer catRows.Close()
@@ -2251,7 +2246,7 @@ func GetDailyPnLHeatmap(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		pnlRows, err := portfolio.QueryHoldingsPnLHeatmap(ctx, pgxPool, entityFilter, allowedEntities, byScheme)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -2377,7 +2372,7 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Now:             now,
 		})
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -2527,7 +2522,7 @@ func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, nullIfEmpty(entityFilter), req.Limit, allowedParam)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2679,13 +2674,12 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		queryLimit := req.Limit
 		if req.AllSchemes && queryLimit > mfapiMaxSchemesPerRequest {
-			// Read one past the cap so a full page means more schemes exist.
 			queryLimit = mfapiMaxSchemesPerRequest + 1
 		}
 
 		rows, err := pgxPool.Query(ctx, query, queryLimit)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -2707,7 +2701,7 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				codes = append(codes, code)
 			}
 			if err := rows.Err(); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			rows.Close()
@@ -2716,7 +2710,6 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				codes = codes[:mfapiMaxSchemesPerRequest]
 			}
 
-			// One lookup, then release the connection before any outbound calls.
 			metaByCode := lookupMFSchemeMeta(ctx, pgxPool, codes)
 
 			type mfFetched struct {
@@ -2805,7 +2798,6 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					NavSource:  source,
 				})
 
-				// Persist on this request only. Skip when the payload date cannot be parsed.
 				if source != "mfapi" || nav <= 0 || ctx.Err() != nil {
 					continue
 				}

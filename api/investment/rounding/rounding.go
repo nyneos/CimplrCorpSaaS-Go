@@ -47,15 +47,10 @@ func NormalizeFrequency(frequency string) string {
 	}
 }
 
-// maxDecimals bounds the precision so a bad configuration cannot ask for absurd scales.
 const maxDecimals = 12
 
-// noiseDigits is how many places past the target scale are kept before rounding.
 const noiseDigits = 6
 
-// RoundByMethod rounds value to the given decimal places using method. The value is
-// converted to its shortest decimal form first, so 1.15 rounds as 1.15 and not as
-// the binary 1.1499999...
 func RoundByMethod(value float64, decimals int, method string) float64 {
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return value
@@ -65,8 +60,6 @@ func RoundByMethod(value float64, decimals int, method string) float64 {
 		decimals = maxDecimals
 	}
 	places := int32(decimals)
-	// Drop binary noise well below the target scale (114.99999999999999 is 115) so the
-	// directed modes do not move a whole unit at the last place.
 	d := decimal.NewFromFloat(value).Round(places + noiseDigits)
 	var out decimal.Decimal
 	switch NormalizeMethod(method) {

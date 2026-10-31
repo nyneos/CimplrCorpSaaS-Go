@@ -275,8 +275,6 @@ func processBulkNAVData(navRecords []NAVRecord, db *pgxpool.Pool, batchSize int,
 		return 0, fmt.Errorf("error bulk copying NAV data: %v", err)
 	}
 
-	// New schemes and NAV rows load atomically, and concurrent NAV loads (manual
-	// trigger and scheduled job) are serialised on one advisory lock.
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin NAV load transaction: %w", err)

@@ -209,7 +209,6 @@ func getAmcCount(pool *pgxpool.Pool) (int, error) {
 	var count int
 	err := pool.QueryRow(ctx, "SELECT COUNT(DISTINCT amc_name) FROM investment.amfi_scheme_master_staging").Scan(&count)
 	if err != nil {
-		// A missing table (first sync) counts as zero; any other failure is reported.
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
 			return 0, nil
@@ -226,7 +225,6 @@ func getSchemeCount(pool *pgxpool.Pool) (int, error) {
 	var count int
 	err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM investment.amfi_scheme_master_staging").Scan(&count)
 	if err != nil {
-		// A missing table (first sync) counts as zero; any other failure is reported.
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
 			return 0, nil

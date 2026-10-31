@@ -66,8 +66,10 @@ type AuthService struct {
 	AccountLockDuration  int
 	SessionCleanerPeriod int
 	userPointers         map[string]*UserSession
-	mu                   sync.Mutex
+	mu                   sync.Mutex // session map (users / userPointers)
+	lockoutMu            sync.Mutex // login-failure lockout map only — do not share with mu
 	stopCh               chan struct{}
+	stopOnce             sync.Once
 	failedAttempts       map[string]*failedAttempt
 }
 
@@ -97,13 +99,13 @@ func (a *AuthService) Start() error {
 }
 
 func (a *AuthService) Stop() error {
-	close(a.stopCh)
+	a.stopOnce.Do(func() {
+		close(a.stopCh)
+	})
 	return nil
 }
 
 // Login authenticates a user by email and password, returning the session and
-// an mfaPending flag. Passwords are compared using bcrypt. Database and bcrypt
-// work runs outside the service lock; only session and attempt state is locked.
 func (a *AuthService) Login(ctx context.Context, username, password string, clientIP string) (*UserSession, bool, error) {
 	var dbUserID, dbName, dbEmail string
 	var dbPassword sql.NullString
@@ -140,12 +142,9 @@ func (a *AuthService) Login(ctx context.Context, username, password string, clie
 		return nil, false, a.recordLoginFailure(ctx, dbUserID, clientIP)
 	}
 
-	var roleName, roleCode sql.NullString
-	if err := a.pool.QueryRow(ctx,
-		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 ORDER BY ur.id ASC LIMIT 1`,
-		dbUserID,
-	).Scan(&roleName, &roleCode); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		logger.LogError("[auth] role lookup failed for user %s: %v", dbUserID, err)
+	roleName, roleCode, roleErr := a.lookupApprovedRole(ctx, dbUserID)
+	if roleErr != nil {
+		logger.LogError("[auth] role lookup failed for user %s: %v", dbUserID, roleErr)
 		return nil, false, errors.New("internal error")
 	}
 
@@ -166,13 +165,13 @@ func (a *AuthService) Login(ctx context.Context, username, password string, clie
 		UserID:           dbUserID,
 		Name:             dbName,
 		Email:            dbEmail,
-		Role:             roleName.String,
-		RoleCode:         roleCode.String,
+		Role:             roleName,
+		RoleCode:         roleCode,
 		LastLoginTime:    time.Now().Format(time.RFC3339),
 		lastActivityUnix: time.Now().Unix(),
 		ClientIP:         clientIP,
 		IsLoggedIn:       !mfaPending,
-		CreatedEntities:  a.loadCreatedEntities(ctx, dbUserID, roleName.String, roleCode.String),
+		CreatedEntities:  a.loadCreatedEntities(ctx, dbUserID, roleName, roleCode),
 	}
 
 	a.mu.Lock()
@@ -183,10 +182,12 @@ func (a *AuthService) Login(ctx context.Context, username, password string, clie
 	}
 	a.users[sessionID] = session
 	a.userPointers[dbUserID] = session
-	if !mfaPending && a.MaxLoginAttempts > 0 {
-		delete(a.failedAttempts, dbUserID)
-	}
 	a.mu.Unlock()
+	if !mfaPending && a.MaxLoginAttempts > 0 {
+		a.lockoutMu.Lock()
+		delete(a.failedAttempts, dbUserID)
+		a.lockoutMu.Unlock()
+	}
 
 	if mfaPending {
 		LogSecurityEvent(ctx, a.pool, dbUserID, "login_mfa_pending", username, clientIP)
@@ -196,28 +197,43 @@ func (a *AuthService) Login(ctx context.Context, username, password string, clie
 	return session, false, nil
 }
 
-// loginStatusAllowed admits approved users, and previously approved users whose
-// edit or deletion is still waiting for a checker.
-func loginStatusAllowed(status sql.NullString, everApproved bool) bool {
-	if !status.Valid || strings.EqualFold(status.String, constants.UserStatusApproved) {
-		return true
-	}
-	if !everApproved {
+// loginStatusAllowed is fail-closed: only Approved users get a full login session.
+// Pending / awaiting-approval / delete-approval (even if previously approved) are blocked.
+func loginStatusAllowed(status sql.NullString, _ bool) bool {
+	if !status.Valid {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(status.String)) {
-	case strings.ToLower(constants.UserStatusPending), "awaiting-approval", "delete-approval":
-		return true
+	return strings.EqualFold(strings.TrimSpace(status.String), constants.UserStatusApproved)
+}
+
+func (a *AuthService) lookupApprovedRole(ctx context.Context, userID string) (string, string, error) {
+	var roleName, roleCode sql.NullString
+	err := a.pool.QueryRow(ctx, `
+		SELECT r.name, COALESCE(r.rolecode, '')
+		FROM user_roles ur
+		JOIN roles r ON r.id = ur.role_id
+		WHERE ur.user_id = $1
+		  AND COALESCE(ur.is_deleted, false) = false
+		  AND COALESCE(r.is_deleted, false) = false
+		  AND LOWER(TRIM(COALESCE(r.status, ''))) = 'approved'
+		ORDER BY ur.approved_at DESC NULLS LAST, ur.role_id DESC
+		LIMIT 1
+	`, userID).Scan(&roleName, &roleCode)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", nil
+		}
+		return "", "", err
 	}
-	return false
+	return roleName.String, roleCode.String, nil
 }
 
 func (a *AuthService) loginLocked(userID string) bool {
 	if a.MaxLoginAttempts <= 0 {
 		return false
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.lockoutMu.Lock()
+	defer a.lockoutMu.Unlock()
 	fa, ok := a.failedAttempts[userID]
 	if !ok || !fa.isLocked {
 		return false
@@ -234,7 +250,7 @@ func (a *AuthService) recordLoginFailure(ctx context.Context, userID, clientIP s
 	if a.MaxLoginAttempts <= 0 {
 		return errors.New("Invalid credentials")
 	}
-	a.mu.Lock()
+	a.lockoutMu.Lock()
 	fa, ok := a.failedAttempts[userID]
 	if !ok {
 		fa = &failedAttempt{}
@@ -251,7 +267,7 @@ func (a *AuthService) recordLoginFailure(ctx context.Context, userID, clientIP s
 			fa.unlockAt = time.Now().Add(100 * 365 * 24 * time.Hour)
 		}
 	}
-	a.mu.Unlock()
+	a.lockoutMu.Unlock()
 	if count >= a.MaxLoginAttempts {
 		LogSecurityEvent(ctx, a.pool, userID, "account_locked", "", clientIP)
 		return errors.New("Account has been locked due to multiple failed login attempts")
@@ -384,19 +400,23 @@ func (a *AuthService) loadUserRootEntities(ctx context.Context, userID string) [
 			WHERE user_id = $1
 		),
 		ancestors AS (
-			-- Start from the user's assigned entities
-			SELECT m.entity_id, m.entity_name, m.entity_level, m.parent_entity_name
+			SELECT m.entity_id, m.entity_name, m.entity_level, m.parent_entity_name,
+			       1 AS depth, ARRAY[m.entity_id::text] AS visited
 			FROM masterentitycash m
 			WHERE m.entity_id IN (SELECT entity_id FROM assigned)
 			  AND (m.is_deleted = false OR m.is_deleted IS NULL)
 
 			UNION
 
-			-- Walk up via parent_entity_name
-			SELECT p.entity_id, p.entity_name, p.entity_level, p.parent_entity_name
+			SELECT p.entity_id, p.entity_name, p.entity_level, p.parent_entity_name,
+			       a.depth + 1, a.visited || p.entity_id::text
 			FROM masterentitycash p
 			INNER JOIN ancestors a ON p.entity_name = a.parent_entity_name
 			WHERE (p.is_deleted = false OR p.is_deleted IS NULL)
+			  AND a.parent_entity_name IS NOT NULL
+			  AND btrim(a.parent_entity_name) <> ''
+			  AND NOT (p.entity_id::text = ANY(a.visited))
+			  AND a.depth < 32
 		)
 		SELECT DISTINCT
 			a.entity_id,

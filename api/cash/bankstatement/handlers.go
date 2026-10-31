@@ -73,6 +73,24 @@ func validateCashMasterScope(ctx context.Context, fields map[string]interface{})
 	return validation.ValidateCashMasterReferences(ctx, fields)
 }
 
+func requireBankStatementsInScope(ctx context.Context, w http.ResponseWriter, pool *pgxpool.Pool, ids []string) bool {
+	cleaned := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if s := strings.TrimSpace(id); s != "" {
+			cleaned = append(cleaned, s)
+		}
+	}
+	if len(cleaned) == 0 {
+		apictx.RespondEnvelopeError(w, http.StatusBadRequest, constants.ErrBankStatementIDRequired, "ENTITY_REQUIRED")
+		return false
+	}
+	return apictx.RequireRecordsInScope(ctx, w, pool, `
+		SELECT NULLIF(btrim(s.entity_id::text), '')
+		FROM unnest($1::text[]) AS id
+		LEFT JOIN cimplrcorpsaas.bank_statements s ON s.bank_statement_id::text = id
+	`, cleaned)
+}
+
 func scopeValues(rows []map[string]string, key string) []string {
 	out := make([]string, 0, len(rows))
 	for _, row := range rows {
@@ -474,6 +492,9 @@ func GetBankStatementDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		ctx := r.Context()
+		if !requireBankStatementsInScope(ctx, w, pool, []string{body.BankStatementID}) {
+			return
+		}
 		var uploadS3Key sql.NullString
 		var entityName sql.NullString
 		var auditFileID sql.NullString
@@ -556,6 +577,9 @@ func GetBankStatementBulkDownloadURLHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		ctx := r.Context()
+		if !requireBankStatementsInScope(ctx, w, pool, body.BankStatementIDs) {
+			return
+		}
 		files := make([]map[string]string, 0, len(body.BankStatementIDs))
 		failedIDs := make([]string, 0)
 
@@ -754,7 +778,11 @@ func RecomputeBankStatementSummaryHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		var acctCurrency sql.NullString
-		err = pool.QueryRow(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
+		err = pool.QueryRow(ctx, `
+			SELECT mba.currency FROM public.masterbankaccount mba
+			WHERE mba.account_number = $1 AND mba.entity_id::text = $2
+			  AND COALESCE(mba.is_deleted, false) = false
+			LIMIT 1`, accountNumber, entityID).Scan(&acctCurrency)
 		if err != nil {
 			http.Error(w, "failed to fetch account currency: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -1185,8 +1213,10 @@ func ApproveBankStatementHandler(pool *pgxpool.Pool) http.Handler {
 				       SELECT mb.bank_name, mba.currency, COALESCE(mba.account_nickname, mb.bank_name), mba.country
 				       FROM public.masterbankaccount mba
 				       JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
-				       WHERE mba.account_number = $1 AND mba.is_deleted = false
-			       `, accountNumber).Scan(&bankName, &currencyCode, &nickname, &country)
+				       WHERE mba.account_number = $1
+				         AND mba.entity_id::text = $2
+				         AND COALESCE(mba.is_deleted, false) = false
+			       `, accountNumber, entityID).Scan(&bankName, &currencyCode, &nickname, &country)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1901,11 +1931,19 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 			apictx.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to read the uploaded file. Please try again.", "")
 			return
 		}
+		// AUD-238: parse once here; UploadBankStatementV2WithCategorization reuses ParsedRows when RowsReady.
+		parsedRows, parsedCSV, parsedOK := prepareStatementRows(fileBytes)
+		if parsedOK {
+			r = r.WithContext(context.WithValue(r.Context(), statementRowsContextKey{}, statementRowsContext{rows: parsedRows, isCSV: parsedCSV}))
+		}
+		fileRows := func() [][]string {
+			return parsedRows
+		}
 
 		// Auto-detect multi-account statements even when multi=true is not provided.
 		// This keeps preview/upload behavior aligned with user expectation for mixed-account CSVs.
 		if !multiFlag {
-			if isLikelyMultiAccountStatement(uploadFileName, fileBytes) {
+			if isLikelyMultiAccountRows(uploadFileName, fileRows()) {
 				logger.LogInfo("[BANK-UPLOAD-DEBUG] Auto-detected multi-account statement for %s; routing to multi handler", uploadFileName)
 				UploadMultiAccountBankStatementHandler(pgxPool).ServeHTTP(w, r)
 				return
@@ -1928,18 +1966,6 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 		accountNumbers := parseAccountNumbers(r.MultipartForm.Value)
 		forceOverride := r.FormValue("force_override") == "true"
 		accountOverride := ""
-		// Parse the file at most once for account matching and the policy lookup below.
-		var parsedFileRows [][]string
-		parsedFileDone := false
-		fileRows := func() [][]string {
-			if !parsedFileDone {
-				parsedFileDone = true
-				if rows, parseErr := parseFileToRows(fileBytes); parseErr == nil {
-					parsedFileRows = rows
-				}
-			}
-			return parsedFileRows
-		}
 
 		if forceOverride {
 			switch len(accountNumbers) {
@@ -1994,6 +2020,9 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 				RequestedIP:           apictx.ClientIPFromRequest(r),
 				Password:              r.FormValue("password"),
 				PgxPool:               pgxPool,
+				ParsedRows:            parsedRows,
+				ParsedCSV:             parsedCSV,
+				RowsReady:             parsedOK,
 			},
 		)
 		if err != nil {
@@ -2132,12 +2161,19 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 }
 
 func isLikelyMultiAccountStatement(filename string, fileBytes []byte) bool {
+	rows, err := parseFileToRows(fileBytes)
+	if err != nil {
+		return false
+	}
+	return isLikelyMultiAccountRows(filename, rows)
+}
+
+func isLikelyMultiAccountRows(filename string, rows [][]string) bool {
 	ext := strings.ToLower(filepath.Ext(filename))
 	if ext != ".csv" && ext != ".xlsx" && ext != ".xls" {
 		return false
 	}
-	rows, err := parseFileToRows(fileBytes)
-	if err != nil || len(rows) < 2 {
+	if len(rows) < 2 {
 		return false
 	}
 
@@ -2309,8 +2345,8 @@ func UploadZippedBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 		for fileIdx, ze := range fileEntries {
 			base := filepath.Base(ze.name)
 
-			// Determine account override for this specific file.
 			accountOverride := ""
+			parsedRows, parsedCSV, parsedOK := prepareStatementRows(ze.data)
 
 			switch {
 			case forceOverride && len(accountNumbers) > 1:
@@ -2399,9 +2435,8 @@ func UploadZippedBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 				logger.LogInfo("[ZIP-UPLOAD] force+filename: file %s → account %s (from filename)", ze.name, accountOverride)
 
 			case !forceOverride && len(accountNumbers) > 0:
-				// Match each file to one of the provided accounts via weighted scoring
 				var fileContent [][]string
-				if parsedRows, parseErr := parseFileToRows(ze.data); parseErr == nil {
+				if parsedOK {
 					fileContent = parsedRows
 				}
 				matched := matchAccountNumberToFile(ctx, pool, ze.name, "", accountNumbers, fileContent)
@@ -2441,6 +2476,9 @@ func UploadZippedBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 					UploadedBy:            requestedByFromCtx(ctx, r.FormValue("user_id")),
 					RequestedIP:           apictx.ClientIPFromRequest(r),
 					PgxPool:               pool,
+					ParsedRows:            parsedRows,
+					ParsedCSV:             parsedCSV,
+					RowsReady:             parsedOK,
 				},
 			)
 			if err != nil {

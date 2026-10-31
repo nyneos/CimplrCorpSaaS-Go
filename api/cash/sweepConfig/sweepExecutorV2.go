@@ -1152,8 +1152,6 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// executeSweepV2WithInitiation executes a V2 sweep with initiation context through the shared
-// transactional executor, so manual and scheduled runs lock, validate and log identically.
 func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, params cashjobs.SweepExecParams) (map[string]interface{}, error) {
 	res, err := cashjobs.ExecuteSweepInitiation(ctx, pgxPool, params, cashjobs.SweepAuditOptions{
 		AuditStatus: constants.StatusApproved,
@@ -1184,6 +1182,10 @@ func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, pa
 func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		if !api.IsAdminOverride(ctx) {
+			api.RespondEnvelopeError(w, http.StatusForbidden, "This view is limited to administrators", "ADMIN_ONLY")
+			return
+		}
 
 		type SweepTriggerRequest struct {
 			// If SweepID is provided, use existing approved sweep
@@ -1260,7 +1262,6 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 		for i, sweep := range req.Sweeps {
 			result := ResultItem{Status: "success"}
 
-			// Each sweep gets its own transaction so one failure cannot poison the rest.
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				result.Status = "failed"

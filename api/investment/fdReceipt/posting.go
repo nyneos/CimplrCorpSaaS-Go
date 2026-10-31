@@ -1,15 +1,17 @@
 package fdReceipt
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	fdAccounting "CimplrCorpSaas/api/investment/fdAccounting"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -35,18 +37,19 @@ func buildReceiptPeriod(t time.Time) string {
 	return strings.ToUpper(t.Format("Jan 2006"))
 }
 
-// errReceiptAlreadyPosted is returned when the receipt already carries a journal entry.
 var errReceiptAlreadyPosted = errors.New("receipt journals are already posted")
 
-// newJournalEntryID returns a journal entry id with 48 random bits so ids generated in
-// the same millisecond (interest + TDS, or concurrent posts) cannot collide.
-func newJournalEntryID() string {
-	return fmt.Sprintf("JE_%d_%s", time.Now().UnixMilli(), strings.ReplaceAll(uuid.NewString(), "-", "")[:12])
+func receiptJournalEntryID(receiptID, kind string) string {
+	sum := sha256.Sum256([]byte("fd-receipt|" + kind + "|" + strings.TrimSpace(receiptID)))
+	return "JE_" + kind + "_" + hex.EncodeToString(sum[:16])
 }
 
 // postReceiptJournals generates and persists journal entries for an interest receipt.
 // Returns (interestEntryID, tdsEntryID, error).
 func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptForPosting, userEmail string) (string, string, error) {
+	if !api.EntityInScope(ctx, strings.TrimSpace(rec.EntityID)) {
+		return "", "", errors.New("entity out of scope")
+	}
 	period := buildReceiptPeriod(rec.ReceiptDate)
 	entryDate := rec.ReceiptDate
 	if entryDate.IsZero() {
@@ -62,7 +65,7 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 		).Scan(&entityName)
 	}
 
-	interestEntryID := newJournalEntryID()
+	interestEntryID := receiptJournalEntryID(rec.ReceiptID, "INT")
 	tdsEntryID := ""
 
 	tx, err := pool.Begin(ctx)
@@ -71,8 +74,6 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Lock the receipt and re-check it inside the transaction so two concurrent
-	// post requests cannot both create journals for it.
 	var lockedReceipt string
 	err = tx.QueryRow(ctx, `
 		SELECT receipt_id FROM investment.fd_interest_receipt
@@ -165,7 +166,7 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 	// Step 2: INSERT TDS journal entry if TDS > 0. Driven by the ACTIVE
 	// FD_TDS_DEDUCTED mapping when one is configured.
 	if rec.TDSAmountDeducted > 0 {
-		tdsEntryID = newJournalEntryID()
+		tdsEntryID = receiptJournalEntryID(rec.ReceiptID, "TDS")
 		tdsMapped, tErr := fdAccounting.BuildMappedJournal(ctx, tx, rec.EntityID, bankID, "FD_TDS_DEDUCTED",
 			fdAccounting.AmountSet{
 				Full: rec.TDSAmountDeducted,

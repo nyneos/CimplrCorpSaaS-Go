@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
@@ -407,6 +408,30 @@ func BulkApproveBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM apibox.audit_bank_master
+			WHERE bank_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.BankIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
@@ -488,6 +513,30 @@ func BulkRejectBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM apibox.audit_bank_master
+			WHERE bank_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.BankIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
@@ -495,6 +544,26 @@ func BulkRejectBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE apibox.bank_master m SET
+				bank_code = COALESCE(a.old_bank_code, m.bank_code),
+				bank_name = COALESCE(a.old_bank_name, m.bank_name),
+				bank_type = COALESCE(a.old_bank_type, m.bank_type),
+				entity_code = COALESCE(a.old_entity_code, m.entity_code)
+			FROM (
+				SELECT DISTINCT ON (bank_id) *
+				FROM apibox.audit_bank_master
+				WHERE bank_id = ANY($1::text[])
+				  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+				ORDER BY bank_id, requested_at DESC
+			) a
+			WHERE m.bank_id = a.bank_id`, req.BankIDs); err != nil {
+			msg, status := getUserFriendlyCounterpartyError(err, "Edit revert failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
 
 		res, err := tx.Exec(ctx, `
 			UPDATE apibox.audit_bank_master SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2

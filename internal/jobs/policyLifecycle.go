@@ -33,15 +33,22 @@ type lifecycleTransition struct {
 }
 
 // SweepPolicyLifecycleTransitions performs the two status transitions:
-//   - Scheduled → Active where effective_start <= CURRENT_DATE
-//   - Active|Scheduled → Expired where effective_end < CURRENT_DATE
+//   - Scheduled → Active where effective_start <= as-of date (Asia/Kolkata calendar)
+//   - Active|Scheduled → Expired where effective_end < as-of date (Asia/Kolkata calendar)
 //
-// Expire runs first so a past-end Scheduled policy becomes Expired, not Active.
+// The as-of date is computed in config.DefaultTimeZone (IST), not Postgres CURRENT_DATE
+// (which follows the session TimeZone, often UTC). Expire runs first so a past-end
+// Scheduled policy becomes Expired, not Active.
 // Each transition writes an append-only policy_master_audit row (old_status/new_status)
 // with action_type POLICY_ACTIVATED / POLICY_EXPIRED and requested_by = SYSTEM.
 // Only rows with is_deleted = false are touched.
 func SweepPolicyLifecycleTransitions(ctx context.Context, pool *pgxpool.Pool) (PolicyLifecycleResult, error) {
 	var out PolicyLifecycleResult
+	loc, err := time.LoadLocation(config.DefaultTimeZone)
+	if err != nil {
+		return out, fmt.Errorf("policy lifecycle timezone: %w", err)
+	}
+	asOf := time.Now().In(loc).Format("2006-01-02")
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -56,7 +63,7 @@ func SweepPolicyLifecycleTransitions(ctx context.Context, pool *pgxpool.Pool) (P
 			WHERE is_deleted = false
 			  AND status IN ('Active', 'Scheduled')
 			  AND effective_end IS NOT NULL
-			  AND effective_end < CURRENT_DATE
+			  AND effective_end < $2::date
 			FOR UPDATE
 		),
 		upd AS (
@@ -68,7 +75,7 @@ func SweepPolicyLifecycleTransitions(ctx context.Context, pool *pgxpool.Pool) (P
 			WHERE p.policy_id = due.policy_id
 			RETURNING due.policy_id::text AS policy_id, due.old_status, p.status AS new_status
 		)
-		SELECT policy_id, old_status, new_status FROM upd`, policyLifecycleActor)
+		SELECT policy_id, old_status, new_status FROM upd`, policyLifecycleActor, asOf)
 	if err != nil {
 		return out, fmt.Errorf("policy lifecycle expire: %w", err)
 	}
@@ -85,7 +92,7 @@ func SweepPolicyLifecycleTransitions(ctx context.Context, pool *pgxpool.Pool) (P
 			FROM policyengine_svc.policy_master
 			WHERE is_deleted = false
 			  AND status = 'Scheduled'
-			  AND effective_start <= CURRENT_DATE
+			  AND effective_start <= $2::date
 			FOR UPDATE
 		),
 		upd AS (
@@ -97,7 +104,7 @@ func SweepPolicyLifecycleTransitions(ctx context.Context, pool *pgxpool.Pool) (P
 			WHERE p.policy_id = due.policy_id
 			RETURNING due.policy_id::text AS policy_id, due.old_status, p.status AS new_status
 		)
-		SELECT policy_id, old_status, new_status FROM upd`, policyLifecycleActor)
+		SELECT policy_id, old_status, new_status FROM upd`, policyLifecycleActor, asOf)
 	if err != nil {
 		return out, fmt.Errorf("policy lifecycle activate: %w", err)
 	}
@@ -121,8 +128,8 @@ func SweepPolicyLifecycleTransitions(ctx context.Context, pool *pgxpool.Pool) (P
 	return out, nil
 }
 
-func applyLifecycleUpdate(ctx context.Context, tx pgx.Tx, query string, actor string) ([]lifecycleTransition, error) {
-	rows, err := tx.Query(ctx, query, actor)
+func applyLifecycleUpdate(ctx context.Context, tx pgx.Tx, query, actor, asOf string) ([]lifecycleTransition, error) {
+	rows, err := tx.Query(ctx, query, actor, asOf)
 	if err != nil {
 		return nil, err
 	}
@@ -183,6 +190,12 @@ func RunPolicyLifecycleSweeper(db *pgxpool.Pool) error {
 	}
 
 	c.Start()
+	RegisterBackgroundCronStop(func() { c.Stop() })
+	catchCtx, catchCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer catchCancel()
+	if _, err := SweepPolicyLifecycleTransitions(catchCtx, db); err != nil {
+		logger.LogError("[policy-lifecycle] startup catch-up failed: %v", err)
+	}
 	if logger.GlobalLogger != nil {
 		logger.GlobalLogger.LogAudit(fmt.Sprintf(
 			"Policy lifecycle sweeper scheduled daily at %s (%s)",

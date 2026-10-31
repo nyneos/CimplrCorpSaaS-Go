@@ -49,7 +49,6 @@ func HandleApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(r.Context())
 
 		approved := make([]string, 0, len(req.IDs))
-		errs := make([]string, 0)
 		for _, raw := range req.IDs {
 			id := strings.TrimSpace(raw)
 			if id == "" {
@@ -57,17 +56,23 @@ func HandleApprove(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			sp, err := tx.Begin(r.Context())
 			if err != nil {
-				errs = append(errs, id+": "+err.Error())
-				break
+				api.LogErrorForResponse(w, "policy approve savepoint %s: %v", id, err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to approve policies", "POLICY_APPROVE_FAILED")
+				return
 			}
 			if msg := approvePolicy(r, sp, id, actor, ip, today, req.CheckerComment); msg != "" {
 				_ = sp.Rollback(r.Context())
-				errs = append(errs, id+": "+msg)
-				continue
+				if msg == governance.ErrSelfApproval.Error() {
+					api.RespondEnvelopeError(w, http.StatusForbidden, msg, "SELF_APPROVAL")
+					return
+				}
+				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, id+": "+msg, "POLICY_APPROVE_FAILED")
+				return
 			}
 			if err := sp.Commit(r.Context()); err != nil {
-				errs = append(errs, id+": "+err.Error())
-				continue
+				api.LogErrorForResponse(w, "policy approve savepoint commit %s: %v", id, err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "failed to approve policies", "POLICY_APPROVE_FAILED")
+				return
 			}
 			approved = append(approved, id)
 		}
@@ -79,13 +84,10 @@ func HandleApprove(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		api.RespondEnvelopeSuccess(w, "Policies approved", map[string]interface{}{
 			"approved": approved,
-			"errors":   errs,
 		})
 	}
 }
 
-// approvePolicy settles one policy inside its own savepoint. It returns a
-// client-safe message on failure and "" on success.
 func approvePolicy(r *http.Request, tx pgx.Tx, id, actor, ip, today, checkerComment string) string {
 	pa, err := findPendingAudit(r, tx, id)
 	if err != nil {
@@ -100,17 +102,18 @@ func approvePolicy(r *http.Request, tx pgx.Tx, id, actor, ip, today, checkerComm
 	if governance.IsSelfApprovalCtx(r.Context(), makers...) || governance.IsSelfApproval(actor, makers...) {
 		return governance.ErrSelfApproval.Error()
 	}
-	// Settle every outstanding request for this policy, not just the newest.
-	// A policy edited before its CREATE was approved has two pending audit
-	// rows; closing only the newest leaves the CREATE pending forever.
-	if _, err := tx.Exec(r.Context(), `
+	tag, err := tx.Exec(r.Context(), `
 		UPDATE policyengine_svc.policy_master_audit
 		SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_ip = $2, checker_comment = $3
 		WHERE policy_id = $4::uuid AND processing_status = ANY($5::text[])`,
 		actor, common.NullIfEmpty(ip), common.NullIfEmpty(checkerComment), id, common.PendingProcessingStatuses,
-	); err != nil {
+	)
+	if err != nil {
 		api.LogError("policy approve %s: %v", id, err)
 		return "failed to approve"
+	}
+	if tag.RowsAffected() == 0 {
+		return "no pending request"
 	}
 
 	switch pa.ActionType {
@@ -135,10 +138,6 @@ func approvePolicy(r *http.Request, tx pgx.Tx, id, actor, ip, today, checkerComm
 			return "failed to approve"
 		}
 	default: // EDIT
-		// If the CREATE was never approved, approving the edit settles it too —
-		// the checker has signed off the current definition. Leaving status at
-		// PendingApproval would strand the row: never enforced (not Active or
-		// Scheduled) and never queued again (nothing left pending).
 		if _, err := tx.Exec(r.Context(), `
 			UPDATE policyengine_svc.policy_master
 			SET processing_status = 'APPROVED', approved_by = $1, approved_at = now(),
@@ -156,7 +155,6 @@ func approvePolicy(r *http.Request, tx pgx.Tx, id, actor, ip, today, checkerComm
 	return ""
 }
 
-// pendingRequesters lists who raised each still-pending request on the policy.
 func pendingRequesters(r *http.Request, tx pgx.Tx, policyID string) ([]string, error) {
 	rows, err := tx.Query(r.Context(), `
 		SELECT COALESCE(requested_by, '') FROM policyengine_svc.policy_master_audit

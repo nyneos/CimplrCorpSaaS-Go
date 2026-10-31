@@ -73,7 +73,6 @@ func ResolveLocalStoragePath(keyOrPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Absolute or relative, the resolved file must sit inside the output root.
 	rel, err := filepath.Rel(rootAbs, abs)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("local DMS path outside output root")

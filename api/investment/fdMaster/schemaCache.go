@@ -6,8 +6,6 @@ import (
 	"CimplrCorpSaas/internal/schemacache"
 )
 
-// loadTableColumns returns the column set of schema.table, cached for a few minutes.
-// Callers must treat the returned map as read-only.
 func loadTableColumns(ctx context.Context, exec queryExecutor, schemaName string, tableName string) (map[string]bool, error) {
 	return schemacache.Columns(schemaName+"."+tableName, func() (map[string]bool, error) {
 		return queryTableColumns(ctx, exec, schemaName, tableName)

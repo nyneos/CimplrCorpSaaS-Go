@@ -13,7 +13,6 @@ import (
 	"strings"
 )
 
-// HeaderSessionID carries the session id issued at login.
 const HeaderSessionID = "X-Session-Id"
 
 var (
@@ -22,13 +21,15 @@ var (
 	ErrUserIDRequired  = errors.New(constants.ErrUserIDRequired)
 )
 
-// RequireToken reports whether requests without a session header are refused.
 func RequireToken() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("AUTH_REQUIRE_SESSION_TOKEN")), "true")
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AUTH_REQUIRE_SESSION_TOKEN"))) {
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
-// HeaderSession returns the session named by the request header.
-// present is false when the header is absent.
 func HeaderSession(r *http.Request) (s *auth.UserSession, present bool) {
 	sid := strings.TrimSpace(r.Header.Get(HeaderSessionID))
 	if sid == "" {
@@ -41,36 +42,22 @@ func HeaderSession(r *http.Request) (s *auth.UserSession, present bool) {
 	return s, true
 }
 
-// Identify resolves the calling session. body is the request body already read
-// by the caller (nil when not read). With a session header the session decides
-// the user and any user_id sent by the client is replaced by it; the returned
-// body is what the caller must hand downstream. Without the header the legacy
-// body/query user_id lookup is used unless RequireToken is set.
 func Identify(r *http.Request, body []byte) (*auth.UserSession, []byte, error) {
 	s, present := HeaderSession(r)
-	if present {
-		if s == nil {
-			return nil, body, ErrInvalidSession
-		}
-		_ = ClaimedUserID(r, body)
-		body = BindUserID(r, body, s.UserID)
-		return s, body, nil
-	}
-	if RequireToken() {
+	if !present && RequireToken() {
 		return nil, body, ErrSessionRequired
 	}
-	claimed := ClaimedUserID(r, body)
-	if claimed == "" {
-		return nil, body, ErrUserIDRequired
+	if !present {
+		return nil, body, ErrSessionRequired
 	}
-	s = auth.LoggedInSessionForUser(claimed)
 	if s == nil {
 		return nil, body, ErrInvalidSession
 	}
+	_ = ClaimedUserID(r, body)
+	body = BindUserID(r, body, s.UserID)
 	return s, body, nil
 }
 
-// ClaimedUserID returns the user_id the client sent in the body, form or query.
 func ClaimedUserID(r *http.Request, body []byte) string {
 	if id := jsonUserID(body); id != "" {
 		return id
@@ -103,7 +90,6 @@ func ClaimedUserID(r *http.Request, body []byte) string {
 	return r.URL.Query().Get(constants.KeyUserID)
 }
 
-// BindUserID replaces every client-supplied user_id with userID and returns the new body.
 func BindUserID(r *http.Request, body []byte, userID string) []byte {
 	q := r.URL.Query()
 	if q.Has(constants.KeyUserID) {

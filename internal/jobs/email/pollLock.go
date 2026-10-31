@@ -11,9 +11,6 @@ import (
 
 const emailPollCycleLimit = 5 * time.Minute
 
-// withEmailPollLock runs fn only when this process wins the named advisory lock.
-// The lock transaction stays open for the whole cycle so a second replica skips
-// instead of polling the same mailbox cursor.
 func withEmailPollLock(ctx context.Context, pool *pgxpool.Pool, lockName string, fn func(context.Context) error) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {

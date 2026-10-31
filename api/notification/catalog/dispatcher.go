@@ -742,8 +742,6 @@ func dispatchForEvent(ctx context.Context, pool *pgxpool.Pool, params dispatchFo
 
 	payloadJSON, _ := json.Marshal(payload)
 
-	// Bound recipient x template rendering so a large role list cannot spawn
-	// one goroutine per recipient.
 	const notificationRenderLimit = 8
 	renderSlots := make(chan struct{}, notificationRenderLimit)
 

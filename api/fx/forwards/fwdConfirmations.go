@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/fx/auditutil"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/policyengine/common"
 	"CimplrCorpSaas/api/policyengine/runtime"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -46,12 +47,18 @@ func normalizeForwardSystemTransactionID(value interface{}) string {
 	}
 }
 
-// forwardBookingEditableColumns is the set of forward_bookings columns a user may edit
-// through UpdateForwardBookingFields; it mirrors editableKeys in the confirmation screen.
-var forwardBookingEditableColumns = map[string]bool{
-	"entity_level_0": true, "entity_level_1": true, "entity_level_2": true, "entity_level_3": true,
-	"local_currency": true, "order_type": true, "counterparty": true,
-	"spot_rate": true, "forward_points": true, "bank_margin": true, "total_rate": true,
+var forwardBookingEditableColumns = map[string]string{
+	"entity_level_0": "entity_level_0",
+	"entity_level_1": "entity_level_1",
+	"entity_level_2": "entity_level_2",
+	"entity_level_3": "entity_level_3",
+	"local_currency": "local_currency",
+	"order_type":     "order_type",
+	"counterparty":   "counterparty",
+	"spot_rate":      "spot_rate",
+	"forward_points": "forward_points",
+	"bank_margin":    "bank_margin",
+	"total_rate":     "total_rate",
 }
 
 func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
@@ -60,11 +67,22 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			SystemTransactionID string                 `json:"system_transaction_id"`
 			Fields              map[string]interface{} `json:"fields"`
-			UserID              string                 `json:"user_id"`
 			Reason              string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SystemTransactionID == "" || len(req.Fields) == 0 {
 			respondEnvelopeError(w, http.StatusBadRequest, "system_transaction_id and at least one field to update must be provided in body")
+			return
+		}
+		actorID := strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context()))
+		if actorID == "" {
+			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT fb.entity_level_0::text
+			FROM (SELECT $1::text AS id) x
+			LEFT JOIN forward_bookings fb ON fb.system_transaction_id::text = x.id
+		`, req.SystemTransactionID) {
 			return
 		}
 		// Check if booking exists
@@ -74,18 +92,30 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusNotFound, "No matching forward booking found")
 			return
 		}
-		updateFields := map[string]interface{}{}
-		for k, v := range req.Fields {
-			if forwardBookingEditableColumns[k] {
-				updateFields[k] = v
-			}
+		type forwardBookingColumnUpdate struct {
+			column string
+			value  interface{}
 		}
-		if len(updateFields) == 0 {
+		updates := make([]forwardBookingColumnUpdate, 0, len(req.Fields)+1)
+		for clientKey, v := range req.Fields {
+			column, ok := forwardBookingEditableColumns[clientKey]
+			if !ok {
+				continue
+			}
+			updates = append(updates, forwardBookingColumnUpdate{column: column, value: v})
+		}
+		if len(updates) == 0 {
 			respondEnvelopeError(w, http.StatusBadRequest, "No valid fields to update")
 			return
 		}
-		// Edits require checker approval before becoming approved again.
-		updateFields["processing_status"] = constants.FwdProcessingStatusPendingEditApproval
+		updates = append(updates, forwardBookingColumnUpdate{
+			column: "processing_status",
+			value:  constants.FwdProcessingStatusPendingEditApproval,
+		})
+		updateFields := make(map[string]interface{}, len(updates))
+		for _, update := range updates {
+			updateFields[update.column] = update.value
+		}
 		oldValues := auditutil.FetchRowSnapshotPGX(r.Context(), pool, "public.forward_bookings", "system_transaction_id", req.SystemTransactionID)
 		// Policy check sees the post-edit view (old row + patch), matching the FD booking edit pattern.
 		mergedFields := map[string]interface{}{}
@@ -101,7 +131,7 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 			ModuleCode:          common.ModuleFX,
 			SubModule:           "FORWARD_BOOKING",
 			EntityCode:          entityCode,
-			ActorUserID:         req.UserID,
+			ActorUserID:         actorID,
 			HandlerName:         "UpdateForwardBookingFields",
 			APIPath:             "/fx/forwards/update-fields",
 			DefaultBlockMessage: "Forward booking edit blocked by policy",
@@ -110,16 +140,11 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		// Build dynamic SET clause
-		keys := make([]string, 0, len(updateFields))
-		values := make([]interface{}, 0, len(updateFields)+1)
-		for k := range updateFields {
-			keys = append(keys, k)
-		}
-		setClause := make([]string, len(keys))
-		for i, k := range keys {
-			setClause[i] = fmt.Sprintf(constants.FormatSQLColumnArg, k, i+1)
-			values = append(values, updateFields[k])
+		setClause := make([]string, len(updates))
+		values := make([]interface{}, 0, len(updates)+1)
+		for i, update := range updates {
+			setClause[i] = fmt.Sprintf(constants.FormatSQLColumnArg, update.column, i+1)
+			values = append(values, update.value)
 		}
 		values = append(values, req.SystemTransactionID)
 		updateQuery := fmt.Sprintf("UPDATE forward_bookings SET %s WHERE system_transaction_id = $%d RETURNING row_to_json(forward_bookings)", strings.Join(setClause, ", "), len(values))
@@ -133,18 +158,11 @@ func UpdateForwardBookingFields(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusInternalServerError, "Failed to parse updated forward booking")
 			return
 		}
-		requestedBy := auditutil.Actor(req.UserID)
-		if strings.TrimSpace(requestedBy) == "" {
-			requestedBy = auditutil.ActorFromContext(r.Context())
+		requestedBy := strings.TrimSpace(api.GetUserNameFromCtx(r.Context()))
+		if requestedBy == "" {
+			requestedBy = actorID
 		}
-
-		makerEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				makerEmail = s.Email
-				break
-			}
-		}
+		makerEmail := api.GetUserEmailFromCtx(r.Context())
 
 		auditutil.RecordActionPGX(r.Context(), pool, auditutil.ActionParams{TableName: auditutil.TableForwardBooking, ParentColumn: "system_transaction_id", ParentID: req.SystemTransactionID, ActionType: constants.FwdActionTypeEdit, Status: constants.FwdProcessingStatusPendingEditApproval, Reason: strings.TrimSpace(req.Reason), RequestedBy: requestedBy, OldValues: oldValues, NewValues: result})
 		triggerForwardBookingNotif(r.Context(), pool, routeForwardUpdateFields, "UPDATE", requestedBy, constants.FwdProcessingStatusPendingEditApproval, []string{req.SystemTransactionID})

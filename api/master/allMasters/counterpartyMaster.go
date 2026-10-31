@@ -3,6 +3,7 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -1048,6 +1049,30 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		checkerBy := session.Name
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactioncounterparty
+			WHERE counterparty_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.CounterpartyIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
@@ -1095,7 +1120,30 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		upd := `UPDATE auditactioncounterparty SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, counterparty_id`
+		if _, err := tx.Exec(ctx, `
+			UPDATE mastercounterparty m SET
+				counterparty_name = COALESCE(m.old_counterparty_name, m.counterparty_name),
+				counterparty_code = COALESCE(m.old_counterparty_code, m.counterparty_code),
+				counterparty_type = COALESCE(m.old_counterparty_type, m.counterparty_type),
+				address = COALESCE(m.old_address, m.address),
+				status = COALESCE(m.old_status, m.status),
+				country = COALESCE(m.old_country, m.country),
+				contact = COALESCE(m.old_contact, m.contact),
+				email = COALESCE(m.old_email, m.email),
+				eff_from = COALESCE(m.old_eff_from, m.eff_from),
+				eff_to = COALESCE(m.old_eff_to, m.eff_to),
+				tags = COALESCE(m.old_tags, m.tags)
+			WHERE m.counterparty_id IN (
+				SELECT counterparty_id FROM auditactioncounterparty
+				WHERE action_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+			)`, actionIDs); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to revert edit: "+errtext.Detail(w, err))
+			return
+		}
+		upd := `UPDATE auditactioncounterparty SET processing_status='REJECTED'
+, checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (action_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, counterparty_id`
 		urows, err := tx.Query(ctx, upd, checkerBy, req.Comment, actionIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to update audit rows: "+errtext.Detail(w, err))
@@ -1141,6 +1189,30 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		checkerBy := session.Name
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactioncounterparty
+			WHERE counterparty_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.CounterpartyIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+errtext.Detail(w, err))
@@ -1644,8 +1716,9 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Bulk insert counterparties
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"mastercounterparty"},
 				validCols, pgx.CopyFromRows(copyRows)); err != nil {
+				api.LogErrorForResponse(w, "counterparty copy: %v", err)
 				api.RespondWithError(w, http.StatusInternalServerError,
-					"Failed to insert into mastercounterparty: "+err.Error())
+					"Failed to insert into mastercounterparty: "+errtext.Detail(w, err))
 				return
 			}
 
@@ -1658,8 +1731,9 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					WHERE counterparty_code = ANY($2) AND COALESCE(is_deleted, false) = false;
 				`
 				if _, err := tx.Exec(ctx, auditSQL, userName, counterpartyCodes); err != nil {
+					api.LogErrorForResponse(w, "counterparty audit insert: %v", err)
 					api.RespondWithError(w, http.StatusInternalServerError,
-						"Failed to insert audit records: "+err.Error())
+						"Failed to insert audit records: "+errtext.Detail(w, err))
 					return
 				}
 			}

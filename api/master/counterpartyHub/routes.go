@@ -19,34 +19,37 @@ func RegisterCounterpartyHubRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
 			),
 		)
 	}
+	permCash := func(page, action string, h http.Handler) http.Handler {
+		return midCash(middlewares.RequirePermission(pool, page, action)(h))
+	}
 
 	// ── Hub v2 unified routes (/master/v2/counterparty-hub/*) ─────────────────
 	// Single payload; counterparty_type routes every write to the correct typed master.
-	mux.Handle("/master/v2/counterparty-hub/create", midCash(http.HandlerFunc(CreateCounterparty(pool))))
-	mux.Handle("/master/v2/counterparty-hub/create-bulk", midCash(http.HandlerFunc(CreateCounterpartyBulk(pool))))
-	mux.Handle("/master/v2/counterparty-hub/update", midCash(http.HandlerFunc(UpdateCounterparty(pool))))
-	mux.Handle("/master/v2/counterparty-hub/bulk-approve", midCash(http.HandlerFunc(BulkApproveCounterparty(pool))))
-	mux.Handle("/master/v2/counterparty-hub/bulk-reject", midCash(http.HandlerFunc(BulkRejectCounterparty(pool))))
-	mux.Handle("/master/v2/counterparty-hub/bulk-delete", midCash(http.HandlerFunc(BulkDeleteCounterparty(pool))))
+	mux.Handle("/master/v2/counterparty-hub/create", permCash("counterparty-master", middlewares.PermCreate, http.HandlerFunc(CreateCounterparty(pool))))
+	mux.Handle("/master/v2/counterparty-hub/create-bulk", permCash("counterparty-master", middlewares.PermCreate, http.HandlerFunc(CreateCounterpartyBulk(pool))))
+	mux.Handle("/master/v2/counterparty-hub/update", permCash("counterparty-master", middlewares.PermEdit, http.HandlerFunc(UpdateCounterparty(pool))))
+	mux.Handle("/master/v2/counterparty-hub/bulk-approve", permCash("counterparty-master", middlewares.PermApprove, http.HandlerFunc(BulkApproveCounterparty(pool))))
+	mux.Handle("/master/v2/counterparty-hub/bulk-reject", permCash("counterparty-master", middlewares.PermReject, http.HandlerFunc(BulkRejectCounterparty(pool))))
+	mux.Handle("/master/v2/counterparty-hub/bulk-delete", permCash("counterparty-master", middlewares.PermDelete, http.HandlerFunc(BulkDeleteCounterparty(pool))))
 	mux.Handle("/master/v2/counterparty-hub/all", midCash(http.HandlerFunc(GetCounterpartyAll(pool))))
 	mux.Handle("/master/v2/counterparty-hub/detail", midCash(http.HandlerFunc(GetCounterpartyDetail(pool))))
 	mux.Handle("/master/v2/counterparty-hub/audit-history", midCash(http.HandlerFunc(GetCounterpartyAuditHistory(pool))))
 	mux.Handle("/master/v2/counterparty-hub/approved-active", midCash(http.HandlerFunc(GetCounterpartyApprovedActive(pool))))
 
 	// ── Bulk Upload v2 (apibox_svc schema, unified flat payload) ─────────────
-	mux.Handle("/master/v2/counterparty-hub/upload", midCash(UploadCounterpartyHubV2(pool)))
+	mux.Handle("/master/v2/counterparty-hub/upload", permCash("counterparty-master", middlewares.PermCreate, UploadCounterpartyHubV2(pool)))
 	mux.Handle("/master/v2/counterparty-hub/upload/template", midCash(GetUploadTemplateV2(pool)))
 
 	// ── Additional Files (DMS / S3 document attachments per counterparty) ────
 	counterpartyHubMF := CounterpartyHubFilesHandlers(pool)
 	mux.Handle("/master/v2/counterparty-hub/additional-files/list", midCash(counterpartyHubMF.List))
-	mux.Handle("/master/v2/counterparty-hub/additional-files/upload", midCash(counterpartyHubMF.Upload))
+	mux.Handle("/master/v2/counterparty-hub/additional-files/upload", permCash("counterparty-master", middlewares.PermCreate, counterpartyHubMF.Upload))
 	mux.Handle("/master/v2/counterparty-hub/additional-files/download", midCash(counterpartyHubMF.Download))
 	mux.Handle("/master/v2/counterparty-hub/additional-files/download-bulk", midCash(counterpartyHubMF.DownloadBulk))
-	mux.Handle("/master/v2/counterparty-hub/additional-files/delete", midCash(counterpartyHubMF.Delete))
+	mux.Handle("/master/v2/counterparty-hub/additional-files/delete", permCash("counterparty-master", middlewares.PermDelete, counterpartyHubMF.Delete))
 	mux.Handle("/master/v2/counterparty-hub/additional-files/audit", midCash(counterpartyHubMF.Audit))
-	mux.Handle("/master/v2/counterparty-hub/additional-files/approve-delete", midCash(counterpartyHubMF.ApproveDelete))
-	mux.Handle("/master/v2/counterparty-hub/additional-files/reject-delete", midCash(counterpartyHubMF.RejectDelete))
+	mux.Handle("/master/v2/counterparty-hub/additional-files/approve-delete", permCash("counterparty-master", middlewares.PermApprove, counterpartyHubMF.ApproveDelete))
+	mux.Handle("/master/v2/counterparty-hub/additional-files/reject-delete", permCash("counterparty-master", middlewares.PermReject, counterpartyHubMF.RejectDelete))
 
 	// ── Per-type handlers below are superseded by the unified hub v2 routes ──
 	// They remain compiled but are not registered. Remove the comment prefix

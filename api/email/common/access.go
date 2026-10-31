@@ -315,8 +315,6 @@ func ResolveManualUploadInbox(
 	)
 }
 
-// CanManageInbox reports whether the user may act on the inbox: admin, owner,
-// submitter, member, or an inbox entity inside the caller's entity scope.
 func CanManageInbox(ctx context.Context, pool *pgxpool.Pool, inboxID, userID string) bool {
 	inboxID = strings.TrimSpace(inboxID)
 	if inboxID == "" || userID == "" {
@@ -342,8 +340,6 @@ func CanManageInbox(ctx context.Context, pool *pgxpool.Pool, inboxID, userID str
 	return entityID != "" && EntityInScope(entityID, api.GetEntityIDsFromCtx(ctx))
 }
 
-// RequireMessageAccess writes a 403 (or 500) unless the caller can see every
-// message the query selects (one message_id per row).
 func RequireMessageAccess(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, messageQuery string, args ...any) bool {
 	ctx := r.Context()
 	userID, userEmail, _, _ := RequestIdentity(r, "", "")

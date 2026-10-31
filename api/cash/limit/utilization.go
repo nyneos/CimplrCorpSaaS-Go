@@ -29,6 +29,25 @@ import (
 
 const errFailedToLoadUtilizationForPolicyCheck = "failed to load utilization for policy check: "
 
+func requireUtilizationScope(ctx context.Context, w http.ResponseWriter, pgxPool *pgxpool.Pool, utilizationIDs []string) bool {
+	ids := make([]string, 0, len(utilizationIDs))
+	for _, id := range utilizationIDs {
+		if s := strings.TrimSpace(id); s != "" {
+			ids = append(ids, s)
+		}
+	}
+	if len(ids) == 0 {
+		api.RespondEnvelopeError(w, http.StatusBadRequest, "utilization_id is required", "ENTITY_REQUIRED")
+		return false
+	}
+	return api.RequireRecordsInScope(ctx, w, pgxPool, `
+		SELECT l.entity_name::text
+		FROM unnest($1::text[]) AS id
+		LEFT JOIN cimplrcorpsaas.bank_limit_utilization u ON u.utilization_id::text = id
+		LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
+	`, ids)
+}
+
 // CreateUtilization creates a single utilization entry with PENDING_APPROVAL audit
 func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -407,6 +426,9 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
+		if !requireUtilizationScope(ctx, w, pgxPool, []string{req.UtilizationID}) {
+			return
+		}
 
 		existingRow, err := loadLimitUtilizationRow(ctx, pgxPool, req.UtilizationID)
 		if err != nil {
@@ -610,6 +632,9 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
+		if !requireUtilizationScope(ctx, w, pgxPool, req.UtilizationIDs) {
+			return
+		}
 
 		results := make([]map[string]interface{}, 0, len(req.UtilizationIDs))
 
@@ -756,9 +781,10 @@ func QueryAllUtilizations(ctx context.Context, pgxPool *pgxpool.Pool, rowLimit i
 				ORDER BY ai.submitted_at DESC, ai.instance_id DESC LIMIT 1
 			) inst ON TRUE
 			WHERE COALESCE(u.is_deleted, false) = false
+			  AND l.entity_name = ANY($1)
 			ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC`
 
-	rows, err := pgxPool.Query(ctx, query)
+	rows, err := pgxPool.Query(ctx, query, api.FilterEntitiesInScope(ctx, api.GetEntityNamesFromCtx(ctx)))
 	if err != nil {
 		return nil, err
 	}
@@ -973,9 +999,10 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) la ON TRUE
 			WHERE COALESCE(u.is_deleted, false) = false
+			  AND l.entity_name = ANY($1)
 			ORDER BY GREATEST(COALESCE((SELECT requested_at FROM cimplrcorpsaas.auditactionbanklimitutilization WHERE utilization_id = u.utilization_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp), COALESCE((SELECT checker_at FROM cimplrcorpsaas.auditactionbanklimitutilization WHERE utilization_id = u.utilization_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp)) DESC`
 
-		rows, err := pgxPool.Query(ctx, query)
+		rows, err := pgxPool.Query(ctx, query, api.FilterEntitiesInScope(ctx, api.GetEntityNamesFromCtx(ctx)))
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
@@ -1098,9 +1125,10 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) a ON a.processing_status = 'APPROVED'
 			LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
 			WHERE COALESCE(u.is_deleted, false) = false
+			  AND l.entity_name = ANY($1)
 			ORDER BY GREATEST(COALESCE((SELECT requested_at FROM cimplrcorpsaas.auditactionbanklimitutilization WHERE utilization_id = u.utilization_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp), COALESCE((SELECT checker_at FROM cimplrcorpsaas.auditactionbanklimitutilization WHERE utilization_id = u.utilization_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp)) DESC`
 
-		rows, err := pgxPool.Query(ctx, query)
+		rows, err := pgxPool.Query(ctx, query, api.FilterEntitiesInScope(ctx, api.GetEntityNamesFromCtx(ctx)))
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
@@ -1270,6 +1298,9 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if checkerBy == "" {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			return
+		}
+		if !requireUtilizationScope(ctx, w, pgxPool, req.UtilizationIDs) {
 			return
 		}
 
@@ -1475,6 +1506,9 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if checkerBy == "" {
 			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			return
+		}
+		if !requireUtilizationScope(ctx, w, pgxPool, req.UtilizationIDs) {
 			return
 		}
 
@@ -2034,6 +2068,9 @@ func DownloadUtilizationUploadFile(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "utilization_id required")
 			return
 		}
+		if !requireUtilizationScope(r.Context(), w, pgxPool, []string{req.UtilizationID}) {
+			return
+		}
 
 		ctx := r.Context()
 		var limitID, currencyCode string
@@ -2079,6 +2116,9 @@ func DownloadSelectedUtilizationUploadFiles(pgxPool *pgxpool.Pool) http.HandlerF
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.UtilizationIDs) == 0 {
 			api.RespondWithResult(w, false, "utilization_ids required")
+			return
+		}
+		if !requireUtilizationScope(r.Context(), w, pgxPool, req.UtilizationIDs) {
 			return
 		}
 

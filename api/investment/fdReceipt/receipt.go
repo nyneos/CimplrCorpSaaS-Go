@@ -51,8 +51,6 @@ func nullStr(v string) interface{} {
 	return v
 }
 
-// formFloat parses a multipart form numeric value, treating blank as zero. Text that
-// is not a finite number (including NaN and Inf) is an error rather than zero.
 func formFloat(field, v string) (float64, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -107,11 +105,10 @@ func appendFDReceiptScopeFilters(ctx context.Context, w http.ResponseWriter, que
 }
 
 func requireFDReceiptEntityScope(ctx context.Context, w http.ResponseWriter, entityID string) bool {
-	entityID = strings.TrimSpace(entityID)
-	if entityID == "" || ctxutil.FromContext(ctx).HasEntityAccess(entityID) {
+	if api.EntityInScope(ctx, strings.TrimSpace(entityID)) {
 		return true
 	}
-	api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
+	api.RespondEntityOutOfScope(w)
 	return false
 }
 
@@ -136,14 +133,16 @@ func requireFDReceiptIDScope(ctx context.Context, pool *pgxpool.Pool, w http.Res
 	defer rows.Close()
 
 	scope := ctxutil.FromContext(ctx)
+	seen := 0
 	for rows.Next() {
+		seen++
 		var entityID, bankID string
 		if err := rows.Scan(&entityID, &bankID); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, err))
 			return false
 		}
-		if !scope.HasEntityAccess(entityID) {
-			api.RespondWithError(w, http.StatusForbidden, fmt.Sprintf(constants.ErrEntityIDNotAuthorized, entityID))
+		if !api.EntityInScope(ctx, strings.TrimSpace(entityID)) {
+			api.RespondEntityOutOfScope(w)
 			return false
 		}
 		if bankID != "" && !scope.HasApprovedBank(bankID) {
@@ -155,6 +154,10 @@ func requireFDReceiptIDScope(ctx context.Context, pool *pgxpool.Pool, w http.Res
 		api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+errtext.Detail(w, rows.Err()))
 		return false
 	}
+	if seen == 0 {
+		api.RespondEntityOutOfScope(w)
+		return false
+	}
 	return true
 }
 
@@ -162,8 +165,6 @@ type receiptSchemaQueryer interface {
 	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
 }
 
-// fdReceiptTableColumns returns the column set of investment.<tableName>, cached for a few minutes.
-// Callers must treat the returned map as read-only.
 func fdReceiptTableColumns(ctx context.Context, q receiptSchemaQueryer, tableName string) (map[string]bool, error) {
 	return schemacache.Columns("investment."+tableName, func() (map[string]bool, error) {
 		return queryFDReceiptTableColumns(ctx, q, tableName)

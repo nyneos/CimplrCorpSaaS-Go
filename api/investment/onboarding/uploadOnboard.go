@@ -1,8 +1,9 @@
 package investment
 
 import (
-	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/errtext"
+	middlewares "CimplrCorpSaas/api/middlewares"
 
 	"context"
 	"database/sql"
@@ -27,8 +28,8 @@ import (
 	_ "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
-	"CimplrCorpSaas/internal/validation"
 	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
+	"CimplrCorpSaas/internal/validation"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -269,8 +270,11 @@ func validateSchemeRequired(i int, s SchemeInput) string {
 	if !s.Enriched && strings.TrimSpace(s.InternalSchemeCode) == "" {
 		return fmt.Sprintf("Scheme #%d '%s': internal_scheme_code is required for new schemes", i+1, s.SchemeName)
 	}
-	if !s.Enriched && strings.TrimSpace(s.Method) != "" {
+	if !s.Enriched {
 		m := strings.ToUpper(strings.TrimSpace(s.Method))
+		if m == "" {
+			return fmt.Sprintf("Scheme #%d '%s': method is required", i+1, s.SchemeName)
+		}
 		if m != "FIFO" && m != "LIFO" && m != "WEIGHTED_AVERAGE" {
 			return fmt.Sprintf("Scheme #%d '%s': method must be FIFO, LIFO, or WEIGHTED_AVERAGE", i+1, s.SchemeName)
 		}
@@ -471,9 +475,9 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userID := r.FormValue(constants.KeyUserID)
+		userID := strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context()))
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 		userEmail := api.GetUserNameFromCtx(r.Context())
@@ -703,7 +707,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			// audit
-			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionamc (amc_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, amcID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionamc (amc_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, amcID, userEmail, api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				logger.LogError("[bulk] audit amc[%d] insert failed: %v", i, err)
 				api.RespondWithError(w, 500, "audit amc failed: "+errtext.Detail(w, err))
 				return
@@ -760,7 +764,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 500, "dp mapping failed: "+errtext.Detail(w, err))
 				return
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, dpID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, dpID, userEmail, api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				logger.LogError("[bulk] audit dp failed: %v", err)
 				api.RespondWithError(w, 500, "audit dp failed: "+errtext.Detail(w, err))
 				return
@@ -814,7 +818,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 500, "demat mapping failed: "+errtext.Detail(w, err))
 				return
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, dematID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, dematID, userEmail, api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				logger.LogError("[bulk] audit demat failed: %v", err)
 				api.RespondWithError(w, 500, "audit demat failed: "+errtext.Detail(w, err))
 				return
@@ -891,7 +895,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 500, constants.ErrBulkFolioMappingFailed+errtext.Detail(w, err))
 				return
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, folioID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, folioID, userEmail, api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				logger.LogError("[bulk] audit folio failed: %v", err)
 				api.RespondWithError(w, 500, "audit folio failed: "+errtext.Detail(w, err))
 				return
@@ -1012,7 +1016,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				defaultIfEmpty(s.InternalRiskRating, "Medium"),
 				defaultIfEmpty(s.ErpGlAccount, "GL000"),
 				defaultIfEmpty(s.Status, "Active"),
-				defaultIfEmpty(strings.ToUpper(strings.TrimSpace(s.Method)), "FIFO")).Scan(&schemeID); err != nil {
+				strings.ToUpper(strings.TrimSpace(s.Method))).Scan(&schemeID); err != nil {
 				logger.LogError("[bulk] insert scheme failed: %v", err)
 				api.RespondWithError(w, 500, "insert scheme failed: "+errtext.Detail(w, err))
 				return
@@ -1023,7 +1027,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, 500, constants.ErrBulkSchemeMappingFailed+errtext.Detail(w, err))
 				return
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, schemeID, api.SystemIfBlank(userEmail), api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at, requested_ip) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3)`, schemeID, userEmail, api.SystemIfBlank(api.ClientIPFromContext(ctx))); err != nil {
 				logger.LogError("[bulk] audit scheme failed: %v", err)
 				api.RespondWithError(w, 500, "audit scheme failed: "+errtext.Detail(w, err))
 				return
@@ -1621,7 +1625,6 @@ func GetOnboardDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // 			BatchID string `json:"batch_id"`
 // 		}
 // 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-// 			api.RespondWithResult(w, false, "Invalid JSON: "+errtext.Detail(w, err))
 // 			return
 // 		}
 // 		if strings.TrimSpace(req.BatchID) == "" {
@@ -1647,7 +1650,6 @@ func GetOnboardDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // 		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), key, 15*time.Minute)
 // 		if err != nil {
-// 			api.RespondWithResult(w, false, "Failed to generate download url: "+errtext.Detail(w, err))
 // 			return
 // 		}
 

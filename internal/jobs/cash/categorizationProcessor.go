@@ -314,9 +314,6 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 		}
 		oldCats := loadTxnCategoryIDs(ctx, db, txnIDs)
 
-		// Advance keyset cursor.
-		lastID = batch[len(batch)-1].input.TransactionID
-
 		// ── 4. Classify transactions in parallel ──────────────────────────────
 		// Each goroutine is independent: allRules and caches are read-only;
 		// SmartCategorize only reads from DB (Steps 4 & 5). PersistBatch handles writes.
@@ -364,7 +361,10 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int, bankState
 		}
 
 		// ── 5. Persist batch (category writes deferred for RECAT txns) ─────────
-		cat.PersistBatchWithOptions(ctx, db, persistItems, skipCategory)
+		if err := cat.PersistBatchWithOptions(ctx, db, persistItems, skipCategory); err != nil {
+			return fmt.Errorf("persist categorization batch at txn %d: %w", batch[len(batch)-1].input.TransactionID, err)
+		}
+		lastID = batch[len(batch)-1].input.TransactionID
 		totalUpdated += len(persistItems)
 		totalProcessed += len(batch)
 

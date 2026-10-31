@@ -72,6 +72,7 @@ func fundPlanAdditionalFilesConfig() additionalfiles.Config {
 		SoftDeleteTx:            deleteFundPlanAdditionalFileTx,
 		RecordMainUploadAudit:   recordFundPlanMainUploadAudit,
 		RecordMainDownloadAudit: recordFundPlanMainDownloadAudit,
+		ParentScopeSQL:          `SELECT NULLIF(btrim(g.entity_name::text), '') FROM (SELECT $1::text AS plan_id) x LEFT JOIN fund_plan_groups g ON g.plan_id::text = x.plan_id`,
 	}
 }
 

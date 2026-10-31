@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -122,7 +123,7 @@ func getUserFriendlyPenaltyError(err error, context string) (string, int) {
 	if strings.Contains(errStr, constants.ErrTxBeginFailed) ||
 		strings.Contains(errStr, constants.ErrCommitFailedCapitalized) ||
 		strings.Contains(errStr, constants.ErrAuditInsertFailed) {
-		return err.Error(), http.StatusOK
+		return errtext.Text(err), http.StatusOK
 	}
 
 	// Constraint violations (string-based fallback)
@@ -1199,6 +1200,30 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_penalty_structure
+			WHERE penalty_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.PenaltyIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
@@ -1323,6 +1348,30 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_penalty_structure
+			WHERE penalty_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.PenaltyIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
@@ -1331,7 +1380,38 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// Simple bulk-reject: mark matching audit rows as REJECTED only (do not modify master rows).
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.fd_penalty_structure_master m SET
+				bank_code = COALESCE(a.old_bank_code, m.bank_code),
+				min_amount_range = COALESCE(a.old_min_amount_range, m.min_amount_range),
+				max_amount_range = COALESCE(a.old_max_amount_range, m.max_amount_range),
+				min_tenor_days = COALESCE(a.old_min_tenor_days, m.min_tenor_days),
+				max_tenor_days = COALESCE(a.old_max_tenor_days, m.max_tenor_days),
+				min_held_days = COALESCE(a.old_min_held_days, m.min_held_days),
+				max_held_days = COALESCE(a.old_max_held_days, m.max_held_days),
+				penalty_type = COALESCE(a.old_penalty_type, m.penalty_type),
+				penalty_value = COALESCE(a.old_penalty_value, m.penalty_value),
+				calculation_method = COALESCE(a.old_calculation_method, m.calculation_method),
+				no_interest_if_withdrawn_before = COALESCE(a.old_no_interest_if_withdrawn_before, m.no_interest_if_withdrawn_before),
+				description = COALESCE(a.old_description, m.description),
+				effective_from = COALESCE(a.old_effective_from, m.effective_from),
+				effective_to = COALESCE(a.old_effective_to, m.effective_to),
+				is_active = COALESCE(a.old_is_active, m.is_active)
+			FROM (
+				SELECT DISTINCT ON (penalty_id) *
+				FROM investment.fd_audit_penalty_structure
+				WHERE penalty_id = ANY($1::text[])
+				  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+				ORDER BY penalty_id, requested_at DESC
+			) a
+			WHERE m.penalty_id = a.penalty_id`, req.PenaltyIDs); err != nil {
+			msg, status := getUserFriendlyPenaltyError(err, "Edit revert failed")
+			api.RespondWithError(w, status, msg)
+			api.LogError("Bulk reject revert failed: %v", err)
+			return
+		}
+
 		res, err := tx.Exec(ctx, `
 			UPDATE investment.fd_audit_penalty_structure
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2

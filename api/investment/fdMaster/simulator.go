@@ -764,8 +764,6 @@ type simulationResult struct {
 	CompoundingDates *json.RawMessage // CAPITALIZATION boundary dates
 }
 
-// maxSimulationTenorDays bounds simulator and maturity-date tenors (50 years) so a request
-// cannot drive the per-day date and schedule loops without limit.
 const maxSimulationTenorDays = 50 * 366
 
 // runSimulationForRequest validates the request, loads all required DB masters,

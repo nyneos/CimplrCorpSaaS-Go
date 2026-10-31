@@ -5,6 +5,8 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/utils"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -113,7 +115,7 @@ func getUserFriendlyTDSPlanError(err error, context string) (string, int) {
 	if strings.Contains(errStr, constants.ErrTxBeginFailed) ||
 		strings.Contains(errStr, constants.ErrCommitFailedCapitalized) ||
 		strings.Contains(errStr, constants.ErrAuditInsertFailed) {
-		return err.Error(), http.StatusOK
+		return errtext.Text(err), http.StatusOK
 	}
 
 	// TDS-specific constraint violations - Business logic error (200 OK)
@@ -1025,6 +1027,11 @@ func GetTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		lq, err := utils.DecodeListQueryBody(r, nil)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			return
+		}
 
 		q := `
 			WITH latest_audit AS (
@@ -1117,11 +1124,38 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_tds_plan_master m
 			LEFT JOIN latest_audit l ON l.tds_plan_id = m.tds_plan_id
 			LEFT JOIN history h ON h.tds_plan_id = m.tds_plan_id
-			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
-		`
+			WHERE COALESCE(m.is_deleted,false)=false`
 
-		rows, err := pgxPool.Query(ctx, q)
+		args := []interface{}{}
+		argIdx := 1
+		if pat := utils.SearchPattern(lq.Search); pat != "" {
+			q += fmt.Sprintf(` AND (
+				COALESCE(m.tds_plan_code,'') ILIKE $%d ESCAPE '\' OR
+				COALESCE(m.tds_plan_name,'') ILIKE $%d ESCAPE '\' OR
+				COALESCE(m.tds_section,'') ILIKE $%d ESCAPE '\' OR
+				COALESCE(l.processing_status,'') ILIKE $%d ESCAPE '\'
+			)`, argIdx, argIdx, argIdx, argIdx)
+			args = append(args, pat)
+			argIdx++
+		}
+		if lq.ProcessingStatus != "" {
+			q += fmt.Sprintf(" AND COALESCE(l.processing_status,'') = $%d", argIdx)
+			args = append(args, lq.ProcessingStatus)
+			argIdx++
+		}
+
+		total, err := utils.CountTotal(ctx, pgxPool, "SELECT COUNT(*) FROM ("+q+`) c`, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
+			return
+		}
+
+		q += `
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC` +
+			fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+		listArgs := append(append([]interface{}{}, args...), lq.Limit, lq.Offset)
+
+		rows, err := pgxPool.Query(ctx, q, listArgs...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+errtext.Detail(w, err))
 			return
@@ -1129,7 +1163,7 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		fields := rows.FieldDescriptions()
-		out := make([]map[string]interface{}, 0, 1000)
+		out := make([]map[string]interface{}, 0, lq.Limit)
 
 		for rows.Next() {
 			vals, _ := rows.Values()
@@ -1150,8 +1184,8 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out})
-		api.LogInfo("Retrieved %d tds plans with audit data", len(out))
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out, "total": total})
+		api.LogInfo("Retrieved %d tds plans with audit data (total=%d)", len(out), total)
 	}
 }
 
@@ -1346,6 +1380,30 @@ func BulkApproveTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_tds_plan
+			WHERE tds_plan_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.TdsIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyTDSPlanError(err, "Begin transaction failed")
@@ -1459,6 +1517,30 @@ func BulkRejectTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_tds_plan
+			WHERE tds_plan_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.TdsIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyTDSPlanError(err, "Begin transaction failed")
@@ -1466,6 +1548,34 @@ func BulkRejectTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.fd_tds_plan_master m SET
+				tds_plan_code = COALESCE(a.old_tds_plan_code, m.tds_plan_code),
+				tds_plan_name = COALESCE(a.old_tds_plan_name, m.tds_plan_name),
+				tds_section = COALESCE(a.old_tds_section, m.tds_section),
+				tds_rate = COALESCE(a.old_tds_rate, m.tds_rate),
+				has_pan = COALESCE(a.old_has_pan, m.has_pan),
+				threshold_amount = COALESCE(a.old_threshold_amount, m.threshold_amount),
+				threshold_type = COALESCE(a.old_threshold_type, m.threshold_type),
+				deduction_timing = COALESCE(a.old_deduction_timing, m.deduction_timing),
+				applicable_from = COALESCE(a.old_applicable_from, m.applicable_from),
+				applicable_to = COALESCE(a.old_applicable_to, m.applicable_to),
+				description = COALESCE(a.old_description, m.description),
+				is_active = COALESCE(a.old_is_active, m.is_active)
+			FROM (
+				SELECT DISTINCT ON (tds_plan_id) *
+				FROM investment.fd_audit_tds_plan
+				WHERE tds_plan_id = ANY($1::text[])
+				  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+				ORDER BY tds_plan_id, requested_at DESC
+			) a
+			WHERE m.tds_plan_id = a.tds_plan_id`, req.TdsIDs); err != nil {
+			msg, status := getUserFriendlyTDSPlanError(err, "Edit revert failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
 
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_tds_plan

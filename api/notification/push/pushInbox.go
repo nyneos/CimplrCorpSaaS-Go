@@ -11,6 +11,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dashboard"
 
@@ -29,12 +30,7 @@ func RegisterPushInboxRoutes(mux *http.ServeMux, pool *pgxpool.Pool, chain func(
 
 // userIDFromCtx resolves the calling user's ID from context or query param.
 func userIDFromCtx(r *http.Request) string {
-	for _, key := range []interface{}{"userID", "user_id", "UserID"} {
-		if v, ok := r.Context().Value(key).(string); ok && v != "" {
-			return v
-		}
-	}
-	return r.URL.Query().Get("user_id")
+	return strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context()))
 }
 
 // writeOK writes the CLAUDE.md standard success envelope. Map-shaped payloads
@@ -73,8 +69,6 @@ func pushCountSSE(ctx context.Context, pool *pgxpool.Pool, userID string) {
 	dashboard.SendToUser(userID, msg)
 }
 
-// pushCountSSEAsync updates the unread badge after the handler returns.
-// The request context is already cancelled by then, so this uses its own timeout.
 func pushCountSSEAsync(pool *pgxpool.Pool, userID string) {
 	go func() {
 		defer func() {
@@ -126,11 +120,7 @@ func handleGetInbox(pool *pgxpool.Pool) http.HandlerFunc {
 		// Body is optional — decode if present, ignore decode errors
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
 
-		// user_id: body > context > query param
-		userID := req.UserID
-		if userID == "" {
-			userID = userIDFromCtx(r)
-		}
+		userID := userIDFromCtx(r)
 		if userID == "" {
 			writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 			return
@@ -255,10 +245,7 @@ func handleGetCount(pool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		userID := req.UserID
-		if userID == "" {
-			userID = userIDFromCtx(r)
-		}
+		userID := userIDFromCtx(r)
 		if userID == "" {
 			writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 			return
@@ -296,10 +283,7 @@ func handleMarkRead(pool *pgxpool.Pool) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, "id required")
 			return
 		}
-		userID := body.UserID
-		if userID == "" {
-			userID = userIDFromCtx(r)
-		}
+		userID := userIDFromCtx(r)
 		if userID == "" {
 			writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 			return
@@ -337,10 +321,7 @@ func handleMarkAllRead(pool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
-		userID := body.UserID
-		if userID == "" {
-			userID = userIDFromCtx(r)
-		}
+		userID := userIDFromCtx(r)
 		if userID == "" {
 			writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 			return
@@ -382,10 +363,7 @@ func handleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, "id required")
 			return
 		}
-		userID := body.UserID
-		if userID == "" {
-			userID = userIDFromCtx(r)
-		}
+		userID := userIDFromCtx(r)
 		if userID == "" {
 			writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 			return

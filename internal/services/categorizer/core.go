@@ -382,15 +382,15 @@ func PersistClassification(ctx context.Context, pool *pgxpool.Pool, txnID int64,
 // PersistBatch sends all writes for a batch of classified transactions in a single
 // PostgreSQL round-trip using pgx.Batch (pipeline). Dramatically faster than N individual
 // calls in a batch job.
-func PersistBatch(ctx context.Context, pool *pgxpool.Pool, items []BatchClassification) {
-	PersistBatchWithOptions(ctx, pool, items, nil)
+func PersistBatch(ctx context.Context, pool *pgxpool.Pool, items []BatchClassification) error {
+	return PersistBatchWithOptions(ctx, pool, items, nil)
 }
 
 // PersistBatchWithOptions skips category_id writes for txn IDs listed in skipCategoryTxnIDs
 // so async RECAT can run policy before mutating categories.
-func PersistBatchWithOptions(ctx context.Context, pool *pgxpool.Pool, items []BatchClassification, skipCategoryTxnIDs map[int64]struct{}) {
+func PersistBatchWithOptions(ctx context.Context, pool *pgxpool.Pool, items []BatchClassification, skipCategoryTxnIDs map[int64]struct{}) error {
 	if len(items) == 0 {
-		return
+		return nil
 	}
 
 	batch := &pgx.Batch{}
@@ -449,14 +449,22 @@ func PersistBatchWithOptions(ctx context.Context, pool *pgxpool.Pool, items []Ba
 
 	br := pool.SendBatch(ctx, batch)
 	n := batch.Len()
+	var first error
 	for i := 0; i < n; i++ {
 		if _, err := br.Exec(); err != nil {
 			log.Printf("[SMART-CAT] batch persist item %d: %v", i, err)
+			if first == nil {
+				first = err
+			}
 		}
 	}
 	if err := br.Close(); err != nil {
 		log.Printf("[SMART-CAT] batch close: %v", err)
+		if first == nil {
+			first = err
+		}
 	}
+	return first
 }
 
 // ═══════════════════════════════════════════════════════════════

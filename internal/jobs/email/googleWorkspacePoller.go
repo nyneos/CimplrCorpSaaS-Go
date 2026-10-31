@@ -181,6 +181,7 @@ func loadGoogleWorkspaceInboxes(ctx context.Context, pool *pgxpool.Pool) ([]goog
 			&r.LastSync, &r.SentLastSync); err != nil {
 			return nil, err
 		}
+		r.Google.PrivateKey = OpenSecret(r.Google.PrivateKey)
 		out = append(out, r)
 	}
 	return out, rows.Err()

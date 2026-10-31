@@ -9,6 +9,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -29,9 +30,18 @@ func HandleIMAPTest(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondBadRequest(w, constants.ErrInvalidBody)
 			return
 		}
+		userID := strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context()))
+		if userID == "" {
+			emailcommon.RespondUnauthorized(w, "user context missing")
+			return
+		}
 		addr := strings.ToLower(strings.TrimSpace(req.MailboxAddress))
 		fields := req.MailboxIMAPFields
 		if inboxID := strings.TrimSpace(req.InboxID); inboxID != "" {
+			if !emailcommon.CanManageInbox(r.Context(), pool, inboxID, userID) {
+				emailcommon.RespondForbidden(w, "inbox not accessible")
+				return
+			}
 			mailbox, stored, err := LoadMailboxIMAPFields(r.Context(), pool, inboxID)
 			if err != nil {
 				emailcommon.RespondBadRequest(w, "mailbox not found")
@@ -40,10 +50,15 @@ func HandleIMAPTest(pool *pgxpool.Pool) http.HandlerFunc {
 			if addr == "" {
 				addr = strings.ToLower(mailbox)
 			}
+			storedHost := strings.TrimSpace(stored.Host)
+			fields.Host = ""
 			merged, mergeErr := MergeIMAPFields(stored, fields, addr)
 			if mergeErr != nil {
 				emailcommon.RespondBadRequest(w, errtext.Detail(w, mergeErr))
 				return
+			}
+			if storedHost != "" {
+				merged.Host = storedHost
 			}
 			fields = merged
 		}

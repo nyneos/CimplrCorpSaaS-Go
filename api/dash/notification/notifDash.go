@@ -21,6 +21,9 @@ import (
 	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -113,7 +116,7 @@ func (f filterRequest) dateWindow() (start, end time.Time) {
 func decodeFilter(r *http.Request) (filterRequest, error) {
 	var f filterRequest
 	if r.Body != nil {
-		if err := json.NewDecoder(r.Body).Decode(&f); err != nil && err.Error() != "EOF" {
+		if err := json.NewDecoder(r.Body).Decode(&f); err != nil && !errors.Is(err, io.EOF) {
 			return f, err
 		}
 	}
@@ -124,7 +127,31 @@ func decodeFilter(r *http.Request) (filterRequest, error) {
 	if f.HourWindow <= 0 {
 		f.HourWindow = 24
 	}
+	if f.Limit <= 0 || f.Limit > dashRowLimit {
+		f.Limit = dashRowLimit
+	}
 	return f, nil
+}
+
+const dashRowLimit = 500
+
+func scopedEntityNames(ctx context.Context) (bool, []string) {
+	if api.IsAdminOverride(ctx) {
+		return true, []string{}
+	}
+	names := api.FilterEntitiesInScope(ctx, append(append([]string{}, api.GetEntityNamesFromCtx(ctx)...), api.GetEntityIDsFromCtx(ctx)...))
+	if names == nil {
+		names = []string{}
+	}
+	return false, names
+}
+
+func entityNamePredicate(alias string, arg int) string {
+	col := "entity_name"
+	if alias != "" {
+		col = alias + ".entity_name"
+	}
+	return fmt.Sprintf(" AND ($%d::boolean OR %s = ANY($%d::text[]))", arg, col, arg+1)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -153,10 +180,11 @@ func GetKPI(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		start, end := f.dateWindow()
+		admin, names := scopedEntityNames(r.Context())
 
 		q := `
 SELECT
@@ -185,11 +213,11 @@ WHERE o.created_at BETWEEN $1 AND $2
   AND ($7 = '' OR o.recipient_email ILIKE '%' || $7 || '%'
                OR o.recipient_phone ILIKE '%' || $7 || '%')
   AND o.retry_count BETWEEN $8 AND $9
-`
+` + entityNamePredicate("o", 10)
 		row := pool.QueryRow(r.Context(), q,
 			start, end,
 			f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
-			f.MinRetry, f.MaxRetry,
+			f.MinRetry, f.MaxRetry, admin, names,
 		)
 		var kpi KPIResponse
 		kpi.Success = true
@@ -272,10 +300,11 @@ func GetLogs(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		start, end := f.dateWindow()
+		admin, names := scopedEntityNames(r.Context())
 
 		// Choose variables_payload column based on log_info flag.
 		varCol := "'{}'"
@@ -293,12 +322,12 @@ WHERE o.created_at BETWEEN $1 AND $2
   AND ($6 = '' OR o.correlation_id ILIKE '%' || $6 || '%')
   AND ($7 = '' OR o.recipient_email ILIKE '%' || $7 || '%'
                OR o.recipient_phone ILIKE '%' || $7 || '%')
-  AND o.retry_count BETWEEN $8 AND $9`
+  AND o.retry_count BETWEEN $8 AND $9` + entityNamePredicate("o", 10)
 
 		var total int64
 		if err := pool.QueryRow(r.Context(), `SELECT COUNT(*) `+baseWhere,
 			start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
-			f.MinRetry, f.MaxRetry,
+			f.MinRetry, f.MaxRetry, admin, names,
 		).Scan(&total); err != nil {
 			errRespInternal(w, err)
 			return
@@ -317,11 +346,12 @@ SELECT
     o.created_at, o.processed_at, o.last_error, o.audit_id::text,
     o.sender_name, o.sender_email, o.rendered_subject, o.priority_level,
     ` + varCol + ` ` + baseWhere + `
-ORDER BY o.created_at DESC`
+ORDER BY o.created_at DESC
+LIMIT ` + strconv.Itoa(dashRowLimit)
 
 		rows, err := pool.Query(r.Context(), rowQ,
 			start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
-			f.MinRetry, f.MaxRetry,
+			f.MinRetry, f.MaxRetry, admin, names,
 		)
 		if err != nil {
 			errRespInternal(w, err)
@@ -502,10 +532,11 @@ func GetChannelBreakdown(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		start, end := f.dateWindow()
+		admin, names := scopedEntityNames(r.Context())
 
 		q := `
 SELECT
@@ -524,11 +555,12 @@ WHERE o.created_at BETWEEN $1 AND $2
   AND ($3 = '' OR o.processing_status = $3)
   AND ($4 = '' OR o.correlation_id ILIKE '%' || $4 || '%')
   AND o.retry_count BETWEEN $5 AND $6
+` + entityNamePredicate("o", 7) + `
 GROUP BY o.channel
 ORDER BY total DESC
 `
 		rows, err := pool.Query(r.Context(), q,
-			start, end, f.Status, f.CorrelationID, f.MinRetry, f.MaxRetry,
+			start, end, f.Status, f.CorrelationID, f.MinRetry, f.MaxRetry, admin, names,
 		)
 		if err != nil {
 			errRespInternal(w, err)
@@ -581,10 +613,11 @@ func GetHourlyTrend(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		windowStart := time.Now().Add(-time.Duration(f.HourWindow) * time.Hour)
+		admin, names := scopedEntityNames(r.Context())
 
 		q := `
 SELECT
@@ -596,10 +629,11 @@ SELECT
 FROM notification_svc.outbox
 WHERE created_at >= $1
   AND ($2 = '' OR channel = $2)
+` + entityNamePredicate("", 3) + `
 GROUP BY 1
 ORDER BY 1 ASC
 `
-		rows, err := pool.Query(r.Context(), q, windowStart, f.Channel)
+		rows, err := pool.Query(r.Context(), q, windowStart, f.Channel, admin, names)
 		if err != nil {
 			errRespInternal(w, err)
 			return
@@ -651,10 +685,11 @@ func GetTopEvents(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		start, end := f.dateWindow()
+		admin, names := scopedEntityNames(r.Context())
 
 		q := `
 SELECT
@@ -671,10 +706,12 @@ LEFT JOIN notification_svc.event e ON e.event_id = o.event_id
 WHERE o.created_at BETWEEN $1 AND $2
   AND ($3 = '' OR o.channel = $3)
   AND ($4 = '' OR o.processing_status = $4)
+` + entityNamePredicate("o", 5) + `
 GROUP BY o.event_id, e.event_display_name, e.source_route
 ORDER BY total DESC
+LIMIT ` + strconv.Itoa(dashRowLimit) + `
 `
-		rows, err := pool.Query(r.Context(), q, start, end, f.Channel, f.Status)
+		rows, err := pool.Query(r.Context(), q, start, end, f.Channel, f.Status, admin, names)
 		if err != nil {
 			errRespInternal(w, err)
 			return
@@ -739,6 +776,7 @@ func GetTimeline(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		admin, names := scopedEntityNames(r.Context())
 		outboxQ := `
 SELECT
     o.outbox_id,
@@ -757,9 +795,11 @@ SELECT
 FROM notification_svc.outbox o
 LEFT JOIN notification_svc.event e ON e.event_id = o.event_id
 WHERE o.correlation_id = $1
+` + entityNamePredicate("o", 2) + `
 ORDER BY o.created_at ASC
+LIMIT ` + strconv.Itoa(dashRowLimit) + `
 `
-		rows, err := pool.Query(r.Context(), outboxQ, body.CorrelationID)
+		rows, err := pool.Query(r.Context(), outboxQ, body.CorrelationID, admin, names)
 		if err != nil {
 			errRespInternal(w, err)
 			return
@@ -854,9 +894,11 @@ SELECT
     COALESCE(sh.recipient_email, sh.recipient_phone, sh.recipient_user_id, '') AS recipient
 FROM notification_svc.send_history sh
 WHERE sh.correlation_id = $1
+` + entityNamePredicate("sh", 2) + `
 ORDER BY sh.attempted_at ASC
+LIMIT ` + strconv.Itoa(dashRowLimit) + `
 `
-		histRows, err := pool.Query(r.Context(), histQ, body.CorrelationID)
+		histRows, err := pool.Query(r.Context(), histQ, body.CorrelationID, admin, names)
 		if err == nil {
 			defer histRows.Close()
 			for histRows.Next() {
@@ -952,10 +994,11 @@ func GetRetryStats(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		start, end := f.dateWindow()
+		admin, names := scopedEntityNames(r.Context())
 
 		var deadCount int64
 		var maxRetry int
@@ -968,8 +1011,9 @@ SELECT
 FROM notification_svc.outbox
 WHERE created_at BETWEEN $1 AND $2
   AND ($3 = '' OR channel = $3)
+` + entityNamePredicate("", 4) + `
 `
-		if err := pool.QueryRow(r.Context(), summaryQ, start, end, f.Channel).Scan(
+		if err := pool.QueryRow(r.Context(), summaryQ, start, end, f.Channel, admin, names).Scan(
 			&deadCount, &maxRetry, &avgRetry,
 		); err != nil {
 			errRespInternal(w, err)
@@ -986,10 +1030,11 @@ FROM notification_svc.outbox
 WHERE created_at BETWEEN $1 AND $2
   AND ($3 = '' OR channel = $3)
   AND retry_count > 0
+` + entityNamePredicate("", 4) + `
 GROUP BY retry_count
 ORDER BY retry_count ASC
 `
-		distribRows, err := pool.Query(r.Context(), distribQ, start, end, f.Channel)
+		distribRows, err := pool.Query(r.Context(), distribQ, start, end, f.Channel, admin, names)
 		if err != nil {
 			errRespInternal(w, err)
 			return
@@ -1018,10 +1063,11 @@ SELECT
     COUNT(*) FILTER (WHERE processing_status = 'DEAD') AS dead_count
 FROM notification_svc.outbox
 WHERE created_at BETWEEN $1 AND $2
+` + entityNamePredicate("", 3) + `
 GROUP BY channel
 ORDER BY avg_retry DESC
 `
-		chRows, err := pool.Query(r.Context(), chQ, start, end)
+		chRows, err := pool.Query(r.Context(), chQ, start, end, admin, names)
 		if err != nil {
 			errRespInternal(w, err)
 			return
@@ -1097,6 +1143,7 @@ func GetSendHistory(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		admin, names := scopedEntityNames(r.Context())
 		q := `
 SELECT
     sh.history_id::text,
@@ -1114,9 +1161,11 @@ SELECT
 FROM notification_svc.send_history sh
 WHERE ($1 = '' OR sh.outbox_id = $1)
   AND ($2 = '' OR sh.correlation_id = $2)
+` + entityNamePredicate("sh", 3) + `
 ORDER BY sh.attempted_at ASC
+LIMIT ` + strconv.Itoa(dashRowLimit) + `
 `
-		rows, err := pool.Query(r.Context(), q, body.OutboxID, body.CorrelationID)
+		rows, err := pool.Query(r.Context(), q, body.OutboxID, body.CorrelationID, admin, names)
 		if err != nil {
 			errRespInternal(w, err)
 			return
@@ -1231,6 +1280,7 @@ func contains(s string, terms ...string) bool {
 
 func fetchFailureReasons(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (FailureReasonsResponse, error) {
 	start, end := f.dateWindow()
+	admin, names := scopedEntityNames(ctx)
 
 	// Pull raw error strings from both outbox.last_error and send_history.provider_response
 	// for all failed/dead rows in the time window.
@@ -1240,14 +1290,17 @@ FROM notification_svc.outbox o
 WHERE o.created_at BETWEEN $1 AND $2
   AND o.processing_status IN ('FAILED', 'DEAD')
   AND ($3 = '' OR o.channel = $3)
+` + entityNamePredicate("o", 4) + `
 UNION ALL
 SELECT COALESCE(sh.provider_response, '') AS raw_error
 FROM notification_svc.send_history sh
 WHERE sh.attempted_at BETWEEN $1 AND $2
   AND sh.processing_status = 'FAILED'
   AND ($3 = '' OR sh.channel = $3)
+` + entityNamePredicate("sh", 4) + `
+LIMIT ` + strconv.Itoa(dashRowLimit) + `
 `
-	rows, err := pool.Query(ctx, q, start, end, f.Channel)
+	rows, err := pool.Query(ctx, q, start, end, f.Channel, admin, names)
 	if err != nil {
 		return FailureReasonsResponse{Success: true, Reasons: []FailureReason{}}, err
 	}
@@ -1297,7 +1350,7 @@ func GetFailureReasons(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		res, err := fetchFailureReasons(r.Context(), pool, f)
@@ -1328,10 +1381,11 @@ func GetProviderStats(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		start, end := f.dateWindow()
+		admin, names := scopedEntityNames(r.Context())
 
 		q := `
 SELECT
@@ -1345,10 +1399,11 @@ FROM notification_svc.send_history sh
 WHERE sh.attempted_at BETWEEN $1 AND $2
   AND ($3 = '' OR sh.channel = $3)
   AND ($4 = '' OR sh.processing_status = $4)
+` + entityNamePredicate("sh", 5) + `
 GROUP BY sh.channel
 ORDER BY total_attempts DESC
 `
-		rows, err := pool.Query(r.Context(), q, start, end, f.Channel, f.Status)
+		rows, err := pool.Query(r.Context(), q, start, end, f.Channel, f.Status, admin, names)
 		if err != nil {
 			errRespInternal(w, err)
 			return
@@ -1406,6 +1461,10 @@ type EventConfigResponse struct {
 
 func GetEventConfig(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !api.IsAdminOverride(r.Context()) {
+			writeJSON(w, http.StatusOK, EventConfigResponse{Success: true, Events: []EventConfigRow{}})
+			return
+		}
 		q := `
 SELECT
     e.event_id,
@@ -1419,6 +1478,7 @@ SELECT
 FROM notification_svc.event e
 LEFT JOIN notification_svc.notification_config nc ON nc.event_id = e.event_id
 ORDER BY e.event_id, nc.channel
+LIMIT ` + strconv.Itoa(dashRowLimit) + `
 `
 		rows, err := pool.Query(r.Context(), q)
 		if err != nil {
@@ -1514,6 +1574,7 @@ type OverviewResponse struct {
 
 func fetchKPI(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (KPIResponse, error) {
 	start, end := f.dateWindow()
+	admin, names := scopedEntityNames(ctx)
 	q := `
 SELECT
     COUNT(*),
@@ -1537,11 +1598,12 @@ WHERE o.created_at BETWEEN $1 AND $2
   AND ($6 = '' OR o.correlation_id ILIKE '%' || $6 || '%')
   AND ($7 = '' OR o.recipient_email ILIKE '%' || $7 || '%' OR o.recipient_phone ILIKE '%' || $7 || '%')
   AND o.retry_count BETWEEN $8 AND $9
+` + entityNamePredicate("o", 10) + `
 `
 	var kpi KPIResponse
 	kpi.Success = true
 	err := pool.QueryRow(ctx, q,
-		start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient, f.MinRetry, f.MaxRetry,
+		start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient, f.MinRetry, f.MaxRetry, admin, names,
 	).Scan(
 		&kpi.TotalDispatched, &kpi.TotalSent, &kpi.TotalFailed, &kpi.TotalDead,
 		&kpi.TotalPending, &kpi.TotalRetrying,
@@ -1560,6 +1622,7 @@ WHERE o.created_at BETWEEN $1 AND $2
 
 func fetchChannelBreakdown(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (ChannelBreakdownResponse, error) {
 	start, end := f.dateWindow()
+	admin, names := scopedEntityNames(ctx)
 	q := `
 SELECT
     o.channel,
@@ -1576,10 +1639,11 @@ WHERE o.created_at BETWEEN $1 AND $2
   AND ($3 = '' OR o.processing_status = $3)
   AND ($4 = '' OR o.correlation_id ILIKE '%' || $4 || '%')
   AND o.retry_count BETWEEN $5 AND $6
+` + entityNamePredicate("o", 7) + `
 GROUP BY o.channel
 ORDER BY 2 DESC
 `
-	rows, err := pool.Query(ctx, q, start, end, f.Status, f.CorrelationID, f.MinRetry, f.MaxRetry)
+	rows, err := pool.Query(ctx, q, start, end, f.Status, f.CorrelationID, f.MinRetry, f.MaxRetry, admin, names)
 	if err != nil {
 		return ChannelBreakdownResponse{Success: true, Channels: []ChannelStat{}}, err
 	}
@@ -1604,6 +1668,7 @@ ORDER BY 2 DESC
 
 func fetchHourlyTrend(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (HourlyTrendResponse, error) {
 	windowStart := time.Now().Add(-time.Duration(f.HourWindow) * time.Hour)
+	admin, names := scopedEntityNames(ctx)
 	q := `
 SELECT date_trunc('hour', created_at), COUNT(*),
        COUNT(*) FILTER (WHERE processing_status = 'SENT'),
@@ -1611,9 +1676,10 @@ SELECT date_trunc('hour', created_at), COUNT(*),
        COUNT(*) FILTER (WHERE processing_status = 'DEAD')
 FROM notification_svc.outbox
 WHERE created_at >= $1 AND ($2 = '' OR channel = $2)
+` + entityNamePredicate("", 3) + `
 GROUP BY 1 ORDER BY 1 ASC
 `
-	rows, err := pool.Query(ctx, q, windowStart, f.Channel)
+	rows, err := pool.Query(ctx, q, windowStart, f.Channel, admin, names)
 	if err != nil {
 		return HourlyTrendResponse{Success: true, Buckets: []HourlyBucket{}}, err
 	}
@@ -1637,6 +1703,7 @@ GROUP BY 1 ORDER BY 1 ASC
 
 func fetchTopEvents(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (TopEventsResponse, error) {
 	start, end := f.dateWindow()
+	admin, names := scopedEntityNames(ctx)
 	q := `
 SELECT o.event_id, COALESCE(e.event_display_name, o.event_id), COALESCE(e.source_route, ''),
        COUNT(*),
@@ -1650,10 +1717,12 @@ WHERE o.created_at BETWEEN $1 AND $2
   AND ($3 = '' OR o.channel = $3)
   AND ($4 = '' OR o.processing_status = $4)
   AND ($5 = '' OR o.event_id = $5 OR e.event_display_name ILIKE '%' || $5 || '%')
+` + entityNamePredicate("o", 6) + `
 GROUP BY o.event_id, e.event_display_name, e.source_route
 ORDER BY 4 DESC
+LIMIT ` + strconv.Itoa(dashRowLimit) + `
 `
-	rows, err := pool.Query(ctx, q, start, end, f.Channel, f.Status, f.EventType)
+	rows, err := pool.Query(ctx, q, start, end, f.Channel, f.Status, f.EventType, admin, names)
 	if err != nil {
 		return TopEventsResponse{Success: true, Events: []EventStat{}}, err
 	}
@@ -1678,13 +1747,14 @@ ORDER BY 4 DESC
 
 func fetchRetryStats(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (RetryStatsResponse, error) {
 	start, end := f.dateWindow()
+	admin, names := scopedEntityNames(ctx)
 	var deadCount int64
 	var maxRetry int
 	var avgRetry float64
 	if err := pool.QueryRow(ctx, `
 SELECT COUNT(*) FILTER (WHERE processing_status = 'DEAD'), COALESCE(MAX(retry_count),0), COALESCE(AVG(retry_count),0)
 FROM notification_svc.outbox WHERE created_at BETWEEN $1 AND $2 AND ($3='' OR channel=$3)
-`, start, end, f.Channel).Scan(&deadCount, &maxRetry, &avgRetry); err != nil {
+`+entityNamePredicate("", 4), start, end, f.Channel, admin, names).Scan(&deadCount, &maxRetry, &avgRetry); err != nil {
 		return RetryStatsResponse{Success: true}, err
 	}
 	distribRows, err := pool.Query(ctx, `
@@ -1693,8 +1763,9 @@ SELECT retry_count, COUNT(*),
        COUNT(*) FILTER (WHERE processing_status = 'SENT')
 FROM notification_svc.outbox
 WHERE created_at BETWEEN $1 AND $2 AND ($3='' OR channel=$3) AND retry_count > 0
+`+entityNamePredicate("", 4)+`
 GROUP BY retry_count ORDER BY retry_count ASC
-`, start, end, f.Channel)
+`, start, end, f.Channel, admin, names)
 	if err != nil {
 		return RetryStatsResponse{Success: true}, err
 	}
@@ -1714,8 +1785,8 @@ GROUP BY retry_count ORDER BY retry_count ASC
 	chRows, err := pool.Query(ctx, `
 SELECT channel, COALESCE(AVG(retry_count),0), COALESCE(MAX(retry_count),0),
        COUNT(*) FILTER (WHERE processing_status='DEAD')
-FROM notification_svc.outbox WHERE created_at BETWEEN $1 AND $2 GROUP BY channel ORDER BY 2 DESC
-`, start, end)
+FROM notification_svc.outbox WHERE created_at BETWEEN $1 AND $2 `+entityNamePredicate("", 3)+` GROUP BY channel ORDER BY 2 DESC
+`, start, end, admin, names)
 	if err != nil {
 		return RetryStatsResponse{Success: true}, err
 	}
@@ -1740,6 +1811,7 @@ FROM notification_svc.outbox WHERE created_at BETWEEN $1 AND $2 GROUP BY channel
 
 func fetchLogs(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (LogsResponse, error) {
 	start, end := f.dateWindow()
+	admin, names := scopedEntityNames(ctx)
 
 	// Choose the SELECT list based on whether the caller wants the heavy details.
 	// When log_info=false we skip variables_payload, template and retry_history
@@ -1757,11 +1829,11 @@ WHERE o.created_at BETWEEN $1 AND $2
   AND ($5='' OR o.event_id=$5 OR e.event_display_name ILIKE '%'||$5||'%')
   AND ($6='' OR o.correlation_id ILIKE '%'||$6||'%')
   AND ($7='' OR o.recipient_email ILIKE '%'||$7||'%' OR o.recipient_phone ILIKE '%'||$7||'%')
-  AND o.retry_count BETWEEN $8 AND $9`
+  AND o.retry_count BETWEEN $8 AND $9` + entityNamePredicate("o", 10)
 
 	var total int64
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) `+baseWhere,
-		start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient, f.MinRetry, f.MaxRetry,
+		start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient, f.MinRetry, f.MaxRetry, admin, names,
 	).Scan(&total); err != nil {
 		return LogsResponse{Success: true}, err
 	}
@@ -1774,11 +1846,12 @@ SELECT o.outbox_id, o.correlation_id, COALESCE(e.event_display_name, o.event_id)
        o.created_at, o.processed_at, o.last_error, o.audit_id::text,
        o.sender_name, o.sender_email, o.rendered_subject, o.priority_level,
        ` + varCol + ` ` + baseWhere + `
-ORDER BY o.created_at DESC`
+ORDER BY o.created_at DESC
+LIMIT ` + strconv.Itoa(dashRowLimit)
 
 	rows, err := pool.Query(ctx, rowQ,
 		start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
-		f.MinRetry, f.MaxRetry,
+		f.MinRetry, f.MaxRetry, admin, names,
 	)
 	if err != nil {
 		return LogsResponse{Success: true}, err
@@ -1933,6 +2006,7 @@ ORDER BY outbox_id, attempt_number ASC`, outboxIDs)
 
 func fetchProviderStats(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (ProviderStatsResponse, error) {
 	start, end := f.dateWindow()
+	admin, names := scopedEntityNames(ctx)
 	rows, err := pool.Query(ctx, `
 SELECT sh.channel,
        COUNT(*), COUNT(*) FILTER (WHERE sh.processing_status='SENT'),
@@ -1941,8 +2015,9 @@ SELECT sh.channel,
 FROM notification_svc.send_history sh
 WHERE sh.attempted_at BETWEEN $1 AND $2
   AND ($3='' OR sh.channel=$3) AND ($4='' OR sh.processing_status=$4)
+`+entityNamePredicate("sh", 5)+`
 GROUP BY sh.channel ORDER BY 2 DESC
-`, start, end, f.Channel, f.Status)
+`, start, end, f.Channel, f.Status, admin, names)
 	if err != nil {
 		return ProviderStatsResponse{Success: true, Providers: []ProviderStat{}}, err
 	}
@@ -1966,12 +2041,16 @@ GROUP BY sh.channel ORDER BY 2 DESC
 }
 
 func fetchEventConfig(ctx context.Context, pool *pgxpool.Pool) (EventConfigResponse, error) {
+	if !api.IsAdminOverride(ctx) {
+		return EventConfigResponse{Success: true, Events: []EventConfigRow{}}, nil
+	}
 	rows, err := pool.Query(ctx, `
 SELECT e.event_id, COALESCE(e.event_display_name, e.event_id), COALESCE(e.source_route,''), e.is_active,
        nc.channel, nc.is_enabled, nc.retry_max, nc.priority_level
 FROM notification_svc.event e
 LEFT JOIN notification_svc.notification_config nc ON nc.event_id = e.event_id
 ORDER BY e.event_id, nc.channel
+LIMIT `+strconv.Itoa(dashRowLimit)+`
 `)
 	if err != nil {
 		return EventConfigResponse{Success: true, Events: []EventConfigRow{}}, err
@@ -2026,7 +2105,7 @@ func GetOverview(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		ctx := r.Context()

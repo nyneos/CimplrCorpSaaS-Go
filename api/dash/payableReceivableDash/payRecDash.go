@@ -88,7 +88,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	`
 		rows, err := pgxPool.Query(ctx, payQ, allowedEntities, allowedCurrencies)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		for rows.Next() {
@@ -139,7 +139,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	`
 		rows2, err := pgxPool.Query(ctx, recQ, allowedEntities, allowedCurrencies)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		for rows2.Next() {
@@ -195,9 +195,7 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		start := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
 		next30 := start.AddDate(0, 0, 30)
 		next60 := start.AddDate(0, 0, 60)
-		// Remainder of the current calendar quarter (start of next quarter minus one day).
 		quarterEnd := time.Date(start.Year(), start.Month()-time.Month((int(start.Month())-1)%3)+3, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
-		// The fetch window must cover the longest bucket.
 		fetchEnd := next60
 		if quarterEnd.After(fetchEnd) {
 			fetchEnd = quarterEnd

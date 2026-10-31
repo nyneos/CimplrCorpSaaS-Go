@@ -27,6 +27,7 @@ import (
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,6 +44,39 @@ const duplicateForwardBookingUploadMessage = "This forward booking file was alre
 var ErrForwardConfirmationFileAlreadyUploaded = errors.New("forward confirmation file already uploaded")
 
 const duplicateForwardConfirmationUploadMessage = "This forward confirmation file was already uploaded earlier. Please upload a different file."
+
+var stagingBankForwardColumnCache struct {
+	mu   sync.Mutex
+	cols []string
+	ok   bool
+}
+
+func stagingBankForwardColumns(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	stagingBankForwardColumnCache.mu.Lock()
+	defer stagingBankForwardColumnCache.mu.Unlock()
+	if stagingBankForwardColumnCache.ok {
+		out := make([]string, len(stagingBankForwardColumnCache.cols))
+		copy(out, stagingBankForwardColumnCache.cols)
+		return out, nil
+	}
+	colRows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_name = 'staging_bank_forward'`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch staging table columns: %w", err)
+	}
+	defer colRows.Close()
+	stagingCols := []string{}
+	for colRows.Next() {
+		var col string
+		if scanErr := colRows.Scan(&col); scanErr == nil {
+			stagingCols = append(stagingCols, col)
+		}
+	}
+	stagingBankForwardColumnCache.cols = stagingCols
+	stagingBankForwardColumnCache.ok = true
+	out := make([]string, len(stagingCols))
+	copy(out, stagingCols)
+	return out, nil
+}
 
 func decodeForwardDownloadID(raw string) string {
 	id := strings.TrimSpace(raw)
@@ -1642,18 +1676,9 @@ func GetForwardBankBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
 // It is called by the thin UploadBankForwardBookingsMulti controller.
 func processUploadBankForwardBookings(ctx context.Context, pool *pgxpool.Pool, r *http.Request) ([]map[string]interface{}, string, error) {
 	uploadBatchID := uuid.New().String()
-	// Get staging table columns
-	stagingCols := []string{}
-	colRows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_name = 'staging_bank_forward'`)
+	stagingCols, err := stagingBankForwardColumns(ctx, pool)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to fetch staging table columns: %w", err)
-	}
-	defer colRows.Close()
-	for colRows.Next() {
-		var col string
-		if err := colRows.Scan(&col); err == nil {
-			stagingCols = append(stagingCols, col)
-		}
+		return nil, "", err
 	}
 	results := []map[string]interface{}{}
 	uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))

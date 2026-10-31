@@ -60,10 +60,15 @@ func validateProjectionProposalScope(ctx context.Context, pgxPool *pgxpool.Pool,
 		return err
 	}
 	defer rows.Close()
+	saw := false
 	for rows.Next() {
+		saw = true
 		var entityName, categoryID, currencyCode, bankName, bankAccountNumber string
 		if err := rows.Scan(&entityName, &categoryID, &currencyCode, &bankName, &bankAccountNumber); err != nil {
 			return err
+		}
+		if strings.TrimSpace(entityName) == "" || !api.EntityInScope(ctx, entityName) {
+			return fmt.Errorf("entity out of scope")
 		}
 		if err := validateProjectionCashScope(ctx, map[string]interface{}{
 			"entity_name":         entityName,
@@ -75,7 +80,13 @@ func validateProjectionProposalScope(ctx context.Context, pgxPool *pgxpool.Pool,
 			return err
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !saw {
+		return fmt.Errorf("entity out of scope")
+	}
+	return nil
 }
 
 // calculateMonthlyProjections auto-calculates monthly breakdown from maturity date
@@ -90,9 +101,6 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 		return projections
 	}
 
-	// Recurring: distribute expectedAmount (the total for the 12-month window) across
-	// month buckets. Months are stepped from the first of the effective month so a
-	// 29th-31st start never normalises past a short month and drops a bucket.
 	freq := strings.ToLower(strings.TrimSpace(frequency))
 	firstMonth := time.Date(effectiveDate.Year(), effectiveDate.Month(), 1, 0, 0, 0, 0, time.UTC)
 	monthKey := func(offset int) string {
@@ -102,8 +110,6 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 
 	switch freq {
 	case "weekly":
-		// 52 weekly occurrences from the effective date, each a 1/52 share,
-		// added to the month it falls in.
 		perWeek := expectedAmount / 52.0
 		for w := 0; w < 52; w++ {
 			d := effectiveDate.AddDate(0, 0, 7*w)
@@ -117,7 +123,6 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 		}
 
 	case "quarterly":
-		// Effective month and every third month after it (e.g. Jan/Apr/Jul/Oct)
 		quarterlyAmount := expectedAmount / 4.0
 		for i := 0; i < 12; i += 3 {
 			projections[monthKey(i)] = quarterlyAmount
@@ -157,7 +162,7 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
-		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id::text = ANY($1) AND COALESCE(is_deleted, false) = false`, req.ProposalIDs) {
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, req.ProposalIDs) {
 			return
 		}
 
@@ -305,7 +310,7 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
-		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id::text = ANY($1) AND COALESCE(is_deleted, false) = false`, req.ProposalIDs) {
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, req.ProposalIDs) {
 			return
 		}
 
@@ -501,7 +506,7 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
-		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id::text = ANY($1) AND COALESCE(is_deleted, false) = false`, req.ProposalIDs) {
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, req.ProposalIDs) {
 			return
 		}
 
@@ -996,7 +1001,7 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
-		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id::text = $1 AND COALESCE(is_deleted, false) = false`, req.ProposalID) {
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, []string{req.ProposalID}) {
 			return
 		}
 
@@ -1383,6 +1388,9 @@ func GetProjectionDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "proposal_id required")
 			return
 		}
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, []string{req.ProposalID}) {
+			return
+		}
 
 		ctx := r.Context()
 		var uploadS3Key interface{}
@@ -1436,6 +1444,9 @@ func GetProjectionBulkDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(req.ProposalIDs) == 0 {
 			api.RespondWithResult(w, false, constants.ErrProposalIDsRequired)
+			return
+		}
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, req.ProposalIDs) {
 			return
 		}
 
@@ -1535,7 +1546,7 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON+": "+err.Error())
 			return
 		}
-		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.cashflow_proposal_item WHERE proposal_id::text = $1 AND COALESCE(is_deleted, false) = false`, req.ProposalID) {
+		if !requireCashflowProposalScope(r.Context(), w, pgxPool, []string{req.ProposalID}) {
 			return
 		}
 

@@ -8,6 +8,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/dms/common"
+	"CimplrCorpSaas/internal/ctxutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -142,6 +143,7 @@ func HandleListExecutionLog(pool *pgxpool.Pool) http.HandlerFunc {
 				" OR LOWER(COALESCE(gr.triggered_by, '')) LIKE $" + n +
 				" OR LOWER(gr.trigger_type) LIKE $" + n + ")"
 		}
+		query, args = common.AppendEntityScopeFilter(query, args, "r.entity_id", ctxutil.FromContext(r.Context()))
 
 		query += " ORDER BY gr.started_at DESC"
 		if req.Limit > 0 {

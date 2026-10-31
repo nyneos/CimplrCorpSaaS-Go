@@ -1627,16 +1627,16 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 
 			if err != nil {
-
+				safe := errtext.Detail(w, err)
 				// Handle unique constraint violation cleanly
-				if strings.Contains(err.Error(), "uniq_one_live_version") {
+				if safe == "duplicate record" || strings.Contains(strings.ToLower(err.Error()), "uniq_one_live_version") {
 					api.RespondWithPayload(w, false,
 						"another approved live version already exists for this template. reject or archive the existing live version before approving this one.",
 						nil)
 					return
 				}
 
-				api.RespondWithPayload(w, false, "approve failed: "+errtext.Detail(w, err), nil)
+				api.RespondWithPayload(w, false, "approve failed: "+safe, nil)
 				return
 			}
 
@@ -1757,7 +1757,6 @@ func BulkRejectTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 	 WHERE audit_id = ANY($1::uuid[])`,
 		// 	req.AuditIDs)
 		// if err != nil {
-		// 	api.RespondWithPayload(w, false, "lookup failed: "+errtext.Detail(w, err), nil)
 		// 	return
 		// }
 		// defer statusRows.Close()
@@ -1771,13 +1770,11 @@ func BulkRejectTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 	var id, status string
 		// 	var deleted bool
 		// 	if err := statusRows.Scan(&id, &status, &deleted); err != nil {
-		// 		api.RespondWithPayload(w, false, "scan failed: "+errtext.Detail(w, err), nil)
 		// 		return
 		// 	}
 		// 	current[id] = rowInfo{status, deleted}
 		// }
 		// if statusRows.Err() != nil {
-		// 	api.RespondWithPayload(w, false, errtext.Detail(w, statusRows.Err()), nil)
 		// 	return
 		// }
 
@@ -1876,7 +1873,6 @@ func DeleteTemplateVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 	   AND COALESCE(is_deleted, false) = false`,
 		// 	req.AuditIDs)
 		// if err != nil {
-		// 	api.RespondWithPayload(w, false, "lookup failed: "+errtext.Detail(w, err), nil)
 		// 	return
 		// }
 		// defer rows.Close()
@@ -1889,14 +1885,12 @@ func DeleteTemplateVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// for rows.Next() {
 		// 	var ar auditRow
 		// 	if err := rows.Scan(&ar.auditID, &ar.templateID, &ar.versionLabel, &ar.status); err != nil {
-		// 		api.RespondWithPayload(w, false, "scan failed: "+errtext.Detail(w, err), nil)
 		// 		return
 		// 	}
 		// 	// All statuses (PENDING, APPROVED, REJECTED) can be queued for deletion
 		// 	valid = append(valid, ar)
 		// }
 		// if rows.Err() != nil {
-		// 	api.RespondWithPayload(w, false, errtext.Detail(w, rows.Err()), nil)
 		// 	return
 		// }
 		// if len(valid) == 0 {

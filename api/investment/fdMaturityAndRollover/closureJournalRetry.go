@@ -13,8 +13,6 @@ import (
 
 const (
 	closureStatusPosted = "POSTED"
-	// closureJournalRetryGrace leaves time for the approval engine's own finalize hook
-	// to post before the sweep treats a closure as stuck.
 	closureJournalRetryGrace = "10 minutes"
 	closureJournalRetryBatch = 50
 )
@@ -25,11 +23,6 @@ func isClosureAlreadyPosted(err error) bool {
 	return errors.Is(err, errClosureAlreadyPosted)
 }
 
-// RetryApprovedClosureJournals posts journals for closure requests whose approval
-// instance is APPROVED but whose journals never posted (the request is still
-// PENDING_APPROVAL because posting failed after the engine finalised).
-// postClosureJournals re-checks the status under a row lock, so a retry that races
-// the finalize hook is a no-op.
 func RetryApprovedClosureJournals(ctx context.Context, pool *pgxpool.Pool) (posted, failed int) {
 	rows, err := pool.Query(ctx, `
 		SELECT cr.closure_request_id, cr.fd_id, cr.closure_type,

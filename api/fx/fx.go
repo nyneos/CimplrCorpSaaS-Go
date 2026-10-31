@@ -26,8 +26,7 @@ func NewFXServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	if user == "" || pass == "" || host == "" || dbPort == "" || name == "" {
 		return nil, nil, fmt.Errorf("FX DB environment is incomplete")
 	}
-	sslMode := dbutil.EffectiveSSLMode(host)
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
+	dsn := dbutil.BuildPostgresDSN(user, pass, host, dbPort, name, dbutil.EffectiveSSLMode(host))
 
 	// create a shared pgx pool once for all middleware and handlers
 	pgxPool, err := dbutil.NewTracedPool(context.Background(), dsn, serviceName)
@@ -37,7 +36,8 @@ func NewFXServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer pingCancel()
 	if err := pgxPool.Ping(pingCtx); err != nil {
-		logger.LogError("FX: failed to verify pgxpool DB connectivity at startup: %v", err)
+		pgxPool.Close()
+		return nil, nil, fmt.Errorf("fx database ping failed: %w", err)
 	}
 
 	RegisterFXRoutes(mux, serviceName, pgxPool)

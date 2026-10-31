@@ -350,7 +350,7 @@ func ApproveMultipleRoles(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		toDelete, toApprove, skipped := []string{}, []string{}, []string{}
 		for _, t := range targets {
-			if governance.IsSelfApprovalCtx(ctx, t.maker) {
+			if governance.DenySelfApprovalCtx(ctx, t.maker) {
 				skipped = append(skipped, t.id+": "+governance.ErrSelfApproval.Error())
 				continue
 			}
@@ -403,7 +403,6 @@ type pendingRole struct {
 	maker  string
 }
 
-// lockPendingRoles locks the requested roles that are waiting for a decision.
 func lockPendingRoles(ctx context.Context, tx pgx.Tx, ids []string) ([]pendingRole, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT id::text, COALESCE(status, ''), COALESCE(NULLIF(edited_by, ''), created_by, '')
@@ -537,7 +536,7 @@ func RejectMultipleRoles(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ids, skipped := []string{}, []string{}
 		for _, t := range targets {
-			if governance.IsSelfApprovalCtx(ctx, t.maker) {
+			if governance.DenySelfApprovalCtx(ctx, t.maker) {
 				skipped = append(skipped, t.id+": "+governance.ErrSelfApproval.Error())
 				continue
 			}
@@ -829,7 +828,6 @@ func UpdateRole(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Every edit goes back through approval.
 		fields["status"] = constants.StatusCodeAwaitingApproval
 
 		// Set edited_by and edited_at for auditing

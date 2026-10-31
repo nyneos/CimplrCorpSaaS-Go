@@ -418,15 +418,10 @@ func RegisterInvestmentRoutes(mux *http.ServeMux, serviceName string, pool *pgxp
 	mux.Handle("/investment/accounting/scheme-data-as-of", mfMid(http.HandlerFunc(accountingworkbench.GetSchemeDataAsOf(pool))))
 	mux.Handle("/investment/accounting/mtm-report-as-of", mfMid(http.HandlerFunc(accountingworkbench.GetMTMReportAsOf(pool))))
 
-	// Temporal Query Test & Validation endpoints are not registered in production.
 
-	// AMFI sync endpoints
-	amfiMid := middlewares.SessionMiddleware(pool)
-	mux.Handle("/investment/amfi/sync-schemes", amfiMid(amfisync.SyncSchemesHandler(pool)))
-	mux.Handle("/investment/amfi/update-nav", amfiMid(amfisync.UpdateNAVHandler(pool)))
-
-	// AMFI data retrieval endpoints
-	mux.Handle("/investment/amfi/get-schemes", amfiMid(amfisync.GetSchemeDataHandler(pool)))
+	mux.Handle("/investment/amfi/sync-schemes", mfMid(amfisync.SyncSchemesHandler(pool)))
+	mux.Handle("/investment/amfi/update-nav", mfMid(amfisync.UpdateNAVHandler(pool)))
+	mux.Handle("/investment/amfi/get-schemes", mfMid(amfisync.GetSchemeDataHandler(pool)))
 
 	// FD Booking Workbench (booking + confirmation)
 	fdBooking.RegisterFDBookingRoutes(mux, pool)

@@ -119,7 +119,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`
 			rows, err := pgxPool.Query(ctx, entityQ, dr.Start, dr.End, entityNames, currencyCodes)
 			if err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 				return
 			}
 
@@ -184,7 +184,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`
 			rows2, err := pgxPool.Query(ctx, cashflowQ, dr.Start, dr.End, entityNames, currencyCodes)
 			if err != nil {
-				api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 				return
 			}
 

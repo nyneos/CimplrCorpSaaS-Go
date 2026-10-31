@@ -3,8 +3,11 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
+	"CimplrCorpSaas/api/utils"
 	dependency "CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -286,10 +289,8 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // GET handler to fetch all currency records
 func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID string `json:"user_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		lq, err := utils.DecodeListQueryBody(r, nil)
+		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
@@ -303,10 +304,60 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if createdBy == "" {
 			createdBy = session.Name
 		}
+		_ = createdBy
 
 		ctx := r.Context()
 
-		// --- Query: mastercurrency + latest audit info per currency (for ordering) ---
+		fromSQL := `
+			FROM mastercurrency m
+			LEFT JOIN LATERAL (
+				SELECT requested_at , checker_at, processing_status
+				FROM auditactioncurrency
+				WHERE currency_id = m.currency_id
+				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
+				ORDER BY requested_at DESC
+				LIMIT 1
+		) a ON TRUE
+		WHERE COALESCE(m.is_deleted, false) = false`
+		args := []interface{}{}
+		argIdx := 1
+		if pat := utils.SearchPattern(lq.Search); pat != "" {
+			fromSQL += fmt.Sprintf(` AND (
+				m.currency_code ILIKE $%d ESCAPE '\' OR
+				m.currency_name ILIKE $%d ESCAPE '\' OR
+				COALESCE(m.country,'') ILIKE $%d ESCAPE '\' OR
+				COALESCE(a.processing_status,'') ILIKE $%d ESCAPE '\'
+			)`, argIdx, argIdx, argIdx, argIdx)
+			args = append(args, pat)
+			argIdx++
+		}
+		if lq.ProcessingStatus != "" {
+			fromSQL += fmt.Sprintf(" AND COALESCE(a.processing_status,'') = $%d", argIdx)
+			args = append(args, lq.ProcessingStatus)
+			argIdx++
+		}
+
+		total, err := utils.CountTotal(ctx, pgxPool, "SELECT COUNT(*) "+fromSQL, args...)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to fetch currency data")
+			if statusCode == http.StatusOK {
+				api.RespondEnvelopeError(w, statusCode, errMsg, "")
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
+		}
+
+		defaultOrder := "ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC"
+		sortCols := map[string]string{
+			"currency_code":     "m.currency_code",
+			"currency_name":     "m.currency_name",
+			"country":           "m.country",
+			"status":            "m.status",
+			"processing_status": "a.processing_status",
+		}
+		orderSQL := utils.OrderBySQL(lq.Sort, lq.SortDir, sortCols, defaultOrder)
+
 		query := `
 			SELECT 
 				m.currency_id,
@@ -319,20 +370,11 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_decimal_places,
 				m.old_status,
 				a.requested_at AS laterequested_at
-			FROM mastercurrency m
-			LEFT JOIN LATERAL (
-				SELECT requested_at , checker_at
-				FROM auditactioncurrency
-				WHERE currency_id = m.currency_id
-				  AND actiontype IN ('CREATE', 'EDIT', 'DELETE')
-				ORDER BY requested_at DESC
-				LIMIT 1
-		) a ON TRUE
-		WHERE COALESCE(m.is_deleted, false) = false
-		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC;
-	`
+			` + fromSQL + `
+			` + orderSQL + fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+		listArgs := append(append([]interface{}{}, args...), lq.Limit, lq.Offset)
 
-		rows, err := pgxPool.Query(ctx, query)
+		rows, err := pgxPool.Query(ctx, query, listArgs...)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to fetch currency data")
 			if statusCode == http.StatusOK {
@@ -454,9 +496,10 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			currencies = make([]map[string]interface{}, 0)
 		}
 
-		// data must be the array itself — wrapping as {"data": currencies} nests under
-		// envelope data and breaks clients that read response.data.data as []Currency.
-		api.RespondEnvelopeSuccess(w, "Success", currencies)
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
+			"rows":  currencies,
+			"total": total,
+		})
 	}
 }
 
@@ -646,8 +689,54 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if checkerBy == "" {
 			checkerBy = session.Name
 		}
+		ctx := r.Context()
+		makerRows, err := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactioncurrency
+			WHERE currency_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, pq.Array(req.CurrencyIDs))
+		if err != nil {
+			api.LogErrorForResponse(w, "currency reject makers: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
+			return
+		}
+		defer tx.Rollback(context.Background())
+		if _, err := tx.Exec(ctx, `
+			UPDATE mastercurrency m SET
+				decimal_places = COALESCE(m.old_decimal_places, m.decimal_places),
+				status = COALESCE(m.old_status, m.status)
+			WHERE m.currency_id IN (
+				SELECT currency_id FROM auditactioncurrency
+				WHERE currency_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+			)`, pq.Array(req.CurrencyIDs)); err != nil {
+			api.LogErrorForResponse(w, "currency reject revert: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
 		query := `UPDATE auditactioncurrency SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (currency_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id,currency_id`
-		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
+		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to reject currency actions")
 			if statusCode == http.StatusOK {
@@ -657,7 +746,6 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		defer rows.Close()
 		var updated []string
 		for rows.Next() {
 			var id, currencyID string
@@ -665,6 +753,11 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				logger.LogError("BulkRejectAuditActions: scan failed: %v", err)
 			}
 			updated = append(updated, id, currencyID)
+		}
+		rows.Close()
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
+			return
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"updated": updated,
@@ -702,6 +795,31 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			checkerBy = session.Name
 		}
 		ctx := r.Context()
+		makerRows, err := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactioncurrency
+			WHERE currency_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, pq.Array(req.CurrencyIDs))
+		if err != nil {
+			api.LogErrorForResponse(w, "currency approve makers: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 
 		// --- Step 3: Handle delete-approvals (Soft Delete) ---
 		delQuery := `

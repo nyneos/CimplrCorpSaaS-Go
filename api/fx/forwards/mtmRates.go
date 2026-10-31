@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"CimplrCorpSaas/api/constants"
@@ -56,7 +57,13 @@ func forwardMTMHasProcessingStatusColumn(ctx context.Context, pool *pgxpool.Pool
 	return forwardMTMHasColumn(ctx, pool, "processing_status")
 }
 
+var forwardMTMColumnCache sync.Map
+
 func forwardMTMHasColumn(ctx context.Context, pool *pgxpool.Pool, columnName string) bool {
+	if cached, ok := forwardMTMColumnCache.Load(columnName); ok {
+		exists, _ := cached.(bool)
+		return exists
+	}
 	var exists bool
 	if err := pool.QueryRow(ctx, `
 		SELECT EXISTS (
@@ -69,6 +76,7 @@ func forwardMTMHasColumn(ctx context.Context, pool *pgxpool.Pool, columnName str
 	`, columnName).Scan(&exists); err != nil {
 		return false
 	}
+	forwardMTMColumnCache.Store(columnName, exists)
 	return exists
 }
 

@@ -240,6 +240,7 @@ func handleZipDirectIngest(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Re
 	for fileIdx, ze := range fileEntries {
 		accountOverride := ""
 		base := filepath.Base(ze.name)
+		parsedRows, parsedCSV, parsedOK := prepareStatementRows(ze.data)
 		switch {
 		case forceOverride && len(accountNumbers) > 1:
 			accountOverride = accountNumbers[fileIdx]
@@ -254,7 +255,7 @@ func handleZipDirectIngest(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Re
 			continue
 		case !forceOverride && len(accountNumbers) > 0:
 			var fileContent [][]string
-			if parsedRows, parseErr := parseFileToRows(ze.data); parseErr == nil {
+			if parsedOK {
 				fileContent = parsedRows
 			}
 			matched := matchAccountNumberToFile(ctx, pool, ze.name, "", accountNumbers, fileContent)
@@ -282,6 +283,9 @@ func handleZipDirectIngest(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Re
 				UploadedBy:            requestedByFromCtx(ctx, userID),
 				RequestedIP:           clientIP,
 				PgxPool:               pool,
+				ParsedRows:            parsedRows,
+				ParsedCSV:             parsedCSV,
+				RowsReady:             parsedOK,
 			},
 		)
 		if err != nil {

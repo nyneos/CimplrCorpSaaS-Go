@@ -145,12 +145,9 @@ func EnforceDetailed(ctx context.Context, r *http.Request, pool *pgxpool.Pool, i
 		mapped, err := BuildVariablesFromCatalog(ctx, pool, in.SubModule, in.Fields, nil)
 		if err != nil {
 			api.LogError("policy CDM map %s/%s: %v", in.ModuleCode, in.SubModule, err)
-			if in.RequireVariables {
-				return EnforceOutcome{OK: false, Message: "policy check failed — could not map fields to CDM"}
-			}
-		} else {
-			vars = mapped
+			return EnforceOutcome{OK: false, Message: "policy check failed — could not map fields to CDM"}
 		}
+		vars = mapped
 	}
 	if len(vars) == 0 && in.RequireVariables {
 		return EnforceOutcome{OK: false, Message: "policy check failed — no CDM variables mapped"}

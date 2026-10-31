@@ -18,29 +18,21 @@ func NewUAMServer(port string) (*http.Server, *pgxpool.Pool, error) {
 	const serviceName = "uam"
 	mux := http.NewServeMux()
 
-	// Build pgx pool for approval matrix handlers (PreValidationMiddleware pattern)
-	pgxPool := func() *pgxpool.Pool {
-		user := os.Getenv("DB_USER")
-		pass := os.Getenv("DB_PASSWORD")
-		host := os.Getenv("DB_HOST")
-		port := os.Getenv("DB_PORT")
-		name := os.Getenv("DB_NAME")
-		sslMode := dbutil.EffectiveSSLMode(host)
-		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
-		pool, err := dbutil.NewTracedPool(context.Background(), dsn, serviceName)
-		if err != nil {
-			return nil
-		}
-		pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := pool.Ping(pingCtx); err != nil {
-			pool.Close()
-			return nil
-		}
-		return pool
-	}()
-	if pgxPool == nil {
-		return nil, nil, fmt.Errorf("UAM: failed to initialize pgxpool DB")
+	user := os.Getenv("DB_USER")
+	pass := os.Getenv("DB_PASSWORD")
+	host := os.Getenv("DB_HOST")
+	dbPort := os.Getenv("DB_PORT")
+	name := os.Getenv("DB_NAME")
+	dsn := dbutil.BuildPostgresDSN(user, pass, host, dbPort, name, dbutil.EffectiveSSLMode(host))
+	pgxPool, err := dbutil.NewTracedPool(context.Background(), dsn, serviceName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("UAM: failed to initialize pgxpool DB: %w", err)
+	}
+	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := pgxPool.Ping(pingCtx); err != nil {
+		pgxPool.Close()
+		return nil, nil, fmt.Errorf("uam database ping failed: %w", err)
 	}
 	RegisterUAMRoutes(mux, serviceName, pgxPool)
 

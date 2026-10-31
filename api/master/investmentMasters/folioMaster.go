@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
@@ -430,8 +431,6 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 			}()
-			_, _ = tx.Exec(ctx, "SET LOCAL synchronous_commit TO OFF")
-
 			_, err = tx.Exec(ctx, `
 				DROP TABLE IF EXISTS tmp_folio;
 				CREATE TEMP TABLE tmp_folio (LIKE investment.masterfolio INCLUDING DEFAULTS) ON COMMIT DROP;
@@ -1696,7 +1695,7 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		sel := `
-			SELECT DISTINCT ON (folio_id) action_id, folio_id, actiontype, processing_status
+			SELECT DISTINCT ON (folio_id) action_id, folio_id, actiontype, processing_status, COALESCE(requested_by, '')
 			FROM investment.auditactionfolio
 			WHERE folio_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY folio_id, requested_at DESC
@@ -1713,16 +1712,18 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var toDeleteActionIDs []string
 		var deleteMasterIDs []string
 		var blockedFolios []map[string]interface{}
+		var makers []string
 
 		for rows.Next() {
-			var aid, fid, atype, pstatus string
-			if err := rows.Scan(&aid, &fid, &atype, &pstatus); err != nil {
+			var aid, fid, atype, pstatus, maker string
+			if err := rows.Scan(&aid, &fid, &atype, &pstatus, &maker); err != nil {
 				continue
 			}
 			ps := strings.ToUpper(strings.TrimSpace(pstatus))
 			if ps == constants.StatusApproved {
 				continue
 			}
+			makers = append(makers, maker)
 			if ps == constants.StatusPendingDeleteApproval {
 				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterfolio", fid)
 				if len(blockers) > 0 {
@@ -1740,6 +1741,10 @@ func BulkApproveFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if ps == constants.StatusPendingApproval || ps == constants.StatusPendingEditApproval {
 				toApprove = append(toApprove, aid)
 			}
+		}
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
 		}
 
 		if len(toApprove) == 0 && len(toDeleteActionIDs) == 0 {
@@ -1830,7 +1835,7 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		sel := `
-			SELECT DISTINCT ON (folio_id) action_id, folio_id, processing_status
+			SELECT DISTINCT ON (folio_id) action_id, folio_id, actiontype, processing_status, COALESCE(requested_by, '')
 			FROM investment.auditactionfolio
 			WHERE folio_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
 			ORDER BY folio_id, requested_at DESC
@@ -1844,11 +1849,13 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		actionIDs := []string{}
+		editFolioIDs := []string{}
 		cannotReject := []string{}
 		found := map[string]bool{}
+		var makers []string
 		for rows.Next() {
-			var aid, fid, ps string
-			if err := rows.Scan(&aid, &fid, &ps); err != nil {
+			var aid, fid, atype, ps, maker string
+			if err := rows.Scan(&aid, &fid, &atype, &ps, &maker); err != nil {
 				continue
 			}
 			found[fid] = true
@@ -1856,7 +1863,15 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cannotReject = append(cannotReject, fid)
 			} else {
 				actionIDs = append(actionIDs, aid)
+				makers = append(makers, maker)
+				if strings.EqualFold(atype, "EDIT") && strings.ToUpper(strings.TrimSpace(ps)) == constants.StatusPendingEditApproval {
+					editFolioIDs = append(editFolioIDs, fid)
+				}
 			}
+		}
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
 		}
 
 		missing := []string{}
@@ -1886,6 +1901,25 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		if len(editFolioIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.masterfolio
+				SET
+					entity_name = CASE WHEN old_entity_name IS NOT NULL THEN old_entity_name ELSE entity_name END,
+					amc_name = CASE WHEN old_amc_name IS NOT NULL THEN old_amc_name ELSE amc_name END,
+					folio_number = CASE WHEN old_folio_number IS NOT NULL THEN old_folio_number ELSE folio_number END,
+					first_holder_name = CASE WHEN old_first_holder_name IS NOT NULL THEN old_first_holder_name ELSE first_holder_name END,
+					default_subscription_account = CASE WHEN old_default_subscription_account IS NOT NULL THEN old_default_subscription_account ELSE default_subscription_account END,
+					default_redemption_account = CASE WHEN old_default_redemption_account IS NOT NULL THEN old_default_redemption_account ELSE default_redemption_account END,
+					status = CASE WHEN old_status IS NOT NULL THEN old_status ELSE status END,
+					source = CASE WHEN old_source IS NOT NULL THEN old_source ELSE source END
+				WHERE folio_id = ANY($1)
+			`, editFolioIDs); err != nil {
+				msg, status := getUserFriendlyFolioError(err, "edit revert")
+				api.RespondWithError(w, status, msg)
+				return
+			}
+		}
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyFolioError(err, "commit")
@@ -1908,6 +1942,9 @@ func GetSingleFolioWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req reqStruct
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.FolioID) == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "folio_id is required in body")
+			return
+		}
+		if !api.RequireRecordsInScope(ctx, w, pgxPool, `SELECT entity_name::text FROM investment.masterfolio WHERE folio_id::text = $1`, req.FolioID) {
 			return
 		}
 

@@ -3,9 +3,7 @@ package email
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"time"
 
@@ -24,19 +22,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func emailPostgresDSN(user, pass, host, port, name, sslMode string) string {
-	u := &url.URL{
-		Scheme: "postgres",
-		User:   url.UserPassword(user, pass),
-		Host:   net.JoinHostPort(host, port),
-		Path:   "/" + name,
-	}
-	q := url.Values{}
-	q.Set("sslmode", sslMode)
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
 func NewEmailServer(pool *pgxpool.Pool, port string) (*http.Server, *pgxpool.Pool, bool, error) {
 	const serviceName = "email"
 	mux := http.NewServeMux()
@@ -49,8 +34,7 @@ func NewEmailServer(pool *pgxpool.Pool, port string) (*http.Server, *pgxpool.Poo
 		dbPort := os.Getenv("DB_PORT")
 		name := os.Getenv("DB_NAME")
 		if user != "" && pass != "" && host != "" && dbPort != "" && name != "" {
-			sslMode := dbutil.EffectiveSSLMode(host)
-			dsn := emailPostgresDSN(user, pass, host, dbPort, name, sslMode)
+			dsn := dbutil.BuildPostgresDSN(user, pass, host, dbPort, name, dbutil.EffectiveSSLMode(host))
 			var err error
 			pool, err = dbutil.NewTracedPool(context.Background(), dsn, serviceName)
 			if err != nil {

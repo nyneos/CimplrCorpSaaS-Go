@@ -10,13 +10,13 @@ import (
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
 	dependency "CimplrCorpSaas/internal/dependency"
+	"CimplrCorpSaas/internal/uploadlimit"
 	"compress/gzip"
 	"context"
 	"database/sql"
 
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -114,8 +114,12 @@ func getUserFriendlyEntityCashError(err error, context string) (string, int) {
 		return fmt.Sprintf("%s: Database connection issue. Please try again.", context), http.StatusServiceUnavailable
 	}
 
-	// Default error
-	return fmt.Sprintf("%s: %s", context, errMsg), http.StatusInternalServerError
+	// Never return driver/raw err.Error() to clients.
+	api.LogError("entityCash: %s: %v", context, err)
+	if context != "" {
+		return context, http.StatusInternalServerError
+	}
+	return "internal error", http.StatusInternalServerError
 }
 
 type cashEntityQuery interface {
@@ -248,7 +252,7 @@ type cashEntityUpdateUpload struct {
 func parseCreateAndSyncCashEntitiesRequest(r *http.Request) (CashEntityBulkRequest, cashEntityCreateUpload, error) {
 	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
 	if strings.HasPrefix(contentType, constants.ContentTypeMultipart) {
-		if err := r.ParseMultipartForm(32 << 20); err != nil {
+		if err := r.ParseMultipartForm(uploadlimit.MaxBytes()); err != nil {
 			return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf("could not parse multipart form: %w", err)
 		}
 
@@ -271,7 +275,7 @@ func parseCreateAndSyncCashEntitiesRequest(r *http.Request) (CashEntityBulkReque
 		file, fileHeader, err := r.FormFile("file")
 		if err == nil {
 			defer file.Close()
-			fileData, readErr := io.ReadAll(file)
+			fileData, readErr := uploadlimit.ReadAllLimited(file)
 			if readErr != nil {
 				return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf("failed to read uploaded file: %w", readErr)
 			}
@@ -302,7 +306,7 @@ func parseCreateAndSyncCashEntitiesRequest(r *http.Request) (CashEntityBulkReque
 func parseUpdateCashEntityBulkRequest(r *http.Request) (cashEntityUpdateRequest, cashEntityUpdateUpload, error) {
 	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
 	if strings.HasPrefix(contentType, constants.ContentTypeMultipart) {
-		if err := r.ParseMultipartForm(32 << 20); err != nil {
+		if err := r.ParseMultipartForm(uploadlimit.MaxBytes()); err != nil {
 			return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf("could not parse multipart form: %w", err)
 		}
 
@@ -328,7 +332,7 @@ func parseUpdateCashEntityBulkRequest(r *http.Request) (cashEntityUpdateRequest,
 		file, fileHeader, err := r.FormFile("file")
 		if err == nil {
 			defer file.Close()
-			fileData, readErr := io.ReadAll(file)
+			fileData, readErr := uploadlimit.ReadAllLimited(file)
 			if readErr != nil {
 				return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf("failed to read uploaded file: %w", readErr)
 			}
@@ -1013,6 +1017,9 @@ func GetCashEntityLogoURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		if !api.RequireRecordsInScope(ctx, w, pgxPool, `SELECT entity_id::text FROM masterentitycash WHERE entity_id::text = $1`, req.EntityID) {
+			return
+		}
 
 		var uploadS3Key sql.NullString
 		err := pgxPool.QueryRow(ctx, `
@@ -1787,7 +1794,8 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, eid, req.Reason, requestedBy)
 
 			if err != nil {
-				auditErrors = append(auditErrors, eid+":"+err.Error())
+				api.LogErrorForResponse(w, "entity cash delete audit %s: %v", eid, err)
+				auditErrors = append(auditErrors, eid+": "+errtext.Detail(w, err))
 			}
 		}
 
@@ -1854,6 +1862,31 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
+		makerRows, err := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactionentity
+			WHERE entity_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, allToReject)
+		if err != nil {
+			api.LogErrorForResponse(w, "entity cash reject makers: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
@@ -1865,6 +1898,45 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `
+			UPDATE masterentitycash m SET
+				entity_name = COALESCE(m.old_entity_name, m.entity_name),
+				entity_short_name = COALESCE(m.old_entity_short_name, m.entity_short_name),
+				entity_level = COALESCE(m.old_entity_level, m.entity_level),
+				parent_entity_name = COALESCE(m.old_parent_entity_name, m.parent_entity_name),
+				entity_registration_number = COALESCE(m.old_entity_registration_number, m.entity_registration_number),
+				country = COALESCE(m.old_country, m.country),
+				base_operating_currency = COALESCE(m.old_base_operating_currency, m.base_operating_currency),
+				tax_identification_number = COALESCE(m.old_tax_identification_number, m.tax_identification_number),
+				address_line1 = COALESCE(m.old_address_line1, m.address_line1),
+				address_line2 = COALESCE(m.old_address_line2, m.address_line2),
+				city = COALESCE(m.old_city, m.city),
+				state_province = COALESCE(m.old_state_province, m.state_province),
+				postal_code = COALESCE(m.old_postal_code, m.postal_code),
+				contact_person_name = COALESCE(m.old_contact_person_name, m.contact_person_name),
+				contact_person_email = COALESCE(m.old_contact_person_email, m.contact_person_email),
+				contact_person_phone = COALESCE(m.old_contact_person_phone, m.contact_person_phone),
+				active_status = COALESCE(m.old_active_status, m.active_status),
+				pan_gst = COALESCE(m.old_pan_gst, m.pan_gst),
+				legal_entity_identifier = COALESCE(m.old_legal_entity_identifier, m.legal_entity_identifier),
+				legal_entity_type = COALESCE(m.old_legal_entity_type, m.legal_entity_type),
+				reporting_currency = COALESCE(m.old_reporting_currency, m.reporting_currency),
+				fx_trading_authority = COALESCE(m.old_fx_trading_authority, m.fx_trading_authority),
+				internal_fx_trading_limit = COALESCE(m.old_internal_fx_trading_limit, m.internal_fx_trading_limit),
+				associated_treasury_contact = COALESCE(m.old_associated_treasury_contact, m.associated_treasury_contact),
+				associated_business_units = COALESCE(m.old_associated_business_units, m.associated_business_units),
+				comments = COALESCE(m.old_comments, m.comments),
+				unique_identifier = COALESCE(m.old_unique_identifier, m.unique_identifier)
+			WHERE m.entity_id IN (
+				SELECT entity_id FROM auditactionentity
+				WHERE entity_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+			)`, allToReject); err != nil {
+			api.LogErrorForResponse(w, "entity cash reject revert: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
 		// Update processing_status to 'REJECTED' in auditactionentity for all
 		query := `UPDATE auditactionentity SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (entity_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, entity_id`
 		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToReject)
@@ -1971,7 +2043,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				anyError = err
 				break
 			}
-			if governance.IsSelfApprovalCtx(ctx, requestedBy) || governance.IsSelfApproval(checkerBy, requestedBy) {
+			if governance.DenySelfApprovalCtx(ctx, requestedBy) || (!api.IsAdminOverride(ctx) && governance.IsSelfApproval(checkerBy, requestedBy)) {
 				allUpdated = append(allUpdated, map[string]interface{}{
 					"entity_id":         eid,
 					constants.KeyStatus: "Skipped",
@@ -2401,7 +2473,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := r.ParseMultipartForm(32 << 20); err != nil {
+		if err := r.ParseMultipartForm(uploadlimit.MaxBytes()); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
@@ -2420,7 +2492,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file: "+fh.Filename)
 				return
 			}
-			fileBytes, err := io.ReadAll(f)
+			fileBytes, err := uploadlimit.ReadAllLimited(f)
 			f.Close()
 			if err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
@@ -2804,7 +2876,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// ── 2. Parse multipart & file ─────────────────────────────────────
-		if err := r.ParseMultipartForm(128 << 20); err != nil {
+		if err := r.ParseMultipartForm(uploadlimit.MaxBytes()); err != nil {
 			uploadEntityError(w, http.StatusBadRequest, "Could not parse the uploaded form. Please try again.")
 			return
 		}
@@ -2813,7 +2885,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			uploadEntityError(w, http.StatusBadRequest, "No file found in the request. Please attach a CSV or XLSX file.")
 			return
 		}
-		fileBytes, err := io.ReadAll(f)
+		fileBytes, err := uploadlimit.ReadAllLimited(f)
 		f.Close()
 		if err != nil {
 			uploadEntityError(w, http.StatusBadRequest, constants.ErrFailedToReadFile+fh.Filename)
@@ -3166,7 +3238,6 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		_, _ = tx.Exec(ctx, "SET LOCAL synchronous_commit = OFF")
 		_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'")
 
 		// ── 9a. Temp table ────────────────────────────────────────────────
@@ -3367,7 +3438,8 @@ WITH RECURSIVE sync AS (
       WHEN m.parent_entity_name IS NULL OR m.parent_entity_name = ''
         THEN 0
       ELSE COALESCE(p.entity_level, 0) + 1
-    END AS correct_level
+    END AS correct_level,
+    ARRAY[m.entity_name]::text[] AS path
   FROM masterentitycash m
   LEFT JOIN masterentitycash p
          ON p.entity_name = m.parent_entity_name
@@ -3381,11 +3453,13 @@ WITH RECURSIVE sync AS (
     c.entity_id,
     c.entity_name,
     c.parent_entity_name,
-    s.correct_level + 1
+    s.correct_level + 1,
+    s.path || c.entity_name
   FROM masterentitycash c
   JOIN sync s ON c.parent_entity_name = s.entity_name
   WHERE COALESCE(c.is_deleted, false) = false
     AND s.correct_level < 3
+    AND NOT (c.entity_name = ANY(s.path))
 )
 UPDATE masterentitycash m
 SET

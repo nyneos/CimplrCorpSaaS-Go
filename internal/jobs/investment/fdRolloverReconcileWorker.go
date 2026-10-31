@@ -206,8 +206,6 @@ func activateRolloverFD(ctx context.Context, db *pgxpool.Pool, r rolloverReconci
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Double-create guard inside the transaction: lock the booking row first so two
-	// workers cannot both pass the fd_master existence check for the same booking.
 	var lockedBooking string
 	if err := tx.QueryRow(ctx,
 		`SELECT booking_id FROM investment.fd_booking_request WHERE booking_id=$1 FOR UPDATE`,
@@ -286,30 +284,15 @@ func activateRolloverFD(ctx context.Context, db *pgxpool.Pool, r rolloverReconci
 		return fmt.Errorf("insert fd_master: %w", err)
 	}
 
-	// Generate and save the cashflow schedule inside a savepoint: a failure there is
-	// non-fatal (fd_master survives and cashflows can be regenerated manually), and
-	// rolling back only the savepoint keeps the outer transaction usable.
-	if cfErr := func() error {
-		sp, err := tx.Begin(ctx)
-		if err != nil {
-			return err
-		}
-		defer sp.Rollback(ctx) //nolint:errcheck
-		if err := generateAndSaveCashflows(ctx, sp, newFDID, r); err != nil {
-			return err
-		}
-		// Mark cashflow_generated so the accrual engine picks it up.
-		if _, err := sp.Exec(ctx,
-			`UPDATE investment.fd_master SET cashflow_generated=true, cashflow_generated_at=now() WHERE fd_id=$1`,
-			newFDID); err != nil {
-			return err
-		}
-		return sp.Commit(ctx)
-	}(); cfErr != nil {
-		logger.LogError("[RolloverReconcile] cashflow generation failed for fd %s: %v", newFDID, cfErr)
+	if err := generateAndSaveCashflows(ctx, tx, newFDID, r); err != nil {
+		return fmt.Errorf("cashflow: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE investment.fd_master SET cashflow_generated=true, cashflow_generated_at=now() WHERE fd_id=$1`,
+		newFDID); err != nil {
+		return fmt.Errorf("mark cashflow generated: %w", err)
 	}
 
-	// Link new fd_id back on closure and booking tables, and mark the booking active.
 	if _, err := tx.Exec(ctx,
 		`UPDATE investment.fd_closure_rollover SET new_fd_id=$1 WHERE closure_request_id=$2`,
 		newFDID, r.ClosureRequestID); err != nil {

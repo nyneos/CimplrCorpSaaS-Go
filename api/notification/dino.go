@@ -27,8 +27,7 @@ func NewNotificationServer(pool *pgxpool.Pool, port string) (*http.Server, *pgxp
 		port := os.Getenv("DB_PORT")
 		name := os.Getenv("DB_NAME")
 		if user != "" && pass != "" && host != "" && port != "" && name != "" {
-			sslMode := dbutil.EffectiveSSLMode(host)
-			dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
+			dsn := dbutil.BuildPostgresDSN(user, pass, host, port, name, dbutil.EffectiveSSLMode(host))
 			var err error
 			pool, err = dbutil.NewTracedPool(context.Background(), dsn, serviceName)
 			if err != nil {
@@ -38,7 +37,8 @@ func NewNotificationServer(pool *pgxpool.Pool, port string) (*http.Server, *pgxp
 			pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := pool.Ping(pingCtx); err != nil {
-				logger.LogError("Notification: failed to verify pgxpool DB connectivity at startup: %v", err)
+				pool.Close()
+				return nil, nil, false, fmt.Errorf("notification database ping failed: %w", err)
 			}
 		}
 	}

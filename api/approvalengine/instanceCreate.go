@@ -112,7 +112,6 @@ func CreateInstance(ctx context.Context, pool *pgxpool.Pool, req InstanceRequest
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Serialise instance creation per record so two requests cannot both insert.
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "approval_instance:"+req.ModuleCode+":"+req.RecordID); err != nil {
 		return "", fmt.Errorf("CreateInstance lock: %w", err)
 	}

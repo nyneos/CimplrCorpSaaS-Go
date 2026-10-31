@@ -737,10 +737,6 @@ func sessionEmail(userID string) string {
 	return ""
 }
 
-// activateHedgeLinkWithLedger activates an approved hedge link and writes the forward
-// utilisation ledger row in one transaction, holding locks on the exposure and the
-// booking so the open amount and ledger sequence cannot race. When the exposure is
-// already settled the link is deactivated instead and the exposure status is returned.
 func activateHedgeLinkWithLedger(ctx context.Context, pool *pgxpool.Pool, expID, bookID string) (float64, string, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {

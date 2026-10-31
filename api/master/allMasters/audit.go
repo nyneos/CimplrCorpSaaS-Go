@@ -46,6 +46,7 @@ type auditHistoryConfig struct {
 	IDCol       string
 	NameCol     string
 	EntityID    string
+	ScopeQuery  string
 }
 
 // runAuditHistory executes the standard audit-history query pattern used by all cash masters.
@@ -66,6 +67,11 @@ func runAuditHistory(
 		return
 	}
 	ctx := r.Context()
+	if strings.TrimSpace(entityID) != "" && strings.TrimSpace(cfg.ScopeQuery) != "" {
+		if !api.RequireRecordsInScope(ctx, w, pgxPool, cfg.ScopeQuery, entityID) {
+			return
+		}
+	}
 
 	//nolint:gosec // table/column names are all hardcoded constants
 	baseQ := `SELECT
@@ -238,7 +244,7 @@ func GetCostProfitCenterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CentreID string `json:"centre_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactioncostprofitcenter", MasterTable: "mastercostprofitcenter", IDCol: "centre_id", NameCol: "centre_name", EntityID: req.CentreID})
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactioncostprofitcenter", MasterTable: "mastercostprofitcenter", IDCol: "centre_id", NameCol: "centre_name", EntityID: req.CentreID, ScopeQuery: `SELECT entity_name::text FROM mastercostprofitcenter WHERE centre_id::text = $1`})
 	}
 }
 
@@ -264,7 +270,7 @@ func GetBankAccountAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			AccountID string `json:"account_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactionbankaccount", MasterTable: "masterbankaccount", IDCol: "account_id", NameCol: "account_number", EntityID: req.AccountID})
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactionbankaccount", MasterTable: "masterbankaccount", IDCol: "account_id", NameCol: "account_number", EntityID: req.AccountID, ScopeQuery: `SELECT entity_id::text FROM masterbankaccount WHERE account_id::text = $1`})
 	}
 }
 
@@ -277,7 +283,7 @@ func GetPayableReceivableAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			TypeID string `json:"type_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactionpayablereceivable", MasterTable: "masterpayablereceivabletype", IDCol: "type_id", NameCol: "type_name", EntityID: req.TypeID})
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactionpayablereceivable", MasterTable: "masterpayablereceivabletype", IDCol: "type_id", NameCol: "type_name", EntityID: req.TypeID, ScopeQuery: `SELECT business_unit_division::text FROM masterpayablereceivabletype WHERE type_id::text = $1`})
 	}
 }
 
@@ -290,6 +296,6 @@ func GetEntityCashAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			EntityID string `json:"entity_id"`
 		}
 		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
-		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactionentity", MasterTable: "masterentitycash", IDCol: "entity_id", NameCol: "entity_name", EntityID: req.EntityID})
+		runAuditHistory(w, r, pgxPool, auditHistoryConfig{AuditTable: "auditactionentity", MasterTable: "masterentitycash", IDCol: "entity_id", NameCol: "entity_name", EntityID: req.EntityID, ScopeQuery: `SELECT entity_id::text FROM masterentitycash WHERE entity_id::text = $1`})
 	}
 }

@@ -26,6 +26,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/internal/logger"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -437,7 +438,6 @@ var dataSources = map[string]dataSourceFn{
 // scoping unless req.EntityIDs is set explicitly, which is the expected mode
 // for a DMS rule (its own generation_rule_filter rows carry whatever scoping
 // it needs — see the filter band below).
-// noEntityScope never matches a real entity id or name.
 const noEntityScope = "__no_entity_scope__"
 
 func FetchSourceData(ctx context.Context, pool *pgxpool.Pool, req DataRequest) (rows []map[string]any, hasMore bool, err error) {
@@ -450,33 +450,37 @@ func FetchSourceData(ctx context.Context, pool *pgxpool.Pool, req DataRequest) (
 		}
 	}
 
-	sessionScoped := api.GetUserIDFromCtx(ctx) != ""
-	if len(req.EntityIDs) == 0 {
-		req.EntityIDs = ctxEntityIDs
-		reqEntityNames = ctxNames
-	} else {
-		var allowedIDs []string
-		for _, reqID := range req.EntityIDs {
-			for i, ctxID := range ctxEntityIDs {
-				if reqID == ctxID {
-					allowedIDs = append(allowedIDs, reqID)
-					if i < len(ctxNames) {
-						reqEntityNames = append(reqEntityNames, ctxNames[i])
-					}
-					break
-				}
-			}
-		}
-		if sessionScoped {
-			req.EntityIDs = allowedIDs
-		}
-	}
-	// A session with nothing in scope must match no rows, not every row.
-	if sessionScoped && len(req.EntityIDs) == 0 {
+	requested := dedupeTrimmedStrings(req.EntityIDs)
+	switch {
+	case api.GetUserIDFromCtx(ctx) == "" && !api.IsAdminOverride(ctx):
 		req.EntityIDs = []string{noEntityScope}
-	}
-	if sessionScoped && len(reqEntityNames) == 0 {
 		reqEntityNames = []string{noEntityScope}
+	case api.IsAdminOverride(ctx) && len(requested) > 0:
+		req.EntityIDs = requested
+		reqEntityNames = namesForScopedEntities(requested, ctxEntityIDs, ctxNames)
+		if len(reqEntityNames) == 0 {
+			reqEntityNames = append([]string(nil), requested...)
+		}
+	default:
+		candidates := requested
+		if len(candidates) == 0 {
+			candidates = append([]string(nil), ctxEntityIDs...)
+		}
+		if api.IsAdminOverride(ctx) {
+			req.EntityIDs = candidates
+		} else {
+			req.EntityIDs = api.FilterEntitiesInScope(ctx, candidates)
+		}
+		reqEntityNames = namesForScopedEntities(req.EntityIDs, ctxEntityIDs, ctxNames)
+		if len(reqEntityNames) == 0 && len(requested) == 0 {
+			reqEntityNames = append([]string(nil), ctxNames...)
+		}
+		if len(req.EntityIDs) == 0 {
+			req.EntityIDs = []string{noEntityScope}
+		}
+		if len(reqEntityNames) == 0 {
+			reqEntityNames = []string{noEntityScope}
+		}
 	}
 
 	if req.Limit < 0 {
@@ -567,6 +571,10 @@ func GetDataSource(pool *pgxpool.Pool) http.HandlerFunc {
 			respondBuilderError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		req.AllowUnscopedBankAccount = false
+		if strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context())) == "" && !api.IsAdminOverride(r.Context()) {
+			req.EntityIDs = nil
+		}
 
 		rows, hasMore, err := FetchSourceData(r.Context(), pool, req)
 		if err != nil {
@@ -638,10 +646,35 @@ func normaliseValue(v any) any {
 	}
 }
 
+func namesForScopedEntities(ids, ctxIDs, ctxNames []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		want[strings.ToLower(strings.TrimSpace(id))] = struct{}{}
+	}
+	var out []string
+	for i, id := range ctxIDs {
+		if _, ok := want[strings.ToLower(strings.TrimSpace(id))]; !ok || i >= len(ctxNames) {
+			continue
+		}
+		out = append(out, ctxNames[i])
+	}
+	if len(out) == 0 {
+		for _, name := range ctxNames {
+			if _, ok := want[strings.ToLower(strings.TrimSpace(name))]; ok {
+				out = append(out, name)
+			}
+		}
+	}
+	return out
+}
+
 // entityFilter appends an entity_id filter when entity IDs are provided.
 func entityFilter(entityIDs []string, alias string, argOffset int) (string, []any) {
 	if len(entityIDs) == 0 {
-		return "", nil
+		entityIDs = []string{noEntityScope}
 	}
 	return fmt.Sprintf("AND %s.entity_id = ANY($%d)", alias, argOffset), []any{entityIDs}
 }
@@ -650,7 +683,7 @@ func entityFilter(entityIDs []string, alias string, argOffset int) (string, []an
 func entityNameFilter(ctx context.Context, alias string, colName string, argOffset int) (string, []any) {
 	names, _ := ctx.Value("reqEntityNames").([]string)
 	if len(names) == 0 {
-		return "", nil
+		names = []string{noEntityScope}
 	}
 	return fmt.Sprintf("AND %s.%s = ANY($%d)", alias, colName, argOffset), []any{names}
 }

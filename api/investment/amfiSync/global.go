@@ -64,11 +64,12 @@ func GetSchemeDataHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if req.Limit <= 0 || req.Limit > 100000 {
-			req.Limit = 100000
+		if req.Limit < 0 || req.Offset < 0 {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "limit and offset cannot be negative", "")
+			return
 		}
-		if req.Offset < 0 {
-			req.Offset = 0
+		if req.Limit == 0 || req.Limit > 500 {
+			req.Limit = 500
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)

@@ -24,8 +24,8 @@ type auditSource struct {
 }
 
 // auditQuery — for FD investment audit tables that use (audit_id, action_type).
-func auditQuery(ctx context.Context, pool *pgxpool.Pool, limit, offset int, parentID string, src auditSource) ([]map[string]any, error) {
-	return auditQueryInner(ctx, pool, limit, offset, auditTableConfig{
+func auditQuery(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit, offset int, parentID string, src auditSource) ([]map[string]any, error) {
+	return auditQueryInner(ctx, pool, entityIDs, limit, offset, auditTableConfig{
 		Table: src.Table, ParentCol: src.ParentCol, ParentID: parentID,
 		PKCol: "audit_id", ActionCol: "action_type", ExtraCols: src.ExtraCols,
 	})
@@ -33,8 +33,7 @@ func auditQuery(ctx context.Context, pool *pgxpool.Pool, limit, offset int, pare
 
 // stdAuditQuery — for standard cimplr audit tables that use (action_id, actiontype).
 func stdAuditQuery(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit, offset int, parentID string, src auditSource) ([]map[string]any, error) {
-	_ = entityIDs
-	return auditQueryInner(ctx, pool, limit, offset, auditTableConfig{
+	return auditQueryInner(ctx, pool, entityIDs, limit, offset, auditTableConfig{
 		Table: src.Table, ParentCol: src.ParentCol, ParentID: parentID,
 		PKCol: "action_id", ActionCol: "actiontype",
 	})
@@ -43,6 +42,7 @@ func stdAuditQuery(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, 
 func auditQueryInner(
 	ctx context.Context,
 	pool *pgxpool.Pool,
+	entityIDs []string,
 	limit int,
 	offset int,
 	cfg auditTableConfig,
@@ -60,7 +60,7 @@ func auditQueryInner(
 		extra = ", " + cfg.ExtraCols
 	}
 
-	scopeFilter, scopeArgs, allowed := auditScopeFilter(ctx, pool, cfg, len(args)+1)
+	scopeFilter, scopeArgs, allowed := auditScopeFilter(ctx, pool, cfg, entityIDs, len(args)+1)
 	if !allowed {
 		return []map[string]any{}, nil
 	}
@@ -91,55 +91,55 @@ func auditQueryInner(
 
 // ── FD Booking Audit ──────────────────────────────────────────────────────────
 func queryFDBookingAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset, parentID,
+	return auditQuery(ctx, pool, entityIDs, limit, offset, parentID,
 		auditSource{Table: "investment.fd_audit_booking_request", ParentCol: "booking_id"})
 }
 
 // ── FD Confirmation Audit ─────────────────────────────────────────────────────
 func queryFDConfirmationAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset, parentID,
+	return auditQuery(ctx, pool, entityIDs, limit, offset, parentID,
 		auditSource{Table: "investment.fd_audit_confirmation", ParentCol: "confirmation_id"})
 }
 
 // ── FD Activation (Master) Audit ──────────────────────────────────────────────
 func queryFDActivationAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset, parentID,
+	return auditQuery(ctx, pool, entityIDs, limit, offset, parentID,
 		auditSource{Table: "investment.fd_audit_master", ParentCol: "fd_id"})
 }
 
 // ── FD Cashflow Audit ─────────────────────────────────────────────────────────
 func queryFDCashflowAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset, parentID,
+	return auditQuery(ctx, pool, entityIDs, limit, offset, parentID,
 		auditSource{Table: "investment.fd_audit_cashflow_schedule", ParentCol: "cashflow_id"})
 }
 
 // ── FD Closure Initiate Audit ─────────────────────────────────────────────────
 func queryFDClosureInitiateAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset, parentID,
+	return auditQuery(ctx, pool, entityIDs, limit, offset, parentID,
 		auditSource{Table: "cimplr.fd_closure_initiate_audit", ParentCol: "closure_initiate_id"})
 }
 
 // ── FD Closure Confirm Audit ──────────────────────────────────────────────────
 func queryFDClosureConfirmAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset, parentID,
+	return auditQuery(ctx, pool, entityIDs, limit, offset, parentID,
 		auditSource{Table: "cimplr.fd_closure_confirm_audit", ParentCol: "closure_confirm_id"})
 }
 
 // ── FD TDS Receipt Audit ──────────────────────────────────────────────────────
 func queryFDTdsAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset, parentID,
+	return auditQuery(ctx, pool, entityIDs, limit, offset, parentID,
 		auditSource{Table: "investment.fd_tds_receipt_audit", ParentCol: "tds_id"})
 }
 
 // ── FD Interest Receipt Audit ─────────────────────────────────────────────────
 func queryFDReceiptAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset, parentID,
+	return auditQuery(ctx, pool, entityIDs, limit, offset, parentID,
 		auditSource{Table: "investment.fd_interest_receipt_audit", ParentCol: "receipt_id"})
 }
 
 // ── FD Receipt Exception Audit ────────────────────────────────────────────────
 func queryFDExceptionAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	return auditQuery(ctx, pool, limit, offset, parentID,
+	return auditQuery(ctx, pool, entityIDs, limit, offset, parentID,
 		auditSource{Table: "investment.fd_receipt_exception_audit", ParentCol: "exception_id"})
 }
 
@@ -170,6 +170,22 @@ func queryCashProjectionAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs
 		parentFilter = fmt.Sprintf("AND proposal_id::text = ANY($%d)", len(args)+1)
 		args = append(args, proposalIDs)
 	}
+	if !api.IsAdminOverride(ctx) {
+		scopeNames := api.FilterEntitiesInScope(ctx, append(append([]string{}, api.GetEntityNamesFromCtx(ctx)...), api.GetEntityIDsFromCtx(ctx)...))
+		if len(entityIDs) > 0 {
+			scopeNames = api.FilterEntitiesInScope(ctx, entityIDs)
+		}
+		if len(scopeNames) == 0 {
+			return []map[string]any{}, nil
+		}
+		parentFilter += fmt.Sprintf(` AND EXISTS (
+			SELECT 1 FROM cimplrcorpsaas.cashflow_proposal_item i
+			WHERE i.proposal_id = cimplrcorpsaas.audit_action_cashflow_proposal.proposal_id
+			  AND COALESCE(i.is_deleted, false) = false
+			  AND i.entity_name = ANY($%d::text[])
+		)`, len(args)+1)
+		args = append(args, scopeNames)
+	}
 	q := fmt.Sprintf(`
 		SELECT
 			COALESCE(action_id::text,   '') AS audit_id,
@@ -194,13 +210,23 @@ func queryCashProjectionAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs
 // parentID is plan_id from /cash/fund-planning/summary (e.g. "plan-1783403924162").
 // Audit rows are keyed by group_id, so we join fund_plan_groups to resolve plan_id.
 func queryCashFundPlanAudit(ctx context.Context, pool *pgxpool.Pool, entityIDs []string, limit int, offset int, parentID string) ([]map[string]any, error) {
-	_ = entityIDs
 	args := []any{limit, offset}
 
 	planFilter := ""
 	if parentID != "" {
 		planFilter = fmt.Sprintf("AND g.plan_id = $%d", len(args)+1)
 		args = append(args, parentID)
+	}
+	if !api.IsAdminOverride(ctx) {
+		scopeNames := api.FilterEntitiesInScope(ctx, append(append([]string{}, api.GetEntityNamesFromCtx(ctx)...), api.GetEntityIDsFromCtx(ctx)...))
+		if len(entityIDs) > 0 {
+			scopeNames = api.FilterEntitiesInScope(ctx, entityIDs)
+		}
+		if len(scopeNames) == 0 {
+			return []map[string]any{}, nil
+		}
+		planFilter += fmt.Sprintf(" AND g.entity_name = ANY($%d::text[])", len(args)+1)
+		args = append(args, scopeNames)
 	}
 
 	q := fmt.Sprintf(`
@@ -278,9 +304,16 @@ func queryInvestmentOnboardBatchInfo(ctx context.Context, pool *pgxpool.Pool, en
 	} else {
 		parentFilter = "WHERE 1=1"
 	}
-	if !api.IsAdminOverride(ctx) && api.GetUserIDFromCtx(ctx) != "" {
+	if !api.IsAdminOverride(ctx) {
+		if len(entityIDs) > 0 && len(api.FilterEntitiesInScope(ctx, entityIDs)) == 0 {
+			return []map[string]any{}, nil
+		}
+		scopeNames := api.FilterEntitiesInScope(ctx, append(append([]string{}, api.GetEntityNamesFromCtx(ctx)...), api.GetEntityIDsFromCtx(ctx)...))
+		if len(scopeNames) == 0 {
+			return []map[string]any{}, nil
+		}
 		parentFilter += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM investment.onboard_transaction ot WHERE ot.batch_id::text = ob.batch_id::text AND ot.entity_name = ANY($%d::text[]))`, len(args)+1)
-		args = append(args, api.GetEntityNamesFromCtx(ctx))
+		args = append(args, scopeNames)
 	}
 
 	q := fmt.Sprintf(`
@@ -314,7 +347,6 @@ type auditParent struct {
 	col   string
 }
 
-// auditParents maps each audit table to the business table its parent id points at.
 var auditParents = map[string]auditParent{
 	"cimplr.fd_closure_confirm_audit":              {"cimplr.fd_closure_confirm", "closure_confirm_id"},
 	"cimplr.fd_closure_initiate_audit":             {"cimplr.fd_closure_initiate", "closure_initiate_id"},
@@ -330,13 +362,24 @@ var auditParents = map[string]auditParent{
 	"investment.fd_tds_receipt_audit":              {"investment.fd_tds_receipt", "tds_id"},
 	"public.auditactionexposure":                   {"public.exposure_headers", "exposure_header_id"},
 	"public.auditactionforwardbooking":             {"public.forward_bookings", "system_transaction_id"},
+	"cimplrcorpsaas.auditactionsweepconfiguration": {"cimplrcorpsaas.sweepconfiguration", "sweep_id"},
 }
 
-// auditScopeFilter limits an audit query to parents in the caller's entity scope.
-// Audit tables whose parent has no known entity column are shown to admins only.
-func auditScopeFilter(ctx context.Context, pool *pgxpool.Pool, cfg auditTableConfig, argN int) (string, []any, bool) {
-	if api.IsAdminOverride(ctx) || api.GetUserIDFromCtx(ctx) == "" {
+func auditScopeFilter(ctx context.Context, pool *pgxpool.Pool, cfg auditTableConfig, entityIDs []string, argN int) (string, []any, bool) {
+	if api.IsAdminOverride(ctx) {
 		return "", nil, true
+	}
+	ids := entityIDs
+	if len(ids) == 0 {
+		ids = api.GetEntityIDsFromCtx(ctx)
+	}
+	ids = api.FilterEntitiesInScope(ctx, ids)
+	names := api.FilterEntitiesInScope(ctx, api.GetEntityNamesFromCtx(ctx))
+	if len(ids) == 0 && len(names) == 0 {
+		return "", nil, false
+	}
+	if clause, ok := indirectAuditScopeSQL(cfg.Table, argN); ok {
+		return clause, []any{ids, names}, true
 	}
 	p, ok := auditParents[cfg.Table]
 	if !ok {
@@ -358,7 +401,51 @@ func auditScopeFilter(ctx context.Context, pool *pgxpool.Pool, cfg auditTableCon
 	}
 	filter := fmt.Sprintf(` AND %s::text IN (SELECT %s::text FROM %s WHERE %s::text = ANY($%d::text[]) OR %s::text = ANY($%d::text[]))`,
 		cfg.ParentCol, p.col, p.table, entityCol, argN, entityCol, argN+1)
-	return filter, []any{api.GetEntityIDsFromCtx(ctx), api.GetEntityNamesFromCtx(ctx)}, true
+	return filter, []any{ids, names}, true
+}
+
+func indirectAuditScopeSQL(table string, argN int) (string, bool) {
+	id := argN
+	name := argN + 1
+	switch table {
+	case "investment.fd_audit_confirmation":
+		return fmt.Sprintf(` AND confirmation_id::text IN (
+			SELECT c.confirmation_id::text
+			FROM investment.fd_confirmation c
+			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			WHERE b.entity_id::text = ANY($%d::text[])
+			   OR COALESCE(b.entity_name, '') = ANY($%d::text[])
+			   OR b.entity_id::text = ANY($%d::text[])
+			   OR COALESCE(b.entity_name, '') = ANY($%d::text[])
+		)`, id, id, name, name), true
+	case "investment.fd_audit_cashflow_schedule":
+		return fmt.Sprintf(` AND fd_id::text IN (
+			SELECT fm.fd_id::text
+			FROM investment.fd_master fm
+			WHERE fm.entity_id::text = ANY($%d::text[])
+			   OR COALESCE(fm.entity_name, '') = ANY($%d::text[])
+			   OR fm.entity_id::text = ANY($%d::text[])
+			   OR COALESCE(fm.entity_name, '') = ANY($%d::text[])
+		)`, id, id, name, name), true
+	case "investment.fd_receipt_exception_audit":
+		return fmt.Sprintf(` AND exception_id::text IN (
+			SELECT e.exception_id::text
+			FROM investment.fd_receipt_exception e
+			JOIN investment.fd_receipt_reconcile_run rr ON rr.reconcile_run_id = e.reconcile_run_id
+			WHERE rr.entity_id::text = ANY($%d::text[])
+			   OR rr.entity_id::text = ANY($%d::text[])
+		)`, id, name), true
+	case "cimplrcorpsaas.auditactionsweepinitiation":
+		return fmt.Sprintf(` AND initiation_id::text IN (
+			SELECT i.initiation_id::text
+			FROM cimplrcorpsaas.sweep_initiation i
+			JOIN cimplrcorpsaas.sweepconfiguration c ON c.sweep_id = i.sweep_id
+			WHERE COALESCE(c.entity_name, '') = ANY($%d::text[])
+			   OR COALESCE(c.entity_name, '') = ANY($%d::text[])
+		)`, id, name), true
+	default:
+		return "", false
+	}
 }
 
 func parentColumns(ctx context.Context, pool *pgxpool.Pool, table string) (map[string]bool, error) {

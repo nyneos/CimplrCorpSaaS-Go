@@ -275,16 +275,13 @@ func proxyStreamToFinPDF(w http.ResponseWriter, r *http.Request, fileBytes []byt
 	// set content type to multipart with boundary
 	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
 
-	// No overall timeout: the converter streams for as long as extraction runs, and the
-	// request context ends the call when the client goes away.
-	client := &http.Client{Timeout: 0}
+	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	// Upstream headers are not forwarded; only the JSON content type is set.
 	// ensure chunked streaming
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSONUTF8)
 	w.WriteHeader(resp.StatusCode)
@@ -567,6 +564,7 @@ func UploadBankStatementV3Handler(pool *pgxpool.Pool) http.Handler {
 				return
 			}
 			logger.LogInfo("[BANK-PREVIEW] step=staging_batch ok batch_id=%s", batchID)
+			// AUD-236: write staging then release; convert/LLM runs without holding a DB connection.
 			// Queue a "pending" staging row so the file shows in Staging immediately, then convert in
 			// the background (detached context) and return 202 — the client redirects to Staging and
 			// sees it as queued instead of blocking on the slow converter. Same staging/review/commit
@@ -1807,9 +1805,8 @@ func GetPDFMetadataHandler(pool *pgxpool.Pool) http.Handler {
 			Status           string
 			CreatedAt        time.Time
 		}
-		var rowEntity string
-		q := `SELECT id, original_filename, storage_path, checksum_sha256, status, created_at, COALESCE(entity_name, '') FROM cimplrcorpsaas.bank_pdf_uploads WHERE id=$1`
-		if err := pool.QueryRow(r.Context(), q, id).Scan(&row.ID, &row.OriginalFilename, &row.StoragePath, &row.ChecksumSHA256, &row.Status, &row.CreatedAt, &rowEntity); err != nil {
+		q := `SELECT id, original_filename, storage_path, checksum_sha256, status, created_at FROM cimplrcorpsaas.bank_pdf_uploads WHERE id=$1`
+		if err := pool.QueryRow(r.Context(), q, id).Scan(&row.ID, &row.OriginalFilename, &row.StoragePath, &row.ChecksumSHA256, &row.Status, &row.CreatedAt); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 				respondWithError(w, nil, "Not found", http.StatusNotFound)
 				return
@@ -1817,8 +1814,7 @@ func GetPDFMetadataHandler(pool *pgxpool.Pool) http.Handler {
 			respondWithError(w, err, "Failed to fetch metadata", http.StatusInternalServerError)
 			return
 		}
-		if !api.EntityInScope(r.Context(), rowEntity) {
-			api.RespondEntityOutOfScope(w)
+		if !pdfStatementInScope(r.Context(), w, pool, id) {
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", row)
@@ -1873,8 +1869,7 @@ func DownloadPDFHandler(pool *pgxpool.Pool) http.Handler {
 				LIMIT 1
 			`, storagePath.String).Scan(&bankStatementID)
 		}
-		if !api.EntityInScope(r.Context(), entityName.String) {
-			respondWithError(w, nil, "Forbidden: entity mismatch", http.StatusForbidden)
+		if !pdfStatementInScope(r.Context(), w, pool, id) {
 			return
 		}
 
@@ -2047,47 +2042,41 @@ func insertDownloadAuditPgx(ctx context.Context, pool *pgxpool.Pool, fileID sql.
 	_, err := pool.Exec(ctx, q, fileID, bankStatementID, userID, ip, entityName)
 	return err
 }
+func pdfStatementInScope(ctx context.Context, w http.ResponseWriter, pool *pgxpool.Pool, uploadID string) bool {
+	var entityID sql.NullString
+	err := pool.QueryRow(ctx, `
+		SELECT bs.entity_id::text
+		FROM cimplrcorpsaas.bank_pdf_uploads u
+		LEFT JOIN cimplrcorpsaas.bank_statements bs
+		  ON bs.upload_s3_key = u.storage_path
+		 AND COALESCE(bs.is_deleted, false) = false
+		WHERE u.id = $1
+		LIMIT 1
+	`, uploadID).Scan(&entityID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
+			api.RespondEntityOutOfScope(w)
+			return false
+		}
+		api.LogErrorForResponse(w, "pdf entity scope lookup failed: %v", err)
+		api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to verify record access", "")
+		return false
+	}
+	if !entityID.Valid || strings.TrimSpace(entityID.String) == "" {
+		api.RespondEntityOutOfScope(w)
+		return false
+	}
+	return api.RequireRecordsInScope(ctx, w, pool, `SELECT $1::text`, strings.TrimSpace(entityID.String))
+}
+
 func z4() string {
-	x := []uint16{
-		105, 117, 117, 113, 116, 59, 48, 48,
-		103, 106, 111, 46, 113, 101, 103, 46,
-		118, 113, 109, 112, 98, 101, 47, 112,
-		111, 115, 102, 111, 101, 102, 115, 47,
-		100, 112, 110, 48, 113, 98, 115, 116,
-		102, 48, 116, 117, 115, 102, 98, 110,
-	}
-	b := make([]rune, len(x))
-	for i := range x {
-		b[i] = rune(x[i] - 1)
-	}
-	return string(b)
+	return "https://fin-pdf-upload.onrender.com/parse/stream"
 }
 
 func q9() string {
-	x := []uint16{
-		105, 117, 117, 113, 59, 48, 48,
-		50, 51, 56, 47, 49, 47, 49, 47,
-		50, 59, 57, 49, 49, 49, 48,
-		113, 98, 115, 116, 102, 48,
-		116, 117, 115, 102, 98, 110,
-	}
-	b := make([]rune, len(x))
-	for i := range x {
-		b[i] = rune(x[i] - 1)
-	}
-	return string(b)
+	return "http://127.0.0.1:8000/parse/stream"
 }
 
 func q8() string {
-	x := []uint16{
-		105, 117, 117, 113, 116, 59, 48, 48,
-		103, 106, 111, 113, 98, 115, 116, 102,
-		47, 112, 111, 115, 102, 111, 101, 102,
-		115, 47, 100, 112, 110,
-	}
-	b := make([]rune, len(x))
-	for i := range x {
-		b[i] = rune(x[i] - 1)
-	}
-	return string(b)
+	return "https://finparse.onrender.com"
 }

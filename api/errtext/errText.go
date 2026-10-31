@@ -1,7 +1,3 @@
-// Package errtext turns errors into text that is safe to put in a client response.
-// Errors raised by our own validation keep their message. Database, network and
-// context errors are logged in full against the response trace id and replaced by a
-// short description, so driver detail (SQL, constraint names, hosts) never reaches the client.
 package errtext
 
 import (
@@ -18,8 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Detail returns err's message when it is safe for the client, otherwise a short
-// description after logging the full error for w's trace id.
 func Detail(w http.ResponseWriter, err error) string {
 	if err == nil {
 		return ""
@@ -32,8 +26,6 @@ func Detail(w http.ResponseWriter, err error) string {
 	return safe
 }
 
-// Text is Detail for code that has no response writer in hand, such as per-row
-// results of a bulk request. Internal errors are logged without a trace id.
 func Text(err error) string {
 	if err == nil {
 		return ""
@@ -92,5 +84,4 @@ func classify(err error) (string, bool) {
 	return "", false
 }
 
-// driverSignatures catch driver errors that were flattened with %v instead of wrapped.
 var driverSignatures = []string{"(SQLSTATE ", "pq: ", "ERROR: ", "failed to connect to", "conn closed", "connection refused"}

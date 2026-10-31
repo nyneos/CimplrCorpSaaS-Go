@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// maxDashboardHorizonDays bounds client-supplied horizons that drive per-day loops.
 const maxDashboardHorizonDays = 3650
 
 // HomePageRequest carries optional knobs; entity scope comes from the v2 master middleware chain.

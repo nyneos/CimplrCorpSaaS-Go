@@ -3,6 +3,7 @@ package benchmarks
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -302,7 +303,7 @@ func GetIndexSeries() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetGraphChart(ctx, req.Index, req.Flag)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			points, parseErr := parseNSEGraphPoints(body)
@@ -325,7 +326,7 @@ func GetIndexSeries() http.HandlerFunc {
 			}
 			points, err := FetchIndexSeries(ctx, def, req.Flag)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -370,7 +371,7 @@ func GetIndexSnapshot() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetIndicesData(ctx, req.Index)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -413,7 +414,7 @@ func GetIndexConstituents() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetIndexConstituents(ctx, req.Index)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -455,7 +456,7 @@ func GetMarketMovers() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetGainerLoser(ctx, req.Index)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -482,7 +483,7 @@ func GetMarketStatus() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetMarketStatus(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -512,7 +513,7 @@ func GetMarketHeatmap() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetMarketHeatMap(ctx, heatmapType)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -539,7 +540,7 @@ func GetAdvanceDeclines() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetAdvanceDeclines(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -599,7 +600,7 @@ func Get52WeekHighLow() http.HandlerFunc {
 		case "nse":
 			body, err := nseGet52WeekHighLow(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -625,7 +626,7 @@ func GetMarketTurnover() http.HandlerFunc {
 		case "nse":
 			body, err := nseGetMarketTurnoverChart(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 			api.RespondWithPayload(w, true, "", map[string]interface{}{

@@ -2319,18 +2319,43 @@ func CimplrClosureDownload(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		if strings.TrimSpace(req.FileID) == "" && strings.TrimSpace(req.ClosureInitiateID) == "" && strings.TrimSpace(req.ClosureConfirmID) == "" {
+			api.RespondEntityOutOfScope(w)
+			return
+		}
 		if !api.RequireRecordsInScope(r.Context(), w, pool, `
-			SELECT COALESCE(ci.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_initiate ci
-			LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
-			WHERE ci.closure_initiate_id::text = $1
+			SELECT src.entity_id FROM (
+				SELECT COALESCE(ci.entity_id::text, m.entity_id::text) AS entity_id
+				FROM cimplr.fd_closure_initiate ci
+				LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
+				WHERE $1 <> '' AND ci.closure_initiate_id::text = $1
+				UNION ALL
+				SELECT COALESCE(cc.entity_id::text, m.entity_id::text)
+				FROM cimplr.fd_closure_confirm cc
+				LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
+				WHERE $2 <> '' AND cc.closure_confirm_id::text = $2
+				UNION ALL
+				SELECT COALESCE(ci.entity_id::text, cc.entity_id::text, mi.entity_id::text, mc.entity_id::text)
+				FROM cimplr.fd_closure_files f
+				LEFT JOIN cimplr.fd_closure_initiate ci ON ci.closure_initiate_id = f.closure_initiate_id
+				LEFT JOIN cimplr.fd_closure_confirm cc ON cc.closure_confirm_id = f.closure_confirm_id
+				LEFT JOIN investment.fd_master mi ON mi.fd_id = ci.fd_id
+				LEFT JOIN investment.fd_master mc ON mc.fd_id = cc.fd_id
+				WHERE $3 <> '' AND f.file_id::text = $3
+			) src
 			UNION ALL
-			SELECT COALESCE(cc.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_confirm cc
-			LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
-			WHERE cc.closure_confirm_id::text = $2`, req.ClosureInitiateID, req.ClosureConfirmID) {
+			SELECT NULL::text
+			WHERE NOT EXISTS (
+				SELECT 1 FROM cimplr.fd_closure_initiate ci WHERE $1 <> '' AND ci.closure_initiate_id::text = $1
+				UNION ALL
+				SELECT 1 FROM cimplr.fd_closure_confirm cc WHERE $2 <> '' AND cc.closure_confirm_id::text = $2
+				UNION ALL
+				SELECT 1 FROM cimplr.fd_closure_files f WHERE $3 <> '' AND f.file_id::text = $3
+			)`, req.ClosureInitiateID, req.ClosureConfirmID, req.FileID) {
 			return
 		}
 		if isCimplrPrematureClosureRoute(r.URL.Path) {
-			files, err := loadCimplrPrematureMainDownloadFiles(r.Context(), pool, req.ClosureConfirmID, req.UploadS3Key)
+			files, err := loadCimplrPrematureMainDownloadFiles(r.Context(), pool, req.ClosureConfirmID)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "download lookup failed: "+errtext.Detail(w, err))
 				return
@@ -2383,7 +2408,7 @@ func CimplrClosureUpload(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if !cimplrClosureKeyBelongs(req.UploadS3Key, req.ClosureInitiateID, req.ClosureConfirmID) {
-			api.RespondWithError(w, http.StatusBadRequest, "upload_s3_key does not belong to this closure")
+			api.RespondWithError(w, http.StatusBadRequest, "upload_s3_key is not under the expected prefix for this closure")
 			return
 		}
 		if !requireCimplrClosureParentScope(r.Context(), pool, w, req.ClosureInitiateID, req.ClosureConfirmID) {
@@ -4739,8 +4764,6 @@ func isCimplrPrematureClosureRoute(path string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(path)), "/closure/premature/")
 }
 
-// cimplrClosureKeyBelongs reports whether key was issued by the closure upload
-// path for this closure: one of its storage prefixes followed by the parent id.
 func cimplrClosureKeyBelongs(key, initiateID, confirmID string) bool {
 	key = strings.TrimSpace(key)
 	if key == "" || strings.Contains(key, "..") {
@@ -4760,12 +4783,38 @@ func cimplrClosureKeyBelongs(key, initiateID, confirmID string) bool {
 	return false
 }
 
-func loadCimplrPrematureMainDownloadFiles(ctx context.Context, pool *pgxpool.Pool, confirmID, uploadS3Key string) ([]map[string]interface{}, error) {
+func cimplrClosureKeyOwned(ctx context.Context, pool *pgxpool.Pool, key, initiateID, confirmID string) (bool, error) {
+	key = strings.TrimSpace(key)
+	if key == "" || strings.Contains(key, "..") {
+		return false, nil
+	}
+	var found int
+	err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM (
+			SELECT 1 FROM cimplr.fd_closure_files
+			WHERE BTRIM(upload_s3_key) = $1
+			  AND (
+				($2 <> '' AND closure_initiate_id::text = $2)
+				OR ($3 <> '' AND closure_confirm_id::text = $3)
+			  )
+			UNION ALL
+			SELECT 1 FROM cimplr.fd_closure_confirm
+			WHERE BTRIM(COALESCE(upload_s3_key, '')) = $1
+			  AND $3 <> ''
+			  AND closure_confirm_id::text = $3
+		) owned`, key, strings.TrimSpace(initiateID), strings.TrimSpace(confirmID)).Scan(&found)
+	if err != nil {
+		return false, err
+	}
+	return found > 0, nil
+}
+
+func loadCimplrPrematureMainDownloadFiles(ctx context.Context, pool *pgxpool.Pool, confirmID string) ([]map[string]interface{}, error) {
 	confirmID = strings.TrimSpace(confirmID)
-	requestedKey := strings.TrimSpace(uploadS3Key)
 	if confirmID == "" {
 		return []map[string]interface{}{}, nil
 	}
+	var uploadS3Key string
 	err := pool.QueryRow(ctx, `
 		SELECT COALESCE(upload_s3_key,'')
 		FROM cimplr.fd_closure_confirm
@@ -4780,9 +4829,6 @@ func loadCimplrPrematureMainDownloadFiles(ctx context.Context, pool *pgxpool.Poo
 		return nil, err
 	}
 	uploadS3Key = strings.TrimSpace(uploadS3Key)
-	if requestedKey != "" && requestedKey != uploadS3Key {
-		return []map[string]interface{}{}, nil
-	}
 	if uploadS3Key == "" {
 		return []map[string]interface{}{}, nil
 	}

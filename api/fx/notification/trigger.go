@@ -9,9 +9,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TriggerFX fires the notification dispatcher in a goroutine. The request context is
-// detached so the send survives the response, bounded by triggerFXTimeout, and a
-// panic in the dispatcher is recovered.
 func TriggerFX(
 	ctx context.Context,
 	pool *pgxpool.Pool,

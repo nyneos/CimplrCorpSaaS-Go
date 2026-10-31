@@ -3,6 +3,7 @@ package landingpage
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/dash/ticker"
 	"context"
 	"encoding/json"
@@ -123,7 +124,7 @@ func GetFXOpsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 		// Alert 3: High Unhedged Exposure (always show)
 		_, alertUnhedged, err := getUnhedgedExposuresChecked(ctx, db, entities, currencies, 0)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		highExposureAlert := highUnhedgedAlert(alertUnhedged)
@@ -133,7 +134,7 @@ func GetFXOpsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 		// KPI 1: Exposures Requiring Attention (Unhedged & Approaching)
 		unhedgedCount, unhedgedAmount, err := getUnhedgedExposuresChecked(ctx, db, entities, currencies, days)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -156,7 +157,7 @@ func GetFXOpsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 		// KPI 3: Overall Unhedged (Spot exposure)
 		_, overallUnhedgedUSD, err := getUnhedgedExposuresChecked(ctx, db, entities, currencies, 0) // All time
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		kpis = append(kpis, KPICard{
@@ -176,21 +177,21 @@ func GetFXOpsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 		// 3. EXPOSURE MATURITIES
 		exposures, err := getExposureMaturitiesChecked(ctx, db, entities, currencies)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
 		// 4. SETTLEMENT PERFORMANCE (Daily)
 		settlementSummary, err := getSettlementPerformanceChecked(ctx, db, entities)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
 		// 5. TOP 5 CURRENCY NET POSITIONS
 		netPositions, err := getTopCurrencyPositionsChecked(ctx, db, entities, 5)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -403,7 +404,6 @@ func getSettlementFailedAlert(ctx context.Context, db *pgxpool.Pool, entities []
 }
 
 // Helper: Get unhedged exposures count and amount
-// getUnhedgedExposures keeps the previous signature for landingPage/homePage.go.
 func getUnhedgedExposures(ctx context.Context, db *pgxpool.Pool, entities []string, currencies []string, days int) (int, float64) {
 	count, total, err := getUnhedgedExposuresChecked(ctx, db, entities, currencies, days)
 	if err != nil {
@@ -558,7 +558,6 @@ func getPendingSettlementToday(ctx context.Context, db *pgxpool.Pool, entities [
 }
 
 // Helper: Get exposure maturities (Next 7 days, Next 30 days, Total)
-// getExposureMaturities keeps the previous signature for landingPage/homePage.go.
 func getExposureMaturities(ctx context.Context, db *pgxpool.Pool, entities []string, currencies []string) []ExposureBlock {
 	blocks, err := getExposureMaturitiesChecked(ctx, db, entities, currencies)
 	if err != nil {
@@ -684,7 +683,6 @@ func getExposureMaturitiesChecked(ctx context.Context, db *pgxpool.Pool, entitie
 }
 
 // Helper: Get settlement performance summary - FIXED SQL INTERVAL SYNTAX
-// getSettlementPerformance keeps the previous signature for landingPage/homePage.go.
 func getSettlementPerformance(ctx context.Context, db *pgxpool.Pool, entities []string) SettlementSummary {
 	summary, err := getSettlementPerformanceChecked(ctx, db, entities)
 	if err != nil {
@@ -780,7 +778,6 @@ func getSettlementPerformanceChecked(ctx context.Context, db *pgxpool.Pool, enti
 }
 
 // Helper: Get top N currency net positions
-// getTopCurrencyPositions keeps the previous signature for landingPage/homePage.go.
 func getTopCurrencyPositions(ctx context.Context, db *pgxpool.Pool, entities []string, topN int) []NetPosition {
 	positions, err := getTopCurrencyPositionsChecked(ctx, db, entities, topN)
 	if err != nil {
@@ -879,7 +876,6 @@ func convertToINR(amount float64, currency string) float64 {
 		return amount
 	}
 	if err != nil || rate == 0 {
-		// No rate for this currency: leave it out instead of treating it as INR.
 		return 0
 	}
 	return amount * rate
@@ -890,7 +886,6 @@ func getTopTradeCurrencies() []NetPosition {
 	// Request full-rate map relative to INR
 	rates, err := ticker.RatesForBase("INR")
 	if err != nil || len(rates) == 0 {
-		// No rates loaded: show nothing rather than invented rates.
 		return []NetPosition{}
 	}
 

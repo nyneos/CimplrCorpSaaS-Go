@@ -665,14 +665,12 @@ func generateAllPeriods(startDate, endDate time.Time, viewType string) map[strin
 			allPeriods[d.Format(constants.DateFormat)] = 0.0
 		}
 	case "weekly":
-		// Step from the Monday of the start week so the end date's ISO week is never skipped.
 		weekStart := startDate.AddDate(0, 0, -((int(startDate.Weekday()) + 6) % 7))
 		for d := weekStart; !d.After(endDate); d = d.AddDate(0, 0, 7) {
 			year, week := d.ISOWeek()
 			allPeriods[fmt.Sprintf(constants.FormatYearWeek, year, week)] = 0.0
 		}
 	case "monthly":
-		// Step from the first of the month; AddDate on the 29th-31st would skip short months.
 		for d := time.Date(startDate.Year(), startDate.Month(), 1, 0, 0, 0, 0, startDate.Location()); !d.After(endDate); d = d.AddDate(0, 1, 0) {
 			allPeriods[d.Format(constants.DateFormatYearMonth)] = 0.0
 		}

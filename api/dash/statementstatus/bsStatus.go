@@ -3,6 +3,7 @@ package statementstatus
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -408,7 +409,7 @@ WHERE mba.is_deleted = false
 
 		rows, err := pgxPool.Query(ctx, accountsSQL, accArgs...)
 		if err != nil {
-			http.Error(w, "error querying accounts: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error querying accounts: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -419,7 +420,7 @@ WHERE mba.is_deleted = false
 			var uploadedAt *time.Time
 			var stmtsJSON []byte
 			if err := rows.Scan(&entityName, &bankName, &currency, &accountNumber, &status, &uploadedAt, &stmtsJSON); err != nil {
-				http.Error(w, "error scanning accounts: "+err.Error(), http.StatusInternalServerError)
+				http.Error(w, "error scanning accounts: "+errtext.Detail(w, err), http.StatusInternalServerError)
 				return
 			}
 			ar := AccountRow{
@@ -441,7 +442,7 @@ WHERE mba.is_deleted = false
 			accounts = append(accounts, ar)
 		}
 		if err := rows.Err(); err != nil {
-			http.Error(w, "error reading accounts: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error reading accounts: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 
@@ -491,7 +492,7 @@ ORDER BY percent DESC;
 		}
 		bankRows, err := pgxPool.Query(ctx, bankSQL, bankArgs...)
 		if err != nil {
-			http.Error(w, "error querying bank compliance: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error querying bank compliance: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		defer bankRows.Close()
@@ -500,13 +501,13 @@ ORDER BY percent DESC;
 		for bankRows.Next() {
 			var b BankComplianceItem
 			if err := bankRows.Scan(&b.Bank, &b.Total, &b.Completed, &b.Percent); err != nil {
-				http.Error(w, "error scanning bank compliance: "+err.Error(), http.StatusInternalServerError)
+				http.Error(w, "error scanning bank compliance: "+errtext.Detail(w, err), http.StatusInternalServerError)
 				return
 			}
 			bankCompliance = append(bankCompliance, b)
 		}
 		if err := bankRows.Err(); err != nil {
-			http.Error(w, "error reading bank compliance: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error reading bank compliance: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 
@@ -557,7 +558,7 @@ ORDER BY percent DESC;
 		}
 		entityRows, err := pgxPool.Query(ctx, entitySQL, entArgs...)
 		if err != nil {
-			http.Error(w, "error querying entity completeness: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error querying entity completeness: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		defer entityRows.Close()
@@ -569,7 +570,7 @@ ORDER BY percent DESC;
 			var completed int64
 			var percent float64
 			if err := entityRows.Scan(&name, &total, &completed, &percent); err != nil {
-				http.Error(w, "error scanning entity completeness: "+err.Error(), http.StatusInternalServerError)
+				http.Error(w, "error scanning entity completeness: "+errtext.Detail(w, err), http.StatusInternalServerError)
 				return
 			}
 			entityCompleteness = append(entityCompleteness, EntityCompletenessItem{
@@ -578,7 +579,7 @@ ORDER BY percent DESC;
 			})
 		}
 		if err := entityRows.Err(); err != nil {
-			http.Error(w, "error reading entity completeness: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error reading entity completeness: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 
@@ -593,7 +594,7 @@ ORDER BY percent DESC;
 		enc := json.NewEncoder(w)
 		enc.SetEscapeHTML(false)
 		if err := enc.Encode(resp); err != nil {
-			http.Error(w, "error encoding response: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "error encoding response: "+errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 	}

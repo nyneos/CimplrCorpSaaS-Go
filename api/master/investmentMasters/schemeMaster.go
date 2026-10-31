@@ -4,6 +4,8 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/utils"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	dependency "CimplrCorpSaas/internal/dependency"
@@ -1168,6 +1170,30 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.auditactionscheme
+			WHERE scheme_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.SchemeIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailedCapitalized)
@@ -1325,6 +1351,30 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.auditactionscheme
+			WHERE scheme_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.SchemeIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailedCapitalized)
@@ -1562,6 +1612,11 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		lq, err := utils.DecodeListQueryBody(r, nil)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			return
+		}
 		q := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.scheme_id)
@@ -1616,11 +1671,40 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.masterscheme m
 			LEFT JOIN latest_audit l ON l.scheme_id = m.scheme_id
 			LEFT JOIN history h ON h.scheme_id = m.scheme_id
-			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC	;
-		`
+			WHERE COALESCE(m.is_deleted,false)=false`
 
-		rows, err := pgxPool.Query(ctx, q)
+		args := []interface{}{}
+		argIdx := 1
+		if pat := utils.SearchPattern(lq.Search); pat != "" {
+			q += fmt.Sprintf(` AND (
+				COALESCE(m.scheme_name,'') ILIKE $%d ESCAPE '\' OR
+				COALESCE(m.isin,'') ILIKE $%d ESCAPE '\' OR
+				COALESCE(m.amc_name,'') ILIKE $%d ESCAPE '\' OR
+				COALESCE(m.internal_scheme_code,'') ILIKE $%d ESCAPE '\' OR
+				COALESCE(l.processing_status,'') ILIKE $%d ESCAPE '\'
+			)`, argIdx, argIdx, argIdx, argIdx, argIdx)
+			args = append(args, pat)
+			argIdx++
+		}
+		if lq.ProcessingStatus != "" {
+			q += fmt.Sprintf(" AND COALESCE(l.processing_status,'') = $%d", argIdx)
+			args = append(args, lq.ProcessingStatus)
+			argIdx++
+		}
+
+		total, err := utils.CountTotal(ctx, pgxPool, "SELECT COUNT(*) FROM ("+q+") c", args...)
+		if err != nil {
+			msg, status := getUserFriendlySchemeError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
+			return
+		}
+
+		q += `
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC` +
+			fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+		listArgs := append(append([]interface{}{}, args...), lq.Limit, lq.Offset)
+
+		rows, err := pgxPool.Query(ctx, q, listArgs...)
 		if err != nil {
 			msg, status := getUserFriendlySchemeError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, status, msg)
@@ -1629,7 +1713,7 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		fields := rows.FieldDescriptions()
-		out := make([]map[string]interface{}, 0, 1000)
+		out := make([]map[string]interface{}, 0, lq.Limit)
 		for rows.Next() {
 			vals, _ := rows.Values()
 			rec := make(map[string]interface{}, len(fields))
@@ -1648,7 +1732,7 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", out)
+		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"rows": out, "total": total})
 	}
 }
 

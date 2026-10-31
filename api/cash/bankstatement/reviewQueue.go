@@ -186,7 +186,6 @@ func GetReviewQueueHandler(pool *pgxpool.Pool) http.Handler {
 				if paymentChannel == "" {
 					paymentChannel = string(nr.Channel)
 				}
-				// Persisted after the response in one batch so later fetches already have it.
 				backfills = append(backfills, narrationBackfill{txnID: txnID, clean: nr.Clean, stemmed: nr.Stemmed, ref: nr.Ref, channel: string(nr.Channel)})
 			}
 
@@ -276,7 +275,6 @@ type narrationBackfill struct {
 	clean, stemmed, ref, channel string
 }
 
-// persistNarrationBackfills stores narrations derived on read in a single statement.
 func persistNarrationBackfills(pool *pgxpool.Pool, items []narrationBackfill) {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -344,6 +342,9 @@ func ReviewActionHandler(pool *pgxpool.Pool) http.Handler {
 		}
 
 		ctx := r.Context()
+		if !requireTxnScope(ctx, w, pool, []int64{req.TransactionID}) {
+			return
+		}
 		var opErr error
 
 		switch req.Action {
@@ -512,6 +513,9 @@ func SaveCorrectionHandler(pool *pgxpool.Pool) http.Handler {
 			correctedBy = session.Name
 		}
 
+		if !requireTxnScope(r.Context(), w, pool, []int64{req.TransactionID}) {
+			return
+		}
 		if err := applyCorrection(r.Context(), pool, req.TransactionID, req.CategoryID, correctedBy); err != nil {
 			writeErrJSON(w, err.Error(), http.StatusInternalServerError)
 			return

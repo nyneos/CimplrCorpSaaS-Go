@@ -13,6 +13,7 @@ import (
 	"CimplrCorpSaas/api"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/dash/ticker"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,8 +21,6 @@ import (
 	"CimplrCorpSaas/internal/logger"
 )
 
-// toUSD returns how many USD equal 1 unit of cur, using rates from rate.json.
-// A currency without a rate returns 0, so its amounts are left out rather than valued as USD.
 func toUSD(cur string) float64 {
 	rate, err := ticker.RateBetween(cur, "USD")
 	if err != nil || rate == 0 {
@@ -148,7 +147,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFun
 			var amount float64
 			var currency, deliveryPeriod string
 			if err := rows.Scan(&amount, &currency, &deliveryPeriod); err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 
@@ -164,7 +163,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *pgxpool.Pool) http.HandlerFun
 			bucketTotals[bucketKey] += usdAmount
 		}
 		if err := rows.Err(); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 
@@ -243,7 +242,7 @@ func GetForwardBookingsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 				&fcyAmount, &spotRate, &forwardRate, &marginBps, &lcyValue,
 				&maturityDate, &dealDate,
 			); err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
 
@@ -294,7 +293,7 @@ func GetForwardBookingsDashboard(db *pgxpool.Pool) http.HandlerFunc {
 			result = append(result, row)
 		}
 		if err := rows.Err(); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	jobs "CimplrCorpSaas/internal/jobs/cash"
+	"CimplrCorpSaas/internal/dbutil"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
@@ -34,13 +35,10 @@ func main() {
 		log.Println("[seed] no .env file found, using OS env")
 	}
 
-	sslMode := os.Getenv("DB_SSLMODE")
-	if sslMode == "" {
-		sslMode = "require"
-	}
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+	dsn := dbutil.BuildPostgresDSN(
 		os.Getenv("DB_USER"), os.Getenv("DB_PASSWORD"),
-		os.Getenv("DB_HOST"), os.Getenv("DB_PORT"), os.Getenv("DB_NAME"), sslMode,
+		os.Getenv("DB_HOST"), os.Getenv("DB_PORT"), os.Getenv("DB_NAME"),
+		dbutil.EffectiveSSLMode(os.Getenv("DB_HOST")),
 	)
 
 	ctx := context.Background()

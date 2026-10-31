@@ -4,12 +4,12 @@ import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/ctxutil"
 	dependency "CimplrCorpSaas/internal/dependency"
-	"CimplrCorpSaas/internal/logger"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -717,12 +717,16 @@ func BulkDeleteBankAccountAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			var stmtCount int
-			_ = pgxPool.QueryRow(r.Context(), `
+			if err := pgxPool.QueryRow(r.Context(), `
 				SELECT COUNT(*) FROM cimplrcorpsaas.bank_statements bs
 				JOIN masterbankaccount ma ON ma.account_number = bs.account_number
 				WHERE ma.account_id = $1 AND COALESCE(ma.is_deleted, false) = false
 				  AND COALESCE(bs.is_deleted, false) = false`, accountID,
-			).Scan(&stmtCount)
+			).Scan(&stmtCount); err != nil {
+				api.LogErrorForResponse(w, "bank account statement dependency %s: %v", accountID, err)
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
 			if stmtCount > 0 {
 				blocked = append(blocked, map[string]interface{}{
 					"id":         accountID,
@@ -753,9 +757,12 @@ func BulkDeleteBankAccountAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now()) RETURNING action_id`
 			var actionID string
 			err := pgxPool.QueryRow(r.Context(), query, accountID, req.Reason, requestedBy).Scan(&actionID)
-			if err == nil {
-				results = append(results, actionID)
+			if err != nil {
+				api.LogErrorForResponse(w, "bank account delete request %s: %v", accountID, err)
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
 			}
+			results = append(results, actionID)
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"created": results,
@@ -780,22 +787,98 @@ func BulkRejectBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		var rows pgx.Rows
-		var err error
+		ctx := r.Context()
+		makerRows, err := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactionbankaccount
+			WHERE account_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, pq.Array(req.AccountIDs))
+		if err != nil {
+			api.LogErrorForResponse(w, "bank account reject makers: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.LogErrorForResponse(w, "bank account reject maker scan: %v", err)
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		if err := makerRows.Err(); err != nil {
+			makerRows.Close()
+			api.LogErrorForResponse(w, "bank account reject makers: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
+			return
+		}
+		defer tx.Rollback(context.Background())
+		if _, err := tx.Exec(ctx, `
+			UPDATE masterbankaccount m SET
+				bank_id = COALESCE(m.old_bank_id, m.bank_id),
+				entity_id = COALESCE(m.old_entity_id, m.entity_id),
+				account_number = COALESCE(m.old_account_number, m.account_number),
+				account_nickname = COALESCE(m.old_account_nickname, m.account_nickname),
+				relationship = COALESCE(m.old_relationship, m.relationship),
+				currency = COALESCE(m.old_currency, m.currency),
+				iban = COALESCE(m.old_iban, m.iban),
+				branch_name = COALESCE(m.old_branch_name, m.branch_name),
+				addr1 = COALESCE(m.old_addr1, m.addr1),
+				addr2 = COALESCE(m.old_addr2, m.addr2),
+				city = COALESCE(m.old_city, m.city),
+				state = COALESCE(m.old_state, m.state),
+				postal = COALESCE(m.old_postal, m.postal),
+				status = COALESCE(m.old_status, m.status)
+			WHERE m.account_id IN (
+				SELECT account_id FROM auditactionbankaccount
+				WHERE account_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+			)`, pq.Array(req.AccountIDs)); err != nil {
+			api.LogErrorForResponse(w, "bank account reject revert: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
 		query := `UPDATE auditactionbankaccount SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (account_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id,account_id`
-		rows, err = pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.AccountIDs))
+		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, pq.Array(req.AccountIDs))
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
-		defer rows.Close()
 		var updated []string
 		for rows.Next() {
 			var id, accountID string
 			if err := rows.Scan(&id, &accountID); err != nil {
-				logger.LogError("BulkRejectBankAccountAuditActions: scan failed: %v", err)
+				rows.Close()
+				api.LogErrorForResponse(w, "BulkRejectBankAccountAuditActions: scan failed: %v", err)
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
 			}
 			updated = append(updated, id, accountID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			api.LogErrorForResponse(w, "BulkRejectBankAccountAuditActions: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		rows.Close()
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
+			return
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"updated": updated,
@@ -821,6 +904,38 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 		ctx := r.Context()
+		makerRows, err := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactionbankaccount
+			WHERE account_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, pq.Array(req.AccountIDs))
+		if err != nil {
+			api.LogErrorForResponse(w, "bank account approve makers: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.LogErrorForResponse(w, "bank account approve maker scan: %v", err)
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		if err := makerRows.Err(); err != nil {
+			makerRows.Close()
+			api.LogErrorForResponse(w, "bank account approve makers: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed)
@@ -828,9 +943,9 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 		defer tx.Rollback(context.Background())
 
-		// Handle audit rows that requested DELETE — blockers were already enforced at delete-request time.
-		delQuery := `UPDATE auditactionbankaccount SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2 WHERE (account_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL') AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, account_id`
-		deleted, accountIDsToDelete, err := collectActionAccountPairs(ctx, tx, delQuery, checkerBy, req.Comment, pq.Array(req.AccountIDs))
+		// Select pending deletes first. Status is flipped to APPROVED only after the soft-delete.
+		delQuery := `SELECT action_id, account_id FROM auditactionbankaccount WHERE account_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($2::text))`
+		deleted, accountIDsToDelete, err := collectActionAccountPairs(ctx, tx, delQuery, pq.Array(req.AccountIDs), checkerBy)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to approve delete requests: "+errtext.Detail(w, err))
 			return
@@ -859,6 +974,22 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to mark bank accounts as deleted: "+errtext.Detail(w, err))
 				return
 			}
+			// Cascade must succeed before audit is stamped APPROVED (same outer tx for soft-delete + audit).
+			for _, accountID := range accountIDsToDelete {
+				if err := dependency.CascadeDelete(ctx, pgxPool, "masterbankaccount", accountID, checkerBy); err != nil {
+					api.LogErrorForResponse(w, "BulkApproveBankAccountAuditActions: cascade delete %s failed: %v", accountID, err)
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to cascade bank account delete: "+errtext.Detail(w, err))
+					return
+				}
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE auditactionbankaccount
+				SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2
+				WHERE account_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL'`,
+				checkerBy, req.Comment, accountIDsToDelete); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to approve delete requests: "+errtext.Detail(w, err))
+				return
+			}
 		}
 
 		// Approve remaining audit actions (exclude those that were pending delete)
@@ -872,13 +1003,6 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+errtext.Detail(w, err))
 			return
 		}
-
-		// Non-core children each soft-delete in their own transaction.
-		for _, accountID := range accountIDsToDelete {
-			if err := dependency.CascadeDelete(ctx, pgxPool, "masterbankaccount", accountID, checkerBy); err != nil {
-				logger.LogError("BulkApproveBankAccountAuditActions: cascade delete %s failed: %v", accountID, err)
-			}
-		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
 			"updated": updated,
 			"deleted": deleted,
@@ -886,7 +1010,6 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 	}
 }
 
-// collectActionAccountPairs runs an UPDATE ... RETURNING action_id, account_id.
 func collectActionAccountPairs(ctx context.Context, tx pgx.Tx, query string, args ...interface{}) ([]string, []string, error) {
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
@@ -1196,7 +1319,6 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 // 		`
 // 		rows, err := pgxPool.Query(r.Context(), query)
 // 		if err != nil {
-// 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 // 			return
 // 		}
 // 		defer rows.Close()
@@ -1249,7 +1371,6 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 
 // 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 // 		if anyErr != nil {
-// 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, anyErr))
 // 			return
 // 		}
 // 		if results == nil {
@@ -1965,6 +2086,10 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		entityIDs := ctxutil.FromContext(ctx).EntityIDs
+		if !api.IsAdminOverride(ctx) && len(entityIDs) == 0 {
+			api.RespondEntityOutOfScope(w)
+			return
+		}
 		bankNames := api.GetBankNamesFromCtx(ctx)
 		currCodes := api.GetCurrencyCodesFromCtx(ctx)
 
@@ -2524,7 +2649,7 @@ func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		lq, _ := utils.DecodeListQueryBody(r, &req)
 		ctx := r.Context()
 
 		entityIDs := ctxutil.FromContext(ctx).EntityIDs
@@ -2533,28 +2658,14 @@ func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// If user has no accessible entities, return empty result
 		if len(entityIDs) == 0 {
-			api.RespondEnvelopeSuccess(w, "No bank accounts accessible with your current permissions", []map[string]interface{}{})
+			api.RespondEnvelopeSuccess(w, "No bank accounts accessible with your current permissions", map[string]interface{}{
+				"rows":  []map[string]interface{}{},
+				"total": 0,
+			})
 			return
-		} // build base query - include account_number and latest audit details plus action_id
-		baseQuery := `
-	SELECT 
-    a.account_id, 
-    a.account_number, 
-    a.status,
-    ent.entity_id,
-    ent.entity_name,
-    b.bank_name, 
-    a.account_nickname,
-    COALESCE(a.upload_s3_key, '') AS upload_s3_key,
-    COALESCE(aa.processing_status, '') AS processing_status,
-    COALESCE(aa.actiontype, '') AS action_type,
-    COALESCE(aa.action_id::text, '') AS action_id,
-    COALESCE(aa.requested_by, '') AS requested_by,
-    COALESCE(to_char(aa.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS requested_at,
-    COALESCE(aa.checker_by, '') AS checker_by,
-    COALESCE(to_char(aa.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS checker_at,
-    COALESCE(aa.checker_comment, '') AS checker_comment,
-    COALESCE(aa.reason, '') AS reason
+		}
+
+		fromSQL := `
 FROM masterbankaccount a
 LEFT JOIN masterbank b ON a.bank_id = b.bank_id
 LEFT JOIN LATERAL (
@@ -2594,12 +2705,89 @@ WHERE COALESCE(a.is_deleted, false) = false`
 			argIdx++
 		}
 
-		if len(filters) > 0 {
-			baseQuery += " AND " + strings.Join(filters, " AND ")
+		if pat := utils.SearchPattern(lq.Search); pat != "" {
+			col := strings.ToLower(lq.SearchColumn)
+			switch col {
+			case "account_id":
+				filters = append(filters, fmt.Sprintf("a.account_id::text ILIKE $%d ESCAPE '\\'", argIdx))
+			case "account_number":
+				filters = append(filters, fmt.Sprintf("COALESCE(a.account_number,'') ILIKE $%d ESCAPE '\\'", argIdx))
+			case "account_nickname":
+				filters = append(filters, fmt.Sprintf("COALESCE(a.account_nickname,'') ILIKE $%d ESCAPE '\\'", argIdx))
+			case "bank_name":
+				filters = append(filters, fmt.Sprintf("COALESCE(b.bank_name,'') ILIKE $%d ESCAPE '\\'", argIdx))
+			case "entity_name":
+				filters = append(filters, fmt.Sprintf("COALESCE(ent.entity_name,'') ILIKE $%d ESCAPE '\\'", argIdx))
+			case "processing_status":
+				filters = append(filters, fmt.Sprintf("COALESCE(aa.processing_status,'') ILIKE $%d ESCAPE '\\'", argIdx))
+			case "status":
+				filters = append(filters, fmt.Sprintf("COALESCE(a.status,'') ILIKE $%d ESCAPE '\\'", argIdx))
+			default:
+				filters = append(filters, fmt.Sprintf(`(
+					a.account_id::text ILIKE $%d ESCAPE '\' OR
+					COALESCE(a.account_number,'') ILIKE $%d ESCAPE '\' OR
+					COALESCE(a.account_nickname,'') ILIKE $%d ESCAPE '\' OR
+					COALESCE(b.bank_name,'') ILIKE $%d ESCAPE '\' OR
+					COALESCE(ent.entity_name,'') ILIKE $%d ESCAPE '\' OR
+					COALESCE(aa.processing_status,'') ILIKE $%d ESCAPE '\' OR
+					COALESCE(a.status,'') ILIKE $%d ESCAPE '\'
+				)`, argIdx, argIdx, argIdx, argIdx, argIdx, argIdx, argIdx))
+			}
+			args = append(args, pat)
+			argIdx++
 		}
-		baseQuery += "ORDER BY GREATEST(COALESCE(aa.requested_at, '1970-01-01'::timestamp), COALESCE(aa.checker_at, '1970-01-01'::timestamp)) DESC"
+		if lq.ProcessingStatus != "" {
+			filters = append(filters, fmt.Sprintf("COALESCE(aa.processing_status,'') = $%d", argIdx))
+			args = append(args, lq.ProcessingStatus)
+			argIdx++
+		}
 
-		rows, err := pgxPool.Query(ctx, baseQuery, args...)
+		if len(filters) > 0 {
+			fromSQL += " AND " + strings.Join(filters, " AND ")
+		}
+
+		total, err := utils.CountTotal(ctx, pgxPool, "SELECT COUNT(*) "+fromSQL, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+
+		defaultOrder := "ORDER BY GREATEST(COALESCE(aa.requested_at, '1970-01-01'::timestamp), COALESCE(aa.checker_at, '1970-01-01'::timestamp)) DESC"
+		acctSortCols := map[string]string{
+			"account_id":        "a.account_id",
+			"account_number":    "a.account_number",
+			"account_nickname":  "a.account_nickname",
+			"bank_name":         "b.bank_name",
+			"entity_name":       "ent.entity_name",
+			"status":            "a.status",
+			"processing_status": "aa.processing_status",
+		}
+		orderSQL := utils.OrderBySQL(lq.Sort, lq.SortDir, acctSortCols, defaultOrder)
+
+		baseQuery := `
+	SELECT 
+    a.account_id, 
+    a.account_number, 
+    a.status,
+    ent.entity_id,
+    ent.entity_name,
+    b.bank_name, 
+    a.account_nickname,
+    COALESCE(a.upload_s3_key, '') AS upload_s3_key,
+    COALESCE(aa.processing_status, '') AS processing_status,
+    COALESCE(aa.actiontype, '') AS action_type,
+    COALESCE(aa.action_id::text, '') AS action_id,
+    COALESCE(aa.requested_by, '') AS requested_by,
+    COALESCE(to_char(aa.requested_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS requested_at,
+    COALESCE(aa.checker_by, '') AS checker_by,
+    COALESCE(to_char(aa.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS checker_at,
+    COALESCE(aa.checker_comment, '') AS checker_comment,
+    COALESCE(aa.reason, '') AS reason
+` + fromSQL + `
+` + orderSQL + fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+		listArgs := append(append([]interface{}{}, args...), lq.Limit, lq.Offset)
+
+		rows, err := pgxPool.Query(ctx, baseQuery, listArgs...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
@@ -2733,8 +2921,9 @@ WHERE COALESCE(a.is_deleted, false) = false`
 		if out == nil {
 			out = make([]map[string]interface{}, 0)
 		}
-		// data must be the array itself — wrapping as {"data": out} nests under
-		// envelope data and breaks clients that read response.data.data as BankSummary[].
-		api.RespondEnvelopeSuccess(w, "Success", out)
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"rows":  out,
+			"total": total,
+		})
 	}
 }

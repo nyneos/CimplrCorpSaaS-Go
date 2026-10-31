@@ -5,10 +5,40 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"CimplrCorpSaas/api/constants"
 )
+
+// DateLayoutCache remembers the layout that successfully parsed a date within
+// one upload/parse pass so subsequent rows try that layout first (AUD-239).
+// One instance per upload; safe for concurrent use within that upload.
+type DateLayoutCache struct {
+	preferred atomic.Value // string
+}
+
+func (c *DateLayoutCache) remember(layout string) {
+	if c == nil || layout == "" {
+		return
+	}
+	c.preferred.Store(layout)
+}
+
+func (c *DateLayoutCache) preferredLayout() string {
+	if c == nil {
+		return ""
+	}
+	if v, ok := c.preferred.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// Parse tries the remembered layout first, then the full layout set.
+func (c *DateLayoutCache) Parse(s string) (time.Time, error) {
+	return parseDateWithCache(c, s)
+}
 
 // normalizeDateMonthAbbrev converts uppercase or lowercase 3-letter month abbreviations
 // to Go's expected title-case form (e.g. "FEB" → "Feb", "feb" → "Feb").
@@ -27,33 +57,9 @@ func normalizeDateMonthAbbrev(s string) string {
 	return s
 }
 
-// parseDate tries multiple date formats for CSV
-func parseDate(s string) (time.Time, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return time.Time{}, nil
-	}
-	// Normalize unicode dash variants often present in downloaded bank statements
-	// (e.g. "01–02–2026" with en-dash).
-	s = strings.ReplaceAll(s, "–", "-")
-	s = strings.ReplaceAll(s, "—", "-")
-	s = strings.ReplaceAll(s, "−", "-")
-	// Prefer dd/mm/yyyy for bank statements before falling back to the broader parser set.
-	if t, err := time.Parse("02/01/2006", s); err == nil {
-		return t, nil
-	}
-	if t, err := time.Parse("2/1/2006", s); err == nil {
-		return t, nil
-	}
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return time.Time{}, errors.New("empty date string")
-	}
-	// Normalize uppercase/lowercase month abbreviations so Go's time.Parse (which is case-sensitive)
-	// can match formats like "01.FEB 2026", "01-FEB-2026", "01/FEB/2026" → "01.Feb 2026" etc.
-	s = normalizeDateMonthAbbrev(s)
+func dateLayouts() []string {
 	// Critical: dd/mm/yyyy formats MUST come before mm/dd/yyyy to prevent misparsing Indian bank statements
-	layouts := []string{
+	return []string{
 		// dd/mm/yyyy variants (Indian/European format) - MUST BE FIRST
 		"02/01/2006", "02/01/06", "2/1/2006", "2/1/06",
 		"02/01/2006 03:04:05 PM", "02/01/06 03:04:05 PM", "2/1/2006 03:04:05 PM", "2/1/06 03:04:05 PM",
@@ -99,8 +105,56 @@ func parseDate(s string) (time.Time, error) {
 		// ISO-ish layouts
 		constants.DateFormat, constants.DateTimeFormat, time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04",
 	}
-	for _, layout := range layouts {
-		if t, err := time.Parse(layout, s); err == nil {
+}
+
+// parseDate tries multiple date formats for CSV (no cross-upload memory).
+func parseDate(s string) (time.Time, error) {
+	return parseDateWithCache(nil, s)
+}
+
+func parseDateWithCache(cache *DateLayoutCache, s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, nil
+	}
+	// Normalize unicode dash variants often present in downloaded bank statements
+	// (e.g. "01–02–2026" with en-dash).
+	s = strings.ReplaceAll(s, "–", "-")
+	s = strings.ReplaceAll(s, "—", "-")
+	s = strings.ReplaceAll(s, "−", "-")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, errors.New("empty date string")
+	}
+	// Normalize uppercase/lowercase month abbreviations so Go's time.Parse (which is case-sensitive)
+	// can match formats like "01.FEB 2026", "01-FEB-2026", "01/FEB/2026" → "01.Feb 2026" etc.
+	s = normalizeDateMonthAbbrev(s)
+
+	try := func(layout string) (time.Time, bool) {
+		t, err := time.Parse(layout, s)
+		if err != nil {
+			return time.Time{}, false
+		}
+		cache.remember(layout)
+		return t, true
+	}
+
+	// Prefer the layout that already worked for an earlier row in this upload.
+	if pref := cache.preferredLayout(); pref != "" {
+		if t, ok := try(pref); ok {
+			return t, nil
+		}
+	}
+	// Prefer dd/mm/yyyy for bank statements before falling back to the broader parser set.
+	if t, ok := try("02/01/2006"); ok {
+		return t, nil
+	}
+	if t, ok := try("2/1/2006"); ok {
+		return t, nil
+	}
+
+	for _, layout := range dateLayouts() {
+		if t, ok := try(layout); ok {
 			return t, nil
 		}
 	}
@@ -108,6 +162,7 @@ func parseDate(s string) (time.Time, error) {
 	if len(s) == 9 && s[2] == '-' && s[6] == '-' {
 		t, err := time.Parse("02-Jan-06", s)
 		if err == nil {
+			cache.remember("02-Jan-06")
 			y := t.Year()
 			if y < 100 {
 				t = t.AddDate(2000, 0, 0)
@@ -119,6 +174,7 @@ func parseDate(s string) (time.Time, error) {
 	// Assume current year; if the resulting date is more than 60 days in the future, use previous year.
 	for _, noYearLayout := range []string{"01/02", "1/2", "1/02", "01/2"} {
 		if t, err := time.Parse(noYearLayout, s); err == nil {
+			cache.remember(noYearLayout)
 			now := time.Now()
 			candidate := time.Date(now.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 			if candidate.After(now.AddDate(0, 0, 60)) {
@@ -136,10 +192,18 @@ func parseDateDDMMFirst(s string) (time.Time, error) {
 	return parseDate(s)
 }
 
+func parseDateDDMMFirstCached(cache *DateLayoutCache, s string) (time.Time, error) {
+	return parseDateWithCache(cache, s)
+}
+
 // tryParseDateWithExcelSerial first attempts normal string parsing, then falls back to
 // Excel serial date numbers (days since 1899-12-30 with the Excel 1900 leap-year bug).
 func tryParseDateWithExcelSerial(s string) time.Time {
-	if t, err := parseDateDDMMFirst(s); err == nil && !t.IsZero() {
+	return tryParseDateWithExcelSerialCached(nil, s)
+}
+
+func tryParseDateWithExcelSerialCached(cache *DateLayoutCache, s string) time.Time {
+	if t, err := parseDateWithCache(cache, s); err == nil && !t.IsZero() {
 		return t
 	}
 	if t, err := parseExcelSerialDate(s); err == nil {

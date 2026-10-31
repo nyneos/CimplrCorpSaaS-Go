@@ -191,6 +191,7 @@ func loadOAuthInboxes(ctx context.Context, pool *pgxpool.Pool) ([]oauthInboxRow,
 			&r.LastSync, &r.SentLastSync, &r.TokenExpires); err != nil {
 			return nil, err
 		}
+		r.RefreshToken = OpenSecret(r.RefreshToken)
 		if strings.TrimSpace(r.MailTransport) == "" {
 			r.MailTransport = "api"
 		}
@@ -254,6 +255,7 @@ func ensureOAuthAccessToken(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 	if err != nil {
 		return "", err
 	}
+	accessToken = OpenSecret(accessToken)
 	if accessToken != "" && expiresAt != nil && time.Now().Before(expiresAt.Add(-2*time.Minute)) {
 		return accessToken, nil
 	}
@@ -266,6 +268,14 @@ func ensureOAuthAccessToken(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 	if newRefresh == "" {
 		newRefresh = inbox.RefreshToken
 	}
+	sealedAccess, err := SealSecret(refreshed.AccessToken)
+	if err != nil {
+		return "", err
+	}
+	sealedRefresh, err := SealSecret(newRefresh)
+	if err != nil {
+		return "", err
+	}
 	exp := time.Now().UTC().Add(time.Duration(refreshed.ExpiresIn) * time.Second)
 	_, err = pool.Exec(ctx, `
 		UPDATE email_svc.inbox_config
@@ -275,7 +285,7 @@ func ensureOAuthAccessToken(ctx context.Context, pool *pgxpool.Pool, rt *mailrun
 		    oauth_scopes = COALESCE(NULLIF($5,''), oauth_scopes),
 		    updated_at = now()
 		WHERE inbox_id = $1::uuid
-	`, inbox.InboxID, refreshed.AccessToken, newRefresh, exp, refreshed.Scope)
+	`, inbox.InboxID, sealedAccess, sealedRefresh, exp, refreshed.Scope)
 	if err != nil {
 		return "", err
 	}

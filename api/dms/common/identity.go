@@ -27,14 +27,12 @@ func RequestIP(r *http.Request) string {
 	return api.ClientIPFromContext(r.Context())
 }
 
-// AuditMaker returns who raised the audit row, for maker != checker checks.
 func AuditMaker(ctx context.Context, tx pgx.Tx, auditTable, auditID string) (string, error) {
 	var maker string
 	err := tx.QueryRow(ctx, fmt.Sprintf(`SELECT COALESCE(requested_by, '') FROM %s WHERE audit_id = $1::uuid`, auditTable), auditID).Scan(&maker)
 	return maker, err
 }
 
-// RunInSavepoint runs fn in a savepoint so one failed item does not abort the batch.
 func RunInSavepoint(ctx context.Context, tx pgx.Tx, fn func(pgx.Tx) error) error {
 	sp, err := tx.Begin(ctx)
 	if err != nil {

@@ -7,12 +7,23 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 	emailjobs "CimplrCorpSaas/internal/jobs/email"
+	"CimplrCorpSaas/internal/secretaes"
 	"CimplrCorpSaas/internal/services/graphmail"
 	"CimplrCorpSaas/internal/services/imapmail"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// SealCredential encrypts a sensitive column value when SECRETS_ENC_KEY is set.
+func SealCredential(v string) (string, error) {
+	return secretaes.Seal(v)
+}
+
+// OpenCredential decrypts Seal output; legacy plaintext passes through.
+func OpenCredential(v string) string {
+	return secretaes.MustOpen(v)
+}
 
 // MailboxGoogleWorkspaceFields are typed Google DWD credential columns (not JSONB).
 type MailboxGoogleWorkspaceFields struct {
@@ -112,7 +123,11 @@ func LoadMailboxGoogleWorkspaceFields(ctx context.Context, pool *pgxpool.Pool, i
 		emailjobs.SQLGoogleWorkspaceServiceAccountEmail, emailjobs.SQLGoogleWorkspaceClientID,
 		emailjobs.SQLGoogleWorkspacePrivateKey), inboxID).Scan(
 		&f.WorkspaceTenantKey, &f.WorkspaceTenantLabel, &f.WorkspaceServiceAccountEmail, &f.WorkspaceClientID, &f.WorkspacePrivateKey)
-	return f, err
+	if err != nil {
+		return f, err
+	}
+	f.WorkspacePrivateKey = OpenCredential(f.WorkspacePrivateKey)
+	return f, nil
 }
 
 func (f MailboxGraphFields) ToGraphMailboxCreds() emailjobs.GraphMailboxCreds {
@@ -350,7 +365,11 @@ func LoadMailboxIMAPFields(ctx context.Context, pool *pgxpool.Pool, inboxID stri
 		&fields.Username, &fields.Password,
 		&fields.InboxFolder, &fields.SentFolder, &fields.UseTLS,
 	)
-	return mailbox, fields, err
+	if err != nil {
+		return mailbox, fields, err
+	}
+	fields.Password = OpenCredential(fields.Password)
+	return mailbox, fields, nil
 }
 
 func LoadMailboxGraphFields(ctx context.Context, pool *pgxpool.Pool, inboxID string) (MailboxGraphFields, error) {
@@ -362,5 +381,9 @@ func LoadMailboxGraphFields(ctx context.Context, pool *pgxpool.Pool, inboxID str
 	`, emailjobs.SQLGraphTenantKey, emailjobs.SQLGraphTenantLabel, emailjobs.SQLGraphTenantID,
 		emailjobs.SQLGraphClientID, emailjobs.SQLGraphSecret), inboxID).Scan(
 		&f.TenantKey, &f.TenantLabel, &f.TenantID, &f.ClientID, &f.ClientSecret)
-	return f, err
+	if err != nil {
+		return f, err
+	}
+	f.ClientSecret = OpenCredential(f.ClientSecret)
+	return f, nil
 }

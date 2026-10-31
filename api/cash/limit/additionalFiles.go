@@ -94,6 +94,7 @@ func limitAdditionalFilesConfig() additionalfiles.Config {
 		GetMany:          getLimitAdditionalFiles,
 		SoftDelete:       deleteLimitAdditionalFile,
 		SoftDeleteTx:     deleteLimitAdditionalFileTx,
+		ParentScopeSQL:   `SELECT NULLIF(btrim(l.entity_name::text), '') FROM (SELECT $1::text AS id) x LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id::text = x.id`,
 	})
 }
 
@@ -112,6 +113,7 @@ func utilizationAdditionalFilesConfig() additionalfiles.Config {
 		GetMany:          getUtilizationAdditionalFiles,
 		SoftDelete:       deleteUtilizationAdditionalFile,
 		SoftDeleteTx:     deleteUtilizationAdditionalFileTx,
+		ParentScopeSQL:   `SELECT NULLIF(btrim(l.entity_name::text), '') FROM (SELECT $1::text AS id) x LEFT JOIN cimplrcorpsaas.bank_limit_utilization u ON u.utilization_id::text = x.id LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id`,
 	})
 }
 

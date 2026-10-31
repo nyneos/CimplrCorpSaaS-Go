@@ -1655,8 +1655,6 @@ func GetFDMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY submitted_at DESC LIMIT 1`, fdID,
 			).Scan(&instanceID)
 
-			// Self-heal: if no instance but audit has PENDING row, create now.
-			// Concurrent detail reads serialise on a per-FD xact lock; the loser skips the heal.
 			if instanceID == "" {
 				instanceID = selfHealFDInstance(ctx, pgxPool, fdID, auditTable, keyCol, masterCols)
 			}
@@ -1679,9 +1677,6 @@ func GetFDMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// selfHealFDInstance creates the missing approval instance for a PENDING FD audit row.
-// A per-FD transaction advisory lock is held while the engine runs so two detail reads
-// cannot both create an instance; the one that does not get the lock skips the heal.
 func selfHealFDInstance(ctx context.Context, pgxPool *pgxpool.Pool, fdID, auditTable, keyCol string, masterCols map[string]bool) string {
 	if auditTable == "" {
 		return ""
@@ -3387,15 +3382,11 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&auditID)
 
 		if auditInsertErr != nil {
-			// The edit is staged only in this audit row; without it the edit does not exist.
 			api.LogError("[CashflowEdit] audit insert failed fd=%s cf=%s: %v", req.FDID, req.CashflowID, auditInsertErr)
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to record the cashflow edit request")
 			return
 		}
 
-		// ── Start the approval workflow before answering ─────────────────────
-		// Done synchronously so a failure is reported instead of leaving a PENDING
-		// edit with no workflow behind it.
 		{
 			p := cashflowEditEngineParams{
 				AuditID:    auditID,
@@ -3433,9 +3424,15 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.LogInfo("[CashflowEdit] Engine instance %s created for audit %s", instID, p.AuditID)
 					return nil
 				}
-				// No matrix configured — auto-approve immediately
 				api.LogInfo("[CashflowEdit] No matrix for FD_CASHFLOW_EDIT — auto-approving audit %s", p.AuditID)
-				if applyErr := applyApprovedCashflowEdit(bgCtx, pgxPool, p.AuditID, "system"); applyErr != nil {
+				autoActor := strings.TrimSpace(userEmail)
+				if strings.EqualFold(autoActor, "system") {
+					autoActor = strings.TrimSpace(api.GetUserIDFromCtx(ctx))
+				}
+				if autoActor == "" || strings.EqualFold(autoActor, "system") {
+					return fmt.Errorf("auto-approve actor is not a session user")
+				}
+				if applyErr := applyApprovedCashflowEdit(bgCtx, pgxPool, p.AuditID, autoActor); applyErr != nil {
 					return fmt.Errorf("auto-approve apply: %w", applyErr)
 				}
 				return nil
@@ -3480,16 +3477,12 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // It reads the audit row, applies the pending_fields to fd_cashflow_schedule,
 // marks the audit as APPROVED, and propagates downstream principal changes.
 func applyApprovedCashflowEdit(ctx context.Context, pool *pgxpool.Pool, auditID string, checkerEmail string) error {
-	// The edit, the audit approval stamp and the downstream propagation commit together.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("applyApprovedCashflowEdit: begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// 1. Read and lock the audit row. A pending edit (no-matrix path) or one the approval
-	// engine has just finalized to APPROVED can be applied; a REJECTED edit, or an
-	// APPROVED one superseded by a newer edit of the same cashflow, cannot be replayed.
 	var cashflowID, fdID, processingStatus, actionType, reasonRaw string
 	var requestedAt time.Time
 	err = tx.QueryRow(ctx,
@@ -3680,8 +3673,6 @@ func applyApprovedCashflowEdit(ctx context.Context, pool *pgxpool.Pool, auditID 
 	return tx.Commit(ctx)
 }
 
-// validateCashflowEditFields rejects edited cashflow values that cannot be correct:
-// non-numeric or negative amounts, TDS above interest, and unparseable dates.
 func validateCashflowEditFields(fields map[string]interface{}) error {
 	var interest, tds float64
 	hasInterest, hasTDS := false, false

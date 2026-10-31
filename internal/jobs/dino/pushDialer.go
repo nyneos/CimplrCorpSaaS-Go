@@ -10,9 +10,6 @@ import (
 
 var errPushPrivateAddress = errors.New("push endpoint resolves to a non-public address")
 
-// pushHTTPClient sends Web Push requests. Subscription endpoints come from browsers, so
-// the dialer refuses loopback, private, link-local and other non-public addresses after
-// DNS resolution, which also covers names that resolve to internal hosts.
 var pushHTTPClient = &http.Client{
 	Timeout: bpwSendTimeout,
 	Transport: &http.Transport{
@@ -47,7 +44,6 @@ func isPublicIP(ip net.IP) bool {
 		return false
 	}
 	if v4 := ip.To4(); v4 != nil {
-		// 100.64.0.0/10 carrier-grade NAT and 0.0.0.0/8.
 		if v4[0] == 100 && v4[1]&0xC0 == 64 || v4[0] == 0 {
 			return false
 		}

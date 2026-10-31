@@ -60,10 +60,27 @@ func HandleCheck(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		req.ActorUserID = api.GetUserIDFromCtx(r.Context())
+		if strings.TrimSpace(req.ActorUserID) == "" {
+			api.RespondEnvelopeError(w, http.StatusUnauthorized, "session user required", "UNAUTHORIZED")
+			return
+		}
 		req.HandlerName = "HandleCheck"
 		req.APIPath = "/policy-engine/policies/check"
-		if strings.TrimSpace(req.EntityCode) != "" && !api.EntityInScope(r.Context(), req.EntityCode) {
-			api.RespondEntityOutOfScope(w)
+		// Never accept caller-supplied policy payloads or forge actor/handler metadata.
+		req.Policies = nil
+		bodyEntity := strings.TrimSpace(req.EntityCode)
+		req.EntityCode = ""
+		if bodyEntity != "" && api.EntityInScope(r.Context(), bodyEntity) {
+			req.EntityCode = bodyEntity
+		}
+		if req.EntityCode == "" {
+			sessionNames := api.GetEntityNamesFromCtx(r.Context())
+			if len(sessionNames) == 1 {
+				req.EntityCode = strings.TrimSpace(sessionNames[0])
+			}
+		}
+		if req.EntityCode == "" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "entity must be one of your accessible entities", "VALIDATION_ERROR")
 			return
 		}
 		if req.Variables == nil {

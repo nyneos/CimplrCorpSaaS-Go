@@ -734,7 +734,12 @@ func DeleteMultipleTransactionCategoriesHandler(pool *pgxpool.Pool) http.Handler
 		}()
 		// Safety check: abort if any transactions currently reference these categories
 		var txnCount int
-		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions WHERE category_id = ANY($1)`, body.CategoryIDs).Scan(&txnCount); err != nil {
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM cimplrcorpsaas.bank_statement_transactions t
+			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
+			WHERE t.category_id = ANY($1)
+			  AND COALESCE(bs.is_deleted, false) = false`, body.CategoryIDs).Scan(&txnCount); err != nil {
 
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return

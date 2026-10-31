@@ -12,6 +12,7 @@ import (
 	"CimplrCorpSaas/api"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -80,7 +81,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE COALESCE(i.entity_name, '') = ANY($1)
 			  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($2)
 		`, allowedEntities, allowedCurrencies).Scan(&resp.TotalProposals); err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -97,7 +98,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE processing_status LIKE 'PENDING%'
 		`
 		if err := pgxPool.QueryRow(ctx, pendingQ, allowedEntities, allowedCurrencies).Scan(&resp.PendingApproval); err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -112,7 +113,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := pgxPool.Query(ctx, sumQ, allowedEntities, allowedCurrencies)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -121,7 +122,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var currency string
 			var amt float64
 			if err := rows.Scan(&currency, &amt); err != nil {
-				api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+				api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 			rate := 1.0
@@ -131,7 +132,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			total += math.Abs(amt) * rate
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		resp.ValuePendingNet = total
@@ -155,7 +156,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  	  AND UPPER(TRIM(COALESCE(p.currency_code, ''))) = ANY($4)
 			  )
 		`, year, month, allowedEntities, allowedCurrencies).Scan(&resp.ApprovedThisMonth); err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -220,7 +221,7 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY a.requested_at DESC NULLS LAST, p.proposal_id, i.item_id
 		`, allowedEntities, allowedCurrencies)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -234,7 +235,7 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var processingStatus *string
 
 			if err := rows.Scan(&proposalID, &itemID, &entityName, &departmentID, &expectedAmount, &currencyCode, &requestedBy, &requestedAt, &processingStatus); err != nil {
-				api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+				api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 
@@ -272,7 +273,7 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 
@@ -334,7 +335,7 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, allowedEntities, allowedCurrencies)
 		if err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 		defer rows.Close()
@@ -346,7 +347,7 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var entity, dept, currency, status *string
 			var amt float64
 			if err := rows.Scan(&entity, &dept, &amt, &currency, &status); err != nil {
-				api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+				api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
 			e := ""
@@ -381,7 +382,7 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			data[e][d][s] += converted
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 			return
 		}
 

@@ -125,11 +125,19 @@ func UpdateExposureHeadersLineItemsBucketing(pool *pgxpool.Pool) http.HandlerFun
 
 		req.UserID = api.GetUserIDFromCtx(ctx)
 		if req.UserID == "" {
+			if s := api.GetSessionFromCtx(ctx); s != nil {
+				req.UserID = s.UserID
+			}
+		}
+		if req.UserID == "" {
 			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
-		if !api.EntityInScope(ctx, exposureEntityForHeader(ctx, pool, req.ExposureHeaderID)) {
-			api.RespondEntityOutOfScope(w)
+		if !api.RequireRecordsInScope(ctx, w, pool, `
+			SELECT h.entity::text
+			FROM (SELECT $1::text AS id) x
+			LEFT JOIN exposure_headers h ON h.exposure_header_id::text = x.id
+		`, req.ExposureHeaderID) {
 			return
 		}
 

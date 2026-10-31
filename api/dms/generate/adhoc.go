@@ -1,12 +1,15 @@
 package generate
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/dms/common"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	dmsjobs "CimplrCorpSaas/internal/jobs/dms"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -54,11 +57,11 @@ func HandleAdhoc(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondEnvelopeError(w, http.StatusBadRequest, "document_template_id is required", "VALIDATION_ERROR")
 			return
 		}
-		actor := common.RequestActor(r, req.ActorID)
-		if bad := recipientsOutsideAllowList(append(append([]string{}, req.EmailTo...), req.EmailCc...)); len(bad) > 0 {
-			api.RespondEnvelopeError(w, http.StatusBadRequest, "recipient domain not allowed: "+strings.Join(bad, ", "), "VALIDATION_ERROR")
+		if strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context())) == "" {
+			api.RespondEnvelopeError(w, http.StatusUnauthorized, "user context missing", "UNAUTHORIZED")
 			return
 		}
+		actor := common.RequestActor(r, "")
 		requireApproval := true
 		storeS3 := true
 		if req.StoreS3 != nil {
@@ -66,6 +69,26 @@ func HandleAdhoc(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if !storeS3 && !req.StoreLocal && !req.SendEmail {
 			storeS3 = true
+		}
+		emailTemplateID := strings.TrimSpace(req.EmailTemplateID)
+		var emailTo, emailCc []string
+		var emailSubject, emailBody string
+		if req.SendEmail {
+			if emailTemplateID == "" {
+				api.RespondEnvelopeError(w, http.StatusBadRequest, "email_template_id is required to send email", "VALIDATION_ERROR")
+				return
+			}
+			var loadErr error
+			emailTo, emailCc, emailSubject, emailBody, loadErr = loadSavedTemplateMail(r.Context(), pool, emailTemplateID)
+			if loadErr != nil {
+				api.LogErrorForResponse(w, "dms adhoc template mail: %v", loadErr)
+				api.RespondEnvelopeError(w, http.StatusUnprocessableEntity, "email template has no saved recipients", "VALIDATION_ERROR")
+				return
+			}
+			if bad := recipientsOutsideAllowList(append(append([]string{}, emailTo...), emailCc...)); len(bad) > 0 {
+				api.RespondEnvelopeError(w, http.StatusBadRequest, "recipient domain not allowed: "+strings.Join(bad, ", "), "VALIDATION_ERROR")
+				return
+			}
 		}
 
 		result, err := dmsjobs.RunAdhocGeneration(r.Context(), pool, dmsjobs.AdhocRequest{
@@ -80,11 +103,11 @@ func HandleAdhoc(pool *pgxpool.Pool) http.HandlerFunc {
 			StoreLocal:         req.StoreLocal,
 			SendEmail:          req.SendEmail,
 			PackageMode:        req.PackageMode,
-			EmailTemplateID:    strings.TrimSpace(req.EmailTemplateID),
-			EmailTo:            req.EmailTo,
-			EmailCc:            req.EmailCc,
-			EmailSubject:       req.EmailSubject,
-			EmailBodyHTML:      req.EmailBodyHTML,
+			EmailTemplateID:    emailTemplateID,
+			EmailTo:            emailTo,
+			EmailCc:            emailCc,
+			EmailSubject:       emailSubject,
+			EmailBodyHTML:      emailBody,
 			RequireApproval:    &requireApproval,
 		})
 		if err != nil {
@@ -115,8 +138,73 @@ type adhocDecisionReq struct {
 	ActorID        string `json:"actor_id"`
 }
 
-// recipientsOutsideAllowList returns addresses whose domain is not in
-// DMS_EMAIL_ALLOWED_DOMAINS (comma separated). An unset list allows all.
+func loadSavedTemplateMail(ctx context.Context, pool *pgxpool.Pool, templateID string) (to, cc []string, subject, body string, err error) {
+	err = pool.QueryRow(ctx, `
+		SELECT COALESCE(subject, ''), COALESCE(NULLIF(body_html, ''), body_text, '')
+		FROM notification_svc.audit_template
+		WHERE template_id = $1
+		  AND processing_status = 'APPROVED'
+		  AND COALESCE(is_deleted, false) = false
+		ORDER BY requested_at DESC NULLS LAST
+		LIMIT 1
+	`, templateID).Scan(&subject, &body)
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT DISTINCT lower(btrim(src.email))
+		FROM (
+			SELECT u.email AS email
+			FROM notification_svc.template_recipient tr
+			JOIN users u ON (
+				(tr.recipient_type = 'USER' AND (
+					u.id::text = NULLIF(btrim(COALESCE(tr.recipient_user_id, '')), '')
+					OR (
+						position('@' in COALESCE(tr.recipient_user_id, '')) > 0
+						AND lower(u.email) = lower(btrim(tr.recipient_user_id))
+					)
+				))
+				OR (
+					tr.recipient_type = 'ROLE'
+					AND u.id IN (
+						SELECT ur2.user_id
+						FROM user_roles ur2
+						JOIN roles ro2 ON ro2.id = ur2.role_id
+						WHERE ro2.name = tr.recipient_role OR ro2.rolecode = tr.recipient_role
+					)
+				)
+			)
+			WHERE tr.template_id = $1 AND tr.is_active = true AND COALESCE(u.email, '') <> ''
+			UNION
+			SELECT tr.recipient_user_id
+			FROM notification_svc.template_recipient tr
+			WHERE tr.template_id = $1 AND tr.is_active = true
+			  AND position('@' in COALESCE(tr.recipient_user_id, '')) > 0
+		) src
+		WHERE position('@' in COALESCE(src.email, '')) > 0
+	`, templateID)
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var email string
+		if scanErr := rows.Scan(&email); scanErr != nil {
+			return nil, nil, "", "", scanErr
+		}
+		if email != "" {
+			to = append(to, email)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, nil, "", "", err
+	}
+	if len(to) == 0 {
+		return nil, nil, "", "", fmt.Errorf("email template has no saved recipients")
+	}
+	return to, cc, subject, body, nil
+}
+
 func recipientsOutsideAllowList(addrs []string) []string {
 	raw := strings.TrimSpace(os.Getenv("DMS_EMAIL_ALLOWED_DOMAINS"))
 	if raw == "" {

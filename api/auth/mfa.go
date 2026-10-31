@@ -32,11 +32,12 @@ const (
 
 // ── MFA Handlers ──────────────────────────────────────────────────────────────
 
-// MFASetupHandler generates a new TOTP secret for the logged-in caller.
-// When MFA is already active the current code is required.
-// POST /auth/mfa/setup  { "user_id": "...", "code": "123456" }
 func MFASetupHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !mfaSecretKeyConfigured() {
+			refuseMFASecretKeyMissing(w)
+			return
+		}
 		var req struct {
 			UserID string `json:"user_id"`
 			Code   string `json:"code"`
@@ -126,7 +127,6 @@ func MFASetupHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// MFAConfirmHandler verifies the first TOTP code and activates MFA.
 // POST /auth/mfa/confirm  { "user_id": "...", "code": "123456" }
 func MFAConfirmHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -188,11 +188,12 @@ func MFAConfirmHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// MFAVerifyHandler validates a TOTP code during login. On success the pending
-// session is marked fully logged in and returned.
-// POST /auth/mfa/verify  { "mfa_token": "...", "user_id": "...", "code": "123456" }
 func MFAVerifyHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !mfaSecretKeyConfigured() {
+			refuseMFASecretKeyMissing(w)
+			return
+		}
 		var req struct {
 			UserID   string `json:"user_id"`
 			MFAToken string `json:"mfa_token"`
@@ -265,7 +266,6 @@ func MFAVerifyHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// MFADisableHandler turns off MFA for the caller (requires a valid code).
 // POST /auth/mfa/disable  { "user_id": "...", "code": "123456" }
 func MFADisableHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -327,7 +327,6 @@ func MFADisableHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// MFAStatusHandler returns whether MFA is enabled for the caller.
 // POST /auth/mfa/status  { "user_id": "..." }
 func MFAStatusHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -375,18 +374,21 @@ func (a *AuthService) CompleteMFALogin(userID string) {
 	}
 }
 
-// completeMFASession marks the given pending session logged in when it is still live.
 func (a *AuthService) completeMFASession(pending *UserSession) *UserSession {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	live, ok := a.users[pending.SessionID]
 	if !ok || live != pending {
+		a.mu.Unlock()
 		return nil
 	}
 	live.IsLoggedIn = true
 	live.lastActivityUnix = time.Now().Unix()
+	userID := live.UserID
+	a.mu.Unlock()
 	if a.MaxLoginAttempts > 0 {
-		delete(a.failedAttempts, live.UserID)
+		a.lockoutMu.Lock()
+		delete(a.failedAttempts, userID)
+		a.lockoutMu.Unlock()
 	}
 	return live
 }

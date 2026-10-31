@@ -34,8 +34,6 @@ func runAutoReconcile(db *pgxpool.Pool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	// One cycle at a time across replicas and restarts. Transaction-scoped lock on a
-	// held connection, which stays correct on the Supabase transaction pooler.
 	lockConn, err := db.Acquire(ctx)
 	if err != nil {
 		logger.LogError("[fd_receipt_scheduler] acquire lock connection: %v", err)
@@ -98,7 +96,6 @@ func runAutoReconcile(db *pgxpool.Pool) {
 	}
 
 	for _, e := range entities {
-		// Do not pile up another run while one for this entity is still running.
 		var running bool
 		if err := db.QueryRow(ctx, `
 			SELECT EXISTS (SELECT 1 FROM investment.fd_receipt_reconcile_run

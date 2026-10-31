@@ -3,9 +3,11 @@ package emailinbox
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"CimplrCorpSaas/api"
 	emailcommon "CimplrCorpSaas/api/email/common"
+	middlewares "CimplrCorpSaas/api/middlewares"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -28,7 +30,11 @@ func HandleInboxList(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
-		userID := api.GetUserIDFromCtx(ctx)
+		userID := strings.TrimSpace(middlewares.GetUserIDFromContext(ctx))
+		if userID == "" {
+			emailcommon.RespondUnauthorized(w, "user context missing")
+			return
+		}
 		rows, err := pool.Query(ctx, `
 			SELECT i.inbox_id::text, i.mailbox_address, COALESCE(i.display_name,''),
 			       i.filters_json, i.poll_interval_secs, COALESCE(i.module,''),

@@ -20,8 +20,10 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/policyengine/common"
+	"CimplrCorpSaas/api/utils"
 	"CimplrCorpSaas/internal/dependency"
 	"CimplrCorpSaas/internal/logger"
 	"context"
@@ -394,7 +396,9 @@ func CreateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
-			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
+			if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail); err != nil {
+				logger.LogError("[CounterpartyHub] cancel pending instances failed: %v", err)
+			}
 			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:          "COUNTERPARTY_HUB",
 				TransactionType:     "COUNTERPARTY_CREATE",
@@ -508,8 +512,8 @@ func BulkApproveCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT requested_by FROM apibox_svc.audit_counterparty
 			WHERE counterparty_id=$1 AND processing_status LIKE 'PENDING%'
 			ORDER BY requested_at DESC LIMIT 1`, cpID).Scan(&requestedBy)
-			if requestedBy == userEmail {
-				errs = append(errs, cpID+": "+constants.ErrMakerCheckerSamePerson)
+			if governance.DenySelfApprovalCtx(ctx, requestedBy) {
+				errs = append(errs, cpID+": "+governance.ErrSelfApproval.Error())
 				continue
 			}
 
@@ -648,31 +652,126 @@ func activateCounterparty(ctx context.Context, pool *pgxpool.Pool,
 
 // ── GetCounterpartyAll ────────────────────────────────────────────────────────
 
-// GetCounterpartyAll handles GET /master/v2/counterparty-hub/all
-// Query params:
+// GetCounterpartyAll handles GET|POST /master/v2/counterparty-hub/all
+// Query / body params:
 //
-//	?type=BANK|EXCHANGE|DATA_PROVIDER|CCP_CSD|PAYMENT_NETWORK|ERP_SYSTEM  (optional — omit for all)
-//	?status=PENDING_APPROVAL  (optional)
+//	type=BANK|EXCHANGE|... (optional)
+//	status=... (lifecycle status, optional)
+//	limit, offset, search, search_column, sort, sort_dir, processing_status
 func GetCounterpartyAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cpType := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("type")))
-		statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
+		var bodyReq struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+		}
+		lq := utils.ListQueryFromRequest(r)
+		if r.Method == http.MethodPost || r.Method == http.MethodPut {
+			bodyLQ, err := utils.DecodeListQueryBody(r, &bodyReq)
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+				return
+			}
+			lq = bodyLQ
+		}
+		cpType := strings.ToUpper(strings.TrimSpace(bodyReq.Type))
+		if cpType == "" {
+			cpType = strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("type")))
+		}
+		statusFilter := strings.TrimSpace(bodyReq.Status)
+		if statusFilter == "" {
+			statusFilter = strings.TrimSpace(r.URL.Query().Get("status"))
+		}
 		ctx := r.Context()
 
-		where := "WHERE c.is_deleted = FALSE"
+		fromSQL := `
+			FROM apibox_svc.counterparty c
+			LEFT JOIN LATERAL (
+				SELECT *
+				FROM apibox_svc.audit_counterparty
+				WHERE counterparty_id = c.counterparty_id
+				ORDER BY GREATEST(
+					COALESCE(requested_at,'1970-01-01'::timestamptz),
+					COALESCE(checker_at,'1970-01-01'::timestamptz)
+				) DESC
+				LIMIT 1
+			) la ON TRUE
+			WHERE c.is_deleted = FALSE`
 		var args []interface{}
 		pos := 1
 		if cpType != "" {
-			where += fmt.Sprintf(" AND c.counterparty_type = $%d", pos)
+			fromSQL += fmt.Sprintf(" AND c.counterparty_type = $%d", pos)
 			args = append(args, cpType)
 			pos++
 		}
 		if statusFilter != "" {
-			where += fmt.Sprintf(" AND c.status = $%d", pos)
+			fromSQL += fmt.Sprintf(" AND c.status = $%d", pos)
 			args = append(args, statusFilter)
+			pos++
+		}
+		if pat := utils.SearchPattern(lq.Search); pat != "" {
+			col := strings.ToLower(lq.SearchColumn)
+			switch col {
+			case "counterparty_id":
+				fromSQL += fmt.Sprintf(" AND c.counterparty_id ILIKE $%d ESCAPE '\\'", pos)
+			case "counterparty_code":
+				fromSQL += fmt.Sprintf(" AND c.counterparty_code ILIKE $%d ESCAPE '\\'", pos)
+			case "counterparty_name":
+				fromSQL += fmt.Sprintf(" AND c.counterparty_name ILIKE $%d ESCAPE '\\'", pos)
+			case "counterparty_type":
+				fromSQL += fmt.Sprintf(" AND c.counterparty_type ILIKE $%d ESCAPE '\\'", pos)
+			case "country":
+				fromSQL += fmt.Sprintf(" AND c.country ILIKE $%d ESCAPE '\\'", pos)
+			case "primary_currency":
+				fromSQL += fmt.Sprintf(" AND c.primary_currency ILIKE $%d ESCAPE '\\'", pos)
+			case "processing_status":
+				fromSQL += fmt.Sprintf(" AND COALESCE(la.processing_status,'') ILIKE $%d ESCAPE '\\'", pos)
+			case "status":
+				fromSQL += fmt.Sprintf(" AND c.status ILIKE $%d ESCAPE '\\'", pos)
+			default:
+				fromSQL += fmt.Sprintf(` AND (
+					c.counterparty_id ILIKE $%d ESCAPE '\' OR
+					c.counterparty_code ILIKE $%d ESCAPE '\' OR
+					c.counterparty_name ILIKE $%d ESCAPE '\' OR
+					c.counterparty_type ILIKE $%d ESCAPE '\' OR
+					c.country ILIKE $%d ESCAPE '\' OR
+					c.primary_currency ILIKE $%d ESCAPE '\' OR
+					COALESCE(la.processing_status,'') ILIKE $%d ESCAPE '\' OR
+					c.status ILIKE $%d ESCAPE '\'
+				)`, pos, pos, pos, pos, pos, pos, pos, pos)
+			}
+			args = append(args, pat)
+			pos++
+		}
+		if lq.ProcessingStatus != "" {
+			fromSQL += fmt.Sprintf(" AND COALESCE(la.processing_status,'') = $%d", pos)
+			args = append(args, lq.ProcessingStatus)
+			pos++
 		}
 
-		q := fmt.Sprintf(`
+		total, err := utils.CountTotal(ctx, pgxPool, "SELECT COUNT(*) "+fromSQL, args...)
+		if err != nil {
+			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
+			return
+		}
+
+		defaultOrder := `ORDER BY GREATEST(
+				COALESCE(la.requested_at,'1970-01-01'::timestamptz),
+				COALESCE(la.checker_at,'1970-01-01'::timestamptz)
+			) DESC`
+		cpSortCols := map[string]string{
+			"counterparty_id":   "c.counterparty_id",
+			"counterparty_code": "c.counterparty_code",
+			"counterparty_name": "c.counterparty_name",
+			"counterparty_type": "c.counterparty_type",
+			"country":           "c.country",
+			"primary_currency":  "c.primary_currency",
+			"status":            "c.status",
+			"processing_status": "la.processing_status",
+		}
+		orderSQL := utils.OrderBySQL(lq.Sort, lq.SortDir, cpSortCols, defaultOrder)
+
+		q := `
 			SELECT
 				c.counterparty_id, c.counterparty_code, c.counterparty_name,
 				COALESCE(c.short_name,'')           AS short_name,
@@ -687,7 +786,6 @@ func GetCounterpartyAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.is_deleted,false)        AS is_deleted,
 				COALESCE(c.created_by,'')           AS created_by,
 				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'') AS created_at,
-				-- latest audit (LATERAL to avoid DISTINCT ON + GROUP BY conflict)
 				COALESCE(la.audit_id::text,'')      AS audit_id,
 				COALESCE(la.action_type,'')         AS action_type,
 				COALESCE(la.processing_status,'')   AS processing_status,
@@ -697,24 +795,11 @@ func GetCounterpartyAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'')  AS checker_at,
 				COALESCE(la.checker_comment,'')     AS checker_comment,
 				COALESCE(la.reason,'')              AS reason
-			FROM apibox_svc.counterparty c
-			LEFT JOIN LATERAL (
-				SELECT *
-				FROM apibox_svc.audit_counterparty
-				WHERE counterparty_id = c.counterparty_id
-				ORDER BY GREATEST(
-					COALESCE(requested_at,'1970-01-01'::timestamptz),
-					COALESCE(checker_at,'1970-01-01'::timestamptz)
-				) DESC
-				LIMIT 1
-			) la ON TRUE
-			%s
-			ORDER BY GREATEST(
-				COALESCE(la.requested_at,'1970-01-01'::timestamptz),
-				COALESCE(la.checker_at,'1970-01-01'::timestamptz)
-			) DESC`, where)
+			` + fromSQL + `
+			` + orderSQL + fmt.Sprintf(" LIMIT $%d OFFSET $%d", pos, pos+1)
+		listArgs := append(append([]interface{}{}, args...), lq.Limit, lq.Offset)
 
-		rows, err := pgxPool.Query(ctx, q, args...)
+		rows, err := pgxPool.Query(ctx, q, listArgs...)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, status, msg)
@@ -723,7 +808,7 @@ func GetCounterpartyAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		fds := rows.FieldDescriptions()
-		out := make([]map[string]interface{}, 0, 100)
+		out := make([]map[string]interface{}, 0, lq.Limit)
 		for rows.Next() {
 			vals, _ := rows.Values()
 			row := make(map[string]interface{}, len(fds))
@@ -740,8 +825,11 @@ func GetCounterpartyAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "row scan error: "+errtext.Detail(w, rows.Err()))
 			return
 		}
-		api.RespondWithPayload(w, true, "", out)
-		api.LogInfo("GetCounterpartyAll: returned %d rows (type=%q status=%q)", len(out), cpType, statusFilter)
+		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{
+			"rows":  out,
+			"total": total,
+		})
+		api.LogInfo("GetCounterpartyAll: returned %d/%d rows (type=%q status=%q)", len(out), total, cpType, statusFilter)
 	}
 }
 
@@ -1048,7 +1136,9 @@ func CreateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}()
 				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer bgCancel()
-				_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", id, uEmail)
+				if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", id, uEmail); err != nil {
+					logger.LogError("[CounterpartyHub] cancel pending instances failed: %v", err)
+				}
 				if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_CREATE",
 					RecordID: id, RecordTable: constants.ErrCounterpartyServiceTable,
@@ -1281,7 +1371,9 @@ func UpdateCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
-			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
+			if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail); err != nil {
+				logger.LogError("[CounterpartyHub] cancel pending instances failed: %v", err)
+			}
 			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_EDIT",
 				RecordID: cpID, RecordTable: constants.ErrCounterpartyServiceTable,
@@ -1345,16 +1437,16 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var rejected, errList []map[string]interface{}
 
 		for _, cpID := range req.CounterpartyIDs {
-			// Self-reject guard: skip if requester == checker
-			var requestedBy string
+			var requestedBy, actionType string
 			_ = pgxPool.QueryRow(ctx, `
-			SELECT requested_by FROM apibox_svc.audit_counterparty
+			SELECT COALESCE(requested_by, ''), COALESCE(action_type, '')
+			FROM apibox_svc.audit_counterparty
 			WHERE counterparty_id=$1 AND processing_status LIKE 'PENDING%'
-			ORDER BY requested_at DESC LIMIT 1`, cpID).Scan(&requestedBy)
-			if requestedBy == userEmail {
+			ORDER BY requested_at DESC LIMIT 1`, cpID).Scan(&requestedBy, &actionType)
+			if governance.DenySelfApprovalCtx(ctx, requestedBy) {
 				errList = append(errList, map[string]interface{}{
 					"counterparty_id": cpID, "success": false,
-					"error": constants.ErrMakerCheckerSamePerson,
+					"error": governance.ErrSelfApproval.Error(),
 				})
 				continue
 			}
@@ -1367,6 +1459,14 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			if actionRes.Acted {
+				if strings.EqualFold(actionType, "EDIT") {
+					if err := revertHub2CounterpartyEdit(ctx, pgxPool, cpID); err != nil {
+						errList = append(errList, map[string]interface{}{
+							"counterparty_id": cpID, "success": false, "error": "edit revert failed: " + errtext.Text(err),
+						})
+						continue
+					}
+				}
 				rejected = append(rejected, map[string]interface{}{
 					"counterparty_id": cpID, "success": true, "approval_engine": true,
 				})
@@ -1392,6 +1492,36 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Fetch type for typed audit stamp
 			var cpType string
 			_ = pgxPool.QueryRow(ctx, `SELECT counterparty_type FROM apibox_svc.counterparty WHERE counterparty_id=$1`, cpID).Scan(&cpType)
+
+			if strings.EqualFold(actionType, "EDIT") {
+				if _, err := tx.Exec(ctx, `
+					UPDATE apibox_svc.counterparty c SET
+						counterparty_name = COALESCE(a.old_counterparty_name, c.counterparty_name),
+						short_name = COALESCE(a.old_short_name, c.short_name),
+						country = COALESCE(a.old_country, c.country),
+						primary_currency = COALESCE(a.old_primary_currency, c.primary_currency),
+						lei = COALESCE(a.old_lei, c.lei),
+						rm_email = COALESCE(a.old_rm_email, c.rm_email),
+						notes = COALESCE(a.old_notes, c.notes),
+						updated_by = $2,
+						updated_at = now()
+					FROM apibox_svc.audit_counterparty a
+					WHERE a.counterparty_id = c.counterparty_id
+					  AND c.counterparty_id = $1
+					  AND UPPER(COALESCE(a.action_type, '')) = 'EDIT'
+					  AND UPPER(COALESCE(a.processing_status, '')) LIKE 'PENDING%'
+					  AND a.action_id = (
+						SELECT action_id FROM apibox_svc.audit_counterparty
+						WHERE counterparty_id = $1 AND processing_status LIKE 'PENDING%'
+						ORDER BY requested_at DESC LIMIT 1
+					)`, cpID, userEmail); err != nil {
+					_ = tx.Rollback(ctx)
+					errList = append(errList, map[string]interface{}{
+						"counterparty_id": cpID, "success": false, "error": "edit revert failed",
+					})
+					continue
+				}
+			}
 
 			tag, err1 := tx.Exec(ctx, `
 				UPDATE apibox_svc.audit_counterparty
@@ -1459,6 +1589,30 @@ func BulkRejectCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"results":        all,
 		})
 	}
+}
+
+func revertHub2CounterpartyEdit(ctx context.Context, pgxPool *pgxpool.Pool, cpID string) error {
+	_, err := pgxPool.Exec(ctx, `
+		UPDATE apibox_svc.counterparty c SET
+			counterparty_name = COALESCE(a.old_counterparty_name, c.counterparty_name),
+			short_name = COALESCE(a.old_short_name, c.short_name),
+			country = COALESCE(a.old_country, c.country),
+			primary_currency = COALESCE(a.old_primary_currency, c.primary_currency),
+			lei = COALESCE(a.old_lei, c.lei),
+			rm_email = COALESCE(a.old_rm_email, c.rm_email),
+			notes = COALESCE(a.old_notes, c.notes),
+			updated_at = now()
+		FROM (
+			SELECT *
+			FROM apibox_svc.audit_counterparty
+			WHERE counterparty_id = $1
+			  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+			ORDER BY requested_at DESC
+			LIMIT 1
+		) a
+		WHERE c.counterparty_id = $1`, cpID)
+	return err
 }
 
 // ── BulkDeleteCounterparty ────────────────────────────────────────────────────

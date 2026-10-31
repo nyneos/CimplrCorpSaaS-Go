@@ -229,6 +229,7 @@ func loadIMAPInboxes(ctx context.Context, pool *pgxpool.Pool) ([]imapInboxRow, e
 			&inboxUID, &sentUID); err != nil {
 			return nil, err
 		}
+		r.IMAP.Password = OpenSecret(r.IMAP.Password)
 		r.InboxLastUID = uint32(inboxUID)
 		r.SentLastUID = uint32(sentUID)
 		resolveIMAPRowDefaults(&r)

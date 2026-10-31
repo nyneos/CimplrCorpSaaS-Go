@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -68,16 +69,17 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 
 		entityFilter := ""
 		entityArgs := []interface{}{}
-		if req.EntityID != "" {
-			if !api.EntityInScope(r.Context(), req.EntityID) {
-				api.RespondEntityOutOfScope(w)
-				return
-			}
-			entityFilter = ` AND bs.entity_id = $1`
-			entityArgs = append(entityArgs, req.EntityID)
-		} else if !api.IsAdminOverride(r.Context()) {
-			entityFilter = ` AND bs.entity_id = ANY($1::text[])`
-			entityArgs = append(entityArgs, api.GetEntityIDsFromCtx(r.Context()))
+		scopeIDs := []string{}
+		if strings.TrimSpace(req.EntityID) != "" {
+			scopeIDs = api.FilterEntitiesInScope(ctx, []string{strings.TrimSpace(req.EntityID)})
+		} else {
+			scopeIDs = api.FilterEntitiesInScope(ctx, api.GetEntityIDsFromCtx(ctx))
+		}
+		if len(scopeIDs) == 0 {
+			entityFilter = ` AND false`
+		} else {
+			entityFilter = ` AND bs.entity_id = ANY($1::text[]) AND COALESCE(bs.entity_id, '') <> ''`
+			entityArgs = append(entityArgs, scopeIDs)
 		}
 
 		txnScopeJoin := `
@@ -194,9 +196,12 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 
 		// ── 5. Correction memory size ─────────────────────────────────
 		var correctionCount int
-		_ = pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM cimplrcorpsaas.categorization_corrections WHERE is_active = TRUE`,
-		).Scan(&correctionCount)
+		if len(scopeIDs) > 0 {
+			_ = pool.QueryRow(ctx,
+				`SELECT COUNT(*) FROM cimplrcorpsaas.categorization_corrections WHERE is_active = TRUE AND entity_id = ANY($1::text[]) AND COALESCE(entity_id, '') <> ''`,
+				scopeIDs,
+			).Scan(&correctionCount)
+		}
 
 		// ── 6. Last run timestamp ─────────────────────────────────────
 		var lastRunStr string
@@ -204,9 +209,18 @@ func SmartCatStatusHandler(pool *pgxpool.Pool) http.Handler {
 		var lastRun *time.Time
 
 		var lastRunTS time.Time
-		err = pool.QueryRow(ctx,
-			`SELECT MAX(classified_at) FROM cimplrcorpsaas.classification_audit_log WHERE classified_by = 'system'`,
-		).Scan(&lastRunTS)
+		if len(scopeIDs) > 0 {
+			err = pool.QueryRow(ctx, `
+				SELECT MAX(cal.classified_at)
+				FROM cimplrcorpsaas.classification_audit_log cal
+				JOIN cimplrcorpsaas.bank_statement_transactions t ON t.transaction_id = cal.transaction_id
+				JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
+				WHERE cal.classified_by = 'system'
+				  AND COALESCE(bs.is_deleted, false) = false
+				  AND bs.entity_id = ANY($1::text[])
+				  AND COALESCE(bs.entity_id, '') <> ''
+			`, scopeIDs).Scan(&lastRunTS)
+		}
 		if err == nil && !lastRunTS.IsZero() {
 			lastRun = &lastRunTS
 			lastRunStr = lastRunTS.UTC().Format(time.RFC3339)

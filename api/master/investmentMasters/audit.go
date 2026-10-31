@@ -1181,6 +1181,9 @@ func GetFolioAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args []interface{}
 		)
 		if strings.TrimSpace(req.FolioID) != "" {
+			if !api.RequireRecordsInScope(ctx, w, pgxPool, `SELECT entity_name::text FROM investment.masterfolio WHERE folio_id::text = $1`, req.FolioID) {
+				return
+			}
 			q = baseQ + `
 			WHERE a.folio_id = $1
 			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`
@@ -1280,6 +1283,9 @@ func GetDematAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args []interface{}
 		)
 		if strings.TrimSpace(req.DematID) != "" {
+			if !api.RequireRecordsInScope(ctx, w, pgxPool, `SELECT entity_name::text FROM investment.masterdemataccount WHERE demat_id::text = $1`, req.DematID) {
+				return
+			}
 			q = baseQ + `
 			WHERE a.demat_id = $1
 			ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC`

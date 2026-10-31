@@ -139,7 +139,8 @@ func processBreachedEye(ctx context.Context, pool *pgxpool.Pool, eye breachedEye
 	// Determine system actor user ID.
 	systemActorID := strings.TrimSpace(os.Getenv("APPROVAL_SYSTEM_USER_ID"))
 	if systemActorID == "" {
-		systemActorID = eye.submittedBy
+		api.LogError("[SLA WORKER] APPROVAL_SYSTEM_USER_ID unset; skipping eye=%s", eye.eyeID)
+		return
 	}
 
 	hasEscalation := (eye.escalationUserID != nil && *eye.escalationUserID != "") ||
@@ -280,11 +281,15 @@ func handleSequentialSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedE
 
 	if remaining == 0 {
 		// No escalation target and no remaining eyes — auto-reject the instance
-		if _, err = tx.Exec(ctx, `
+		instTag, err := tx.Exec(ctx, `
 			UPDATE uam.approval_instance
 			SET status = 'REJECTED', resolved_at = now(), resolved_by_email = 'SYSTEM'
-			WHERE instance_id = $1 AND status = 'PENDING'`, eye.instanceID); err != nil {
+			WHERE instance_id = $1 AND status = 'PENDING'`, eye.instanceID)
+		if err != nil {
 			api.LogError("[SLA WORKER] SeqSkip finalize instance=%s: %v", eye.instanceID, err)
+			return
+		}
+		if instTag.RowsAffected() != 1 {
 			return
 		}
 		// Write final audit: mark record as rejected by system due to SLA
@@ -360,11 +365,15 @@ func handleParallelSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedEye
 
 	if remaining == 0 {
 		// No escalation target and no remaining eyes — auto-reject the instance
-		if _, err = tx.Exec(ctx, `
+		instTag, err := tx.Exec(ctx, `
 			UPDATE uam.approval_instance
 			SET status = 'REJECTED', resolved_at = now(), resolved_by_email = 'SYSTEM'
-			WHERE instance_id = $1 AND status = 'PENDING'`, eye.instanceID); err != nil {
+			WHERE instance_id = $1 AND status = 'PENDING'`, eye.instanceID)
+		if err != nil {
 			api.LogError("[SLA WORKER] ParSkip finalize instance=%s: %v", eye.instanceID, err)
+			return
+		}
+		if instTag.RowsAffected() != 1 {
 			return
 		}
 		if err = finalizeRecord(ctx, tx, FinalizeParams{

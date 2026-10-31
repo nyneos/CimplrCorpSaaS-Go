@@ -7,10 +7,68 @@ import (
 	"regexp"
 	"strings"
 
+	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// lookupMasterBankAccountForUpload resolves masterbankaccount by account_number
+// and, when the request has entity scope, entity_id as well (AUD-294 upload path).
+func lookupMasterBankAccountForUpload(ctx context.Context, pool *pgxpool.Pool, accountNumber string) (entityID, bankName, accountName string, err error) {
+	accountNumber = strings.TrimSpace(accountNumber)
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
+	q := `
+		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
+		FROM public.masterbankaccount mba
+		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+		WHERE mba.account_number = $1
+		  AND COALESCE(mba.is_deleted, false) = false`
+	args := []interface{}{accountNumber}
+	if len(entityIDs) > 0 {
+		q += `
+		  AND mba.entity_id::text = ANY($2)`
+		args = append(args, entityIDs)
+	}
+	q += `
+		LIMIT 1`
+	err = pool.QueryRow(ctx, q, args...).Scan(&entityID, &bankName, &accountName)
+	return entityID, bankName, accountName, err
+}
+
+// lookupMasterBankAccountsByCandidates batch-resolves account candidates, scoped
+// to the caller's entity set when present (same dual key as AUD-294 list joins).
+func lookupMasterBankAccountsByCandidates(ctx context.Context, pool *pgxpool.Pool, candidates []string) (map[string]struct{ eID, bName, aName string }, error) {
+	out := map[string]struct{ eID, bName, aName string }{}
+	if len(candidates) == 0 {
+		return out, nil
+	}
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
+	q := `
+		SELECT mba.account_number, mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
+		FROM public.masterbankaccount mba
+		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+		WHERE mba.account_number = ANY($1)
+		  AND COALESCE(mba.is_deleted, false) = false`
+	args := []interface{}{candidates}
+	if len(entityIDs) > 0 {
+		q += `
+		  AND mba.entity_id::text = ANY($2)`
+		args = append(args, entityIDs)
+	}
+	rows, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var acNum, eID, bName, aName string
+		if sErr := rows.Scan(&acNum, &eID, &bName, &aName); sErr == nil {
+			out[acNum] = struct{ eID, bName, aName string }{eID, bName, aName}
+		}
+	}
+	return out, rows.Err()
+}
 
 // accountMatchScore represents a scored match between a file and an account
 type accountMatchScore struct {
@@ -49,14 +107,20 @@ func matchAccountNumberToFile(ctx context.Context, pool *pgxpool.Pool, filename,
 				}
 			}
 
-			// Verify against DB
+			// Verify against DB (entity-scoped when request has entity IDs)
 			var exists bool
-			err := pool.QueryRow(ctx, `
+			entityIDs := ctxutil.FromContext(ctx).EntityIDs
+			existsQ := `
 				SELECT EXISTS(
-					SELECT 1 FROM public.masterbankaccount 
-					WHERE account_number = $1 AND is_deleted = false
-				)
-			`, override).Scan(&exists)
+					SELECT 1 FROM public.masterbankaccount
+					WHERE account_number = $1 AND COALESCE(is_deleted, false) = false`
+			existsArgs := []interface{}{override}
+			if len(entityIDs) > 0 {
+				existsQ += ` AND entity_id::text = ANY($2)`
+				existsArgs = append(existsArgs, entityIDs)
+			}
+			existsQ += `)`
+			err := pool.QueryRow(ctx, existsQ, existsArgs...).Scan(&exists)
 			if err == nil && exists {
 				logger.LogError("[ACCOUNT-MATCHER] ✓ Direct override %s verified in DB (1000 points)", override)
 				return override
@@ -150,25 +214,40 @@ func matchAccountNumberToFile(ctx context.Context, pool *pgxpool.Pool, filename,
 				}
 			}
 
-			// Check against DB
+			// Check against DB (entity-scoped when request has entity IDs)
+			entityIDs := ctxutil.FromContext(ctx).EntityIDs
 			var matchedAccount string
-			err := pool.QueryRow(ctx, `
-				SELECT account_number FROM public.masterbankaccount 
-				WHERE is_deleted = false 
-				  AND account_number = $1
-				LIMIT 1
-			`, candidate).Scan(&matchedAccount)
+			exactQ := `
+				SELECT account_number FROM public.masterbankaccount
+				WHERE COALESCE(is_deleted, false) = false
+				  AND account_number = $1`
+			exactArgs := []interface{}{candidate}
+			if len(entityIDs) > 0 {
+				exactQ += `
+				  AND entity_id::text = ANY($2)`
+				exactArgs = append(exactArgs, entityIDs)
+			}
+			exactQ += `
+				LIMIT 1`
+			err := pool.QueryRow(ctx, exactQ, exactArgs...).Scan(&matchedAccount)
 			if err == nil && matchedAccount != "" {
 				addScore(matchedAccount, 350, fmt.Sprintf("full account '%s' in filename verified in DB", candidate))
 				logger.LogInfo("[ACCOUNT-MATCHER]  Filename candidate %s matched DB account %s (+350 points)", candidate, matchedAccount)
 			} else {
 				// Try suffix match
-				err = pool.QueryRow(ctx, `
-					SELECT account_number FROM public.masterbankaccount 
-					WHERE is_deleted = false 
-					  AND account_number LIKE '%' || $1
-					LIMIT 1
-				`, candidate).Scan(&matchedAccount)
+				suffixQ := `
+					SELECT account_number FROM public.masterbankaccount
+					WHERE COALESCE(is_deleted, false) = false
+					  AND account_number LIKE '%' || $1`
+				suffixArgs := []interface{}{candidate}
+				if len(entityIDs) > 0 {
+					suffixQ += `
+					  AND entity_id::text = ANY($2)`
+					suffixArgs = append(suffixArgs, entityIDs)
+				}
+				suffixQ += `
+					LIMIT 1`
+				err = pool.QueryRow(ctx, suffixQ, suffixArgs...).Scan(&matchedAccount)
 				if err == nil && matchedAccount != "" {
 					addScore(matchedAccount, 150, fmt.Sprintf("partial account '%s' suffix in filename, DB matched", candidate))
 					logger.LogInfo("[ACCOUNT-MATCHER]  Filename suffix %s matched DB account %s (+150 points)", candidate, matchedAccount)
@@ -301,28 +380,42 @@ func matchMaskedAccount(ctx context.Context, pool *pgxpool.Pool, maskedAccount s
 		}
 	}
 
-	// Query DB for accounts matching the suffix pattern
+	// Query DB for accounts matching the suffix pattern (entity-scoped when present)
+	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	var matchedAccount string
 	query := `
-		SELECT account_number FROM public.masterbankaccount 
-		WHERE is_deleted = false 
+		SELECT account_number FROM public.masterbankaccount
+		WHERE COALESCE(is_deleted, false) = false
 		  AND account_number LIKE '%' || $1
-		  AND LENGTH(account_number) = $2
-		LIMIT 1
-	`
-	err := pool.QueryRow(ctx, query, suffix, expectedLen).Scan(&matchedAccount)
+		  AND LENGTH(account_number) = $2`
+	args := []interface{}{suffix, expectedLen}
+	if len(entityIDs) > 0 {
+		query += `
+		  AND entity_id::text = ANY($3)`
+		args = append(args, entityIDs)
+	}
+	query += `
+		LIMIT 1`
+	err := pool.QueryRow(ctx, query, args...).Scan(&matchedAccount)
 	if err == nil && matchedAccount != "" {
 		logger.LogInfo("[ACCOUNT-MATCHER] masked %s matched DB account %s", masked, matchedAccount)
 		return matchedAccount
 	}
 
 	// Fallback: try without length constraint (in case account has dashes/spaces)
-	err = pool.QueryRow(ctx, `
-		SELECT account_number FROM public.masterbankaccount 
-		WHERE is_deleted = false 
-		  AND account_number LIKE '%' || $1
-		LIMIT 1
-	`, suffix).Scan(&matchedAccount)
+	fallbackQ := `
+		SELECT account_number FROM public.masterbankaccount
+		WHERE COALESCE(is_deleted, false) = false
+		  AND account_number LIKE '%' || $1`
+	fallbackArgs := []interface{}{suffix}
+	if len(entityIDs) > 0 {
+		fallbackQ += `
+		  AND entity_id::text = ANY($2)`
+		fallbackArgs = append(fallbackArgs, entityIDs)
+	}
+	fallbackQ += `
+		LIMIT 1`
+	err = pool.QueryRow(ctx, fallbackQ, fallbackArgs...).Scan(&matchedAccount)
 	if err == nil && matchedAccount != "" {
 		logger.LogInfo("[ACCOUNT-MATCHER] masked %s matched DB account %s (no length constraint)", masked, matchedAccount)
 		return matchedAccount

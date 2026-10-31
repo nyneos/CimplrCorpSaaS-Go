@@ -564,7 +564,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
-		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.bank_limit WHERE limit_id::text = $1`, req.LimitID) {
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT l.entity_name::text FROM (SELECT $1::text AS id) x LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id::text = x.id`, req.LimitID) {
 			return
 		}
 
@@ -846,7 +846,7 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
-		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.bank_limit WHERE limit_id::text = ANY($1)`, req.LimitIDs) {
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT l.entity_name::text FROM unnest($1::text[]) AS id LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id::text = id`, req.LimitIDs) {
 			return
 		}
 
@@ -1205,7 +1205,7 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
-		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.bank_limit WHERE limit_id::text = ANY($1)`, req.LimitIDs) {
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT l.entity_name::text FROM unnest($1::text[]) AS id LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id::text = id`, req.LimitIDs) {
 			return
 		}
 
@@ -1425,7 +1425,7 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
-		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT entity_name::text FROM cimplrcorpsaas.bank_limit WHERE limit_id::text = ANY($1)`, req.LimitIDs) {
+		if !api.RequireRecordsInScope(r.Context(), w, pgxPool, `SELECT l.entity_name::text FROM unnest($1::text[]) AS id LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id::text = id`, req.LimitIDs) {
 			return
 		}
 

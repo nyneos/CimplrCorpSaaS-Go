@@ -32,12 +32,17 @@ func NewPolicyEngineServer(pool *pgxpool.Pool, port string) (*http.Server, *pgxp
 		dbPort := os.Getenv("DB_PORT")
 		name := os.Getenv("DB_NAME")
 		if user != "" && pass != "" && host != "" && dbPort != "" && name != "" {
-			sslMode := dbutil.EffectiveSSLMode(host)
-			dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
+			dsn := dbutil.BuildPostgresDSN(user, pass, host, dbPort, name, dbutil.EffectiveSSLMode(host))
 			var err error
 			pool, err = dbutil.NewTracedPool(context.Background(), dsn, serviceName)
 			if err != nil {
 				return nil, nil, false, fmt.Errorf("policyengine pgxpool connect: %w", err)
+			}
+			pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := pool.Ping(pingCtx); err != nil {
+				pool.Close()
+				return nil, nil, false, fmt.Errorf("policyengine database ping failed: %w", err)
 			}
 			ownsPool = true
 		}

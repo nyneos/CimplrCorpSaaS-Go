@@ -11,20 +11,16 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/api/dash/ticker"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// maxDashboardHorizonDays bounds client-supplied horizons that drive per-day loops.
 const maxDashboardHorizonDays = 3650
 
-// forecastItemCurrencyFilter filters on the line item's currency, falling back to the
-// proposal currency when the item has none.
 const forecastItemCurrencyFilter = " AND UPPER(TRIM(COALESCE(NULLIF(cpi.currency_code, ''), cp.currency_code, ''))) = ANY($%d)"
 
-// toUSD returns how many USD equal 1 unit of cur, using rates from rate.json.
-// A currency without a rate returns 0, so its amounts are left out rather than valued as USD.
 func toUSD(cur string) float64 {
 	rate, err := ticker.RateBetween(cur, "USD")
 	if err != nil || rate == 0 {
@@ -150,12 +146,12 @@ func GetCashflowForecastHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		kpis, err := GetForecastKPIs(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		rows, err := GetForecastRows(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{
@@ -417,7 +413,6 @@ func GetForecastDailyRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon in
 		if err := mrows.Scan(&year, &month, &ctype, &cur, &maturityDate, &amt); err != nil {
 			return out, err
 		}
-		// If the item has a maturity_date, use its day-of-month as the effective date for that projection (e.g., 16 => 16th of each month)
 		// Otherwise fall back to distributing evenly across the month (legacy behaviour).
 		firstOfMonth := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
 		daysInMonth := time.Date(year, time.Month(month)+1, 0, 0, 0, 0, 0, time.UTC).Day()
@@ -559,7 +554,7 @@ func GetForecastDailyHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastDailyRows(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": rows})
@@ -598,7 +593,7 @@ func GetForecastKPIsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		kpis, err := GetForecastKPIs(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"kpis": kpis})
@@ -636,7 +631,7 @@ func GetForecastRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastRows(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": rows})
@@ -720,7 +715,7 @@ func GetForecastCategorySumsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		sums, err := GetForecastCategorySums(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"category_sums": sums})

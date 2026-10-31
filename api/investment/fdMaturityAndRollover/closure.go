@@ -161,7 +161,6 @@ type maturityDashboardEnvelope struct {
 	maturityDashboardRequest
 }
 
-// maxNearMaturityDaysAhead caps the look-ahead window of GetFDsNearMaturity.
 const maxNearMaturityDaysAhead = 3650
 
 func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {

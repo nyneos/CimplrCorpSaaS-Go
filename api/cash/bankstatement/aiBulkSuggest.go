@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,8 +74,12 @@ func AiBulkSuggestHandler(pool *pgxpool.Pool) http.Handler {
 		}()
 
 		ctx := r.Context()
-		if req.EntityID != "" && !api.EntityInScope(ctx, req.EntityID) {
-			api.RespondEntityOutOfScope(w)
+		req.EntityID = strings.TrimSpace(req.EntityID)
+		if req.EntityID == "" {
+			api.RespondEnvelopeError(w, http.StatusBadRequest, "entity_id is required", "ENTITY_REQUIRED")
+			return
+		}
+		if !api.RequireRecordsInScope(ctx, w, pool, `SELECT NULLIF(btrim($1::text), '')`, req.EntityID) {
 			return
 		}
 		inputs, totalTxns, err := loadBulkSuggestInputs(ctx, pool, req.EntityID)
@@ -96,6 +101,11 @@ func AiBulkSuggestHandler(pool *pgxpool.Pool) http.Handler {
 
 		started = true
 		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.LogError("[AI-BULK-JOB] job %s panic: %v", jobID, rec)
+				}
+			}()
 			defer aiBulkJobsRunning.Delete(sessionUID)
 			runAiBulkSuggestJob(pool, jobID, sessionUID, inputs, totalTxns)
 		}()
@@ -141,10 +151,10 @@ func AiBulkSuggestStatusHandler(pool *pgxpool.Pool) http.Handler {
 }
 
 func loadBulkSuggestInputs(ctx context.Context, pool *pgxpool.Pool, entityID string) ([]cat.BulkNarrationInput, int, error) {
-	var query string
-	var args []interface{}
-	if entityID != "" {
-		query = `
+	if strings.TrimSpace(entityID) == "" {
+		return nil, 0, fmt.Errorf("entity_id is required")
+	}
+	query := `
 			SELECT q.transaction_id,
 			       COALESCE(t.narration_clean, t.description, q.transaction_id::text),
 			       COALESCE(t.payment_channel, 'UNKNOWN')
@@ -155,25 +165,9 @@ func loadBulkSuggestInputs(ctx context.Context, pool *pgxpool.Pool, entityID str
 			  AND q.step = 'UNALLOCATED'
 			  AND COALESCE(bs.is_deleted, false) = false
 			  AND bs.entity_id = $1
+			  AND COALESCE(bs.entity_id, '') <> ''
 			ORDER BY t.narration_clean`
-		args = []interface{}{entityID}
-	} else {
-		query = `
-			SELECT q.transaction_id,
-			       COALESCE(t.narration_clean, t.description, q.transaction_id::text),
-			       COALESCE(t.payment_channel, 'UNKNOWN')
-			FROM cimplrcorpsaas.categorization_review_queue q
-			JOIN cimplrcorpsaas.bank_statement_transactions t ON t.transaction_id = q.transaction_id
-			JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id
-			WHERE q.status = 'PENDING'
-			  AND q.step = 'UNALLOCATED'
-			  AND COALESCE(bs.is_deleted, false) = false
-			  AND ($1::boolean OR bs.entity_id = ANY($2::text[]))
-			ORDER BY t.narration_clean`
-		args = []interface{}{api.IsAdminOverride(ctx), api.GetEntityIDsFromCtx(ctx)}
-	}
-
-	rows, err := pool.Query(ctx, query, args...)
+	rows, err := pool.Query(ctx, query, entityID)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -217,7 +211,47 @@ func loadBulkSuggestInputs(ctx context.Context, pool *pgxpool.Pool, entityID str
 	return inputs, totalTxns, nil
 }
 
-// aiBulkJobsRunning holds the users with a bulk-suggest job running in this process.
+func requireTxnScope(ctx context.Context, w http.ResponseWriter, pool *pgxpool.Pool, txnIDs []int64) bool {
+	if len(txnIDs) == 0 {
+		api.RespondEnvelopeError(w, http.StatusBadRequest, "transaction id is required", "ENTITY_REQUIRED")
+		return false
+	}
+	const q = `
+		SELECT bs.entity_id::text
+		FROM unnest($1::bigint[]) AS id
+		LEFT JOIN cimplrcorpsaas.bank_statement_transactions t ON t.transaction_id = id
+		LEFT JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = t.bank_statement_id`
+	if api.IsAdminOverride(ctx) {
+		rows, err := pool.Query(ctx, q, txnIDs)
+		if err != nil {
+			api.LogErrorForResponse(w, "entity scope lookup failed: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to verify record access", "")
+			return false
+		}
+		defer rows.Close()
+		n := 0
+		for rows.Next() {
+			var entity *string
+			if err := rows.Scan(&entity); err != nil || entity == nil || strings.TrimSpace(*entity) == "" {
+				api.RespondEntityOutOfScope(w)
+				return false
+			}
+			n++
+		}
+		if err := rows.Err(); err != nil {
+			api.LogErrorForResponse(w, "entity scope lookup failed: %v", err)
+			api.RespondEnvelopeError(w, http.StatusInternalServerError, "Failed to verify record access", "")
+			return false
+		}
+		if n == 0 {
+			api.RespondEntityOutOfScope(w)
+			return false
+		}
+		return true
+	}
+	return api.RequireRecordsInScope(ctx, w, pool, q, txnIDs)
+}
+
 var aiBulkJobsRunning sync.Map
 
 const aiBulkJobTimeout = 30 * time.Minute

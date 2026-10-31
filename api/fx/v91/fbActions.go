@@ -14,7 +14,6 @@ import (
 
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
-	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/auditutil"
 	fxexposures "CimplrCorpSaas/api/fx/exposures"
 	fxnotif "CimplrCorpSaas/api/fx/notification"
@@ -39,6 +38,30 @@ func notifyExposureDetached(parent context.Context, pool *pgxpool.Pool, in fxnot
 	fxnotif.NotifyExposureBulkAction(ctx, pool, in)
 }
 
+func v91Actor(ctx context.Context) (userID, name, email string, ok bool) {
+	userID = strings.TrimSpace(api.GetUserIDFromCtx(ctx))
+	if s := api.GetSessionFromCtx(ctx); s != nil {
+		if userID == "" {
+			userID = strings.TrimSpace(s.UserID)
+		}
+		name = s.Name
+		email = s.Email
+	}
+	if userID == "" {
+		return "", "", "", false
+	}
+	if name == "" {
+		name = api.GetUserNameFromCtx(ctx)
+	}
+	if email == "" {
+		email = api.GetUserEmailFromCtx(ctx)
+	}
+	if name == "" {
+		name = userID
+	}
+	return userID, name, email, true
+}
+
 func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -53,23 +76,14 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+errtext.Detail(w, err), v91ErrorCode(http.StatusBadRequest))
 			return
 		}
-		if req.UserID == "" {
-			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrUserIDRequired, v91ErrorCode(http.StatusBadRequest))
+		uid, requester, _, ok := v91Actor(ctx)
+		if !ok {
+			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
+		req.UserID = uid
 		if len(req.Rows) == 0 {
 			respondEnvelopeError(w, http.StatusBadRequest, "empty payload", v91ErrorCode(http.StatusBadRequest))
-			return
-		}
-		requester := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				requester = s.Name
-				break
-			}
-		}
-		if requester == "" {
-			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
 		type valueDateChange struct {
@@ -89,7 +103,7 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			dt, err := parseFlexibleDate(p.NewValueDate)
 			if err != nil {
-				respondEnvelopeError(w, http.StatusBadRequest, fmt.Sprintf("invalid date at index %d: %v", i, err), v91ErrorCode(http.StatusBadRequest))
+				respondEnvelopeError(w, http.StatusBadRequest, fmt.Sprintf("invalid date at index %d: %s", i, errtext.Detail(w, err)), v91ErrorCode(http.StatusBadRequest))
 				return
 			}
 			creationRow, err := fxexposures.LoadExposureCreationRow(ctx, pool, p.ExposureHeaderID)
@@ -255,23 +269,16 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			ExposureIDs []string `json:"exposure_ids"`
 			Comment     string   `json:"comment,omitempty"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ExposureIDs) == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureIDs) == 0 {
 			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSON, v91ErrorCode(http.StatusBadRequest))
 			return
 		}
-		approver := ""
-		approverEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				approver = s.Name
-				approverEmail = s.Email
-				break
-			}
-		}
-		if approver == "" {
+		uid, approver, approverEmail, ok := v91Actor(ctx)
+		if !ok {
 			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
+		req.UserID = uid
 		for _, id := range req.ExposureIDs {
 			creationRow, err := fxexposures.LoadExposureCreationRow(ctx, pool, id)
 			if err != nil {
@@ -413,23 +420,16 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			ExposureIDs []string `json:"exposure_ids"`
 			Comment     string   `json:"comment,omitempty"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ExposureIDs) == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureIDs) == 0 {
 			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSON, v91ErrorCode(http.StatusBadRequest))
 			return
 		}
-		rejector := ""
-		rejectorEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				rejector = s.Name
-				rejectorEmail = s.Email
-				break
-			}
-		}
-		if rejector == "" {
+		uid, rejector, rejectorEmail, ok := v91Actor(ctx)
+		if !ok {
 			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
+		req.UserID = uid
 		for _, id := range req.ExposureIDs {
 			creationRow, err := fxexposures.LoadExposureCreationRow(ctx, pool, id)
 			if err != nil {
@@ -523,21 +523,16 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			ExposureIDs []string `json:"exposure_ids"`
 			Comment     string   `json:"comment,omitempty"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ExposureIDs) == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureIDs) == 0 {
 			respondEnvelopeError(w, http.StatusBadRequest, constants.ErrInvalidJSON, v91ErrorCode(http.StatusBadRequest))
 			return
 		}
-		deleter := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				deleter = s.Name
-				break
-			}
-		}
-		if deleter == "" {
+		uid, deleter, makerEmail, ok := v91Actor(ctx)
+		if !ok {
 			respondEnvelopeError(w, http.StatusUnauthorized, constants.ErrInvalidSession, v91ErrorCode(http.StatusUnauthorized))
 			return
 		}
+		req.UserID = uid
 		triggerMatrices := make(map[string]string)
 		for _, id := range req.ExposureIDs {
 			creationRow, err := fxexposures.LoadExposureCreationRow(ctx, pool, id)
@@ -597,14 +592,6 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				"deleted": deleted,
 			},
 		})
-
-		makerEmail := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				makerEmail = s.Email
-				break
-			}
-		}
 
 		go func(ids []string, email string, matrices map[string]string) {
 			defer func() {

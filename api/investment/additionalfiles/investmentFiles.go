@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"mime/multipart"
 	"net/http"
 	"strings"
@@ -2518,15 +2519,35 @@ func missingInvestmentAdditionalFileIDs(expected []string, files []cashfiles.Fil
 	return missing
 }
 
-// investmentParentInScope checks the parent row's entity against the caller's scope.
-// Parent tables without an entity column cannot be scoped and are allowed.
-func investmentParentInScope(ctx context.Context, pool *pgxpool.Pool, table, idColumn, parentID string) (bool, error) {
-	if api.IsAdminOverride(ctx) {
-		return true, nil
+var sqlIdentPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func quoteSQLIdent(name string) (string, bool) {
+	if !sqlIdentPattern.MatchString(name) {
+		return "", false
+	}
+	return `"` + name + `"`, true
+}
+
+func parentEntitySelect(ctx context.Context, pool *pgxpool.Pool, table, idColumn string) (string, error) {
+	switch table {
+	case "investment.onboard_batch":
+		if idColumn == "batch_id" {
+			return `SELECT DISTINCT BTRIM(entity_name)::text AS entity_ref FROM investment.onboard_transaction WHERE batch_id::text = $1 AND BTRIM(COALESCE(entity_name, '')) <> ''`, nil
+		}
+	case "investment.fd_receipt_exception":
+		if idColumn == "exception_id" {
+			return `SELECT rr.entity_id::text AS entity_ref FROM investment.fd_receipt_exception e JOIN investment.fd_receipt_reconcile_run rr ON rr.reconcile_run_id = e.reconcile_run_id WHERE e.exception_id::text = $1`, nil
+		}
 	}
 	parts := strings.SplitN(table, ".", 2)
 	if len(parts) != 2 {
-		return true, nil
+		return "", nil
+	}
+	schemaIdent, schemaOK := quoteSQLIdent(parts[0])
+	tableIdent, tableOK := quoteSQLIdent(parts[1])
+	idIdent, idOK := quoteSQLIdent(idColumn)
+	if !schemaOK || !tableOK || !idOK {
+		return "", nil
 	}
 	cols, err := schemacache.Columns("additionalfiles:"+table, func() (map[string]bool, error) {
 		rows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`, parts[0], parts[1])
@@ -2545,7 +2566,7 @@ func investmentParentInScope(ctx context.Context, pool *pgxpool.Pool, table, idC
 		return out, rows.Err()
 	})
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	entityCol := ""
 	for _, c := range []string{"entity_id", "entity_name"} {
@@ -2554,20 +2575,55 @@ func investmentParentInScope(ctx context.Context, pool *pgxpool.Pool, table, idC
 			break
 		}
 	}
-	if entityCol == "" || !cols[idColumn] {
-		return true, nil
+	entityIdent, entityOK := quoteSQLIdent(entityCol)
+	if entityCol == "" || !entityOK || !cols[idColumn] {
+		return "", nil
 	}
-	return api.RecordsInScope(ctx, pool, fmt.Sprintf(`SELECT %s::text FROM %s WHERE %s::text = $1`, entityCol, table, idColumn), parentID)
+	return fmt.Sprintf(`SELECT %s::text AS entity_ref FROM %s.%s WHERE %s::text = $1`, entityIdent, schemaIdent, tableIdent, idIdent), nil
 }
 
-// closureFileParentInScope checks a closure initiate or confirm parent against the caller's scope.
+func investmentParentInScope(ctx context.Context, pool *pgxpool.Pool, table, idColumn, parentID string) (bool, error) {
+	if api.IsAdminOverride(ctx) {
+		return true, nil
+	}
+	if strings.TrimSpace(parentID) == "" {
+		return false, nil
+	}
+	inner, err := parentEntitySelect(ctx, pool, table, idColumn)
+	if err != nil {
+		return false, err
+	}
+	if inner == "" {
+		return false, nil
+	}
+	query := fmt.Sprintf(`SELECT src.entity_ref FROM (%s) src UNION ALL SELECT NULL::text WHERE NOT EXISTS (%s)`, inner, inner)
+	return api.RecordsInScope(ctx, pool, query, parentID)
+}
+
 func closureFileParentInScope(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, parentID string) bool {
 	return api.RequireRecordsInScope(r.Context(), w, pool, `
-		SELECT COALESCE(ci.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_initiate ci
-		LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
-		WHERE ci.closure_initiate_id::text = $1
+		SELECT src.entity_id FROM (
+			SELECT COALESCE(ci.entity_id::text, m.entity_id::text) AS entity_id
+			FROM cimplr.fd_closure_initiate ci
+			LEFT JOIN investment.fd_master m ON m.fd_id = ci.fd_id
+			WHERE ci.closure_initiate_id::text = $1
+			UNION ALL
+			SELECT COALESCE(cc.entity_id::text, m.entity_id::text)
+			FROM cimplr.fd_closure_confirm cc
+			LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
+			WHERE cc.closure_confirm_id::text = $1
+			UNION ALL
+			SELECT entity_id::text
+			FROM investment.fd_closure_request
+			WHERE closure_request_id::text = $1
+		) src
 		UNION ALL
-		SELECT COALESCE(cc.entity_id::text, m.entity_id::text) FROM cimplr.fd_closure_confirm cc
-		LEFT JOIN investment.fd_master m ON m.fd_id = cc.fd_id
-		WHERE cc.closure_confirm_id::text = $1`, parentID)
+		SELECT NULL::text
+		WHERE NOT EXISTS (
+			SELECT 1 FROM cimplr.fd_closure_initiate WHERE closure_initiate_id::text = $1
+			UNION ALL
+			SELECT 1 FROM cimplr.fd_closure_confirm WHERE closure_confirm_id::text = $1
+			UNION ALL
+			SELECT 1 FROM investment.fd_closure_request WHERE closure_request_id::text = $1
+		)`, parentID)
 }

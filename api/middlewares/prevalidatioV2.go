@@ -13,8 +13,10 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"CimplrCorpSaas/internal/ctxutil"
 	"CimplrCorpSaas/internal/logger"
+	"CimplrCorpSaas/internal/uploadlimit"
 	"CimplrCorpSaas/internal/validation"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -773,7 +775,7 @@ func SessionMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 
-			r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // 10 MB limit
+			r.Body = http.MaxBytesReader(w, r.Body, uploadlimit.MaxBytes())
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				if err.Error() == "http: request body too large" {
@@ -824,11 +826,11 @@ func SessionMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 					return
 				}
 				if isInfraError(err) {
-					logger.LogError("Session validation unavailable for user_id=%s: %v", userID, err)
-					api.RespondWithError(w, http.StatusServiceUnavailable, "Service temporarily unavailable, please retry")
+					api.LogErrorForResponse(w, "session validation unavailable: %v", err)
+					api.RespondEnvelopeError(w, http.StatusServiceUnavailable, "Service temporarily unavailable, please retry", "")
 					return
 				}
-				api.RespondWithError(w, http.StatusUnauthorized, "Validation failed: "+err.Error())
+				api.RespondEnvelopeError(w, http.StatusUnauthorized, errtext.Detail(w, err), "")
 				return
 			}
 
@@ -838,7 +840,7 @@ func SessionMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 					api.RespondEnvelopeError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit, "")
 					return
 				}
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve entity hierarchy: "+err.Error())
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 				return
 			}
 
@@ -878,7 +880,8 @@ func SessionMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				if !roleMatched {
 					isRoleAdmin, dbMatched, roleErr := IsUserInAdminRole(ctx, db, userID)
 					if roleErr != nil {
-						ctx = context.WithValue(ctx, "admin_override_load_errors", []string{"role_lookup: " + roleErr.Error()})
+						api.LogErrorForResponse(w, "admin role lookup: %v", roleErr)
+						ctx = context.WithValue(ctx, "admin_override_load_errors", []string{"role_lookup failed"})
 					}
 					if isRoleAdmin {
 						roleMatched = true

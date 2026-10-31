@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"CimplrCorpSaas/api/approvalengine"
 )
@@ -66,13 +67,33 @@ func validateFundPlanScope(ctx context.Context, fields map[string]interface{}) s
 	return validation.ValidateCashMasterReferences(ctx, fields)
 }
 
+func scopedFundPlanEntities(ctx context.Context, entity string) []string {
+	entity = strings.TrimSpace(entity)
+	if entity != "" {
+		return api.FilterEntitiesInScope(ctx, []string{entity})
+	}
+	return api.FilterEntitiesInScope(ctx, api.GetEntityNamesFromCtx(ctx))
+}
+
+func requireFundPlanScope(ctx context.Context, w http.ResponseWriter, pgxPool *pgxpool.Pool, planID string) bool {
+	return api.RequireRecordsInScope(ctx, w, pgxPool, `
+		SELECT g.entity_name::text
+		FROM (SELECT $1::text AS plan_id) x
+		LEFT JOIN fund_plan_groups g ON g.plan_id::text = x.plan_id
+	`, planID)
+}
+
 // projectionDueItemsQuery reads approved cashflow projection V2 rows (cimplrcorpsaas schema).
-func projectionDueItemsQuery(includeCounterparty, includeType bool, argI int) string {
+func projectionDueItemsQuery(includeCounterparty, includeType bool, argI int, amountAsText bool) string {
 	primaryField := constants.QuerryGeneric
 	if includeCounterparty {
 		primaryField = "COALESCE(NULLIF(cpi.entity_name, ''), 'Generic')"
 	} else if includeType {
 		primaryField = "COALESCE(CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'Collection' WHEN cpi.cashflow_type = 'Outflow' THEN 'Vendor Payment' ELSE NULL END, 'Generic')"
+	}
+	amountExpr := "cpi.expected_amount"
+	if amountAsText {
+		amountExpr = "COALESCE(cpi.expected_amount, 0)::text"
 	}
 	return `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref FROM (
 		SELECT
@@ -80,7 +101,7 @@ func projectionDueItemsQuery(includeCounterparty, includeType bool, argI int) st
 			CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'inflow' ELSE 'outflow' END as direction,
 			COALESCE(NULLIF(cpi.currency_code,''), cp.base_currency_code) as currency,
 			` + primaryField + ` as primary_name,
-			cpi.expected_amount as amount,
+			` + amountExpr + ` as amount,
 			'Generic' as costprofit_center,
 			cpi.item_id::text as source_ref
 		FROM cimplrcorpsaas.cashflow_proposal cp
@@ -128,10 +149,6 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
 			return
 		}
-		if req.EntityID != "" && !api.EntityInScope(r.Context(), req.EntityID) {
-			api.RespondEntityOutOfScope(w)
-			return
-		}
 		if req.HorizonDays == 0 {
 			req.HorizonDays = 30
 		}
@@ -147,6 +164,11 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if req.IncludeCounterparty && req.IncludeType {
 			api.RespondWithResult(w, false, "only one of counterparty or type can be true")
+			return
+		}
+		entityScope := scopedFundPlanEntities(r.Context(), req.EntityID)
+		if len(entityScope) == 0 {
+			api.RespondWithPayload(w, true, "", []interface{}{})
 			return
 		}
 
@@ -186,7 +208,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					'outflow' as direction, 
 					p.currency_code as currency, 
 					` + primaryField + ` as primary_name, 
-					p.amount as amount,
+					COALESCE(p.amount, 0)::text as amount,
 					'Generic' as costprofit_center,
 					p.payable_id::text as source_ref
 				FROM tr_payables p
@@ -200,15 +222,9 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, now, endDate)
 			argI += 2
 
-			if req.EntityID != "" {
-				q += ` AND p.entity_name = $` + fmt.Sprint(argI)
-				args = append(args, req.EntityID)
-				argI++
-			} else if !api.IsAdminOverride(r.Context()) {
-				q += ` AND p.entity_name = ANY($` + fmt.Sprint(argI) + `::text[])`
-				args = append(args, api.GetEntityNamesFromCtx(r.Context()))
-				argI++
-			}
+			q += ` AND p.entity_name = ANY($` + fmt.Sprint(argI) + `::text[])`
+			args = append(args, entityScope)
+			argI++
 
 			if req.Currency != "" {
 				q += ` AND p.currency_code = $` + fmt.Sprint(argI)
@@ -238,7 +254,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			'inflow' as direction, 
 			r.currency_code as currency, 
 			%s as primary_name, 
-			r.invoice_amount as amount,
+			COALESCE(r.invoice_amount, 0)::text as amount,
 			'Generic' as costprofit_center,
 			r.receivable_id::text as source_ref
 		FROM tr_receivables r
@@ -260,15 +276,9 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, now, endDate)
 			argI += 2
 
-			if req.EntityID != "" {
-				q += ` AND r.entity_name = $` + fmt.Sprint(argI)
-				args = append(args, req.EntityID)
-				argI++
-			} else if !api.IsAdminOverride(r.Context()) {
-				q += ` AND r.entity_name = ANY($` + fmt.Sprint(argI) + `::text[])`
-				args = append(args, api.GetEntityNamesFromCtx(r.Context()))
-				argI++
-			}
+			q += ` AND r.entity_name = ANY($` + fmt.Sprint(argI) + `::text[])`
+			args = append(args, entityScope)
+			argI++
 
 			if req.Currency != "" {
 				q += ` AND r.currency_code = $` + fmt.Sprint(argI)
@@ -280,20 +290,14 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			parts = append(parts, q)
 		}
 		if req.IncludeProjections {
-			q := projectionDueItemsQuery(req.IncludeCounterparty, req.IncludeType, argI)
+			q := projectionDueItemsQuery(req.IncludeCounterparty, req.IncludeType, argI, true)
 
 			args = append(args, now, endDate)
 			argI += 2
 
-			if req.EntityID != "" {
-				q += ` AND cpi.entity_name = $` + fmt.Sprint(argI)
-				args = append(args, req.EntityID)
-				argI++
-			} else if !api.IsAdminOverride(r.Context()) {
-				q += ` AND cpi.entity_name = ANY($` + fmt.Sprint(argI) + `::text[])`
-				args = append(args, api.GetEntityNamesFromCtx(r.Context()))
-				argI++
-			}
+			q += ` AND cpi.entity_name = ANY($` + fmt.Sprint(argI) + `::text[])`
+			args = append(args, entityScope)
+			argI++
 
 			if req.Currency != "" {
 				q += ` AND COALESCE(NULLIF(cpi.currency_code,''), cp.base_currency_code) = $` + fmt.Sprint(argI)
@@ -325,21 +329,26 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		type Row struct {
-			Date             string  `json:"date"`
-			Direction        string  `json:"direction"`
-			Currency         string  `json:"curr"`
-			Primary          string  `json:"primary"`
-			Amount           float64 `json:"amount"`
-			CostProfitCenter string  `json:"costprofit_center"`
-			SourceRef        string  `json:"source_ref"`
+			Date             string          `json:"date"`
+			Direction        string          `json:"direction"`
+			Currency         string          `json:"curr"`
+			Primary          string          `json:"primary"`
+			Amount           decimal.Decimal `json:"amount"`
+			CostProfitCenter string          `json:"costprofit_center"`
+			SourceRef        string          `json:"source_ref"`
 		}
 		res := []Row{}
 		for rows.Next() {
 			var dt time.Time
-			var dir, curr, primary, costProfitCenter, sourceRef string
-			var amt float64
-			if err := rows.Scan(&dt, &dir, &curr, &primary, &amt, &costProfitCenter, &sourceRef); err != nil {
+			var dir, curr, primary, costProfitCenter, sourceRef, amtText string
+			if err := rows.Scan(&dt, &dir, &curr, &primary, &amtText, &costProfitCenter, &sourceRef); err != nil {
 				continue
+			}
+			amt, err := decimal.NewFromString(strings.TrimSpace(amtText))
+			if err != nil {
+				api.LogErrorForResponse(w, "fund planning amount: %v", err)
+				api.RespondEnvelopeError(w, http.StatusInternalServerError, "invalid amount", "")
+				return
 			}
 			if strings.TrimSpace(costProfitCenter) == "" && strings.TrimSpace(req.CostProfitCenter) != "" {
 				costProfitCenter = req.CostProfitCenter
@@ -450,6 +459,11 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "only one of counterparty or type can be true")
 			return
 		}
+		entityScope := scopedFundPlanEntities(r.Context(), req.EntityID)
+		if len(entityScope) == 0 {
+			api.RespondWithPayload(w, true, "", []interface{}{})
+			return
+		}
 
 		userEmail := ""
 		for _, s := range auth.GetActiveSessions() {
@@ -501,11 +515,9 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, now, endDate)
 			argI += 2
 
-			if req.EntityID != "" {
-				q += ` AND p.entity_name = $` + fmt.Sprint(argI)
-				args = append(args, req.EntityID)
-				argI++
-			}
+			q += ` AND p.entity_name = ANY($` + fmt.Sprint(argI) + `::text[])`
+			args = append(args, entityScope)
+			argI++
 
 			if req.Currency != "" {
 				q += ` AND p.currency_code = $` + fmt.Sprint(argI)
@@ -547,11 +559,9 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, now, endDate)
 			argI += 2
 
-			if req.EntityID != "" {
-				q += ` AND r.entity_name = $` + fmt.Sprint(argI)
-				args = append(args, req.EntityID)
-				argI++
-			}
+			q += ` AND r.entity_name = ANY($` + fmt.Sprint(argI) + `::text[])`
+			args = append(args, entityScope)
+			argI++
 
 			if req.Currency != "" {
 				q += ` AND r.currency_code = $` + fmt.Sprint(argI)
@@ -563,16 +573,14 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			parts = append(parts, q)
 		}
 		if req.IncludeProjections {
-			q := projectionDueItemsQuery(req.IncludeCounterparty, req.IncludeType, argI)
+			q := projectionDueItemsQuery(req.IncludeCounterparty, req.IncludeType, argI, false)
 
 			args = append(args, now, endDate)
 			argI += 2
 
-			if req.EntityID != "" {
-				q += ` AND cpi.entity_name = $` + fmt.Sprint(argI)
-				args = append(args, req.EntityID)
-				argI++
-			}
+			q += ` AND cpi.entity_name = ANY($` + fmt.Sprint(argI) + `::text[])`
+			args = append(args, entityScope)
+			argI++
 
 			if req.Currency != "" {
 				q += ` AND COALESCE(NULLIF(cpi.currency_code,''), cp.base_currency_code) = $` + fmt.Sprint(argI)
@@ -1466,6 +1474,9 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailed+err.Error())
 				return
 			}
+			if strings.TrimSpace(entityName) == "" || !api.EntityInScope(ctx, entityName) {
+				continue
+			}
 			if msg := validateFundPlanScope(ctx, map[string]interface{}{"entity_name": entityName}); msg != "" {
 				continue
 			}
@@ -1528,6 +1539,9 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if req.PlanID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrPlanIDRequired)
+			return
+		}
+		if !requireFundPlanScope(r.Context(), w, pgxPool, req.PlanID) {
 			return
 		}
 
@@ -1689,6 +1703,9 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.PlanID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrPlanIDRequired)
+			return
+		}
+		if !requireFundPlanScope(r.Context(), w, pgxPool, req.PlanID) {
 			return
 		}
 
@@ -1858,6 +1875,9 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrPlanIDRequired)
 			return
 		}
+		if !requireFundPlanScope(r.Context(), w, pgxPool, req.PlanID) {
+			return
+		}
 
 		// Get user email from active sessions
 		userEmail := ""
@@ -2023,6 +2043,9 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.PlanID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrPlanIDRequired)
+			return
+		}
+		if !requireFundPlanScope(r.Context(), w, pgxPool, req.PlanID) {
 			return
 		}
 

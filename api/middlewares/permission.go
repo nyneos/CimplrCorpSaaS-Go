@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Permission actions stored in public.permissions.action.
 const (
 	PermView    = "hasAccess"
 	PermCreate  = "showCreateButton"
@@ -21,7 +20,6 @@ const (
 	PermReject  = "showRejectButton"
 )
 
-// permissionMode is PERMISSION_ENFORCE: "on" blocks, "off" skips, anything else logs only.
 func permissionMode() string {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("PERMISSION_ENFORCE"))) {
 	case "on", "true", "enforce":
@@ -32,9 +30,6 @@ func permissionMode() string {
 	return "log"
 }
 
-// RequirePermission allows the request when one of the session user's roles has
-// the page action granted in role_permissions. It must run after the session
-// middleware. Admin override users always pass.
 func RequirePermission(db *pgxpool.Pool, page, action string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

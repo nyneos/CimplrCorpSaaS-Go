@@ -13,9 +13,9 @@ import (
 	// "github.com/jackc/pgx/v5"
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 )
 
-// maxDashboardHorizonDays bounds client-supplied horizons that drive per-day loops.
 const maxDashboardHorizonDays = 3650
 
 type liquidityScope struct {
@@ -94,7 +94,7 @@ func TotalCashBalanceByEntityHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		balances, err := TotalCashBalanceByEntity(r.Context(), pgxPool, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", balances)
@@ -120,7 +120,7 @@ func LiquidityCoverageRatioHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ratio, err := LiquidityCoverageRatio(r.Context(), pgxPool, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"liquidity_coverage_ratio": ratio})
@@ -150,7 +150,7 @@ func EntityCurrencyWiseCashHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		data, err := entitycurrencywiseCash(r.Context(), pgxPool, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", data)
@@ -374,7 +374,7 @@ func KpiCardsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		kpi, err := GetKpiCards(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", kpi)
@@ -411,7 +411,7 @@ func DetailedDailyCashFlowHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := DetailedDailyCashFlowRows(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", rows)

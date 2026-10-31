@@ -3,7 +3,7 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"time"
+	"sync"
 
 	approvalengine "CimplrCorpSaas/api/approvalengine"
 	fdAccrual "CimplrCorpSaas/api/investment/fdAccrual"
@@ -21,6 +21,31 @@ import (
 type CronService struct {
 	config map[string]interface{}
 	db     *pgxpool.Pool
+	cancel context.CancelFunc
+}
+
+var (
+	backgroundCronMu    sync.Mutex
+	backgroundCronStops []func()
+)
+
+func RegisterBackgroundCronStop(stop func()) {
+	if stop == nil {
+		return
+	}
+	backgroundCronMu.Lock()
+	backgroundCronStops = append(backgroundCronStops, stop)
+	backgroundCronMu.Unlock()
+}
+
+func stopBackgroundCrons() {
+	backgroundCronMu.Lock()
+	stops := backgroundCronStops
+	backgroundCronStops = nil
+	backgroundCronMu.Unlock()
+	for _, stop := range stops {
+		stop()
+	}
 }
 
 func NewCronService(cfg map[string]interface{}, db *pgxpool.Pool) serviceiface.Service {
@@ -36,6 +61,8 @@ func (s *CronService) Name() string {
 
 func (s *CronService) Start() error {
 	logger.LogInfo("Starting cron service...")
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
 
 	// ---------------- AMFI ----------------
 	amfiConfig := investmentjobs.NewDefaultConfig()
@@ -99,8 +126,6 @@ func (s *CronService) Start() error {
 	logger.GlobalLogger.LogAudit("Auto-categorization scheduler started")
 
 	// ---------------- Background Workers ----------------
-	ctx := context.Background()
-
 	go dinojobs.StartOutboxWorker(ctx, s.db)
 	go dinojobs.StartInboxWorker(ctx, s.db)
 	go dinojobs.StartBrowserPushWorker(ctx, s.db)
@@ -139,65 +164,16 @@ func (s *CronService) Start() error {
 	logger.GlobalLogger.LogAudit("Policy lifecycle sweeper started")
 
 	logger.GlobalLogger.LogAudit("All background workers started")
-
-	// ---------------- DB Cleanup Worker ----------------
-	go s.startDBCleanupWorker()
-	logger.GlobalLogger.LogAudit("DB cleanup worker started")
-	logger.LogInfo("Cron service started — DB Cleanup Worker running")
+	logger.LogInfo("Cron service started")
 
 	return nil
 }
 
 func (s *CronService) Stop() error {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	stopBackgroundCrons()
 	logger.LogInfo("Cron service stopped.")
 	return nil
-}
-
-//
-// ---------------- DB CLEANUP WORKER ----------------
-//
-
-func (s *CronService) startDBCleanupWorker() {
-	interval := 100 // default seconds (safe)
-
-	// config override
-	if s.config != nil {
-		if val, ok := s.config["db_cleanup_interval"].(int); ok && val > 0 {
-			interval = val
-		}
-	}
-
-	logger.LogInfo("DB Cleanup Worker running every %d seconds\n", interval)
-
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			s.cleanupIdleConnections()
-		}
-	}
-}
-
-func (s *CronService) cleanupIdleConnections() {
-	query := `
-		SELECT pg_terminate_backend(pid)
-		FROM pg_stat_activity
-		WHERE usename = current_user
-		  AND pid <> pg_backend_pid()
-		  AND state = 'idle'
-		  AND now() - state_change > interval '5 minutes';
-	`
-
-	tag, err := s.db.Exec(context.Background(), query)
-	if err != nil {
-		logger.LogError("DB cleanup error: %v", err)
-		if logger.GlobalLogger != nil {
-			logger.GlobalLogger.LogAudit("DB cleanup failed: " + err.Error())
-		}
-		return
-	}
-
-	logger.LogInfo("DB cleanup executed. Rows affected: %d\n", tag.RowsAffected())
 }

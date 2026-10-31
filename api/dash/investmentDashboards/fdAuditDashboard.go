@@ -1755,10 +1755,16 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(r.status,'')                         AS role_status
 				FROM participant_emails pe
 				JOIN public.users u ON u.email = pe.email
-				LEFT JOIN LATERAL (
+				JOIN LATERAL (
 					SELECT string_agg(entity_name, ', ' ORDER BY entity_name) AS entity_names
-					FROM public.user_entity_mappings WHERE user_id = u.id
-				) em ON true
+					FROM public.user_entity_mappings
+					WHERE user_id = u.id
+					  AND COALESCE(is_deleted, false) = false
+					  AND (
+					    entity_id::text = ANY(string_to_array($3, ','))
+					    OR entity_name = ANY(string_to_array($3, ','))
+					  )
+				) em ON COALESCE(em.entity_names, '') <> ''
 				LEFT JOIN public.user_roles ur ON ur.user_id = u.id
 				LEFT JOIN public.roles r       ON r.id       = ur.role_id
 				ORDER BY u.email, r.name

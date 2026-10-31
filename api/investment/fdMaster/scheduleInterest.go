@@ -12,9 +12,6 @@ import (
 // PeriodInterestFromSchedule sums period interest from fd_cashflow_schedule rows.
 // It follows cashflow summary semantics, adjusted for accrual windows so payout
 // rows contribute only the due-not-accrued slice already embedded in the receipt.
-// Returns found=true when at least one in-scope cashflow row exists for the FD, and a
-// non-nil error when the schedule could not be read (callers must not treat that as
-// "no schedule" and silently fall back to the formula).
 func PeriodInterestFromSchedule(
 	ctx context.Context,
 	pool *pgxpool.Pool,

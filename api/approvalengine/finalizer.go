@@ -65,12 +65,10 @@ func finalizeRecord(
 		return fmt.Errorf("finalizeRecord audit update: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		api.LogError("[ApprovalEngine] finalize found no pending audit row: table=%s record=%s status=%s",
-			p.AuditTable, p.RecordID, processingStatus)
-	} else {
-		api.LogInfo("[ApprovalEngine] Finalized audit: table=%s record=%s status=%s rows=%d",
-			p.AuditTable, p.RecordID, processingStatus, tag.RowsAffected())
+		return fmt.Errorf("finalizeRecord: no pending audit row for record %s", p.RecordID)
 	}
+	api.LogInfo("[ApprovalEngine] Finalized audit: table=%s record=%s status=%s rows=%d",
+		p.AuditTable, p.RecordID, processingStatus, tag.RowsAffected())
 
 	// Step 3: For approved DELETEs, flip is_deleted on the master record.
 	// Email inbox soft-delete is handled by the EMAIL_INBOX module post-finalize hook

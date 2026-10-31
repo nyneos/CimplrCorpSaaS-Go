@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/logger"
 	"context"
@@ -281,7 +282,9 @@ func CreateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
-			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
+			if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail); err != nil {
+				logger.LogError("[CounterpartyHub] cancel pending instances failed: %v", err)
+			}
 			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_MASTER_CREATE",
 				RecordID: cpID, RecordTable: constants.ErrCounterpartyMasterTable,
@@ -614,7 +617,9 @@ func UpdateCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}()
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer bgCancel()
-			_ = approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail)
+			if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "COUNTERPARTY_HUB", cpID, uEmail); err != nil {
+				logger.LogError("[CounterpartyHub] cancel pending instances failed: %v", err)
+			}
 			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "COUNTERPARTY_HUB", TransactionType: "COUNTERPARTY_MASTER_EDIT",
 				RecordID: cpID, RecordTable: constants.ErrCounterpartyMasterTable,
@@ -667,6 +672,30 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM apibox.audit_counterparty_master
+			WHERE counterparty_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.CounterpartyIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
@@ -851,6 +880,30 @@ func BulkRejectCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Enforce maker-checker: fetch requested_by for all pending audits
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM apibox.audit_counterparty_master
+			WHERE counterparty_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.CounterpartyIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrTransactionFailed)
@@ -887,6 +940,28 @@ func BulkRejectCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var updated int64
 		if len(rejectIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE apibox.counterparty_master m SET
+					counterparty_code = COALESCE(a.old_counterparty_code, m.counterparty_code),
+					counterparty_name = COALESCE(a.old_counterparty_name, m.counterparty_name),
+					status = COALESCE(a.old_status, m.status),
+					platform_sync_status = COALESCE(a.old_platform_sync_status, m.platform_sync_status),
+					eff_from = COALESCE(a.old_eff_from, m.eff_from),
+					eff_to = COALESCE(a.old_eff_to, m.eff_to),
+					is_active = COALESCE(a.old_is_active, m.is_active)
+				FROM (
+					SELECT DISTINCT ON (counterparty_id) *
+					FROM apibox.audit_counterparty_master
+					WHERE counterparty_id = ANY($1::text[])
+					  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+					  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+					ORDER BY counterparty_id, requested_at DESC
+				) a
+				WHERE m.counterparty_id = a.counterparty_id`, rejectIDs); err != nil {
+				msg, status := getUserFriendlyCounterpartyError(err, "Edit revert failed")
+				api.RespondWithError(w, status, msg)
+				return
+			}
 			res, err := tx.Exec(ctx, `
 				UPDATE apibox.audit_counterparty_master
 				SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2

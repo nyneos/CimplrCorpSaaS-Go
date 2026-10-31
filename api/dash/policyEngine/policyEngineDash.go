@@ -30,9 +30,12 @@ package policyEngine
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -45,7 +48,7 @@ import (
 func writeJSON(w http.ResponseWriter, _ int, v interface{}) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		api.RespondEnvelopeError(w, http.StatusInternalServerError, err.Error(), "")
+		api.RespondEnvelopeError(w, http.StatusInternalServerError, errtext.Detail(w, err), "")
 		return
 	}
 	var fields map[string]interface{}
@@ -119,6 +122,30 @@ func decodeFilter(r *http.Request) (filterRequest, error) {
 	return f, nil
 }
 
+const dashRowLimit = 500
+const noEntityScope = "__no_entity_scope__"
+
+func scopedEntityCodes(ctx context.Context, requested string) (bool, []string) {
+	req := strings.TrimSpace(requested)
+	if api.IsAdminOverride(ctx) {
+		if req != "" {
+			return false, []string{req}
+		}
+		return true, []string{}
+	}
+	if req != "" {
+		if api.EntityInScope(ctx, req) {
+			return false, []string{req}
+		}
+		return false, []string{noEntityScope}
+	}
+	codes := api.FilterEntitiesInScope(ctx, append(append([]string{}, api.GetEntityNamesFromCtx(ctx)...), api.GetEntityIDsFromCtx(ctx)...))
+	if len(codes) == 0 {
+		return false, []string{noEntityScope}
+	}
+	return false, codes
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. KPI
 // ─────────────────────────────────────────────────────────────────────────────
@@ -138,6 +165,7 @@ type KPIResponse struct {
 
 func fetchKPI(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (KPIResponse, error) {
 	start, end := f.dateWindow()
+	admin, codes := scopedEntityCodes(ctx, f.EntityCode)
 	var kpi KPIResponse
 	kpi.Success = true
 
@@ -152,11 +180,11 @@ SELECT
     COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_duration_ms), 0)  AS p95_duration_ms
 FROM policyengine_svc.execution_run
 WHERE started_at BETWEEN $1 AND $2
-  AND ($3 = '' OR entity_code = $3)
-  AND ($4 = '' OR module_code = $4)
-  AND ($5 = '' OR sub_module  = $5)
+  AND ($3::boolean OR entity_code = ANY($4::text[]))
+  AND ($5 = '' OR module_code = $5)
+  AND ($6 = '' OR sub_module  = $6)
 `
-	row := pool.QueryRow(ctx, q, start, end, f.EntityCode, f.ModuleCode, f.SubModule)
+	row := pool.QueryRow(ctx, q, start, end, admin, codes, f.ModuleCode, f.SubModule)
 	if err := row.Scan(
 		&kpi.TotalChecks, &kpi.TotalEvaluated, &kpi.TotalPass, &kpi.TotalBreach, &kpi.TotalError,
 		&kpi.AvgDurationMs, &kpi.P95DurationMs,
@@ -167,8 +195,12 @@ WHERE started_at BETWEEN $1 AND $2
 		kpi.BreachRatePct = float64(kpi.TotalBreach) / float64(kpi.TotalEvaluated) * 100
 	}
 	activeRow := pool.QueryRow(ctx, `
-SELECT COUNT(*) FROM policyengine_svc.policy_master
-WHERE COALESCE(is_deleted,false) = false AND status = 'Active' AND UPPER(TRIM(processing_status)) = 'APPROVED'`)
+SELECT COUNT(*) FROM policyengine_svc.policy_master p
+WHERE COALESCE(p.is_deleted,false) = false AND p.status = 'Active' AND UPPER(TRIM(p.processing_status)) = 'APPROVED'
+  AND ($1::boolean OR EXISTS (
+    SELECT 1 FROM policyengine_svc.policy_entity pe
+    WHERE pe.policy_id = p.policy_id AND COALESCE(pe.is_deleted,false) = false AND pe.entity_code = ANY($2::text[])
+  ))`, admin, codes)
 	_ = activeRow.Scan(&kpi.ActivePolicies)
 	return kpi, nil
 }
@@ -177,12 +209,12 @@ func GetKPI(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		v, err := fetchKPI(r.Context(), pool, f)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errResp(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		writeJSON(w, http.StatusOK, v)
@@ -207,6 +239,7 @@ type ResultTrendResponse struct {
 
 func fetchResultTrend(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (ResultTrendResponse, error) {
 	start, end := f.dateWindow()
+	admin, codes := scopedEntityCodes(ctx, f.EntityCode)
 	resp := ResultTrendResponse{Success: true, Points: []TrendPoint{}}
 
 	q := `
@@ -217,13 +250,13 @@ SELECT
     COALESCE(SUM(error_count), 0)  AS error
 FROM policyengine_svc.execution_run
 WHERE started_at BETWEEN $1 AND $2
-  AND ($3 = '' OR entity_code = $3)
-  AND ($4 = '' OR module_code = $4)
-  AND ($5 = '' OR sub_module  = $5)
+  AND ($3::boolean OR entity_code = ANY($4::text[]))
+  AND ($5 = '' OR module_code = $5)
+  AND ($6 = '' OR sub_module  = $6)
 GROUP BY 1
 ORDER BY 1
 `
-	rows, err := pool.Query(ctx, q, start, end, f.EntityCode, f.ModuleCode, f.SubModule)
+	rows, err := pool.Query(ctx, q, start, end, admin, codes, f.ModuleCode, f.SubModule)
 	if err != nil {
 		return resp, err
 	}
@@ -245,12 +278,12 @@ func GetResultTrend(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		v, err := fetchResultTrend(r.Context(), pool, f)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errResp(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		writeJSON(w, http.StatusOK, v)
@@ -277,6 +310,7 @@ type ModuleBreakdownResponse struct {
 
 func fetchModuleBreakdown(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (ModuleBreakdownResponse, error) {
 	start, end := f.dateWindow()
+	admin, codes := scopedEntityCodes(ctx, f.EntityCode)
 	resp := ModuleBreakdownResponse{Success: true, Rows: []ModuleBreakdownRow{}}
 
 	q := `
@@ -289,13 +323,13 @@ SELECT
     COUNT(*)                       AS total_runs
 FROM policyengine_svc.execution_run
 WHERE started_at BETWEEN $1 AND $2
-  AND ($3 = '' OR entity_code = $3)
-  AND ($4 = '' OR module_code = $4)
-  AND ($5 = '' OR sub_module  = $5)
+  AND ($3::boolean OR entity_code = ANY($4::text[]))
+  AND ($5 = '' OR module_code = $5)
+  AND ($6 = '' OR sub_module  = $6)
 GROUP BY module_code, sub_module
 ORDER BY breach DESC, total_runs DESC
 `
-	rows, err := pool.Query(ctx, q, start, end, f.EntityCode, f.ModuleCode, f.SubModule)
+	rows, err := pool.Query(ctx, q, start, end, admin, codes, f.ModuleCode, f.SubModule)
 	if err != nil {
 		return resp, err
 	}
@@ -317,12 +351,12 @@ func GetModuleBreakdown(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		v, err := fetchModuleBreakdown(r.Context(), pool, f)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errResp(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		writeJSON(w, http.StatusOK, v)
@@ -351,6 +385,7 @@ const topBreachingLimit = 15
 
 func fetchTopBreaching(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (TopBreachingResponse, error) {
 	start, end := f.dateWindow()
+	admin, codes := scopedEntityCodes(ctx, f.EntityCode)
 	resp := TopBreachingResponse{Success: true, Rows: []TopPolicyRow{}}
 
 	q := `
@@ -363,14 +398,14 @@ FROM policyengine_svc.execution_log l
 LEFT JOIN policyengine_svc.policy_master p ON p.policy_id = l.policy_id
 WHERE l.result = 'BREACH'
   AND l.evaluated_at BETWEEN $1 AND $2
-  AND ($3 = '' OR l.entity_code = $3)
-  AND ($4 = '' OR l.module_code = $4)
-  AND ($5 = '' OR l.sub_module  = $5)
+  AND ($3::boolean OR l.entity_code = ANY($4::text[]))
+  AND ($5 = '' OR l.module_code = $5)
+  AND ($6 = '' OR l.sub_module  = $6)
 GROUP BY l.policy_code, p.name, p.criticality
 ORDER BY breach_count DESC
-LIMIT $6
+LIMIT $7
 `
-	rows, err := pool.Query(ctx, q, start, end, f.EntityCode, f.ModuleCode, f.SubModule, topBreachingLimit)
+	rows, err := pool.Query(ctx, q, start, end, admin, codes, f.ModuleCode, f.SubModule, topBreachingLimit)
 	if err != nil {
 		return resp, err
 	}
@@ -392,12 +427,12 @@ func GetTopBreaching(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		v, err := fetchTopBreaching(r.Context(), pool, f)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errResp(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		writeJSON(w, http.StatusOK, v)
@@ -421,6 +456,7 @@ type CriticalityBreakdownResponse struct {
 
 func fetchCriticalityBreakdown(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (CriticalityBreakdownResponse, error) {
 	start, end := f.dateWindow()
+	admin, codes := scopedEntityCodes(ctx, f.EntityCode)
 	resp := CriticalityBreakdownResponse{Success: true, Rows: []CriticalityRow{}}
 
 	q := `
@@ -432,13 +468,13 @@ FROM policyengine_svc.execution_log l
 LEFT JOIN policyengine_svc.policy_master p ON p.policy_id = l.policy_id
 WHERE l.result = 'BREACH'
   AND l.evaluated_at BETWEEN $1 AND $2
-  AND ($3 = '' OR l.entity_code = $3)
-  AND ($4 = '' OR l.module_code = $4)
-  AND ($5 = '' OR l.sub_module  = $5)
+  AND ($3::boolean OR l.entity_code = ANY($4::text[]))
+  AND ($5 = '' OR l.module_code = $5)
+  AND ($6 = '' OR l.sub_module  = $6)
 GROUP BY p.criticality, p.action_on_breach
 ORDER BY breach_count DESC
 `
-	rows, err := pool.Query(ctx, q, start, end, f.EntityCode, f.ModuleCode, f.SubModule)
+	rows, err := pool.Query(ctx, q, start, end, admin, codes, f.ModuleCode, f.SubModule)
 	if err != nil {
 		return resp, err
 	}
@@ -460,12 +496,12 @@ func GetCriticalityBreakdown(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		v, err := fetchCriticalityBreakdown(r.Context(), pool, f)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errResp(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		writeJSON(w, http.StatusOK, v)
@@ -489,28 +525,29 @@ type ModuleHeatmapResponse struct {
 
 func fetchModuleHeatmap(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (ModuleHeatmapResponse, error) {
 	start, end := f.dateWindow()
+	admin, codes := scopedEntityCodes(ctx, f.EntityCode)
 	resp := ModuleHeatmapResponse{Success: true, Cells: []HeatmapCell{}}
 
 	q := `
 SELECT COALESCE(module_code, ''), 'PASS' AS result, COALESCE(SUM(pass_count),0)
 FROM policyengine_svc.execution_run
 WHERE started_at BETWEEN $1 AND $2
-  AND ($3 = '' OR entity_code = $3) AND ($4 = '' OR module_code = $4) AND ($5 = '' OR sub_module = $5)
+  AND ($3::boolean OR entity_code = ANY($4::text[])) AND ($5 = '' OR module_code = $5) AND ($6 = '' OR sub_module = $6)
 GROUP BY module_code
 UNION ALL
 SELECT COALESCE(module_code, ''), 'BREACH' AS result, COALESCE(SUM(breach_count),0)
 FROM policyengine_svc.execution_run
 WHERE started_at BETWEEN $1 AND $2
-  AND ($3 = '' OR entity_code = $3) AND ($4 = '' OR module_code = $4) AND ($5 = '' OR sub_module = $5)
+  AND ($3::boolean OR entity_code = ANY($4::text[])) AND ($5 = '' OR module_code = $5) AND ($6 = '' OR sub_module = $6)
 GROUP BY module_code
 UNION ALL
 SELECT COALESCE(module_code, ''), 'ERROR' AS result, COALESCE(SUM(error_count),0)
 FROM policyengine_svc.execution_run
 WHERE started_at BETWEEN $1 AND $2
-  AND ($3 = '' OR entity_code = $3) AND ($4 = '' OR module_code = $4) AND ($5 = '' OR sub_module = $5)
+  AND ($3::boolean OR entity_code = ANY($4::text[])) AND ($5 = '' OR module_code = $5) AND ($6 = '' OR sub_module = $6)
 GROUP BY module_code
 `
-	rows, err := pool.Query(ctx, q, start, end, f.EntityCode, f.ModuleCode, f.SubModule)
+	rows, err := pool.Query(ctx, q, start, end, admin, codes, f.ModuleCode, f.SubModule)
 	if err != nil {
 		return resp, err
 	}
@@ -532,12 +569,12 @@ func GetModuleHeatmap(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		v, err := fetchModuleHeatmap(r.Context(), pool, f)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errResp(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		writeJSON(w, http.StatusOK, v)
@@ -562,6 +599,7 @@ var latencyBucketOrder = []string{"0-50ms", "50-100ms", "100-200ms", "200-300ms"
 
 func fetchLatencyDistribution(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (LatencyDistributionResponse, error) {
 	start, end := f.dateWindow()
+	admin, codes := scopedEntityCodes(ctx, f.EntityCode)
 
 	q := `
 SELECT
@@ -577,12 +615,12 @@ SELECT
     COUNT(*) AS count
 FROM policyengine_svc.execution_run
 WHERE started_at BETWEEN $1 AND $2
-  AND ($3 = '' OR entity_code = $3)
-  AND ($4 = '' OR module_code = $4)
-  AND ($5 = '' OR sub_module  = $5)
+  AND ($3::boolean OR entity_code = ANY($4::text[]))
+  AND ($5 = '' OR module_code = $5)
+  AND ($6 = '' OR sub_module  = $6)
 GROUP BY 1
 `
-	rows, err := pool.Query(ctx, q, start, end, f.EntityCode, f.ModuleCode, f.SubModule)
+	rows, err := pool.Query(ctx, q, start, end, admin, codes, f.ModuleCode, f.SubModule)
 	counts := make(map[string]int64, len(latencyBucketOrder))
 	if err != nil {
 		return LatencyDistributionResponse{}, err
@@ -609,12 +647,12 @@ func GetLatencyDistribution(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		v, err := fetchLatencyDistribution(r.Context(), pool, f)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errResp(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		writeJSON(w, http.StatusOK, v)
@@ -659,6 +697,7 @@ type LogsResponse struct {
 // endpoints. Used for the drill-down click-through, not the primary overview.
 func fetchLogs(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (LogsResponse, error) {
 	start, end := f.dateWindow()
+	admin, codes := scopedEntityCodes(ctx, f.EntityCode)
 	resp := LogsResponse{Success: true, Rows: []LogRow{}}
 
 	q := `
@@ -672,13 +711,14 @@ SELECT
 FROM policyengine_svc.execution_log l
 LEFT JOIN policyengine_svc.policy_master p ON p.policy_id = l.policy_id
 WHERE l.evaluated_at BETWEEN $1 AND $2
-  AND ($3 = '' OR l.entity_code = $3)
-  AND ($4 = '' OR l.module_code = $4)
-  AND ($5 = '' OR l.sub_module  = $5)
-  AND ($6 = '' OR l.result      = $6)
+  AND ($3::boolean OR l.entity_code = ANY($4::text[]))
+  AND ($5 = '' OR l.module_code = $5)
+  AND ($6 = '' OR l.sub_module  = $6)
+  AND ($7 = '' OR l.result      = $7)
 ORDER BY l.evaluated_at DESC
+LIMIT ` + strconv.Itoa(dashRowLimit) + `
 `
-	rows, err := pool.Query(ctx, q, start, end, f.EntityCode, f.ModuleCode, f.SubModule, f.Result)
+	rows, err := pool.Query(ctx, q, start, end, admin, codes, f.ModuleCode, f.SubModule, f.Result)
 	if err != nil {
 		return resp, err
 	}
@@ -710,12 +750,12 @@ func GetLogs(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		v, err := fetchLogs(r.Context(), pool, f)
 		if err != nil {
-			errResp(w, http.StatusInternalServerError, err.Error())
+			errResp(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
 		writeJSON(w, http.StatusOK, v)
@@ -741,7 +781,7 @@ func GetOverview(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+errtext.Detail(w, err))
 			return
 		}
 		ctx := r.Context()

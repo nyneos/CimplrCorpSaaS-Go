@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"encoding/json"
@@ -358,8 +359,6 @@ func CreateHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
-
-		_, _ = tx.Exec(ctx, "SET LOCAL synchronous_commit TO OFF")
 
 		// Temp table like folio upload
 		_, err = tx.Exec(ctx, `
@@ -1607,6 +1606,30 @@ func BulkApproveCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.auditactioncalendar
+			WHERE calendar_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.CalendarIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, 500, "tx begin failed")
@@ -1732,6 +1755,30 @@ func BulkRejectCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.auditactioncalendar
+			WHERE calendar_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.CalendarIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, 500, "tx begin failed")
@@ -1778,6 +1825,35 @@ func BulkRejectCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(missing) > 0 || len(cannotReject) > 0 {
 			api.RespondWithError(w, 400,
 				fmt.Sprintf("missing: %v | cannot reject approved: %v", missing, cannotReject))
+			return
+		}
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.mastercalendar m SET
+				calendar_code = COALESCE(m.old_calendar_code, m.calendar_code),
+				calendar_name = COALESCE(m.old_calendar_name, m.calendar_name),
+				scope = COALESCE(m.old_scope, m.scope),
+				country = COALESCE(m.old_country, m.country),
+				state = COALESCE(m.old_state, m.state),
+				city = COALESCE(m.old_city, m.city),
+				timezone = COALESCE(m.old_timezone, m.timezone),
+				weekend_pattern = COALESCE(m.old_weekend_pattern, m.weekend_pattern),
+				source = COALESCE(m.old_source, m.source),
+				eff_from = COALESCE(m.old_eff_from, m.eff_from),
+				eff_to = COALESCE(m.old_eff_to, m.eff_to),
+				status = COALESCE(m.old_status, m.status),
+				erp_type = COALESCE(m.old_erp_type, m.erp_type),
+				sap_factory_calendar_id = COALESCE(m.old_sap_factory_calendar_id, m.sap_factory_calendar_id),
+				oracle_calendar_name = COALESCE(m.old_oracle_calendar_name, m.oracle_calendar_name),
+				tally_calendar_id = COALESCE(m.old_tally_calendar_id, m.tally_calendar_id),
+				sage_calendar_id = COALESCE(m.old_sage_calendar_id, m.sage_calendar_id)
+			WHERE m.calendar_id IN (
+				SELECT calendar_id FROM investment.auditactioncalendar
+				WHERE action_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+			)`, actionIDs); err != nil {
+			api.RespondWithError(w, 500, constants.ErrUpdateFailed+errtext.Detail(w, err))
 			return
 		}
 

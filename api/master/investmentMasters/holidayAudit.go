@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"net/http"
 	"strings"
 	"time"
@@ -63,6 +64,30 @@ func BulkApproveHolidayActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.auditactionholiday
+			WHERE holiday_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.HolidayIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, 500, "tx begin failed")
@@ -212,6 +237,30 @@ func BulkRejectHolidayActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.auditactionholiday
+			WHERE holiday_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.HolidayIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, 500, "tx begin failed")
@@ -266,6 +315,24 @@ func BulkRejectHolidayActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(actionIDs) == 0 {
 			api.RespondWithPayload(w, false, constants.ErrNoApprovableActions,
 				map[string]any{"rejected_action_ids": []string{}, "cannot_reject": cannotReject})
+			return
+		}
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.masterholiday m SET
+				holiday_date = COALESCE(m.old_holiday_date, m.holiday_date),
+				holiday_name = COALESCE(m.old_holiday_name, m.holiday_name),
+				holiday_type = COALESCE(m.old_holiday_type, m.holiday_type),
+				recurrence_rule = COALESCE(m.old_recurrence_rule, m.recurrence_rule),
+				notes = COALESCE(m.old_notes, m.notes),
+				status = COALESCE(m.old_status, m.status)
+			WHERE m.holiday_id IN (
+				SELECT holiday_id FROM investment.auditactionmasterholiday
+				WHERE action_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+			)`, actionIDs); err != nil {
+			api.RespondWithError(w, 500, constants.ErrUpdateFailed+errtext.Detail(w, err))
 			return
 		}
 

@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// revertedHeaderCols are the policy_master columns restored from old_* on an EDIT reject.
 var revertedHeaderCols = []string{
 	"code", "name", "description", "category", "sub_category",
 	"validation_level", "criticality", "action_on_breach", "approval_matrix_id", "notification_group",
@@ -24,8 +23,6 @@ var revertedHeaderCols = []string{
 	"addl_expression", "version",
 }
 
-// revertPolicyEdit puts the master row and its children back to the values
-// captured in old_* on the pending EDIT audit row.
 func revertPolicyEdit(r *http.Request, tx pgx.Tx, auditID, policyID, actor string) error {
 	ctx := r.Context()
 	sets := make([]string, 0, len(revertedHeaderCols)+2)
@@ -90,7 +87,6 @@ func revertPolicyEdit(r *http.Request, tx pgx.Tx, auditID, policyID, actor strin
 	return nil
 }
 
-// splitAuditCSV reverses joinSortedCSV.
 func splitAuditCSV(s string) []string {
 	if strings.TrimSpace(s) == "" {
 		return nil
@@ -105,7 +101,6 @@ func splitAuditCSV(s string) []string {
 	return out
 }
 
-// parseSlabRows reverses serializeSlabRows.
 func parseSlabRows(s string) ([]slabRowConfig, error) {
 	if strings.TrimSpace(s) == "" {
 		return nil, nil
@@ -133,7 +128,6 @@ func parseSlabRows(s string) ([]slabRowConfig, error) {
 	return out, nil
 }
 
-// parseCompBuckets reverses serializeCompBuckets.
 func parseCompBuckets(s string) ([]compositionBucketConfig, error) {
 	if strings.TrimSpace(s) == "" {
 		return nil, nil

@@ -33,8 +33,6 @@ type RateEntry struct {
 	InrEquivalentRate float64 `json:"inrEquivalentRate"`
 }
 
-// init tries to load the rate file. If every path fails, the error is logged and
-// no rate table is installed.
 func init() {
 	// Try a few common relative paths so running from different working directories works,
 	// plus a path anchored to this source file's own location (works regardless of the
@@ -53,8 +51,6 @@ func init() {
 		}
 	}
 
-	// Do not invent rates. A missing rate.json leaves inrRates nil so callers
-	// skip unconverted amounts instead of treating every currency as 1.0.
 	logger.LogError("ticker: failed to load rate.json from known paths: %v", lastErr)
 }
 
@@ -168,7 +164,6 @@ func RateBetween(base, target string) (float64, error) {
 }
 
 // InrEquivalentRates returns a copy of INR-per-unit rates (same as rate.json inrEquivalentRate).
-// An empty map means rate.json was not loaded; INR is not invented as 1.0 in that case.
 func InrEquivalentRates() map[string]float64 {
 	if len(inrRates) == 0 {
 		return map[string]float64{}
@@ -181,8 +176,6 @@ func InrEquivalentRates() map[string]float64 {
 }
 
 // ConvertAmountToINR converts amount in the given currency to INR using loaded ticker rates.
-// INR is already the quote currency, so it is returned unchanged. An empty or unknown
-// currency, or a missing rate file, is skipped (0) rather than valued at 1.0.
 func ConvertAmountToINR(amount float64, currency string) float64 {
 	if amount == 0 {
 		return 0

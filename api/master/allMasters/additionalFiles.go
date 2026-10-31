@@ -307,17 +307,8 @@ func EntityCashMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
 	})
 }
 
-func EntityMasterFilesHandlers(pool *pgxpool.Pool) masterFilesHandlers {
-	return newMasterFilesHandlers(pool, MasterFilesConfigArgs{
-		ModuleKey:   "master-entity",
-		ParentField: "entity_id",
-		ParentTable: "public.masterentity",
-		ParentCol:   "entity_id",
-		FilesTable:  "cimplrcorpsaas.master_entity_files",
-		AuditTable:  "public.auditactionentity",
-		ActionCol:   "actiontype",
-	})
-}
+// EntityMasterFilesHandlers removed 2026-10-31 (Entity Master product surface deprecated).
+// Use EntityCashMasterFilesHandlers. public.masterentity table retained for JOIN fallbacks.
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 

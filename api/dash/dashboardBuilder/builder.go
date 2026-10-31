@@ -15,6 +15,7 @@ package dashboardbuilder
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/errtext"
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -110,8 +111,6 @@ func SaveDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			if tag.RowsAffected() == 0 {
-				// An unknown id (or someone else's dashboard) is an error, not a create:
-				// falling through would turn retries and stale ids into duplicates.
 				respondBuilderError(w, http.StatusNotFound, "dashboard not found")
 				return
 			}
@@ -142,7 +141,6 @@ func SaveDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// maxDashboardConfigBytes caps a saved dashboard config.
 const maxDashboardConfigBytes = 1 << 20
 
 // ─── ListDashboards ────────────────────────────────────────────────────────────
@@ -358,6 +356,60 @@ func GetDashboardAssignees(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+func assignableUserIDs(ctx context.Context, pool *pgxpool.Pool, userIDs []string) ([]string, string) {
+	if len(userIDs) == 0 {
+		return []string{}, ""
+	}
+	admin := api.IsAdminOverride(ctx)
+	scope := api.FilterEntitiesInScope(ctx, append(append([]string{}, api.GetEntityIDsFromCtx(ctx)...), api.GetEntityNamesFromCtx(ctx)...))
+	if !admin && len(scope) == 0 {
+		return nil, "assignee is outside your entities"
+	}
+	q := `
+		SELECT DISTINCT u.id::text
+		FROM public.users u
+		WHERE u.id::text = ANY($1::text[])
+		  AND COALESCE(u.is_deleted, false) = false`
+	args := []any{userIDs}
+	if !admin {
+		q += `
+		  AND EXISTS (
+			SELECT 1 FROM public.user_entity_mappings uem
+			WHERE uem.user_id = u.id
+			  AND COALESCE(uem.is_deleted, false) = false
+			  AND (uem.entity_id::text = ANY($2::text[]) OR uem.entity_name = ANY($2::text[]))
+		  )`
+		args = append(args, scope)
+	}
+	rows, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		logger.LogError("dashboard-builder assignable users: %v", err)
+		return nil, "failed to validate assignees"
+	}
+	defer rows.Close()
+	found := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			logger.LogError("dashboard-builder assignable users scan: %v", err)
+			return nil, "failed to validate assignees"
+		}
+		found[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		logger.LogError("dashboard-builder assignable users rows: %v", err)
+		return nil, "failed to validate assignees"
+	}
+	out := make([]string, 0, len(userIDs))
+	for _, id := range userIDs {
+		if _, ok := found[id]; !ok {
+			return nil, "assignee is outside your entities"
+		}
+		out = append(out, id)
+	}
+	return out, ""
+}
+
 // ─── AssignDashboard ───────────────────────────────────────────────────────────
 //
 // POST /dash/builder/dashboard/assign
@@ -412,8 +464,17 @@ func AssignDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			seen[assignedID] = struct{}{}
 			assignees = append(assignees, assignedID)
 		}
-
+		if len(assignees) > 100 {
+			respondBuilderError(w, http.StatusBadRequest, "too many assignees")
+			return
+		}
 		ctx := r.Context()
+		valid, vmsg := assignableUserIDs(ctx, pool, assignees)
+		if vmsg != "" {
+			respondBuilderError(w, http.StatusBadRequest, vmsg)
+			return
+		}
+		assignees = valid
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			respondBuilderError(w, http.StatusInternalServerError, constants.ErrFailedToAssignDashboard)

@@ -134,8 +134,6 @@ func pollDateRelativeRules(
 		if len(sourceIDs) == 0 {
 			continue
 		}
-		// Lock + insert the run (and job, in queue mode) before enqueue/render.
-		// Dedupe of each source id happens inside that lock, not just before the call.
 		runID, jobID, kept, claimed, reserveErr := reserveDateRelativeTick(
 			ctx, pool, rule.RuleID, rule.SourceIDField, sourceIDs, dayStart, dayEnd,
 		)

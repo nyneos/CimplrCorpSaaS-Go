@@ -12,6 +12,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	emailcommon "CimplrCorpSaas/api/email/common"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/services/mailruntime"
 
@@ -439,16 +440,29 @@ func HandleMessageExtract(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondBadRequest(w, "message_id is required")
 			return
 		}
-			if !emailcommon.RequireMessageAccess(w, r, pool, emailcommon.MessageByIDQuery, strings.TrimSpace(req.MessageID)) {
-				return
-			}
+		if strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context())) == "" {
+			emailcommon.RespondUnauthorized(w, "user context missing")
+			return
+		}
+		messageID := strings.TrimSpace(req.MessageID)
+		if !emailcommon.RequireMessageAccess(w, r, pool, emailcommon.MessageByIDQuery, messageID) {
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT COALESCE(NULLIF(m.entity_id, ''), NULLIF(i.entity_id, ''))
+			FROM email_svc.message m
+			LEFT JOIN email_svc.inbox_config i ON i.inbox_id = m.inbox_id
+			WHERE m.message_id = $1::uuid
+		`, messageID) {
+			return
+		}
 
 		var s3RawKey, s3ParsedKey, module string
 		err := pool.QueryRow(r.Context(), `
 			SELECT COALESCE(s3_raw_key,''), COALESCE(s3_parsed_key,''), COALESCE(NULLIF($2,''), module, '')
 			FROM email_svc.message
 			WHERE message_id = $1::uuid
-		`, req.MessageID, req.Module).Scan(&s3RawKey, &s3ParsedKey, &module)
+		`, messageID, req.Module).Scan(&s3RawKey, &s3ParsedKey, &module)
 		if err != nil {
 			emailcommon.RespondNotFound(w, "message not found")
 			return
@@ -466,7 +480,7 @@ func HandleMessageExtract(pool *pgxpool.Pool) http.HandlerFunc {
 				s3ParsedKey = decoded.S3ParsedKey
 				_, _ = pool.Exec(r.Context(), `
 					UPDATE email_svc.message SET s3_parsed_key = $2, updated_at = now() WHERE message_id = $1::uuid
-				`, req.MessageID, s3ParsedKey)
+				`, messageID, s3ParsedKey)
 			}
 		}
 		if s3ParsedKey == "" {
@@ -500,7 +514,7 @@ func HandleMessageExtract(pool *pgxpool.Pool) http.HandlerFunc {
 			UPDATE email_svc.message
 			SET extracted_metadata = $2::jsonb, updated_at = now()
 			WHERE message_id = $1::uuid
-		`, req.MessageID, string(metaBytes))
+		`, messageID, string(metaBytes))
 
 		emailcommon.RespondPayload(w, "messages/extract", map[string]interface{}{"row": out})
 	}
@@ -547,13 +561,26 @@ func HandleMessageLink(pool *pgxpool.Pool) http.HandlerFunc {
 			emailcommon.RespondBadRequest(w, "message_id and entity_id are required")
 			return
 		}
-			if !emailcommon.RequireMessageAccess(w, r, pool, emailcommon.MessageByIDQuery, strings.TrimSpace(req.MessageID)) {
-				return
-			}
-			if !emailcommon.EntityInScope(req.EntityID, api.GetEntityIDsFromCtx(r.Context())) && !emailcommon.IsEmailAdmin(r.Context(), api.GetUserIDFromCtx(r.Context())) {
-				emailcommon.RespondForbidden(w, "entity not accessible")
-				return
-			}
+		if strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context())) == "" {
+			emailcommon.RespondUnauthorized(w, "user context missing")
+			return
+		}
+		messageID := strings.TrimSpace(req.MessageID)
+		if !emailcommon.RequireMessageAccess(w, r, pool, emailcommon.MessageByIDQuery, messageID) {
+			return
+		}
+		if !api.RequireRecordsInScope(r.Context(), w, pool, `
+			SELECT COALESCE(NULLIF(m.entity_id, ''), NULLIF(i.entity_id, ''))
+			FROM email_svc.message m
+			LEFT JOIN email_svc.inbox_config i ON i.inbox_id = m.inbox_id
+			WHERE m.message_id = $1::uuid
+		`, messageID) {
+			return
+		}
+		if !api.EntityInScope(r.Context(), req.EntityID) {
+			emailcommon.RespondForbidden(w, "entity not accessible")
+			return
+		}
 
 		_, err := pool.Exec(r.Context(), `
 			UPDATE email_svc.message
@@ -561,7 +588,7 @@ func HandleMessageLink(pool *pgxpool.Pool) http.HandlerFunc {
 			    entity_id = $3,
 			    updated_at = now()
 			WHERE message_id = $1::uuid
-		`, req.MessageID, req.Module, req.EntityID)
+		`, messageID, req.Module, req.EntityID)
 		if err != nil {
 			api.LogErrorForResponse(w, "email message link failed: %v", err)
 			emailcommon.RespondInternal(w, "database operation failed")

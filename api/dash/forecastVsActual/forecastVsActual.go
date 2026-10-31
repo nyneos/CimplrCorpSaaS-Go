@@ -13,14 +13,13 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/errtext"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// maxDashboardHorizonDays bounds client-supplied horizons that drive per-day loops.
 const maxDashboardHorizonDays = 3650
 
-// maxDashboardHorizonMonths bounds the month-based forecast-vs-actual view.
 const maxDashboardHorizonMonths = 120
 
 var rates = fxrates.USDPerUnit()
@@ -120,7 +119,7 @@ func GetForecastVsActualRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastVsActualRows(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": rows})
@@ -157,7 +156,7 @@ func GetForecastVsActualKPIHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		k, err := GetForecastVsActualKPIs(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"kpis": k})
@@ -193,7 +192,7 @@ func GetForecastVsActualByDateHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastVsActualByDateRows(r.Context(), pgxPool, req.Horizon, scope)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": rows})
@@ -221,7 +220,6 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Horizon <= 0 {
 			req.Horizon = 90
 		}
-		// The by-month view treats horizon as a number of months.
 		if req.Horizon > maxDashboardHorizonMonths {
 			req.Horizon = maxDashboardHorizonMonths
 		}
@@ -232,7 +230,7 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows, err := GetForecastVsActualByMonthRows(r.Context(), pgxPool, req.Horizon, scope, req.AccountID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, errtext.Detail(w, err), http.StatusInternalServerError)
 			return
 		}
 		api.RespondEnvelopeSuccess(w, "Success", map[string]interface{}{"rows": rows})
@@ -241,7 +239,6 @@ func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 func GetForecastVsActualRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope requestScope) ([]CatRow, error) {
 
-	// Midnight, so items dated today are inside the window regardless of the time of day.
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	end := today.AddDate(0, 0, horizon-1)
 	actualQ := `
@@ -391,7 +388,6 @@ func GetForecastVsActualRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon
 }
 
 func GetForecastVsActualByDateRows(ctx context.Context, pgxPool *pgxpool.Pool, horizon int, scope requestScope) ([]DateCatRow, error) {
-	// Midnight, so items dated today are inside the window regardless of the time of day.
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	end := today.AddDate(0, 0, horizon-1)
 
@@ -612,8 +608,6 @@ func GetForecastVsActualByMonthRows(
 		horizon = 3
 	}
 
-	// Month buckets from the first of the current month; stepping from the 1st avoids
-	// day-of-month overflow (Jan 31 + 1 month = Mar 3) skipping a month.
 	today := time.Now().UTC()
 	firstMonth := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
 	lastMonth := firstMonth.AddDate(0, horizon-1, 0)
@@ -685,8 +679,6 @@ func GetForecastVsActualByMonthRows(
 			amtNorm = math.Abs(amtNorm)
 		}
 
-		// Attribute the line to the month of its plan date (same date source as the
-		// by-date view); lines without a parseable date or outside the horizon are skipped.
 		var lineDate time.Time
 		parsed := false
 		if strings.TrimSpace(pv) != "" {
@@ -705,7 +697,6 @@ func GetForecastVsActualByMonthRows(
 			continue
 		}
 		monthKey := lineMonth.Format(constants.DateFormat)
-		// choose a sensible Type value: prefer computed typ, otherwise fall back to group's direction
 		rowType := typ
 		if rowType == "" && strings.TrimSpace(direction) != "" {
 			rowType = direction

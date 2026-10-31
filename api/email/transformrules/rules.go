@@ -11,6 +11,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	emailcommon "CimplrCorpSaas/api/email/common"
+	middlewares "CimplrCorpSaas/api/middlewares"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -71,9 +72,11 @@ type TransformationRule struct {
 	SftpPort         int    `json:"sftp_port,omitempty"`
 	SftpUser         string `json:"sftp_user,omitempty"`
 	SftpPassword     string `json:"sftp_password"`
+	HasSftpPassword  bool   `json:"has_sftp_password,omitempty"`
 	SftpFolder       string `json:"sftp_folder,omitempty"`
 	APIURL           string `json:"api_url,omitempty"`
 	APIAuthToken     string `json:"api_auth_token"`
+	HasAPIAuthToken  bool   `json:"has_api_auth_token,omitempty"`
 
 	// Multi-destination (1:many child rows). Prefer this over flat fields when present.
 	Destinations []RuleDestination `json:"destinations,omitempty"`
@@ -249,9 +252,22 @@ type listReq struct {
 	InboxID string `json:"inbox_id"`
 }
 
+func requireSessionUser(w http.ResponseWriter, r *http.Request) (string, bool) {
+	userID := strings.TrimSpace(middlewares.GetUserIDFromContext(r.Context()))
+	if userID == "" {
+		emailcommon.RespondUnauthorized(w, "user context missing")
+		return "", false
+	}
+	return userID, true
+}
+
 func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	if r.Method != http.MethodPost {
 		emailcommon.RespondMethodNotAllowed(w)
+		return
+	}
+	userID, ok := requireSessionUser(w, r)
+	if !ok {
 		return
 	}
 
@@ -262,6 +278,11 @@ func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	}
 
 	inboxID := strings.TrimSpace(req.InboxID)
+	admin := emailcommon.IsEmailAdmin(r.Context(), userID)
+	if inboxID != "" && !admin && !emailcommon.CanManageInbox(r.Context(), pool, inboxID, userID) {
+		emailcommon.RespondForbidden(w, "inbox not accessible")
+		return
+	}
 
 	query := `
 		SELECT ` + ruleSelectCols + `
@@ -269,13 +290,32 @@ func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 ` + ruleAuditLateral + `
 		WHERE ($1 = '' OR r.inbox_id::text = $1)
 		  AND (r.is_deleted = false OR r.is_deleted IS NULL)
+	`
+	args := []interface{}{inboxID}
+	if !admin && inboxID == "" {
+		query += `
+		  AND EXISTS (
+		    SELECT 1 FROM email_svc.inbox_config i
+		    WHERE i.inbox_id = r.inbox_id AND i.is_deleted = false
+		      AND (
+		        i.owner_user_id = $2 OR i.submitted_by = $2
+		        OR EXISTS (
+		          SELECT 1 FROM email_svc.inbox_members im
+		          WHERE im.inbox_id = i.inbox_id AND im.user_id = $2
+		        )
+		        OR (COALESCE(i.entity_id, '') <> '' AND i.entity_id = ANY($3::text[]))
+		      )
+		  )`
+		args = append(args, userID, api.GetEntityIDsFromCtx(r.Context()))
+	}
+	query += `
 		ORDER BY GREATEST(
 			COALESCE(ra.last_activity_at, '-infinity'::timestamptz),
 			COALESCE(r.updated_at, r.created_at, '-infinity'::timestamptz)
 		) DESC
 	`
 
-	rows, err := pool.Query(r.Context(), query, inboxID)
+	rows, err := pool.Query(r.Context(), query, args...)
 	if err != nil {
 		emailcommon.RespondInternal(w, "Failed to list rules")
 		return
@@ -292,6 +332,9 @@ func handleList(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		rules = append(rules, rule)
 	}
 	attachDestinations(r.Context(), pool, rules)
+	for i := range rules {
+		maskRuleSecrets(&rules[i])
+	}
 
 	emailcommon.RespondList(w, "transform-rules-list", rules, len(rules))
 }
@@ -302,13 +345,19 @@ func handleCreate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		return
 	}
 
+	userID, ok := requireSessionUser(w, r)
+	if !ok {
+		return
+	}
 	var req TransformationRule
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
-	if u := api.GetUserIDFromCtx(r.Context()); u != "" {
-		req.UserID = u
+	req.UserID = userID
+	if !emailcommon.CanManageInbox(r.Context(), pool, req.InboxID, userID) {
+		emailcommon.RespondForbidden(w, "inbox not accessible")
+		return
 	}
 	if req.InboxID == "" || req.RuleName == "" || req.ConditionType == "" || req.MappingID == "" {
 		emailcommon.RespondBadRequest(w, "Missing required fields")
@@ -366,6 +415,7 @@ func handleCreate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	}
 
 	logAudit(r, pool, req.RuleID, "CREATE_PENDING", req.UserID, req)
+	maskRuleSecrets(&req)
 	emailcommon.RespondPayload(w, "transform-rules-create", req)
 }
 
@@ -375,26 +425,32 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		return
 	}
 
+	userID, ok := requireSessionUser(w, r)
+	if !ok {
+		return
+	}
 	var req TransformationRule
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
-	if u := api.GetUserIDFromCtx(r.Context()); u != "" {
-		req.UserID = u
-	}
+	req.UserID = userID
 	if req.RuleID == "" {
 		emailcommon.RespondBadRequest(w, errRuleIDRequired)
 		return
 	}
 
-	var currentStatus string
+	var currentStatus, inboxID string
 	if err := pool.QueryRow(r.Context(), `
-		SELECT COALESCE(processing_status, '')
+		SELECT COALESCE(processing_status, ''), COALESCE(inbox_id::text, '')
 		FROM email_svc.transformation_rules
 		WHERE rule_id = $1 AND (is_deleted = false OR is_deleted IS NULL)
-	`, req.RuleID).Scan(&currentStatus); err != nil {
+	`, req.RuleID).Scan(&currentStatus, &inboxID); err != nil {
 		emailcommon.RespondBadRequest(w, "rule not found")
+		return
+	}
+	if inboxID != "" && !emailcommon.CanManageInbox(r.Context(), pool, inboxID, userID) {
+		emailcommon.RespondForbidden(w, "inbox not accessible")
 		return
 	}
 	statusNorm := strings.ToUpper(strings.TrimSpace(currentStatus))
@@ -437,6 +493,7 @@ func handleUpdate(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 
 	logAudit(r, pool, req.RuleID, "UPDATE_PENDING", req.UserID, req)
 	req.ProcessingStatus = "PENDING_EDIT_APPROVAL"
+	maskRuleSecrets(&req)
 	emailcommon.RespondPayload(w, "transform-rules-update", req)
 }
 
@@ -453,16 +510,35 @@ func handleDelete(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		return
 	}
 
+	userID, ok := requireSessionUser(w, r)
+	if !ok {
+		return
+	}
 	var req deleteReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
-	if u := api.GetUserIDFromCtx(r.Context()); u != "" {
-		req.UserID = u
-	}
+	req.UserID = userID
 	if req.RuleID == "" {
 		emailcommon.RespondBadRequest(w, errRuleIDRequired)
+		return
+	}
+	var currentStatus, inboxID string
+	if err := pool.QueryRow(r.Context(), `
+		SELECT COALESCE(processing_status, ''), COALESCE(inbox_id::text, '')
+		FROM email_svc.transformation_rules
+		WHERE rule_id = $1 AND (is_deleted = false OR is_deleted IS NULL)
+	`, req.RuleID).Scan(&currentStatus, &inboxID); err != nil {
+		emailcommon.RespondBadRequest(w, "rule not found")
+		return
+	}
+	if inboxID != "" && !emailcommon.CanManageInbox(r.Context(), pool, inboxID, userID) {
+		emailcommon.RespondForbidden(w, "inbox not accessible")
+		return
+	}
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(currentStatus)), "PENDING") {
+		emailcommon.RespondBadRequest(w, "rule is already pending approval")
 		return
 	}
 	comment := strings.TrimSpace(req.CheckerComment)
@@ -500,14 +576,16 @@ func handleApprove(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		return
 	}
 
+	userID, ok := requireSessionUser(w, r)
+	if !ok {
+		return
+	}
 	var req approveRejectReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
-	if u := api.GetUserIDFromCtx(r.Context()); u != "" {
-		req.UserID = u
-	}
+	req.UserID = userID
 	if req.RuleID == "" {
 		emailcommon.RespondBadRequest(w, errRuleIDRequired)
 		return
@@ -620,14 +698,16 @@ func handleReject(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 		return
 	}
 
+	userID, ok := requireSessionUser(w, r)
+	if !ok {
+		return
+	}
 	var req approveRejectReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
-	if u := api.GetUserIDFromCtx(r.Context()); u != "" {
-		req.UserID = u
-	}
+	req.UserID = userID
 	if req.RuleID == "" {
 		emailcommon.RespondBadRequest(w, errRuleIDRequired)
 		return
@@ -666,6 +746,59 @@ func handleReject(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	emailcommon.RespondPayload(w, "transform-rules-reject", map[string]bool{"success": true})
 }
 
+func maskRuleSecrets(rule *TransformationRule) {
+	rule.HasSftpPassword = strings.TrimSpace(rule.SftpPassword) != ""
+	rule.SftpPassword = ""
+	rule.HasAPIAuthToken = strings.TrimSpace(rule.APIAuthToken) != ""
+	rule.APIAuthToken = ""
+	for i := range rule.Destinations {
+		d := &rule.Destinations[i]
+		d.HasSftpPassword = strings.TrimSpace(d.SftpPassword) != ""
+		d.SftpPassword = ""
+		d.HasAPIAuthToken = strings.TrimSpace(d.APIAuthToken) != ""
+		d.APIAuthToken = ""
+	}
+	if len(rule.PendingEditJSON) == 0 {
+		return
+	}
+	var raw map[string]interface{}
+	if json.Unmarshal(rule.PendingEditJSON, &raw) != nil {
+		return
+	}
+	maskSecretMap(raw)
+	if encoded, err := json.Marshal(raw); err == nil {
+		rule.PendingEditJSON = encoded
+	}
+}
+
+func maskSecretMap(m map[string]interface{}) {
+	if m == nil {
+		return
+	}
+	for _, key := range []string{
+		"sftp_password", "api_auth_token",
+		"graph_client_secret", "google_workspace_private_key", "imap_password",
+		"oauth_access_token", "oauth_refresh_token",
+	} {
+		raw, ok := m[key]
+		if !ok {
+			continue
+		}
+		s, _ := raw.(string)
+		m["has_"+key] = strings.TrimSpace(s) != ""
+		delete(m, key)
+	}
+	if dest, ok := m["destinations"]; ok {
+		if arr, ok := dest.([]interface{}); ok {
+			for _, item := range arr {
+				if child, ok := item.(map[string]interface{}); ok {
+					maskSecretMap(child)
+				}
+			}
+		}
+	}
+}
+
 func sanitizeTransformRuleAuditState(raw map[string]interface{}) map[string]interface{} {
 	if raw == nil {
 		return map[string]interface{}{}
@@ -673,8 +806,9 @@ func sanitizeTransformRuleAuditState(raw map[string]interface{}) map[string]inte
 	out := make(map[string]interface{}, len(raw))
 	for k, v := range raw {
 		switch strings.ToLower(k) {
-		case "sftp_password", "api_auth_token":
-			continue
+		case "sftp_password", "api_auth_token", "graph_client_secret", "google_workspace_private_key", "imap_password", "oauth_access_token", "oauth_refresh_token":
+			s, _ := v.(string)
+			out["has_"+strings.ToLower(k)] = strings.TrimSpace(s) != ""
 		case "destinations":
 			out[k] = sanitizeDestinationsAudit(v)
 		default:
@@ -699,8 +833,9 @@ func sanitizeDestinationsAudit(v interface{}) interface{} {
 		row := make(map[string]interface{}, len(m))
 		for dk, dv := range m {
 			switch strings.ToLower(dk) {
-			case "sftp_password", "api_auth_token":
-				continue
+			case "sftp_password", "api_auth_token", "graph_client_secret", "google_workspace_private_key", "imap_password", "oauth_access_token", "oauth_refresh_token":
+				s, _ := dv.(string)
+				row["has_"+strings.ToLower(dk)] = strings.TrimSpace(s) != ""
 			default:
 				row[dk] = dv
 			}
@@ -723,9 +858,24 @@ func handleAuditLog(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 		emailcommon.RespondBadRequest(w, errInvalidJSONBody)
 		return
 	}
+	userID, ok := requireSessionUser(w, r)
+	if !ok {
+		return
+	}
 	ruleID := strings.TrimSpace(req.RuleID)
 	if ruleID == "" {
 		emailcommon.RespondBadRequest(w, errRuleIDRequired)
+		return
+	}
+	var inboxID string
+	if err := pool.QueryRow(r.Context(), `
+		SELECT COALESCE(inbox_id::text, '') FROM email_svc.transformation_rules WHERE rule_id = $1::uuid
+	`, ruleID).Scan(&inboxID); err != nil {
+		emailcommon.RespondBadRequest(w, "rule not found")
+		return
+	}
+	if inboxID != "" && !emailcommon.CanManageInbox(r.Context(), pool, inboxID, userID) {
+		emailcommon.RespondForbidden(w, "inbox not accessible")
 		return
 	}
 
@@ -774,8 +924,6 @@ func handleAuditLog(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) 
 	emailcommon.RespondList(w, "transform-rules/audit-log", items, len(items))
 }
 
-// ruleDecisionAllowed checks that the rule is waiting for a decision, that the
-// checker is not its submitter and that the checker can manage its inbox.
 func ruleDecisionAllowed(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, ruleID, checker string) bool {
 	var submittedBy, status, inboxID string
 	err := pool.QueryRow(r.Context(), `

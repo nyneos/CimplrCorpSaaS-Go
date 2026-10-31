@@ -5,7 +5,6 @@ import (
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -26,23 +25,20 @@ import (
 //
 //	{ "success": true, "rows": { "processed": N, "skipped": N, "failed": N, "elapsed_ms": N } }
 
-// autoMaturitySystemActor is the maker and checker recorded for confirms the job creates.
 const autoMaturitySystemActor = "system@cimplr.auto"
 
 func CimplrAutoMaturityRunNow(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID    string `json:"user_id"`
-			UserEmail string `json:"user_email"`
+		if !api.IsAdminOverride(r.Context()) {
+			api.RespondEnvelopeError(w, http.StatusForbidden, "This view is limited to administrators", "ADMIN_ONLY")
+			return
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-
-		actor := api.GetUserEmailFromCtx(r.Context())
+		actor := strings.TrimSpace(api.GetUserEmailFromCtx(r.Context()))
 		if actor == "" {
-			actor = api.GetUserIDFromCtx(r.Context())
+			actor = strings.TrimSpace(api.GetUserIDFromCtx(r.Context()))
 		}
 		if actor == "" {
-			actor = "manual-trigger"
+			actor = autoMaturitySystemActor
 		}
 
 		started := time.Now()
@@ -78,8 +74,6 @@ const (
 // RunCimplrAutoMaturityDue creates and finalizes payout/rollover confirms for approved
 // initiates whose FD maturity date has arrived. Each initiate is processed at most once.
 func RunCimplrAutoMaturityDue(ctx context.Context, pool *pgxpool.Pool) (processed, skipped, failed int) {
-	// One sweep at a time across replicas and the run-now endpoint. Transaction-scoped
-	// lock on a held connection, which stays correct on the Supabase transaction pooler.
 	lockConn, err := pool.Acquire(ctx)
 	if err != nil {
 		api.LogError("[CimplrAutoMaturity] acquire lock connection: %v", err)
@@ -188,12 +182,8 @@ func RunCimplrAutoMaturityDue(ctx context.Context, pool *pgxpool.Pool) (processe
 			api.LogError("[CimplrAutoMaturity] row scan failed candidate#=%d: %v", candidateCount, err)
 			continue
 		}
-		if strings.TrimSpace(actorEmail) == "" {
-			actorEmail = autoMaturitySystemActor
-		}
-		if strings.TrimSpace(actorUserID) == "" {
-			actorUserID = actorEmail
-		}
+		actorEmail = autoMaturitySystemActor
+		actorUserID = autoMaturitySystemActor
 		api.LogInfo("[CimplrAutoMaturity] processing initiate_id=%s fd_id=%s type=%s tenor_days=%d rate=%v actor=%s",
 			initiateID, fdID, closureType, newTenor, newRate, actorEmail)
 
@@ -296,10 +286,10 @@ func processCimplrAutoMaturityInitiate(ctx context.Context, pool *pgxpool.Pool, 
 		InterestExpected:     calc.AccruedInterest,
 		TDSExpected:          calc.TDSAmount,
 		NetExpected:          calc.NetPayout,
-		PrincipalReceived:    src.Principal,
-		InterestReceived:     calc.AccruedInterest,
-		TDSDeducted:          calc.TDSAmount,
-		NetAmountReceived:    calc.NetPayout,
+		PrincipalReceived:    0,
+		InterestReceived:     0,
+		TDSDeducted:          0,
+		NetAmountReceived:    0,
 		NewTenorDays:         newTenor,
 		NewInterestRate:      newRate,
 		RolloverAmountBasis:  rolloverBasis,
@@ -307,9 +297,6 @@ func processCimplrAutoMaturityInitiate(ctx context.Context, pool *pgxpool.Pool, 
 		ClosureAmount:        calc.NetPayout,
 		Remarks:              "Auto maturity confirm (system calculation)",
 		Reason:               "AUTO_MATURITY_JOB",
-	}
-	if closureType == "PREMATURE" {
-		req.InterestReceived = calc.RevisedInterestAmount
 	}
 
 	tx, err := pool.Begin(ctx)

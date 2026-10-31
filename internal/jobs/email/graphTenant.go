@@ -46,6 +46,7 @@ func LoadGraphTenant(ctx context.Context, pool *pgxpool.Pool, tenantKey string) 
 		}
 		return row, fmt.Errorf("graph tenant %q not found in email_svc.graph_tenant_config", key)
 	}
+	row.ClientSecret = OpenSecret(row.ClientSecret)
 	return row, nil
 }
 
@@ -62,6 +63,7 @@ func LoadDefaultGraphTenant(ctx context.Context, pool *pgxpool.Pool) (GraphTenan
 	if err != nil {
 		return row, fmt.Errorf("no default graph tenant in email_svc.graph_tenant_config")
 	}
+	row.ClientSecret = OpenSecret(row.ClientSecret)
 	return row, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/master/mastererrors"
 	"CimplrCorpSaas/api/utils/s3storage"
@@ -113,7 +114,7 @@ func getUserFriendlyBankConfigError(err error, context string) (string, int) {
 
 	if strings.Contains(errStr, constants.ErrTxBeginFailed) ||
 		strings.Contains(errStr, constants.ErrAuditInsertFailed) {
-		return err.Error(), http.StatusOK
+		return errtext.Text(err), http.StatusOK
 	}
 	if strings.Contains(errStr, "violates foreign key") || strings.Contains(errStr, "foreign key constraint") {
 		return "Referenced record not found or invalid (e.g. bank_code, day_count_code, or holiday_calendar_code does not exist).", http.StatusBadRequest
@@ -1557,6 +1558,30 @@ func BulkApproveBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_bank_config
+			WHERE config_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.ConfigIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyBankConfigError(err, constants.ErrTransactionFailed)
@@ -1663,6 +1688,30 @@ func BulkRejectBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		makerRows, mErr := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM investment.fd_audit_bank_config
+			WHERE config_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, req.ConfigIDs)
+		if mErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, mErr))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			msg, status := getUserFriendlyBankConfigError(err, constants.ErrTransactionFailed)
@@ -1670,6 +1719,49 @@ func BulkRejectBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.fd_bank_config_master m SET
+				bank_code = COALESCE(a.old_bank_code, m.bank_code),
+				product_type = COALESCE(a.old_product_type, m.product_type),
+				minimum_amount = COALESCE(a.old_minimum_amount, m.minimum_amount),
+				maximum_amount = COALESCE(a.old_maximum_amount, m.maximum_amount),
+				day_count_code = COALESCE(a.old_day_count_code, m.day_count_code),
+				capitalization_schedule_type = COALESCE(a.old_capitalization_schedule_type, m.capitalization_schedule_type),
+				capitalization_date_adjustment = COALESCE(a.old_capitalization_date_adjustment, m.capitalization_date_adjustment),
+				accrual_start_convention = COALESCE(a.old_accrual_start_convention, m.accrual_start_convention),
+				accrual_end_convention = COALESCE(a.old_accrual_end_convention, m.accrual_end_convention),
+				period_boundary_definition = COALESCE(a.old_period_boundary_definition, m.period_boundary_definition),
+				weekend_accrual = COALESCE(a.old_weekend_accrual, m.weekend_accrual),
+				holiday_accrual = COALESCE(a.old_holiday_accrual, m.holiday_accrual),
+				holiday_calendar_code = COALESCE(a.old_holiday_calendar_code, m.holiday_calendar_code),
+				broken_period_method = COALESCE(a.old_broken_period_method, m.broken_period_method),
+				broken_period_location = COALESCE(a.old_broken_period_location, m.broken_period_location),
+				interest_rounding_decimals = COALESCE(a.old_interest_rounding_decimals, m.interest_rounding_decimals),
+				rounding_method = COALESCE(a.old_rounding_method, m.rounding_method),
+				rounding_frequency = COALESCE(a.old_rounding_frequency, m.rounding_frequency),
+				grace_period_days = COALESCE(a.old_grace_period_days, m.grace_period_days),
+				grace_period_rate_type = COALESCE(a.old_grace_period_rate_type, m.grace_period_rate_type),
+				minimum_compounding_period_days = COALESCE(a.old_minimum_compounding_period_days, m.minimum_compounding_period_days),
+				quarter_definition = COALESCE(a.old_quarter_definition, m.quarter_definition),
+				tds_deduction_timing = COALESCE(a.old_tds_deduction_timing, m.tds_deduction_timing),
+				effective_from = COALESCE(a.old_effective_from, m.effective_from),
+				effective_to = COALESCE(a.old_effective_to, m.effective_to),
+				config_notes = COALESCE(a.old_config_notes, m.config_notes),
+				is_active = COALESCE(a.old_is_active, m.is_active)
+			FROM (
+				SELECT DISTINCT ON (config_id) *
+				FROM investment.fd_audit_bank_config
+				WHERE config_id = ANY($1::text[])
+				  AND UPPER(COALESCE(action_type, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+				ORDER BY config_id, requested_at DESC
+			) a
+			WHERE m.config_id = a.config_id`, req.ConfigIDs); err != nil {
+			msg, status := getUserFriendlyBankConfigError(err, "Edit revert failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
 
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_bank_config

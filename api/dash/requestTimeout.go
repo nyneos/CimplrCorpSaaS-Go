@@ -6,9 +6,6 @@ import (
 	"time"
 )
 
-// dashQueryTimeout bounds every dashboard request context, so each query a handler
-// runs on r.Context() is cancelled instead of holding a connection indefinitely.
-// It stays below the server WriteTimeout.
 const dashQueryTimeout = 3 * time.Minute
 
 func withDashQueryTimeout(next http.Handler) http.Handler {

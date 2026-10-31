@@ -3,11 +3,13 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/errtext"
+	"CimplrCorpSaas/api/governance"
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/dependency"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -692,6 +694,20 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							computedLevel = 0
 							computedIsTop = true
 						} else {
+							var childCode string
+							if err := tx.QueryRow(ctx, `SELECT centre_code FROM mastercostprofitcenter WHERE centre_id=$1`, row.CentreID).Scan(&childCode); err != nil {
+								results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to read centre code: " + errtext.Text(err), "centre_id": row.CentreID})
+								return
+							}
+							cycled, err := costCentreParentCycles(ctx, tx, childCode, pcode)
+							if err != nil {
+								results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errtext.Text(err), "centre_id": row.CentreID})
+								return
+							}
+							if cycled {
+								results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent assignment would create a hierarchy cycle", "centre_id": row.CentreID})
+								return
+							}
 							var plevel int
 							if err := pgxPool.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, pcode).Scan(&plevel); err != nil {
 								results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent centre not found: " + pcode, "centre_id": row.CentreID})
@@ -1081,69 +1097,126 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				return
 			}
-			defer relRows.Close()
-
+			type costRelPair struct{ child, parent string }
+			var relPairs []costRelPair
 			for relRows.Next() {
 				var childCode, parentCode interface{}
-				if err := relRows.Scan(&childCode, &parentCode); err == nil {
-					cc := strings.TrimSpace(ifaceToString(childCode))
-					pc := strings.TrimSpace(ifaceToString(parentCode))
-					if cc == "" {
+				if err := relRows.Scan(&childCode, &parentCode); err != nil {
+					relRows.Close()
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
+				}
+				cc := strings.TrimSpace(ifaceToString(childCode))
+				if cc == "" {
+					continue
+				}
+				relPairs = append(relPairs, costRelPair{child: cc, parent: strings.TrimSpace(ifaceToString(parentCode))})
+			}
+			if err := relRows.Err(); err != nil {
+				relRows.Close()
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			relRows.Close()
+
+			// Batch-resolve missing centre codes / levels / parent links (avoids per-row N+1).
+			codeToLevel := map[string]int{}
+			codeToParent := map[string]string{}
+			needLookup := make([]string, 0)
+			seenLookup := map[string]bool{}
+			for _, pair := range relPairs {
+				for _, code := range []string{pair.child, pair.parent} {
+					if code == "" || seenLookup[code] {
 						continue
 					}
+					seenLookup[code] = true
+					needLookup = append(needLookup, code)
+				}
+			}
+			if len(needLookup) > 0 {
+				lookupRows, err := tx.Query(ctx, `
+					SELECT centre_id::text, centre_code, COALESCE(centre_level, 0),
+					       COALESCE(NULLIF(TRIM(parent_centre_code), ''), '')
+					FROM mastercostprofitcenter
+					WHERE centre_code = ANY($1) AND COALESCE(is_deleted, false) = false`, needLookup)
+				if err != nil {
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
+				}
+				for lookupRows.Next() {
+					var id, code, parent string
+					var level int
+					if err := lookupRows.Scan(&id, &code, &level, &parent); err != nil {
+						lookupRows.Close()
+						tx.Rollback(ctx)
+						api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+						return
+					}
+					codeToID[code] = id
+					codeToLevel[code] = level
+					codeToParent[code] = parent
+				}
+				if err := lookupRows.Err(); err != nil {
+					lookupRows.Close()
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
+				}
+				lookupRows.Close()
+			}
+			// Proposed edges override existing parent links for cycle detection in this batch.
+			for _, pair := range relPairs {
+				if pair.parent != "" {
+					codeToParent[pair.child] = pair.parent
+				} else {
+					codeToParent[pair.child] = ""
+				}
+			}
 
-					// Resolve child ID: prefer newly inserted map, fallback to existing master
-					var childID string
-					if cid, ok := codeToID[cc]; ok {
-						childID = cid
-					} else {
-						if err := tx.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, cc).Scan(&childID); err != nil {
-							// cannot resolve child - skip
-							continue
-						}
+			for _, pair := range relPairs {
+				cc, pc := pair.child, pair.parent
+				childID, ok := codeToID[cc]
+				if !ok {
+					continue
+				}
+
+				if pc != "" {
+					if _, ok := codeToID[pc]; !ok {
+						continue
+					}
+					if costCentreParentMapCycles(cc, pc, codeToParent) {
+						tx.Rollback(ctx)
+						api.RespondWithError(w, http.StatusBadRequest, "cost centre hierarchy cycle: "+cc)
+						return
+					}
+					relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_code, child_centre_code) VALUES ($1,$2) ON CONFLICT DO NOTHING`
+					if _, err := tx.Exec(ctx, relQ, pc, cc); err != nil {
+						tx.Rollback(ctx)
+						api.RespondWithResult(w, false, constants.ErrBulkRelationshipInsertFailed+errtext.Detail(w, err))
+						return
 					}
 
-					if pc != "" {
-						// Resolve parent ID: prefer current batch map, then existing master by code
-						var parentID string
-						if pid, ok := codeToID[pc]; ok {
-							parentID = pid
-						} else {
-							if err := tx.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, pc).Scan(&parentID); err != nil {
-								// cannot resolve parent - skip relationship
-								continue
-							}
-						}
-
-						// Insert relationship (no-op if exists)
-						relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_code, child_centre_code) VALUES ($1,$2) ON CONFLICT DO NOTHING`
-						if _, err := tx.Exec(ctx, relQ, pc, cc); err != nil {
-							tx.Rollback(ctx)
-							api.RespondWithResult(w, false, constants.ErrBulkRelationshipInsertFailed+errtext.Detail(w, err))
+					if parentLevel, ok := codeToLevel[pc]; ok {
+						if _, err := tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_code=$1, centre_level=$2, is_top_level_centre=false WHERE centre_id=$3`, pc, parentLevel+1, childID); err != nil {
+							api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 							return
 						}
-
-						// Update child master: set parent and compute level
-						var parentLevel int
-						if err := tx.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1 AND COALESCE(is_deleted, false) = false`, pc).Scan(&parentLevel); err == nil {
-							if _, err := tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_code=$1, centre_level=$2, is_top_level_centre=false WHERE centre_id=$3`, pc, parentLevel+1, childID); err != nil {
-								api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
-								return
-							}
-						} else {
-							// parent exists but level unknown - at least set parent code
-							if _, err := tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_code=$1 WHERE centre_id=$2`, pc, childID); err != nil {
-								api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
-								return
-							}
-						}
+						codeToLevel[cc] = parentLevel + 1
 					} else {
-						// No parent specified: ensure this child is marked top-level with level 0
-						if _, err := tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_code=NULL, centre_level=0, is_top_level_centre=true WHERE centre_id=$1`, childID); err != nil {
+						if _, err := tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_code=$1 WHERE centre_id=$2`, pc, childID); err != nil {
 							api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 							return
 						}
 					}
+				} else {
+					if _, err := tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_code=NULL, centre_level=0, is_top_level_centre=true WHERE centre_id=$1`, childID); err != nil {
+						api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+						return
+					}
+					codeToLevel[cc] = 0
 				}
 			}
 
@@ -1803,68 +1876,48 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Fetch relationships and compute descendants so we add audit actions for all descendants as well
+		// Descendants only for the requested roots (recursive CTE — no full-table load).
 		ctx := r.Context()
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
+		descRows, err := pgxPool.Query(ctx, `
+			WITH RECURSIVE descendants AS (
+				SELECT centre_id::text AS centre_id, centre_code
+				FROM mastercostprofitcenter
+				WHERE centre_id::text = ANY($1::text[])
+				UNION
+				SELECT child.centre_id::text, child.centre_code
+				FROM descendants d
+				JOIN costprofitcenterrelationships rel ON rel.parent_centre_code = d.centre_code
+				JOIN mastercostprofitcenter child ON child.centre_code = rel.child_centre_code
+				WHERE COALESCE(child.is_deleted, false) = false
+			)
+			SELECT DISTINCT centre_id FROM descendants`, req.CentreIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		codeToIDMap := map[string]string{}
-
-		// First get all centre_code to centre_id mappings
-		codeRows, err := pgxPool.Query(ctx, `SELECT centre_id, centre_code FROM mastercostprofitcenter`)
-		if err != nil {
+		defer descRows.Close()
+		allList := make([]string, 0, len(req.CentreIDs))
+		seen := map[string]bool{}
+		for descRows.Next() {
+			var id string
+			if err := descRows.Scan(&id); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			allList = append(allList, id)
+		}
+		if err := descRows.Err(); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
-		defer codeRows.Close()
-		for codeRows.Next() {
-			var id, code string
-			if err := codeRows.Scan(&id, &code); err == nil {
-				codeToIDMap[code] = id
-			}
-		}
 
-		// Build parent map using centre IDs
-		for relRows.Next() {
-			var parentCode, childCode string
-			if err := relRows.Scan(&parentCode, &childCode); err == nil {
-				if parentID, ok := codeToIDMap[parentCode]; ok {
-					if childID, ok := codeToIDMap[childCode]; ok {
-						parentMap[parentID] = append(parentMap[parentID], childID)
-					}
-				}
-			}
-		}
-
-		// BFS to collect all descendants of provided centre ids
-		allSet := map[string]bool{}
-		queue := append([]string{}, req.CentreIDs...)
-		for _, id := range req.CentreIDs {
-			allSet[id] = true
-		}
-		for len(queue) > 0 {
-			cur := queue[0]
-			queue = queue[1:]
-			for _, child := range parentMap[cur] {
-				if !allSet[child] {
-					allSet[child] = true
-					queue = append(queue, child)
-				}
-			}
-		}
-
-		if len(allSet) == 0 {
+		if len(allList) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "No centres found to delete")
 			return
-		}
-
-		allList := make([]string, 0, len(allSet))
-		for id := range allSet {
-			allList = append(allList, id)
 		}
 
 		// Bulk insert audit actions for all centre ids (roots + descendants)
@@ -1966,6 +2019,31 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "No centres found to reject")
 			return
 		}
+		makerRows, err := pgxPool.Query(ctx, `
+			SELECT COALESCE(requested_by, '')
+			FROM auditactioncostprofitcenter
+			WHERE centre_id = ANY($1)
+			  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'`, allToReject)
+		if err != nil {
+			api.LogErrorForResponse(w, "cost centre reject makers: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		var makers []string
+		for makerRows.Next() {
+			var maker string
+			if err := makerRows.Scan(&maker); err != nil {
+				makerRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			makers = append(makers, maker)
+		}
+		makerRows.Close()
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
+		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -1978,6 +2056,35 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `
+			UPDATE mastercostprofitcenter m SET
+				centre_code = COALESCE(m.old_centre_code, m.centre_code),
+				centre_name = COALESCE(m.old_centre_name, m.centre_name),
+				centre_type = COALESCE(m.old_centre_type, m.centre_type),
+				entity_name = COALESCE(m.old_entity_name, m.entity_name),
+				status = COALESCE(m.old_status, m.status),
+				source = COALESCE(m.old_source, m.source),
+				erp_type = COALESCE(m.old_erp_type, m.erp_type),
+				default_currency = COALESCE(m.old_default_currency, m.default_currency),
+				owner = COALESCE(m.old_owner, m.owner),
+				owner_email = COALESCE(m.old_owner_email, m.owner_email),
+				tags = COALESCE(m.old_tags, m.tags),
+				external_code = COALESCE(m.old_external_code, m.external_code),
+				segment = COALESCE(m.old_segment, m.segment),
+				parent_centre_code = COALESCE(m.old_parent_centre_code, m.parent_centre_code),
+				centre_level = COALESCE(m.old_centre_level, m.centre_level),
+				effective_from = COALESCE(m.old_effective_from, m.effective_from),
+				effective_to = COALESCE(m.old_effective_to, m.effective_to)
+			WHERE m.centre_id IN (
+				SELECT centre_id FROM auditactioncostprofitcenter
+				WHERE centre_id = ANY($1)
+				  AND UPPER(COALESCE(actiontype, '')) = 'EDIT'
+				  AND UPPER(COALESCE(processing_status, '')) LIKE 'PENDING%'
+			)`, allToReject); err != nil {
+			api.LogErrorForResponse(w, "cost centre reject revert: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
 
 		// Update audit rows to REJECTED and return affected rows
 		query := `UPDATE auditactioncostprofitcenter SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (centre_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, centre_id`
@@ -2046,114 +2153,81 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		checkerBy := session.Name
 		ctx := r.Context()
 
-		// Fetch relationships
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
+		pendingRows, err := pgxPool.Query(ctx, `
+			SELECT DISTINCT ON (centre_id) centre_id::text, action_id::text, COALESCE(actiontype, ''), COALESCE(processing_status, ''), COALESCE(requested_by, '')
+			FROM auditactioncostprofitcenter
+			WHERE centre_id = ANY($1)
+			ORDER BY centre_id, requested_at DESC`, req.CentreIDs)
 		if err != nil {
+			api.LogErrorForResponse(w, "cost centre approve pending: %v", err)
 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		codeToIDMap := map[string]string{}
-
-		// Get centre_code to centre_id mappings
-		codeRows, err := pgxPool.Query(ctx, `SELECT centre_id, centre_code FROM mastercostprofitcenter`)
-		if err != nil {
+		type pendingCentre struct {
+			id, actionID, actionType, status, maker string
+		}
+		var pending []pendingCentre
+		for pendingRows.Next() {
+			var row pendingCentre
+			if err := pendingRows.Scan(&row.id, &row.actionID, &row.actionType, &row.status, &row.maker); err != nil {
+				pendingRows.Close()
+				api.LogErrorForResponse(w, "cost centre approve scan: %v", err)
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(row.status)), "PENDING") {
+				continue
+			}
+			pending = append(pending, row)
+		}
+		if err := pendingRows.Err(); err != nil {
+			pendingRows.Close()
+			api.LogErrorForResponse(w, "cost centre approve pending: %v", err)
 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
-		defer codeRows.Close()
-		for codeRows.Next() {
-			var id, code string
-			if err := codeRows.Scan(&id, &code); err == nil {
-				codeToIDMap[code] = id
-			}
+		pendingRows.Close()
+		makers := make([]string, 0, len(pending))
+		for _, row := range pending {
+			makers = append(makers, row.maker)
+		}
+		if governance.DenySelfApprovalCtx(ctx, makers...) {
+			api.RespondWithError(w, http.StatusForbidden, governance.ErrSelfApproval.Error())
+			return
 		}
 
-		// Build parent map using centre IDs
-		for relRows.Next() {
-			var parentCode, childCode string
-			if err := relRows.Scan(&parentCode, &childCode); err == nil {
-				if parentID, ok := codeToIDMap[parentCode]; ok {
-					if childID, ok := codeToIDMap[childCode]; ok {
-						parentMap[parentID] = append(parentMap[parentID], childID)
-					}
-				}
-			}
-		}
-
-		// Traverse descendants
-		getAllDescendants := func(ids []string) []string {
-			all := map[string]bool{}
-			queue := append([]string{}, ids...)
-			for _, id := range ids {
-				all[id] = true
-			}
-			for len(queue) > 0 {
-				current := queue[0]
-				queue = queue[1:]
-				for _, child := range parentMap[current] {
-					if !all[child] {
-						all[child] = true
-						queue = append(queue, child)
-					}
-				}
-			}
-			res := []string{}
-			for id := range all {
-				res = append(res, id)
-			}
-			return res
-		}
-
-		// Only a pending DELETE carries its descendants; other approvals touch the selected centres only.
-		var deleteRoots, plainIDs []string
-		for _, cid := range req.CentreIDs {
-			var procStatus string
-			if err := pgxPool.QueryRow(ctx, "SELECT processing_status FROM auditactioncostprofitcenter WHERE centre_id = $1 ORDER BY requested_at DESC LIMIT 1", cid).Scan(&procStatus); err == nil && strings.ToUpper(procStatus) == "PENDING_DELETE_APPROVAL" {
-				deleteRoots = append(deleteRoots, cid)
-			} else {
-				plainIDs = append(plainIDs, cid)
-			}
-		}
-		allToApprove := plainIDs
-		if len(deleteRoots) > 0 {
-			seen := map[string]bool{}
-			for _, id := range plainIDs {
-				seen[id] = true
-			}
-			for _, id := range getAllDescendants(deleteRoots) {
-				if !seen[id] {
-					seen[id] = true
-					allToApprove = append(allToApprove, id)
-				}
-			}
-		}
-
-		// Dependency validation for deletes
-		var safeToApprove []string
+		var safeActionIDs []string
 		var blockedRecords []map[string]interface{}
-
-		for _, cid := range allToApprove {
-			var actionType, procStatus string
-			err := pgxPool.QueryRow(ctx, "SELECT actiontype, processing_status FROM auditactioncostprofitcenter WHERE centre_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC LIMIT 1", cid).Scan(&actionType, &procStatus)
-			if err == nil && strings.ToUpper(actionType) == "DELETE" && strings.ToUpper(procStatus) == "PENDING_DELETE_APPROVAL" {
-				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "mastercostprofitcenter", cid)
+		var deleteIDs []string
+		for _, row := range pending {
+			if strings.ToUpper(row.actionType) == "DELETE" && strings.ToUpper(row.status) == "PENDING_DELETE_APPROVAL" {
+				blockers, err := dependency.HasCoreBelow(ctx, pgxPool, "mastercostprofitcenter", row.id)
+				if err != nil {
+					api.LogErrorForResponse(w, "cost centre delete blockers %s: %v", row.id, err)
+					api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
+				}
 				if len(blockers) > 0 {
 					blockedRecords = append(blockedRecords, map[string]interface{}{
-						"centre_id":  cid,
+						"centre_id":  row.id,
 						"blocked_by": dependency.BlockersSummary(blockers),
 					})
 					continue
 				}
+				deleteIDs = append(deleteIDs, row.id)
 			}
-			safeToApprove = append(safeToApprove, cid)
+			safeActionIDs = append(safeActionIDs, row.actionID)
 		}
+		safeToApprove := safeActionIDs
 
 		if len(safeToApprove) == 0 {
-			api.RespondWithPayload(w, false, "All selected centres are blocked from deletion", map[string]interface{}{
-				"blocked": blockedRecords,
-			})
+			if len(blockedRecords) > 0 {
+				api.RespondWithPayload(w, false, "All selected centres are blocked from deletion", map[string]interface{}{
+					"blocked": blockedRecords,
+				})
+				return
+			}
+			api.RespondEnvelopeFailureCompat(w, http.StatusUnprocessableEntity, constants.ErrNoRowsUpdated, "", map[string]interface{}{"updated": []string{}, "blocked": blockedRecords})
 			return
 		}
 
@@ -2169,8 +2243,26 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 		defer tx.Rollback(ctx)
 
-		// Update audit rows to APPROVED and return affected rows including action type
-		query := `UPDATE auditactioncostprofitcenter SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE (centre_id = ANY($3)) AND LOWER(TRIM(COALESCE(requested_by,''))) <> LOWER(TRIM($1::text)) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, centre_id, actiontype`
+		if len(deleteIDs) > 0 {
+			for _, cid := range deleteIDs {
+				if err := dependency.CascadeDelete(ctx, pgxPool, "mastercostprofitcenter", cid, checkerBy); err != nil {
+					api.LogErrorForResponse(w, "cost centre cascade %s: %v", cid, err)
+					api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+					return
+				}
+			}
+			if _, err := tx.Exec(ctx, `UPDATE mastercostprofitcenter SET is_deleted=true WHERE centre_id = ANY($1)`, deleteIDs); err != nil {
+				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to mark centres as deleted")
+				if statusCode == http.StatusOK {
+					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
+				return
+			}
+		}
+
+		query := `UPDATE auditactioncostprofitcenter SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND UPPER(COALESCE(processing_status,'')) LIKE 'PENDING%' RETURNING action_id, centre_id, actiontype`
 		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, safeToApprove)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to approve centre actions")
@@ -2181,36 +2273,24 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 			return
 		}
-		defer rows.Close()
-
 		var updated []map[string]interface{}
-		var deleteIDs []string
 		for rows.Next() {
 			var actionID, centreID, actionType string
-			if err := rows.Scan(&actionID, &centreID, &actionType); err == nil {
-				updated = append(updated, map[string]interface{}{"action_id": actionID, "centre_id": centreID, "action_type": actionType})
-				if strings.ToUpper(strings.TrimSpace(actionType)) == "DELETE" {
-					deleteIDs = append(deleteIDs, centreID)
-				}
-			}
-		}
-
-		// Set is_deleted=true for approved DELETE actions
-		if len(deleteIDs) > 0 {
-			for _, cid := range deleteIDs {
-				_ = dependency.CascadeDelete(ctx, pgxPool, "mastercostprofitcenter", cid, checkerBy)
-			}
-			updQ := `UPDATE mastercostprofitcenter SET is_deleted=true WHERE centre_id = ANY($1)`
-			if _, err := tx.Exec(ctx, updQ, deleteIDs); err != nil {
-				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to mark centres as deleted")
-				if statusCode == http.StatusOK {
-					api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
-				} else {
-					api.RespondWithError(w, statusCode, errMsg)
-				}
+			if err := rows.Scan(&actionID, &centreID, &actionType); err != nil {
+				rows.Close()
+				api.LogErrorForResponse(w, "cost centre approve scan: %v", err)
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 				return
 			}
+			updated = append(updated, map[string]interface{}{"action_id": actionID, "centre_id": centreID, "action_type": actionType})
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			api.LogErrorForResponse(w, "cost centre approve rows: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		rows.Close()
 
 		success := len(updated) > 0
 		message := "Success"
@@ -2430,74 +2510,94 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Async sync + audit - pass the centre codes so we can find the newly inserted rows
 			go func(userName string, centreCodes []string) {
-				ctx2 := context.Background()
-				tx2, err := pgxPool.Begin(ctx2)
-				if err != nil {
-					logger.LogError("Async tx begin failed: %v", err)
+				defer func() {
+					if rec := recover(); rec != nil {
+						logger.LogError("UploadCostProfitCenterSimple async panic: %v", rec)
+					}
+				}()
+				ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				defer cancel()
+
+				uniq := make(map[string]bool)
+				uniqList := make([]string, 0, len(centreCodes))
+				for _, c := range centreCodes {
+					if c == "" || uniq[c] {
+						continue
+					}
+					uniq[c] = true
+					uniqList = append(uniqList, c)
+				}
+
+				// Hierarchy sync is best-effort and scoped to the uploaded batch.
+				// Audit runs in a separate transaction so a sync failure cannot skip it.
+				if len(uniqList) > 0 {
+					syncTx, err := pgxPool.Begin(ctx2)
+					if err != nil {
+						logger.LogError("UploadCostProfitCenterSimple: sync tx begin failed: %v", err)
+					} else {
+						_, err = syncTx.Exec(ctx2, `
+							UPDATE mastercostprofitcenter
+							SET centre_level = 0, is_top_level_centre = true
+							WHERE centre_code = ANY($1)
+							  AND (
+							    parent_centre_code IS NULL OR TRIM(parent_centre_code) = ''
+							    OR parent_centre_code NOT IN (SELECT centre_code FROM mastercostprofitcenter WHERE COALESCE(is_deleted, false) = false)
+							  );
+
+							WITH RECURSIVE cte AS (
+								SELECT centre_id, centre_code, parent_centre_code, 0 lvl, ARRAY[centre_code]::text[] AS path
+								FROM mastercostprofitcenter
+								WHERE parent_centre_code IS NULL OR TRIM(parent_centre_code) = ''
+								UNION ALL
+								SELECT c.centre_id, c.centre_code, c.parent_centre_code, p.lvl + 1, p.path || c.centre_code
+								FROM mastercostprofitcenter c
+								JOIN cte p ON c.parent_centre_code = p.centre_code
+								WHERE NOT (c.centre_code = ANY(p.path)) AND p.lvl < 64
+							)
+							UPDATE mastercostprofitcenter m
+							SET centre_level = cte.lvl,
+								is_top_level_centre = (cte.lvl = 0)
+							FROM cte
+							WHERE m.centre_id = cte.centre_id
+							  AND m.centre_code = ANY($1);
+
+							INSERT INTO costprofitcenterrelationships (parent_centre_code, child_centre_code, status)
+							SELECT DISTINCT p.centre_code, c.centre_code, 'Active'
+							FROM mastercostprofitcenter c
+							JOIN mastercostprofitcenter p ON c.parent_centre_code = p.centre_code
+							WHERE c.centre_code = ANY($1)
+							  AND COALESCE(c.is_deleted, false) = false
+							  AND COALESCE(p.is_deleted, false) = false
+							ON CONFLICT DO NOTHING;
+						`, uniqList)
+						if err != nil {
+							logger.LogError("UploadCostProfitCenterSimple: hierarchy sync failed: %v", err)
+							_ = syncTx.Rollback(ctx2)
+						} else if err := syncTx.Commit(ctx2); err != nil {
+							logger.LogError("UploadCostProfitCenterSimple: hierarchy sync commit failed: %v", err)
+						}
+					}
+				}
+
+				if len(uniqList) == 0 {
 					return
 				}
-				defer tx2.Rollback(ctx2)
-
-				_, err = tx2.Exec(ctx2, `
-					-- Set root levels (use parent_centre_code -> centre_code)
-					UPDATE mastercostprofitcenter
-					SET centre_level = 0, is_top_level_centre = true
-					WHERE parent_centre_code IS NULL OR TRIM(parent_centre_code) = ''
-					   OR parent_centre_code NOT IN (SELECT centre_code FROM mastercostprofitcenter);
-
-					-- Build recursive levels using centre_code link
-					WITH RECURSIVE cte AS (
-						SELECT centre_id, centre_code, parent_centre_code, 0 lvl
-						FROM mastercostprofitcenter
-						WHERE parent_centre_code IS NULL OR TRIM(parent_centre_code) = ''
-						UNION ALL
-						SELECT c.centre_id, c.centre_code, c.parent_centre_code, p.lvl + 1
-						FROM mastercostprofitcenter c
-						JOIN cte p ON c.parent_centre_code = p.centre_code
-					)
-					UPDATE mastercostprofitcenter m
-					SET centre_level = cte.lvl,
-						is_top_level_centre = (cte.lvl=0)
-					FROM cte WHERE m.centre_id = cte.centre_id;
-
-					-- Relationships (store codes in relationships table)
-					INSERT INTO costprofitcenterrelationships (parent_centre_code, child_centre_code, status)
-					SELECT DISTINCT p.centre_code, c.centre_code, 'Active'
-					FROM mastercostprofitcenter c
-					JOIN mastercostprofitcenter p ON c.parent_centre_code = p.centre_code
-					WHERE COALESCE(c.is_deleted, false) = false AND COALESCE(p.is_deleted, false) = false
-					ON CONFLICT DO NOTHING;
-				`)
+				auditTx, err := pgxPool.Begin(ctx2)
 				if err != nil {
-					logger.LogError("Hierarchy sync failed: %v", err)
+					logger.LogError("UploadCostProfitCenterSimple: audit tx begin failed: %v", err)
+					return
 				}
-
-				// Insert audit rows for the centre_codes we just uploaded. Use centre_code to locate rows
-				if len(centreCodes) > 0 {
-					// dedupe centreCodes
-					uniq := make(map[string]bool)
-					uniqList := make([]string, 0, len(centreCodes))
-					for _, c := range centreCodes {
-						if c == "" {
-							continue
-						}
-						if !uniq[c] {
-							uniq[c] = true
-							uniqList = append(uniqList, c)
-						}
-					}
-					if len(uniqList) > 0 {
-						if _, err := tx2.Exec(ctx2, `
-						INSERT INTO auditactioncostprofitcenter(centre_id, actiontype, processing_status, requested_by, requested_at)
-						SELECT centre_id, 'CREATE', 'PENDING_APPROVAL', $1, now()
-						FROM mastercostprofitcenter
-						WHERE centre_code = ANY($2)
-						`, userName, uniqList); err != nil {
-							logger.LogError("Audit insert failed: %v", err)
-						}
-					}
+				if _, err := auditTx.Exec(ctx2, `
+					INSERT INTO auditactioncostprofitcenter(centre_id, actiontype, processing_status, requested_by, requested_at)
+					SELECT centre_id, 'CREATE', 'PENDING_APPROVAL', $1, now()
+					FROM mastercostprofitcenter
+					WHERE centre_code = ANY($2)
+				`, userName, uniqList); err != nil {
+					logger.LogError("UploadCostProfitCenterSimple: audit insert failed: %v", err)
+					_ = auditTx.Rollback(ctx2)
+					return
 				}
-				if err := tx2.Commit(ctx2); err != nil {
+				if err := auditTx.Commit(ctx2); err != nil {
 					logger.LogError("UploadCostProfitCenterSimple: audit tx commit failed: %v", err)
 				}
 			}(userName, centreCodes)
@@ -2507,6 +2607,78 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondEnvelopeSuccessCompat(w, "Success", map[string]interface{}{"batch_ids": batchIDs})
 	}
+}
+
+func costCentreParentMapCycles(childCode, parentCode string, parentByCode map[string]string) bool {
+	childCode = strings.TrimSpace(childCode)
+	parentCode = strings.TrimSpace(parentCode)
+	if childCode == "" || parentCode == "" {
+		return false
+	}
+	if strings.EqualFold(childCode, parentCode) {
+		return true
+	}
+	visited := map[string]bool{strings.ToLower(childCode): true}
+	cur := parentCode
+	for cur != "" {
+		key := strings.ToLower(cur)
+		if visited[key] {
+			return true
+		}
+		visited[key] = true
+		next, ok := parentByCode[cur]
+		if !ok {
+			// Try case-insensitive map lookup once.
+			found := false
+			for code, parent := range parentByCode {
+				if strings.EqualFold(code, cur) {
+					next = parent
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		cur = strings.TrimSpace(next)
+	}
+	return false
+}
+
+func costCentreParentCycles(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, childCode, parentCode string) (bool, error) {
+	childCode = strings.TrimSpace(childCode)
+	parentCode = strings.TrimSpace(parentCode)
+	if childCode == "" || parentCode == "" {
+		return false, nil
+	}
+	if strings.EqualFold(childCode, parentCode) {
+		return true, nil
+	}
+	visited := map[string]bool{strings.ToLower(childCode): true}
+	cur := parentCode
+	for cur != "" {
+		key := strings.ToLower(cur)
+		if visited[key] {
+			return true, nil
+		}
+		visited[key] = true
+		var next *string
+		err := q.QueryRow(ctx, `SELECT NULLIF(TRIM(parent_centre_code), '') FROM mastercostprofitcenter WHERE centre_code = $1 AND COALESCE(is_deleted, false) = false`, cur).Scan(&next)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return false, nil
+			}
+			return false, err
+		}
+		if next == nil {
+			return false, nil
+		}
+		cur = *next
+	}
+	return false, nil
 }
 
 func contains(arr []string, v string) bool {
