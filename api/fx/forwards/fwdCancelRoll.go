@@ -262,6 +262,31 @@ func lockBookingAndNextLedger(ctx context.Context, tx pgx.Tx, bookingID string) 
 	return openAmount, ledgerSeq + 1, nil
 }
 
+func validateCancelRollAmount(ctx context.Context, pool *pgxpool.Pool, bookingID string, amount float64) error {
+	var openAmount float64
+	err := pool.QueryRow(ctx, `SELECT running_open_amount FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bookingID).Scan(&openAmount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = pool.QueryRow(ctx, `SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bookingID).Scan(&openAmount)
+	}
+	if err != nil {
+		return err
+	}
+	if amount <= 0 || amount > math.Abs(openAmount)+0.0001 {
+		return errCancelRollAmountInvalid
+	}
+	return nil
+}
+
+func validatePendingCancelRollAmount(ctx context.Context, pool *pgxpool.Pool, requestType, bookingID, requestDate string) error {
+	var amount float64
+	q := fmt.Sprintf(`SELECT %s FROM %s WHERE booking_id = $1 AND %s = $2 AND status = 'Pending' AND COALESCE(is_deleted, false) = false LIMIT 1`,
+		cancelRollAmountColumn(requestType), cancelRollMainTable(requestType), cancelRollDateColumn(requestType))
+	if err := pool.QueryRow(ctx, q, bookingID, requestDate).Scan(&amount); err != nil {
+		return err
+	}
+	return validateCancelRollAmount(ctx, pool, bookingID, amount)
+}
+
 func executeCancellationApproval(ctx context.Context, pool *pgxpool.Pool, userID, bookingID, requestDate, comment string) error {
 	cancellationReason, err := applyCancellationApproval(ctx, pool, bookingID, requestDate)
 	if err != nil {
@@ -516,6 +541,16 @@ func CancellationStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				respondEnvelopeError(w, http.StatusBadRequest, "Booking not in pending cancellation state")
 				return
 			}
+			if !strings.EqualFold(requestedStatus, "Rejected") {
+				if err := validatePendingCancelRollAmount(r.Context(), pool, cancelRollTypeCancellation, bid, cancellationDate); err != nil {
+					if errors.Is(err, errCancelRollAmountInvalid) {
+						respondEnvelopeError(w, http.StatusBadRequest, errCancelRollAmountInvalid.Error())
+						return
+					}
+					respondEnvelopeError(w, http.StatusInternalServerError, "failed to validate cancellation amount")
+					return
+				}
+			}
 			// Route the decision through the approval matrix instance first. The
 			// engine owns eye ordering, so an approver whose eye is not yet active
 			// is rejected here instead of mutating the record out of sequence, and
@@ -551,6 +586,10 @@ func CancellationStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := applyCancellationApproval(r.Context(), pool, bid, cancellationDate); err != nil {
 				if errors.Is(err, errPendingCancellationNotUpdated) || errors.Is(err, pgx.ErrNoRows) {
 					respondEnvelopeError(w, http.StatusBadRequest, constants.ErrPendingCancellationNotUpdated)
+					return
+				}
+				if errors.Is(err, errCancelRollAmountInvalid) {
+					respondEnvelopeError(w, http.StatusBadRequest, errCancelRollAmountInvalid.Error())
 					return
 				}
 				respondEnvelopeError(w, http.StatusInternalServerError, "failed to approve pending cancellation")
@@ -939,6 +978,16 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 			// APPROVE/REJECT are decisions on a matrix instance — let the approval
 			// engine own eye ordering. DELETE here is a delete *request*, not a
 			// decision, so it stays outside the gate.
+			if action == constants.AuditActionApprove && strings.EqualFold(currentStatus, "Pending") {
+				if err := validatePendingCancelRollAmount(r.Context(), pool, requestType, bookingID, requestDate); err != nil {
+					if errors.Is(err, errCancelRollAmountInvalid) {
+						respondWithError(w, http.StatusBadRequest, errCancelRollAmountInvalid.Error())
+						return
+					}
+					respondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to validate %s amount", cancelRollRequestLabel(requestType)))
+					return
+				}
+			}
 			var gate fxApprovalOutcome
 			if action == constants.AuditActionApprove || action == constants.AuditActionReject {
 				engineAction := approvalengine.ActionApproved
@@ -988,11 +1037,19 @@ func CancellationRolloverAction(pool *pgxpool.Pool) http.HandlerFunc {
 				} else if strings.EqualFold(currentStatus, "Pending") {
 					if requestType == cancelRollTypeRollover {
 						if err := executeRolloverApproval(r.Context(), pool, req.UserID, bookingID, requestDate, req.Comment); err != nil {
+							if errors.Is(err, errCancelRollAmountInvalid) {
+								respondWithError(w, http.StatusBadRequest, errCancelRollAmountInvalid.Error())
+								return
+							}
 							respondWithError(w, http.StatusInternalServerError, "failed to approve rollover request")
 							return
 						}
 					} else {
 						if err := executeCancellationApproval(r.Context(), pool, req.UserID, bookingID, requestDate, req.Comment); err != nil {
+							if errors.Is(err, errCancelRollAmountInvalid) {
+								respondWithError(w, http.StatusBadRequest, errCancelRollAmountInvalid.Error())
+								return
+							}
 							respondWithError(w, http.StatusInternalServerError, "failed to approve cancellation request")
 							return
 						}
@@ -1141,6 +1198,18 @@ func RolloverForwardBooking(pool *pgxpool.Pool) http.HandlerFunc {
 		createdBookingIDs := make([]string, 0, len(req.BookingAmounts))
 		matrixByBooking := make(map[string]string, len(req.BookingAmounts))
 		for bid, amtCancelled := range req.BookingAmounts {
+			if err := validateCancelRollAmount(r.Context(), pool, bid, amtCancelled); err != nil {
+				if errors.Is(err, errCancelRollAmountInvalid) {
+					respondWithError(w, http.StatusBadRequest, fmt.Sprintf("%s: %s", bid, errCancelRollAmountInvalid.Error()))
+					return
+				}
+				if errors.Is(err, pgx.ErrNoRows) {
+					respondWithError(w, http.StatusBadRequest, fmt.Sprintf("Forward booking not found for %s", bid))
+					return
+				}
+				respondWithError(w, http.StatusInternalServerError, "Failed to validate rollover amount")
+				return
+			}
 			// Enforce per booking, not once for the batch — see the same note in
 			// CreateForwardCancellations: amount_rolled_over is the field that
 			// varies across BookingAmounts and the one policies key off, so a
@@ -1529,6 +1598,14 @@ func CreateForwardCancellations(pool *pgxpool.Pool) http.HandlerFunc {
 				respondWithError(w, http.StatusInternalServerError, "Failed to validate forward booking: "+errtext.Detail(w, err))
 				return
 			}
+			if err := validateCancelRollAmount(r.Context(), pool, bookingID, amtCancelled); err != nil {
+				if errors.Is(err, errCancelRollAmountInvalid) {
+					respondWithError(w, http.StatusBadRequest, fmt.Sprintf("%s: %s", bookingOrReferenceID, errCancelRollAmountInvalid.Error()))
+					return
+				}
+				respondWithError(w, http.StatusInternalServerError, "Failed to validate cancellation amount")
+				return
+			}
 			// Enforce per booking, not once for the batch: amount_cancelled is the
 			// one field that varies across BookingAmounts, and it is the field
 			// policies are actually written against (e.g. FX Cancellation &
@@ -1679,6 +1756,16 @@ func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				respondWithError(w, http.StatusBadRequest, "booking not in pending rollover state")
 				return
 			}
+			if !strings.EqualFold(requestedStatus, "Rejected") {
+				if err := validatePendingCancelRollAmount(r.Context(), pool, cancelRollTypeRollover, bid, cancellationDate); err != nil {
+					if errors.Is(err, errCancelRollAmountInvalid) {
+						respondWithError(w, http.StatusBadRequest, errCancelRollAmountInvalid.Error())
+						return
+					}
+					respondWithError(w, http.StatusInternalServerError, "failed to validate rollover amount")
+					return
+				}
+			}
 			// Same approval-matrix routing as CancellationStatusRequest — the
 			// engine decides whether this approver's eye is the active one.
 			gate := fxApprovalGate(r.Context(), pool, req.UserID, actorEmail, bid, engineAction, strings.TrimSpace(req.Comment))
@@ -1712,6 +1799,10 @@ func RolloverStatusRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			if err := applyRolloverApproval(r.Context(), pool, bid, cancellationDate); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errPendingRolloverNotUpdated) {
 					respondWithError(w, http.StatusBadRequest, constants.ErrPendingRolloverNotUpdated)
+					return
+				}
+				if errors.Is(err, errCancelRollAmountInvalid) {
+					respondWithError(w, http.StatusBadRequest, errCancelRollAmountInvalid.Error())
 					return
 				}
 				respondWithError(w, http.StatusInternalServerError, "failed to approve pending rollover")

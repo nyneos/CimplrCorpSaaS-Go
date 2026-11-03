@@ -1991,7 +1991,7 @@ func parseFloatPtr(s string) (*float64, error) {
 	if s == "" {
 		return nil, nil
 	}
-	val, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	val, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "%")), 64)
 	if err != nil {
 		return nil, err
 	}
