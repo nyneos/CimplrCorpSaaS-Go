@@ -1542,7 +1542,8 @@ func friendlyAccrualError(err error, context string) string {
 	case strings.Contains(s, "connection"):
 		return "Database connection error. Please retry."
 	default:
-		return context + ": " + err.Error()
+		api.LogError("[FDAccrual] %s: %v", context, err)
+		return "Internal error: " + context
 	}
 }
 

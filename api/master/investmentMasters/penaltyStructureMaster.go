@@ -1834,8 +1834,12 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// parse optional fields
 			minHeldPtr, _ := parseIntPtr(minHeldStr)
 			maxHeldPtr, _ := parseIntPtr(maxHeldStr)
-			minAmtPtr, _ := parseFloatPtr(minAmtStr)
-			maxAmtPtr, _ := parseFloatPtr(maxAmtStr)
+			minAmtPtr, errMinAmt := parseFloatPtr(minAmtStr)
+			maxAmtPtr, errMaxAmt := parseFloatPtr(maxAmtStr)
+			if errMinAmt != nil || errMaxAmt != nil {
+				sendFail(rowIdx+2, "invalid min_amount_range or max_amount_range")
+				return
+			}
 			noInterestPtr, _ := parseIntPtr(noInterestStr)
 			var effToPtr *string = nil
 			if effToStr != "" {

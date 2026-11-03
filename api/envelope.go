@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 // RespondEnvelopeSuccess writes the CLAUDE.md standard success envelope.
@@ -28,6 +29,7 @@ func RespondEnvelopeFailureWithData(w http.ResponseWriter, status int, message, 
 	if code == "" {
 		code = EnvelopeErrorCode(status)
 	}
+	message = stripDBErrorText(w, message)
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	body := map[string]interface{}{
@@ -87,6 +89,7 @@ func RespondEnvelopeFailureCompat(w http.ResponseWriter, status int, message, co
 	if code == "" {
 		code = EnvelopeErrorCode(status)
 	}
+	message = stripDBErrorText(w, message)
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	body := map[string]interface{}{
@@ -125,6 +128,24 @@ func EnvelopeErrorCode(status int) string {
 		}
 		return "REQUEST_FAILED"
 	}
+}
+
+func stripDBErrorText(w http.ResponseWriter, message string) string {
+	idx := -1
+	for _, sig := range []string{"ERROR:", "FATAL:", "PANIC:", "pq:", "(SQLSTATE"} {
+		if i := strings.Index(message, sig); i != -1 && (idx == -1 || i < idx) {
+			idx = i
+		}
+	}
+	if idx == -1 {
+		return message
+	}
+	LogErrorForResponse(w, "%s", message)
+	prefix := strings.TrimRight(strings.TrimSpace(message[:idx]), ": -")
+	if prefix == "" {
+		return "An internal error occurred"
+	}
+	return prefix
 }
 
 func writeEnvelopeJSON(w http.ResponseWriter, v interface{}) {

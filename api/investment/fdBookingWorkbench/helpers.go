@@ -599,40 +599,41 @@ func getUserFriendlyFDError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
 	}
+	api.LogError("%s: %v", context, err)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
 		case "42703":
-			return "FD booking schema mismatch detected. The service is using a column name that does not exist in the live database.", http.StatusInternalServerError
+			return fmt.Sprintf("Internal server error: %s", context), http.StatusInternalServerError
 		case "23503":
 			constraint := strings.ToLower(pgErr.ConstraintName)
 			switch {
 			case strings.Contains(constraint, "entity"):
-				return "Referenced entity was not found or is not valid.", http.StatusOK
+				return "Referenced entity was not found or is not valid.", http.StatusBadRequest
 			case strings.Contains(constraint, "bank_account") || strings.Contains(constraint, "account"):
-				return "Referenced bank account was not found or is not valid.", http.StatusOK
+				return "Referenced bank account was not found or is not valid.", http.StatusBadRequest
 			case strings.Contains(constraint, "bank_config") || strings.Contains(constraint, "config"):
-				return "Referenced bank config was not found or is not valid.", http.StatusOK
+				return "Referenced bank config was not found or is not valid.", http.StatusBadRequest
 			case strings.Contains(constraint, "tds"):
-				return "Referenced TDS plan was not found or is not valid.", http.StatusOK
+				return "Referenced TDS plan was not found or is not valid.", http.StatusBadRequest
 			case strings.Contains(constraint, "bank"):
-				return "Referenced bank was not found or is not valid.", http.StatusOK
+				return "Referenced bank was not found or is not valid.", http.StatusBadRequest
 			default:
-				return "Referenced record not found or is invalid.", http.StatusOK
+				return "Referenced record not found or is invalid.", http.StatusBadRequest
 			}
 		case "23514":
 			constraint := strings.ToLower(pgErr.ConstraintName)
 			switch {
 			case strings.Contains(constraint, "interest_type"):
-				return "Invalid interest type. Must be SIMPLE or COMPOUND.", http.StatusOK
+				return "Invalid interest type. Must be SIMPLE or COMPOUND.", http.StatusBadRequest
 			case strings.Contains(constraint, "currency"):
-				return "Invalid currency code.", http.StatusOK
+				return "Invalid currency code.", http.StatusBadRequest
 			case strings.Contains(constraint, "day_count"):
-				return "Invalid day count convention.", http.StatusOK
+				return "Invalid day count convention.", http.StatusBadRequest
 			case strings.Contains(constraint, "compounding"):
-				return "Invalid compounding frequency.", http.StatusOK
+				return "Invalid compounding frequency.", http.StatusBadRequest
 			case strings.Contains(constraint, "interest_payout"):
-				return "Invalid interest payout frequency.", http.StatusOK
+				return "Invalid interest payout frequency.", http.StatusBadRequest
 			}
 		case "23505":
 			constraint := strings.ToLower(pgErr.ConstraintName)
@@ -647,99 +648,99 @@ func getUserFriendlyFDError(err error, context string) (string, int) {
 	if strings.Contains(errStr, "tx begin failed") ||
 		strings.Contains(errStr, "commit failed") ||
 		strings.Contains(errStr, "audit insert failed") {
-		return err.Error(), http.StatusOK
+		return fmt.Sprintf("Internal server error: %s", context), http.StatusInternalServerError
 	}
 
 	// ── Booking constraints ───────────────────────────────────────────────────
 	if strings.Contains(errStr, "fd_booking_entity_not_empty") {
-		return "Entity ID is required for a booking.", http.StatusOK
+		return "Entity ID is required for a booking.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_booking_bank_not_empty") {
-		return "Bank ID is required for a booking.", http.StatusOK
+		return "Bank ID is required for a booking.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_booking_account_not_empty") {
-		return "Account ID is required for a booking.", http.StatusOK
+		return "Account ID is required for a booking.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_booking_principal_positive") {
-		return "Principal amount must be greater than zero.", http.StatusOK
+		return "Principal amount must be greater than zero.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_booking_rate_positive") {
-		return "Interest rate must be greater than zero.", http.StatusOK
+		return "Interest rate must be greater than zero.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_booking_tenor_positive") {
-		return "Tenor days must be greater than zero.", http.StatusOK
+		return "Tenor days must be greater than zero.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_booking_maturity_after_value") {
-		return "Maturity date must be after the value date.", http.StatusOK
+		return "Maturity date must be after the value date.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_booking_status_chk") {
-		return "Invalid booking status. Must be DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, or SENT_TO_BANK.", http.StatusOK
+		return "Invalid booking status. Must be DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, or SENT_TO_BANK.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_booking_interest_payout_chk") {
-		return "Invalid interest payout frequency.", http.StatusOK
+		return "Invalid interest payout frequency.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_booking_currency_chk") {
-		return "Invalid currency code.", http.StatusOK
+		return "Invalid currency code.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_booking_interest_type_chk") {
-		return "Invalid interest type. Must be SIMPLE or COMPOUND.", http.StatusOK
+		return "Invalid interest type. Must be SIMPLE or COMPOUND.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_booking_day_count_chk") {
-		return "Invalid day count convention.", http.StatusOK
+		return "Invalid day count convention.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_booking_compounding_chk") {
-		return "Invalid compounding frequency.", http.StatusOK
+		return "Invalid compounding frequency.", http.StatusBadRequest
 	}
 
 	// ── Confirmation constraints ──────────────────────────────────────────────
 	if strings.Contains(errStr, "fd_confirmation_booking_fk") {
-		return "Booking record not found. Cannot create confirmation.", http.StatusOK
+		return "Booking record not found. Cannot create confirmation.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_confirmation_principal_positive") {
-		return "Confirmed principal amount must be greater than zero.", http.StatusOK
+		return "Confirmed principal amount must be greater than zero.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_confirmation_rate_positive") {
-		return "Confirmed interest rate must be greater than zero.", http.StatusOK
+		return "Confirmed interest rate must be greater than zero.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_confirmation_tenor_positive") {
-		return "Confirmed tenor days must be greater than zero.", http.StatusOK
+		return "Confirmed tenor days must be greater than zero.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_confirmation_status_chk") {
-		return "Invalid confirmation status.", http.StatusOK
+		return "Invalid confirmation status.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_confirmation_variance_action_chk") {
-		return "Invalid variance action. Must be ACCEPTED or REJECTED.", http.StatusOK
+		return "Invalid variance action. Must be ACCEPTED or REJECTED.", http.StatusBadRequest
 	}
 
 	// ── Master constraints ────────────────────────────────────────────────────
 	if strings.Contains(errStr, "fd_master_confirmation_fk") {
-		return "Confirmation record not found. Cannot activate FD.", http.StatusOK
+		return "Confirmation record not found. Cannot activate FD.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_master_receipt_date_after_value") {
-		return "Receipt date must be on or after the value date.", http.StatusOK
+		return "Receipt date must be on or after the value date.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_master_status_chk") {
-		return "Invalid FD master status.", http.StatusOK
+		return "Invalid FD master status.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "fd_master_fdno_not_empty") {
-		return "FD number / certificate number is required.", http.StatusOK
+		return "FD number / certificate number is required.", http.StatusBadRequest
 	}
 
 	// ── Generic DB constraint patterns ───────────────────────────────────────
 	if strings.Contains(errStr, "unique constraint") || strings.Contains(errStr, "duplicate key") {
-		return "Duplicate entry detected. Please check for existing records.", http.StatusOK
+		return "Duplicate entry detected. Please check for existing records.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "foreign key constraint") || strings.Contains(errStr, "violates foreign key") {
-		return "Referenced record not found or is invalid.", http.StatusOK
+		return "Referenced record not found or is invalid.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "check constraint") {
-		return "Invalid data format or value.", http.StatusOK
+		return "Invalid data format or value.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "not-null constraint") || strings.Contains(errStr, "null value") {
-		return "Required field is missing.", http.StatusOK
+		return "Required field is missing.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "no rows") || strings.Contains(errStr, "not found") {
-		return "Record not found.", http.StatusOK
+		return "Record not found.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "connection") || strings.Contains(errStr, "timeout") {
 		return "Database connection issue.", http.StatusServiceUnavailable

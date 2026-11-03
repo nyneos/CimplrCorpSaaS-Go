@@ -244,7 +244,7 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int, loc *time.Location
 				mu.Unlock()
 				return
 			}
-			err = createScheduledInitiation(ctx, db, sweep.sweepID)
+			err = createScheduledInitiation(ctx, db, sweep.sweepID, today, loc.String())
 			if err != nil {
 				logger.LogError("[SWEEP V2] %s - Failed to create scheduled initiation: %v", sweep.sweepID, err)
 				mu.Lock()
@@ -353,7 +353,7 @@ func getTargetDayForMonthV2(targetDay, year, month int) int {
 	return targetDay
 }
 
-func createScheduledInitiation(ctx context.Context, db *pgxpool.Pool, sweepID string) error {
+func createScheduledInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, today, tzName string) error {
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return err
@@ -370,9 +370,9 @@ func createScheduledInitiation(ctx context.Context, db *pgxpool.Pool, sweepID st
 		FROM cimplrcorpsaas.sweep_initiation si
 		JOIN cimplrcorpsaas.auditactionsweepinitiation asi ON asi.initiation_id = si.initiation_id
 		WHERE si.sweep_id = $1
-		AND DATE(si.initiation_time) = CURRENT_DATE
+		AND (si.initiation_time::timestamptz AT TIME ZONE $3)::date = $2::date
 		AND asi.processing_status IN ('PENDING_APPROVAL', 'APPROVED')
-	`, sweepID).Scan(&existingCount); err != nil {
+	`, sweepID, today, tzName).Scan(&existingCount); err != nil {
 		return fmt.Errorf("check existing initiation: %w", err)
 	}
 	if existingCount > 0 {

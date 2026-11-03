@@ -187,6 +187,72 @@ func cashEntityIDsWithDescendants(ctx context.Context, q cashEntityQuery, parent
 	return ids, rows.Err()
 }
 
+func cashEntityDescendantNames(ctx context.Context, q cashEntityQuery, rootNames []string) ([]string, error) {
+	rows, err := q.Query(ctx, `
+		WITH RECURSIVE descendants AS (
+			SELECT unnest($1::text[]) AS entity_name
+			UNION
+			SELECT rel.child_entity_name::text
+			FROM descendants d
+			JOIN cashentityrelationships rel ON rel.parent_entity_name = d.entity_name
+		)
+		SELECT entity_name FROM descendants`, rootNames)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := make([]string, 0, len(rootNames))
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
+func cashEntityDescendantIDs(ctx context.Context, q cashEntityQuery, rootEntityIDs []string) ([]string, error) {
+	nameRows, err := q.Query(ctx, `SELECT entity_name FROM masterentitycash WHERE entity_id = ANY($1)`, rootEntityIDs)
+	if err != nil {
+		return nil, err
+	}
+	var rootNames []string
+	for nameRows.Next() {
+		var name string
+		if err := nameRows.Scan(&name); err != nil {
+			nameRows.Close()
+			return nil, err
+		}
+		rootNames = append(rootNames, name)
+	}
+	nameRows.Close()
+	if err := nameRows.Err(); err != nil {
+		return nil, err
+	}
+	if len(rootNames) == 0 {
+		return rootEntityIDs, nil
+	}
+	names, err := cashEntityDescendantNames(ctx, q, rootNames)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := q.Query(ctx, `SELECT entity_id FROM masterentitycash WHERE entity_name = ANY($1)`, names)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, len(names))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 type CashEntityMasterRequest struct {
 	EntityName       string `json:"entity_name"`
 	ParentEntityName string `json:"parent_entity_name"`
@@ -1688,50 +1754,12 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// ── 4. Build parent map (name आधारित) ───────────────
-		rows, err := pgxPool.Query(ctx,
-			`SELECT parent_entity_name, child_entity_name FROM cashentityrelationships`,
-		)
+		// ── 4. Traverse hierarchy using NAMES ───────────────
+		allNames, err := cashEntityDescendantNames(ctx, pgxPool, []string{rootName})
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch relationships")
 			return
 		}
-		defer rows.Close()
-
-		parentMap := make(map[string][]string)
-		for rows.Next() {
-			var parent, child string
-			if err := rows.Scan(&parent, &child); err == nil {
-				parentMap[parent] = append(parentMap[parent], child)
-			}
-		}
-
-		// ── 5. Traverse hierarchy using NAMES ───────────────
-		getAllDescendants := func(start string) []string {
-			visited := make(map[string]bool)
-			queue := []string{start}
-			visited[start] = true
-
-			for len(queue) > 0 {
-				curr := queue[0]
-				queue = queue[1:]
-
-				for _, child := range parentMap[curr] {
-					if !visited[child] {
-						visited[child] = true
-						queue = append(queue, child)
-					}
-				}
-			}
-
-			result := make([]string, 0, len(visited))
-			for k := range visited {
-				result = append(result, k)
-			}
-			return result
-		}
-
-		allNames := getAllDescendants(rootName)
 
 		if len(allNames) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "No entities found for deletion")
@@ -1765,9 +1793,9 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ── 7. Block delete if ANY entity has core records (FDs, bank statements, etc.)
 		// Check here so the delete request itself fails fast — never reach PENDING_DELETE_APPROVAL.
 		var blockedEntities []map[string]interface{}
+		blockersByID, _ := dependency.HasCoreBelowBatch(ctx, pgxPool, "masterentitycash", allIDs)
 		for _, eid := range allIDs {
-			blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterentitycash", eid)
-			if len(blockers) > 0 {
+			if blockers := blockersByID[eid]; len(blockers) > 0 {
 				blockedEntities = append(blockedEntities, map[string]interface{}{
 					"entity_id":  eid,
 					"blocked_by": dependency.BlockersSummary(blockers),
@@ -2001,25 +2029,6 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
-		// Fetch all relationships
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_entity_name, child_entity_name FROM cashentityrelationships`)
-		if err != nil {
-			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity relationships for bulk approve")
-			if statusCode == http.StatusOK {
-				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
-		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		for relRows.Next() {
-			var parent, child string
-			if err := relRows.Scan(&parent, &child); err == nil {
-				parentMap[parent] = append(parentMap[parent], child)
-			}
-		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
@@ -2053,7 +2062,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if status == constants.StatusPendingDeleteApproval {
 				// Mark all descendants as deleted (do not approve them)
-				descendants, derr := cashEntityIDsWithDescendants(ctx, tx, parentMap, []string{eid})
+				descendants, derr := cashEntityDescendantIDs(ctx, tx, []string{eid})
 				if derr != nil {
 					anyError = derr
 					break
@@ -2061,9 +2070,9 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				// Block deletion if any descendant entity has core records (FDs, bank statements, etc.)
 				var entityBlockSummary []string
+				blockersByID, _ := dependency.HasCoreBelowBatch(ctx, pgxPool, "masterentitycash", descendants)
 				for _, desc := range descendants {
-					blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterentitycash", desc)
-					if len(blockers) > 0 {
+					if blockers := blockersByID[desc]; len(blockers) > 0 {
 						entityBlockSummary = append(entityBlockSummary, desc+": "+dependency.BlockersSummary(blockers))
 					}
 				}

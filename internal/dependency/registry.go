@@ -228,6 +228,51 @@ func HasCoreBelow(ctx context.Context, db *pgxpool.Pool, resourceType, resourceI
 	return blockers, nil
 }
 
+func HasCoreBelowBatch(ctx context.Context, db *pgxpool.Pool, resourceType string, resourceIDs []string) (map[string][]BlockingDep, error) {
+	out := make(map[string][]BlockingDep)
+	children, ok := DependencyGraph[resourceType]
+	if !ok || len(resourceIDs) == 0 {
+		return out, nil
+	}
+
+	byKey := make(map[string][]BlockingDep)
+	for _, child := range children {
+		table := qualifiedTable(child)
+
+		if child.IsCore {
+			counts, err := queryCountBatch(ctx, db, table, child.FKCol, resourceIDs)
+			if err != nil {
+				continue
+			}
+			for id, count := range counts {
+				if count > 0 {
+					key := strings.ToLower(id)
+					byKey[key] = append(byKey[key], BlockingDep{Label: child.Label, Count: count})
+				}
+			}
+		} else {
+			parentOf, childIDs, err := queryChildIDsBatch(ctx, db, table, child.FKCol, child.AuditFKCol, resourceIDs)
+			if err != nil {
+				continue
+			}
+			deeper, _ := HasCoreBelowBatch(ctx, db, child.Table, childIDs)
+			for _, childID := range childIDs {
+				if len(deeper[childID]) > 0 {
+					key := strings.ToLower(parentOf[childID])
+					byKey[key] = append(byKey[key], deeper[childID]...)
+				}
+			}
+		}
+	}
+
+	for _, id := range resourceIDs {
+		if deps := byKey[strings.ToLower(id)]; len(deps) > 0 {
+			out[id] = deps
+		}
+	}
+	return out, nil
+}
+
 // CascadeDelete soft-deletes the resource and all non-core children bottom-up,
 // writing an audit row to each child's AuditTable.
 // Call HasCoreBelow first — CascadeDelete does NOT re-check for core records.
@@ -313,6 +358,51 @@ func queryChildIDs(ctx context.Context, db *pgxpool.Pool, table, fkCol, pkCol, p
 		}
 	}
 	return ids, nil
+}
+
+func queryCountBatch(ctx context.Context, db *pgxpool.Pool, table, fkCol string, parentIDs []string) (map[string]int, error) {
+	q := fmt.Sprintf(
+		`SELECT %s::text, COUNT(*) FROM %s WHERE %s = ANY($1) AND COALESCE(is_deleted, false) = false GROUP BY %s`,
+		fkCol, table, fkCol, fkCol,
+	)
+	rows, err := db.Query(ctx, q, parentIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var id string
+		var count int
+		if rows.Scan(&id, &count) == nil {
+			counts[id] = count
+		}
+	}
+	return counts, rows.Err()
+}
+
+func queryChildIDsBatch(ctx context.Context, db *pgxpool.Pool, table, fkCol, pkCol string, parentIDs []string) (map[string]string, []string, error) {
+	q := fmt.Sprintf(
+		`SELECT %s::text, %s::text FROM %s WHERE %s = ANY($1) AND COALESCE(is_deleted, false) = false`,
+		pkCol, fkCol, table, fkCol,
+	)
+	rows, err := db.Query(ctx, q, parentIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	parentOf := make(map[string]string)
+	var ids []string
+	for rows.Next() {
+		var id, parentID string
+		if rows.Scan(&id, &parentID) == nil && id != "" {
+			parentOf[id] = parentID
+			ids = append(ids, id)
+		}
+	}
+	return parentOf, ids, rows.Err()
 }
 
 func writeAuditRow(ctx context.Context, db *pgxpool.Pool, auditTable, fkCol, recordID, deletedBy string) {

@@ -231,6 +231,66 @@ func buildCategoryNameToIDMap(ctx context.Context, pgxPool *pgxpool.Pool) (map[s
 	return m, nil
 }
 
+func cashFlowCategoryDescendantIDs(ctx context.Context, pgxPool *pgxpool.Pool, rootIDs []string) ([]string, error) {
+	rows, err := pgxPool.Query(ctx, `
+		WITH RECURSIVE descendants AS (
+			SELECT unnest($1::text[]) AS category_id
+			UNION
+			SELECT c.category_id::text
+			FROM descendants d
+			JOIN mastercashflowcategory p ON p.category_id::text = d.category_id
+			JOIN cashflowcategoryrelationships rel ON LOWER(TRIM(rel.parent_category_name)) = LOWER(TRIM(p.category_name))
+			JOIN mastercashflowcategory c ON LOWER(TRIM(c.category_name)) = LOWER(TRIM(rel.child_category_name))
+		)
+		SELECT category_id FROM descendants`, rootIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, len(rootIDs))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func cashFlowCategoryPendingDeleteIDs(ctx context.Context, pgxPool *pgxpool.Pool, ids []string) ([]string, error) {
+	rows, err := pgxPool.Query(ctx, `
+		SELECT category_id::text FROM (
+			SELECT DISTINCT ON (category_id) category_id, actiontype, processing_status
+			FROM auditactioncashflowcategory
+			WHERE category_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
+			ORDER BY category_id, requested_at DESC
+		) latest
+		WHERE UPPER(actiontype) = 'DELETE' AND UPPER(processing_status) = 'PENDING_DELETE_APPROVAL'`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	pending := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		pending[strings.ToLower(id)] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, id := range ids {
+		if pending[strings.ToLower(id)] {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
 func ifaceToInt(v interface{}) int {
 	if v == nil {
 		return 0
@@ -1318,8 +1378,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		requestedBy := session.Name
 
-		nameToID, _ := buildCategoryNameToIDMap(ctx, pgxPool)
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_category_name, child_category_name FROM cashflowcategoryrelationships`)
+		allToDelete, err := cashFlowCategoryDescendantIDs(ctx, pgxPool, req.IDs)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, constants.ErrFailedToFetchCategoryRelationships)
 			if statusCode == http.StatusOK {
@@ -1329,42 +1388,6 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		for relRows.Next() {
-			var parentName, childName string
-			if err := relRows.Scan(&parentName, &childName); err == nil {
-				pid := nameToID[strings.ToLower(strings.TrimSpace(parentName))]
-				cid := nameToID[strings.ToLower(strings.TrimSpace(childName))]
-				if pid != "" && cid != "" {
-					parentMap[pid] = append(parentMap[pid], cid)
-				}
-			}
-		}
-		getAllDescendants := func(ids []string) []string {
-			all := map[string]bool{}
-			queue := append([]string{}, ids...)
-			for _, id := range ids {
-				all[id] = true
-			}
-			for len(queue) > 0 {
-				current := queue[0]
-				queue = queue[1:]
-				for _, child := range parentMap[current] {
-					if !all[child] {
-						all[child] = true
-						queue = append(queue, child)
-					}
-				}
-			}
-			result := []string{}
-			for id := range all {
-				result = append(result, id)
-			}
-			return result
-		}
-
-		allToDelete := getAllDescendants(req.IDs)
 		if len(allToDelete) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "No category found to delete")
 			return
@@ -1645,8 +1668,7 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 		checkerBy := session.Name
 
-		nameToID, _ := buildCategoryNameToIDMap(ctx, pgxPool)
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_category_name, child_category_name FROM cashflowcategoryrelationships`)
+		allToApprove, err := cashFlowCategoryDescendantIDs(ctx, pgxPool, req.CategoryIDs)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, constants.ErrFailedToFetchCategoryRelationships)
 			if statusCode == http.StatusOK {
@@ -1656,43 +1678,6 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 			return
 		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		for relRows.Next() {
-			var parentName, childName string
-			if err := relRows.Scan(&parentName, &childName); err == nil {
-				pid := nameToID[strings.ToLower(strings.TrimSpace(parentName))]
-				cid := nameToID[strings.ToLower(strings.TrimSpace(childName))]
-				if pid != "" && cid != "" {
-					parentMap[pid] = append(parentMap[pid], cid)
-				}
-			}
-		}
-
-		getAllDescendants := func(ids []string) []string {
-			all := map[string]bool{}
-			queue := append([]string{}, ids...)
-			for _, id := range ids {
-				all[id] = true
-			}
-			for len(queue) > 0 {
-				current := queue[0]
-				queue = queue[1:]
-				for _, child := range parentMap[current] {
-					if !all[child] {
-						all[child] = true
-						queue = append(queue, child)
-					}
-				}
-			}
-			res := []string{}
-			for id := range all {
-				res = append(res, id)
-			}
-			return res
-		}
-
-		allToApprove := getAllDescendants(req.CategoryIDs)
 		if len(allToApprove) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "No categories found to approve")
 			return
@@ -1702,18 +1687,19 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		var safeToApprove []string
 		var blockedCategories []map[string]interface{}
 
+		pendingDeleteIDs, err := cashFlowCategoryPendingDeleteIDs(ctx, pgxPool, allToApprove)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		blockersByID, _ := dependency.HasCoreBelowBatch(ctx, pgxPool, "mastercashflowcategory", pendingDeleteIDs)
 		for _, cid := range allToApprove {
-			var actionType, procStatus string
-			err := pgxPool.QueryRow(ctx, "SELECT actiontype, processing_status FROM auditactioncashflowcategory WHERE category_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC LIMIT 1", cid).Scan(&actionType, &procStatus)
-			if err == nil && strings.ToUpper(actionType) == "DELETE" && strings.ToUpper(procStatus) == "PENDING_DELETE_APPROVAL" {
-				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "mastercashflowcategory", cid)
-				if len(blockers) > 0 {
-					blockedCategories = append(blockedCategories, map[string]interface{}{
-						"category_id": cid,
-						"blocked_by":  dependency.BlockersSummary(blockers),
-					})
-					continue
-				}
+			if blockers := blockersByID[cid]; len(blockers) > 0 {
+				blockedCategories = append(blockedCategories, map[string]interface{}{
+					"category_id": cid,
+					"blocked_by":  dependency.BlockersSummary(blockers),
+				})
+				continue
 			}
 			safeToApprove = append(safeToApprove, cid)
 		}

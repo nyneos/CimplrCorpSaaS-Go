@@ -7,6 +7,7 @@ import (
 	"CimplrCorpSaas/api/master/bulkuploadaudit"
 	"CimplrCorpSaas/api/utils/s3storage"
 	"CimplrCorpSaas/internal/dependency"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1163,6 +1164,64 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+func glAccountDescendantIDs(ctx context.Context, pgxPool *pgxpool.Pool, rootIDs []string) ([]string, error) {
+	rows, err := pgxPool.Query(ctx, `
+		WITH RECURSIVE descendants AS (
+			SELECT unnest($1::text[]) AS gl_account_id
+			UNION
+			SELECT rel.child_gl_account_id::text
+			FROM descendants d
+			JOIN glaccountrelationships rel ON rel.parent_gl_account_id::text = d.gl_account_id
+		)
+		SELECT gl_account_id FROM descendants`, rootIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, len(rootIDs))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func glAccountPendingDeleteIDs(ctx context.Context, pgxPool *pgxpool.Pool, ids []string) ([]string, error) {
+	rows, err := pgxPool.Query(ctx, `
+		SELECT gl_account_id::text FROM (
+			SELECT DISTINCT ON (gl_account_id) gl_account_id, actiontype, processing_status
+			FROM auditactionglaccount
+			WHERE gl_account_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
+			ORDER BY gl_account_id, requested_at DESC
+		) latest
+		WHERE UPPER(actiontype) = 'DELETE' AND UPPER(processing_status) = 'PENDING_DELETE_APPROVAL'`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	pending := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		pending[strings.ToLower(id)] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, id := range ids {
+		if pending[strings.ToLower(id)] {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
 func DeleteGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -1188,44 +1247,15 @@ func DeleteGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
+		allList, err := glAccountDescendantIDs(ctx, pgxPool, body.GLAccountIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		for relRows.Next() {
-			var parentID, childID string
-			if err := relRows.Scan(&parentID, &childID); err == nil {
-				parentMap[parentID] = append(parentMap[parentID], childID)
-			}
-		}
 
-		allSet := map[string]bool{}
-		queue := append([]string{}, body.GLAccountIDs...)
-		for _, id := range body.GLAccountIDs {
-			allSet[id] = true
-		}
-		for len(queue) > 0 {
-			cur := queue[0]
-			queue = queue[1:]
-			for _, child := range parentMap[cur] {
-				if !allSet[child] {
-					allSet[child] = true
-					queue = append(queue, child)
-				}
-			}
-		}
-
-		if len(allSet) == 0 {
+		if len(allList) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "No GL accounts found to delete")
 			return
-		}
-
-		allList := make([]string, 0, len(allSet))
-		for id := range allSet {
-			allList = append(allList, id)
 		}
 
 		q := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at)
@@ -1429,43 +1459,11 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
+		allToApprove, err := glAccountDescendantIDs(ctx, pgxPool, req.GLAccountIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		for relRows.Next() {
-			var parentID, childID string
-			if err := relRows.Scan(&parentID, &childID); err == nil {
-				parentMap[parentID] = append(parentMap[parentID], childID)
-			}
-		}
-		getAllDescendants := func(ids []string) []string {
-			all := map[string]bool{}
-			queue := append([]string{}, ids...)
-			for _, id := range ids {
-				all[id] = true
-			}
-			for len(queue) > 0 {
-				current := queue[0]
-				queue = queue[1:]
-				for _, child := range parentMap[current] {
-					if !all[child] {
-						all[child] = true
-						queue = append(queue, child)
-					}
-				}
-			}
-			res := []string{}
-			for id := range all {
-				res = append(res, id)
-			}
-			return res
-		}
-
-		allToApprove := getAllDescendants(req.GLAccountIDs)
 		if len(allToApprove) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "No GL accounts found to approve")
 			return
@@ -1500,18 +1498,19 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var safeToApprove []string
 		var blockedGLAccounts []map[string]interface{}
 
+		pendingDeleteIDs, err := glAccountPendingDeleteIDs(ctx, pgxPool, allToApprove)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		blockersByID, _ := dependency.HasCoreBelowBatch(ctx, pgxPool, "masterglaccount", pendingDeleteIDs)
 		for _, gid := range allToApprove {
-			var actionType, procStatus string
-			err := pgxPool.QueryRow(ctx, "SELECT actiontype, processing_status FROM auditactionglaccount WHERE gl_account_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC LIMIT 1", gid).Scan(&actionType, &procStatus)
-			if err == nil && strings.ToUpper(actionType) == "DELETE" && strings.ToUpper(procStatus) == "PENDING_DELETE_APPROVAL" {
-				blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterglaccount", gid)
-				if len(blockers) > 0 {
-					blockedGLAccounts = append(blockedGLAccounts, map[string]interface{}{
-						"gl_account_id": gid,
-						"blocked_by":    dependency.BlockersSummary(blockers),
-					})
-					continue
-				}
+			if blockers := blockersByID[gid]; len(blockers) > 0 {
+				blockedGLAccounts = append(blockedGLAccounts, map[string]interface{}{
+					"gl_account_id": gid,
+					"blocked_by":    dependency.BlockersSummary(blockers),
+				})
+				continue
 			}
 			safeToApprove = append(safeToApprove, gid)
 		}

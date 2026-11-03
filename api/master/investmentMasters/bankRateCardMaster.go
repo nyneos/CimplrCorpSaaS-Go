@@ -328,7 +328,11 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			minTenorPtr, _ := parseIntPtr(get("min_tenor_days"))
 			maxTenorPtr, _ := parseIntPtr(get("max_tenor_days"))
-			interestRatePtr, _ := parseFloatPtr(get("interest_rate"))
+			interestRatePtr, rateErr := parseFloatPtr(get("interest_rate"))
+			if rateErr != nil {
+				sendFail(ri+2, "invalid interest_rate")
+				return
+			}
 
 			minTenor := 0
 			if minTenorPtr != nil {
@@ -374,10 +378,15 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EffectiveTo:   efToPtr,
 			}
 
-			input.MinAmount, _ = parseFloatPtr(get("min_amount"))
-			input.MaxAmount, _ = parseFloatPtr(get("max_amount"))
+			var minAmtErr, maxAmtErr, penaltyErr error
+			input.MinAmount, minAmtErr = parseFloatPtr(get("min_amount"))
+			input.MaxAmount, maxAmtErr = parseFloatPtr(get("max_amount"))
 			input.IsCallable, _ = parseBoolPtr(get("is_callable"))
-			input.PenaltyPercentage, _ = parseFloatPtr(get("penalty_percentage"))
+			input.PenaltyPercentage, penaltyErr = parseFloatPtr(get("penalty_percentage"))
+			if minAmtErr != nil || maxAmtErr != nil || penaltyErr != nil {
+				sendFail(ri+2, "invalid min_amount, max_amount or penalty_percentage")
+				return
+			}
 
 			pwaStr := get("premature_withdrawal_allowed")
 			pwaPtr, _ := parseBoolPtr(pwaStr)

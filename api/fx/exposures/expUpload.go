@@ -684,6 +684,12 @@ func EditExposureHeadersLineItemsJoined(pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusForbidden, "Forbidden: entity not accessible")
 			return
 		}
+		if v, ok := req.Fields["entity"]; ok {
+			if s, isStr := v.(string); !isStr || !contains(buNames, s) {
+				respondWithError(w, http.StatusForbidden, "Forbidden: entity not accessible")
+				return
+			}
+		}
 
 		headerCols, err := publicTableColumns(ctx, pool, "exposure_headers")
 		if err != nil {

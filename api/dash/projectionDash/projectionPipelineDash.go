@@ -125,10 +125,7 @@ func GetProjectionPipelineKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithResult(w, false, constants.ErrDBPrefix+errtext.Detail(w, err))
 				return
 			}
-			rate := 1.0
-			if r, ok := spotRates[currency]; ok && r > 0 {
-				rate = r
-			}
+			rate := fxrates.Rate(spotRates, currency)
 			total += math.Abs(amt) * rate
 		}
 		if err := rows.Err(); err != nil {
@@ -242,11 +239,8 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// build id as proposal:item
 			id := proposalID + ":" + itemID
 
-			// convert to USD using spotRates (fallback 1.0)
-			rate := 1.0
-			if rc, ok := spotRates[currencyCode]; ok && rc > 0 {
-				rate = rc
-			}
+			// convert to USD using spotRates
+			rate := fxrates.Rate(spotRates, currencyCode)
 			amount := math.Abs(expectedAmount) * rate
 
 			submittedBy := ""
@@ -367,10 +361,7 @@ func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				s = *status
 			}
 
-			rate := 1.0
-			if r, ok := spotRates[c]; ok && r > 0 {
-				rate = r
-			}
+			rate := fxrates.Rate(spotRates, c)
 			converted := math.Abs(amt) * rate
 
 			if _, ok := data[e]; !ok {

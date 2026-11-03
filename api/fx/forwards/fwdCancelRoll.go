@@ -41,6 +41,7 @@ var (
 	errPendingCancellationNotUpdated = errors.New(constants.ErrPendingCancellationNotUpdated)
 	errPendingRolloverNotUpdated     = errors.New(constants.ErrPendingRolloverNotUpdated)
 	errCancelRollNotPending          = errors.New("request is no longer pending")
+	errCancelRollAmountInvalid       = errors.New("requested amount must be greater than zero and must not exceed the booking's open amount")
 )
 
 type cancelRollActionItem struct {
@@ -138,21 +139,17 @@ func isUUIDValue(value string) bool {
 
 func resolveForwardBookingID(ctx context.Context, pool *pgxpool.Pool, bookingOrReferenceID string, buNames []string) (string, error) {
 	bookingOrReferenceID = strings.TrimSpace(bookingOrReferenceID)
-	if bookingOrReferenceID == "" {
+	if bookingOrReferenceID == "" || len(buNames) == 0 {
 		return "", pgx.ErrNoRows
-	}
-	if isUUIDValue(bookingOrReferenceID) {
-		return bookingOrReferenceID, nil
 	}
 
 	var systemTransactionID string
-	if len(buNames) > 0 {
+	if isUUIDValue(bookingOrReferenceID) {
 		err := pool.QueryRow(ctx, `
 			SELECT system_transaction_id::text
 			FROM forward_bookings
-			WHERE internal_reference_id = $1
+			WHERE system_transaction_id::text = $1
 			  AND entity_level_0 = ANY($2)
-			LIMIT 1
 		`, bookingOrReferenceID, buNames).Scan(&systemTransactionID)
 		return systemTransactionID, err
 	}
@@ -161,8 +158,9 @@ func resolveForwardBookingID(ctx context.Context, pool *pgxpool.Pool, bookingOrR
 		SELECT system_transaction_id::text
 		FROM forward_bookings
 		WHERE internal_reference_id = $1
+		  AND entity_level_0 = ANY($2)
 		LIMIT 1
-	`, bookingOrReferenceID).Scan(&systemTransactionID)
+	`, bookingOrReferenceID, buNames).Scan(&systemTransactionID)
 	return systemTransactionID, err
 }
 
@@ -302,6 +300,9 @@ func applyCancellationApproval(ctx context.Context, pool *pgxpool.Pool, bookingI
 	if err != nil {
 		return "", err
 	}
+	if amountCancelled <= 0 || amountCancelled > math.Abs(openAmount)+0.0001 {
+		return "", errCancelRollAmountInvalid
+	}
 	newOpenAmount := math.Abs(openAmount) - amountCancelled
 	actionType := "Partial Cancellation"
 	if newOpenAmount <= 0.0001 {
@@ -366,6 +367,9 @@ func applyRolloverApproval(ctx context.Context, pool *pgxpool.Pool, bookingID, r
 	}
 	if err != nil {
 		return err
+	}
+	if amountRolledOver <= 0 || amountRolledOver > math.Abs(openAmount)+0.0001 {
+		return errCancelRollAmountInvalid
 	}
 	newOpenAmount := math.Abs(openAmount) - amountRolledOver
 	actionType := "Partial Rollover"

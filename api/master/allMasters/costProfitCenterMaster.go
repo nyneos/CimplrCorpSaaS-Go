@@ -2071,6 +2071,17 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tags = COALESCE(m.old_tags, m.tags),
 				external_code = COALESCE(m.old_external_code, m.external_code),
 				segment = COALESCE(m.old_segment, m.segment),
+				sap_kokrs = COALESCE(m.old_sap_kokrs, m.sap_kokrs),
+				sap_bukrs = COALESCE(m.old_sap_bukrs, m.sap_bukrs),
+				sap_kostl = COALESCE(m.old_sap_kostl, m.sap_kostl),
+				sap_prctr = COALESCE(m.old_sap_prctr, m.sap_prctr),
+				oracle_ledger = COALESCE(m.old_oracle_ledger, m.oracle_ledger),
+				oracle_dept = COALESCE(m.old_oracle_dept, m.oracle_dept),
+				oracle_profit_center = COALESCE(m.old_oracle_profit_center, m.oracle_profit_center),
+				tally_ledger_name = COALESCE(m.old_tally_ledger_name, m.tally_ledger_name),
+				tally_ledger_group = COALESCE(m.old_tally_ledger_group, m.tally_ledger_group),
+				sage_department_code = COALESCE(m.old_sage_department_code, m.sage_department_code),
+				sage_cost_centre_code = COALESCE(m.old_sage_cost_centre_code, m.sage_cost_centre_code),
 				parent_centre_code = COALESCE(m.old_parent_centre_code, m.parent_centre_code),
 				centre_level = COALESCE(m.old_centre_level, m.centre_level),
 				effective_from = COALESCE(m.old_effective_from, m.effective_from),
@@ -2199,14 +2210,21 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		var safeActionIDs []string
 		var blockedRecords []map[string]interface{}
 		var deleteIDs []string
+		var pendingDeleteIDs []string
 		for _, row := range pending {
 			if strings.ToUpper(row.actionType) == "DELETE" && strings.ToUpper(row.status) == "PENDING_DELETE_APPROVAL" {
-				blockers, err := dependency.HasCoreBelow(ctx, pgxPool, "mastercostprofitcenter", row.id)
-				if err != nil {
-					api.LogErrorForResponse(w, "cost centre delete blockers %s: %v", row.id, err)
-					api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
-					return
-				}
+				pendingDeleteIDs = append(pendingDeleteIDs, row.id)
+			}
+		}
+		blockersByID, err := dependency.HasCoreBelowBatch(ctx, pgxPool, "mastercostprofitcenter", pendingDeleteIDs)
+		if err != nil {
+			api.LogErrorForResponse(w, "cost centre delete blockers: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+			return
+		}
+		for _, row := range pending {
+			if strings.ToUpper(row.actionType) == "DELETE" && strings.ToUpper(row.status) == "PENDING_DELETE_APPROVAL" {
+				blockers := blockersByID[row.id]
 				if len(blockers) > 0 {
 					blockedRecords = append(blockedRecords, map[string]interface{}{
 						"centre_id":  row.id,

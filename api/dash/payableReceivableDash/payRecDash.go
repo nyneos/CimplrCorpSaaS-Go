@@ -101,10 +101,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
 				return
 			}
-			rate := 1.0
-			if r, ok := spotRates[currency]; ok && r > 0 {
-				rate = r
-			}
+			rate := fxrates.Rate(spotRates, currency)
 			converted := math.Abs(amt) * rate
 			out = append(out, PayRecRow{
 				Counterparty: counterparty,
@@ -152,10 +149,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read dashboard data: "+errtext.Detail(w, err))
 				return
 			}
-			rate := 1.0
-			if r, ok := spotRates[currency]; ok && r > 0 {
-				rate = r
-			}
+			rate := fxrates.Rate(spotRates, currency)
 			converted := math.Abs(amt) * rate
 			out = append(out, PayRecRow{
 				Counterparty: counterparty,

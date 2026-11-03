@@ -107,6 +107,9 @@ func (f filterRequest) dateWindow() (start, end time.Time) {
 				end = t
 			}
 		}
+		if start.IsZero() {
+			start = end.Add(-30 * 24 * time.Hour)
+		}
 	default: // "24h" and any unknown value
 		start = end.Add(-24 * time.Hour)
 	}

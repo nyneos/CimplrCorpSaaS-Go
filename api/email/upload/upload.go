@@ -87,7 +87,7 @@ func HandleUploadEml(pool *pgxpool.Pool) http.HandlerFunc {
 			safeName = "upload.eml"
 		}
 		s3Key := fmt.Sprintf("email/inbound/raw/manual/%04d/%02d/%02d/%d-%s",
-			now.Year(), now.Month(), now.Day(), now.Unix(), safeName)
+			now.Year(), now.Month(), now.Day(), now.UnixNano(), safeName)
 
 		if err := s3storage.PutObjectToS3(r.Context(), s3Key, body, "message/rfc822"); err != nil {
 			respondUploadInternal(w, err)

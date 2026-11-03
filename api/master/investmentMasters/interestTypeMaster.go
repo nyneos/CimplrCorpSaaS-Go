@@ -17,11 +17,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1989,9 +1991,12 @@ func parseFloatPtr(s string) (*float64, error) {
 	if s == "" {
 		return nil, nil
 	}
-	var val float64
-	if _, err := fmt.Sscanf(s, "%f", &val); err != nil {
+	val, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
 		return nil, err
+	}
+	if math.IsNaN(val) || math.IsInf(val, 0) {
+		return nil, fmt.Errorf("invalid number: %s", s)
 	}
 	return &val, nil
 }

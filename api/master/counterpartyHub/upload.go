@@ -11,6 +11,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -604,6 +605,16 @@ func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			func(i int, row map[string]string) {
 				req := hubV2RequestFromRow(row, formType, userID)
 
+				if v := strings.TrimSpace(row["max_txn_amount"]); v != "" {
+					if f, err := strconv.ParseFloat(v, 64); err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+						errList = append(errList, map[string]interface{}{
+							"row_index": i, "success": false, "error": "invalid max_txn_amount",
+							"counterparty_code": req.CounterpartyCode,
+						})
+						return
+					}
+				}
+
 				if err := validateHubCreateRequest(req); err != nil {
 					errList = append(errList, map[string]interface{}{
 						"row_index": i, "success": false, "error": errtext.Text(err),
@@ -789,8 +800,7 @@ func parseFloat(s string) float64 {
 	if s == "" {
 		return 0
 	}
-	var f float64
-	fmt.Sscanf(s, "%f", &f)
+	f, _ := strconv.ParseFloat(s, 64)
 	return f
 }
 

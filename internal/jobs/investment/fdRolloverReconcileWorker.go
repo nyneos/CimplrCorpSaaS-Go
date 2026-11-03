@@ -229,14 +229,14 @@ func activateRolloverFD(ctx context.Context, db *pgxpool.Pool, r rolloverReconci
 
 	entityName := r.EntityName
 	if entityName == "" {
-		_ = tx.QueryRow(ctx,
-			`SELECT COALESCE(entity_name,'') FROM public.entity_master WHERE entity_id=$1 LIMIT 1`,
+		_ = db.QueryRow(ctx,
+			`SELECT COALESCE(entity_name,'') FROM public.masterentity WHERE entity_id=$1 LIMIT 1`,
 			r.EntityID).Scan(&entityName)
 	}
 	bankName := r.BankName
 	if bankName == "" {
-		_ = tx.QueryRow(ctx,
-			`SELECT COALESCE(bank_name,'') FROM public.bank_master WHERE bank_id=$1 LIMIT 1`,
+		_ = db.QueryRow(ctx,
+			`SELECT COALESCE(bank_name,'') FROM public.masterbank WHERE bank_id=$1 LIMIT 1`,
 			r.BankID).Scan(&bankName)
 	}
 

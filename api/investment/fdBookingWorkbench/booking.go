@@ -2696,26 +2696,20 @@ func MarkAsSentToBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx) //nolint:errcheck
 
 		tag, err := tx.Exec(ctx, `
-			UPDATE investment.fd_booking_request
-			SET booking_status = 'SENT_TO_BANK'
-			WHERE booking_id = ANY($1::text[]) AND booking_status = 'APPROVED'`,
-			req.BookingIDs,
-		)
-		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Status update failed")
-			api.RespondWithError(w, status, msg)
-			return
-		}
-
-		if _, err = tx.Exec(ctx, `
+			WITH sent AS (
+				UPDATE investment.fd_booking_request
+				SET booking_status = 'SENT_TO_BANK'
+				WHERE booking_id = ANY($2::text[]) AND booking_status = 'APPROVED'
+				RETURNING booking_id
+			)
 			INSERT INTO investment.fd_audit_booking_request
 				(booking_id, action_type, processing_status, requested_by, requested_at, requested_ip, old_booking_status)
 			SELECT booking_id, 'EDIT', 'APPROVED', $1, now(), $3, 'APPROVED'
-			FROM investment.fd_booking_request
-			WHERE booking_id = ANY($2::text[]) AND booking_status = 'SENT_TO_BANK'`,
+			FROM sent`,
 			api.SystemIfBlank(userEmail), req.BookingIDs, api.SystemIfBlank(api.ClientIPFromContext(ctx)),
-		); err != nil {
-			msg, status := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)
+		)
+		if err != nil {
+			msg, status := getUserFriendlyFDError(err, "Status update failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}

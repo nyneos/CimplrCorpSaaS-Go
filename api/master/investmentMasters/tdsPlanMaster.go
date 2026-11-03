@@ -672,6 +672,9 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rate := 0.0
 			if parsed, err := parseFloatPtr(rateStr); err == nil {
 				rate = *parsed
+			} else {
+				sendFail(ri+2, "invalid tds_rate")
+				return
 			}
 			hasPan := false
 			if v := get("has_pan"); v != "" {
@@ -683,6 +686,9 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if v := get("threshold_amount"); v != "" {
 				if p, err := parseFloatPtr(v); err == nil {
 					thr = p
+				} else {
+					sendFail(ri+2, "invalid threshold_amount")
+					return
 				}
 			}
 			inputMap := map[string]interface{}{

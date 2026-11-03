@@ -546,10 +546,183 @@ func reduceExposureOpenAmount(ctx context.Context, db settlementDB, exposureHead
 		      ELSE LEAST(0, COALESCE(total_open_amount, 0) + $1)
 		    END,
 		    updated_at = NOW()
-		WHERE exposure_header_id::text = $2
+		WHERE exposure_header_id = $2
 		  AND COALESCE(is_deleted, false) = false
 	`, math.Abs(amount), exposureHeaderID)
 	return err
+}
+
+type settlementForwardLeg struct {
+	exposureID string
+	bookingID  string
+	amount     float64
+}
+
+func resolveForwardBookingIDsByRef(ctx context.Context, db settlementDB, refs []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(refs) == 0 {
+		return out, nil
+	}
+	rows, err := db.Query(ctx, `
+		SELECT DISTINCT ON (internal_reference_id) internal_reference_id, system_transaction_id::text
+		FROM public.forward_bookings
+		WHERE internal_reference_id = ANY($1) AND COALESCE(is_deleted,false) = false
+		ORDER BY internal_reference_id, add_date DESC NULLS LAST`, refs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref, id string
+		if err := rows.Scan(&ref, &id); err != nil {
+			return nil, err
+		}
+		out[ref] = id
+	}
+	return out, rows.Err()
+}
+
+func reduceExposureOpenAmounts(ctx context.Context, db settlementDB, exposureHeaderIDs []string, amounts []float64) error {
+	if len(exposureHeaderIDs) == 0 {
+		return nil
+	}
+	_, err := db.Exec(ctx, `
+		UPDATE public.exposure_headers h
+		SET total_open_amount = CASE
+		      WHEN COALESCE(h.total_open_amount, 0) >= 0
+		        THEN GREATEST(0, COALESCE(h.total_open_amount, 0) - v.amount)
+		      ELSE LEAST(0, COALESCE(h.total_open_amount, 0) + v.amount)
+		    END,
+		    updated_at = NOW()
+		FROM (
+			SELECT id, SUM(amount) AS amount
+			FROM unnest($1::text[], $2::float8[]) AS t(id, amount)
+			GROUP BY id
+		) v
+		WHERE h.exposure_header_id = ANY($3)
+		  AND h.exposure_header_id::text = v.id
+		  AND COALESCE(h.is_deleted, false) = false
+	`, exposureHeaderIDs, amounts, exposureHeaderIDs)
+	return err
+}
+
+func applySettlementForwardLegs(ctx context.Context, db settlementDB, legs []settlementForwardLeg, method, settlementID string) error {
+	if len(legs) == 0 {
+		return nil
+	}
+
+	var linkExposureIDs, linkBookingIDs []string
+	var linkAmounts []float64
+	var bookingIDs []string
+	seenBooking := map[string]bool{}
+	for _, leg := range legs {
+		if leg.exposureID != "" {
+			linkExposureIDs = append(linkExposureIDs, leg.exposureID)
+			linkBookingIDs = append(linkBookingIDs, leg.bookingID)
+			linkAmounts = append(linkAmounts, leg.amount)
+		}
+		if key := strings.ToLower(leg.bookingID); !seenBooking[key] {
+			seenBooking[key] = true
+			bookingIDs = append(bookingIDs, leg.bookingID)
+		}
+	}
+
+	if len(linkExposureIDs) > 0 {
+		if _, err := db.Exec(ctx, `
+			UPDATE public.exposure_hedge_links l
+			SET hedged_amount = GREATEST(0, COALESCE(l.hedged_amount, 0) - v.amount),
+			    is_active = CASE WHEN GREATEST(0, COALESCE(l.hedged_amount, 0) - v.amount) <= 0 THEN false ELSE l.is_active END
+			FROM (
+				SELECT exposure_id, booking_id, SUM(amount) AS amount
+				FROM unnest($1::text[], $2::text[], $3::float8[]) AS t(exposure_id, booking_id, amount)
+				GROUP BY exposure_id, booking_id
+			) v
+			WHERE l.exposure_header_id = ANY($4)
+			  AND l.booking_id = ANY($5)
+			  AND l.exposure_header_id::text = v.exposure_id
+			  AND l.booking_id::text = v.booking_id
+		`, linkExposureIDs, linkBookingIDs, linkAmounts, linkExposureIDs, linkBookingIDs); err != nil {
+			return fmt.Errorf("hedge link update: %w", err)
+		}
+	}
+
+	bookingAmounts := map[string]float64{}
+	lockRows, err := db.Query(ctx, `SELECT system_transaction_id::text, COALESCE(booking_amount,0) FROM public.forward_bookings WHERE system_transaction_id = ANY($1) FOR UPDATE`, bookingIDs)
+	if err != nil {
+		return fmt.Errorf("lock forward bookings: %w", err)
+	}
+	for lockRows.Next() {
+		var id string
+		var amount float64
+		if err := lockRows.Scan(&id, &amount); err != nil {
+			lockRows.Close()
+			return fmt.Errorf("lock forward bookings: %w", err)
+		}
+		bookingAmounts[strings.ToLower(id)] = amount
+	}
+	lockRows.Close()
+	if err := lockRows.Err(); err != nil {
+		return fmt.Errorf("lock forward bookings: %w", err)
+	}
+	for _, id := range bookingIDs {
+		if _, ok := bookingAmounts[strings.ToLower(id)]; !ok {
+			return fmt.Errorf("lock forward booking %s: %w", id, pgx.ErrNoRows)
+		}
+	}
+
+	type ledgerState struct {
+		open float64
+		seq  int
+	}
+	state := map[string]ledgerState{}
+	ledgerRows, err := db.Query(ctx, `
+		SELECT DISTINCT ON (booking_id) booking_id::text, COALESCE(running_open_amount, 0), COALESCE(ledger_sequence, 0)
+		FROM public.forward_booking_ledger
+		WHERE booking_id = ANY($1)
+		ORDER BY booking_id, ledger_sequence DESC
+	`, bookingIDs)
+	if err != nil {
+		return fmt.Errorf("read forward ledger: %w", err)
+	}
+	for ledgerRows.Next() {
+		var id string
+		var st ledgerState
+		if err := ledgerRows.Scan(&id, &st.open, &st.seq); err != nil {
+			ledgerRows.Close()
+			return fmt.Errorf("read forward ledger: %w", err)
+		}
+		state[strings.ToLower(id)] = st
+	}
+	ledgerRows.Close()
+	if err := ledgerRows.Err(); err != nil {
+		return fmt.Errorf("read forward ledger: %w", err)
+	}
+
+	actionType := "UTILIZATION"
+	if method == "CANCELLATION" {
+		actionType = "CANCELLATION"
+	}
+	values := make([]string, 0, len(legs))
+	args := []any{actionType, settlementID}
+	for _, leg := range legs {
+		key := strings.ToLower(leg.bookingID)
+		st, ok := state[key]
+		if !ok {
+			st = ledgerState{open: bookingAmounts[key], seq: 0}
+		}
+		newOpen := math.Max(0, math.Abs(st.open)-leg.amount)
+		n := len(args)
+		values = append(values, fmt.Sprintf("($%d::uuid, $%d, $1, $2, CURRENT_DATE, $%d, $%d)", n+1, n+2, n+3, n+4))
+		args = append(args, leg.bookingID, st.seq+1, -leg.amount, newOpen)
+		state[key] = ledgerState{open: newOpen, seq: st.seq + 1}
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO public.forward_booking_ledger
+			(booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount)
+		VALUES `+strings.Join(values, ", "), args...); err != nil {
+		return fmt.Errorf("forward ledger insert: %w", err)
+	}
+	return nil
 }
 
 // invalidateStalePendingSettlements auto-rejects other still-pending settlement drafts
@@ -637,7 +810,7 @@ func syncExposureLifecycleStatus(ctx context.Context, db settlementDB, exposureH
 	if err := db.QueryRow(ctx, `
 		SELECT COALESCE(total_open_amount, 0)
 		FROM public.exposure_headers
-		WHERE exposure_header_id::text = $1 AND COALESCE(is_deleted, false) = false
+		WHERE exposure_header_id = $1 AND COALESCE(is_deleted, false) = false
 	`, exposureHeaderID).Scan(&open); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -664,7 +837,7 @@ func syncExposureLifecycleStatus(ctx context.Context, db settlementDB, exposureH
 		SET status = $1,
 		    is_active = CASE WHEN $3 THEN false ELSE is_active END,
 		    updated_at = NOW()
-		WHERE exposure_header_id::text = $2
+		WHERE exposure_header_id = $2
 		  AND COALESCE(is_deleted, false) = false
 	`, next, exposureHeaderID, fullySettled); err != nil {
 		return fmt.Errorf("exposure lifecycle status %s -> %s: %w", exposureHeaderID, next, err)
@@ -673,7 +846,7 @@ func syncExposureLifecycleStatus(ctx context.Context, db settlementDB, exposureH
 	if _, err := db.Exec(ctx, `
 		UPDATE public.exposure_hedge_links
 		SET is_active = false
-		WHERE exposure_header_id::text = $1 AND COALESCE(is_active, false) = false
+		WHERE exposure_header_id = $1 AND COALESCE(is_active, false) = false
 	`, exposureHeaderID); err != nil {
 		return fmt.Errorf("void pending hedge links %s: %w", exposureHeaderID, err)
 	}
@@ -933,6 +1106,19 @@ func applySettlementOnApprove(ctx context.Context, db settlementDB, settlementID
 			}
 		}
 		touched := map[string]struct{}{}
+		var refs []string
+		for _, lr := range lines {
+			if lr.BookingID == "" && lr.ForwardRef != "" {
+				refs = append(refs, strings.TrimSpace(lr.ForwardRef))
+			}
+		}
+		bookingByRef, err := resolveForwardBookingIDsByRef(ctx, db, refs)
+		if err != nil {
+			return nil, fmt.Errorf("resolve forward refs: %w", err)
+		}
+		var reduceIDs []string
+		var reduceAmts []float64
+		var legs []settlementForwardLeg
 		for _, lr := range lines {
 			amt := lr.Amount
 			if lr.Partial > 0 {
@@ -947,63 +1133,30 @@ func applySettlementOnApprove(ctx context.Context, db settlementDB, settlementID
 				shouldReduce = !hasExposureLeg
 			}
 			if shouldReduce {
-				if err := reduceExposureOpenAmount(ctx, db, lr.ExposureID, amt); err != nil {
-					return nil, fmt.Errorf("reduce exposure %s: %w", lr.ExposureID, err)
-				}
-				if strings.TrimSpace(lr.ExposureID) != "" {
-					touched[strings.TrimSpace(lr.ExposureID)] = struct{}{}
+				if id := strings.TrimSpace(lr.ExposureID); id != "" {
+					if amt != 0 {
+						reduceIDs = append(reduceIDs, id)
+						reduceAmts = append(reduceAmts, math.Abs(amt))
+					}
+					touched[id] = struct{}{}
 				}
 			}
 			// Forward legs (LINKED_HEDGE / ADDITIONAL_FWD / CASH with a ref): consume
 			// the hedge link and write the booking ledger. Lines saved before the
 			// booking_id backfill only carry forward_ref, so resolve it here too.
 			if lr.BookingID == "" && lr.ForwardRef != "" {
-				lr.BookingID, _, _ = resolveForwardBooking(ctx, db, "", lr.ForwardRef)
+				lr.BookingID = bookingByRef[strings.TrimSpace(lr.ForwardRef)]
 			}
 			if strings.TrimSpace(lr.BookingID) == "" || lr.LegType == "EXPOSURE" || lr.LegType == "CANCELLATION" || amt == 0 {
 				continue
 			}
-			if strings.TrimSpace(lr.ExposureID) != "" {
-				if _, err := db.Exec(ctx, `
-					UPDATE public.exposure_hedge_links
-					SET hedged_amount = GREATEST(0, COALESCE(hedged_amount, 0) - $1),
-					    is_active = CASE WHEN GREATEST(0, COALESCE(hedged_amount, 0) - $1) <= 0 THEN false ELSE is_active END
-					WHERE exposure_header_id::text = $2
-					  AND booking_id::text = $3
-				`, math.Abs(amt), lr.ExposureID, lr.BookingID); err != nil {
-					return nil, fmt.Errorf("hedge link update %s/%s: %w", lr.ExposureID, lr.BookingID, err)
-				}
-			}
-			var bookingAmount float64
-			if err := db.QueryRow(ctx, `SELECT COALESCE(booking_amount,0) FROM public.forward_bookings WHERE system_transaction_id::text = $1 FOR UPDATE`, lr.BookingID).Scan(&bookingAmount); err != nil {
-				return nil, fmt.Errorf("lock forward booking %s: %w", lr.BookingID, err)
-			}
-			openAmt := bookingAmount
-			seq := 0
-			err := db.QueryRow(ctx, `
-				SELECT COALESCE(running_open_amount, 0), COALESCE(ledger_sequence, 0)
-				FROM public.forward_booking_ledger
-				WHERE booking_id::text = $1
-				ORDER BY ledger_sequence DESC LIMIT 1
-			`, lr.BookingID).Scan(&openAmt, &seq)
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				return nil, fmt.Errorf("read forward ledger %s: %w", lr.BookingID, err)
-			}
-			if errors.Is(err, pgx.ErrNoRows) {
-				openAmt, seq = bookingAmount, 0
-			}
-			actionType := "UTILIZATION"
-			if method == "CANCELLATION" {
-				actionType = "CANCELLATION"
-			}
-			newOpen := math.Max(0, math.Abs(openAmt)-math.Abs(amt))
-			if _, err := db.Exec(ctx, `
-				INSERT INTO public.forward_booking_ledger
-					(booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount)
-				VALUES ($1::uuid, $2, $3, $4, CURRENT_DATE, $5, $6)
-			`, lr.BookingID, seq+1, actionType, settlementID, -math.Abs(amt), newOpen); err != nil {
-				return nil, fmt.Errorf("forward ledger insert %s: %w", lr.BookingID, err)
-			}
+			legs = append(legs, settlementForwardLeg{exposureID: strings.TrimSpace(lr.ExposureID), bookingID: strings.TrimSpace(lr.BookingID), amount: math.Abs(amt)})
+		}
+		if err := reduceExposureOpenAmounts(ctx, db, reduceIDs, reduceAmts); err != nil {
+			return nil, fmt.Errorf("reduce exposures: %w", err)
+		}
+		if err := applySettlementForwardLegs(ctx, db, legs, method, settlementID); err != nil {
+			return nil, err
 		}
 		return finish(touched, method)
 
@@ -1061,7 +1214,7 @@ func applySettlementOnApprove(ctx context.Context, db settlementDB, settlementID
 			if err := db.QueryRow(ctx, `
 				SELECT COALESCE(entity,''), COALESCE(currency,''), COALESCE(counterparty_name,''), COALESCE(company_code,''), COALESCE(exposure_type,'')
 				FROM public.exposure_headers
-				WHERE exposure_header_id::text = $1
+				WHERE exposure_header_id = $1
 			`, primaryOldID).Scan(&oldEntity, &oldCurrency, &oldCP, &oldCompany, &oldExpType); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return nil, fmt.Errorf("read rollover source exposure %s: %w", primaryOldID, err)
 			}
@@ -1110,7 +1263,7 @@ func applySettlementOnApprove(ctx context.Context, db settlementDB, settlementID
 				INSERT INTO public.exposure_hedge_links (exposure_header_id, booking_id, hedged_amount, is_active)
 				SELECT $1::uuid, booking_id, SUM(COALESCE(hedged_amount, 0)), true
 				FROM public.exposure_hedge_links
-				WHERE exposure_header_id::text = ANY($2) AND COALESCE(is_active, true) = true
+				WHERE exposure_header_id = ANY($2) AND COALESCE(is_active, true) = true
 				GROUP BY booking_id
 				ON CONFLICT (exposure_header_id, booking_id)
 				DO UPDATE SET hedged_amount = EXCLUDED.hedged_amount, is_active = true
@@ -1119,7 +1272,7 @@ func applySettlementOnApprove(ctx context.Context, db settlementDB, settlementID
 			}
 			if _, err := db.Exec(ctx, `
 				UPDATE public.exposure_hedge_links SET is_active = false
-				WHERE exposure_header_id::text = ANY($1) AND COALESCE(is_active, true) = true
+				WHERE exposure_header_id = ANY($1) AND COALESCE(is_active, true) = true
 			`, oldIDs); err != nil {
 				return nil, fmt.Errorf("deactivate old hedge links: %w", err)
 			}

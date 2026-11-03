@@ -23,6 +23,9 @@ func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFDIDRequired)
 			return
 		}
+		if !api.RequireRecordsInScope(ctx, w, pgxPool, `SELECT entity_id::text FROM investment.fd_master WHERE fd_id::text = $1`, fdID) {
+			return
+		}
 
 		auditTable := resolveFDAuditTable(ctx, pgxPool)
 		if auditTable == "" {
@@ -100,6 +103,16 @@ func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		cashflowID := strings.TrimSpace(r.URL.Query().Get("cashflow_id"))
 		if fdID == "" && cashflowID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "fd_id or cashflow_id is required")
+			return
+		}
+		if fdID != "" && !api.RequireRecordsInScope(ctx, w, pgxPool, `SELECT entity_id::text FROM investment.fd_master WHERE fd_id::text = $1`, fdID) {
+			return
+		}
+		if cashflowID != "" && !api.RequireRecordsInScope(ctx, w, pgxPool, `
+			SELECT m.entity_id::text FROM investment.fd_master m
+			WHERE m.fd_id IN (
+				SELECT cs.fd_id FROM investment.fd_cashflow_schedule cs
+				WHERE cs.cashflow_id::text = $1)`, cashflowID) {
 			return
 		}
 

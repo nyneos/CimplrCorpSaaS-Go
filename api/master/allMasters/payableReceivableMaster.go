@@ -1306,6 +1306,10 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		cannotApprove := []string{}
 		actionTypeByType := map[string]string{}
 		var blockedRecords []map[string]interface{}
+		type deleteCandidate struct {
+			aid, tid, atype string
+		}
+		var deleteCandidates []deleteCandidate
 
 		for rows.Next() {
 			var aid, tid, atype, pstatus string
@@ -1320,18 +1324,29 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 				cannotApprove = append(cannotApprove, tid)
 			} else {
 				if strings.ToUpper(strings.TrimSpace(atype)) == "DELETE" {
-					blockers, _ := dependency.HasCoreBelow(ctx, pgxPool, "masterpayablereceivabletype", tid)
-					if len(blockers) > 0 {
-						blockedRecords = append(blockedRecords, map[string]interface{}{
-							"type_id":    tid,
-							"blocked_by": dependency.BlockersSummary(blockers),
-						})
-						continue
-					}
+					deleteCandidates = append(deleteCandidates, deleteCandidate{aid: aid, tid: tid, atype: atype})
+					continue
 				}
 				actionIDs = append(actionIDs, aid)
 				actionTypeByType[tid] = atype
 			}
+		}
+
+		deleteTIDs := make([]string, 0, len(deleteCandidates))
+		for _, c := range deleteCandidates {
+			deleteTIDs = append(deleteTIDs, c.tid)
+		}
+		blockersByID, _ := dependency.HasCoreBelowBatch(ctx, pgxPool, "masterpayablereceivabletype", deleteTIDs)
+		for _, c := range deleteCandidates {
+			if blockers := blockersByID[c.tid]; len(blockers) > 0 {
+				blockedRecords = append(blockedRecords, map[string]interface{}{
+					"type_id":    c.tid,
+					"blocked_by": dependency.BlockersSummary(blockers),
+				})
+				continue
+			}
+			actionIDs = append(actionIDs, c.aid)
+			actionTypeByType[c.tid] = c.atype
 		}
 
 		missing := []string{}

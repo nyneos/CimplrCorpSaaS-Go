@@ -313,10 +313,7 @@ func entitycurrencywiseCash(ctx context.Context, pgxPool *pgxpool.Pool, scope li
 		if err := rows.Scan(&rec.EntityName, &rec.CurrencyCode, &rec.TotalBalance); err != nil {
 			return nil, err
 		}
-		rate := 1.0
-		if r, ok := rates[rec.CurrencyCode]; ok {
-			rate = r
-		}
+		rate := fxrates.Rate(rates, rec.CurrencyCode)
 		rec.Normalized = rec.TotalBalance * rate
 		results = append(results, rec)
 	}

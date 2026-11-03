@@ -106,7 +106,6 @@ func HandleTransformResultDownloadLocal(pool *pgxpool.Pool) http.HandlerFunc {
 			"filename":       name,
 			"content_base64": base64.StdEncoding.EncodeToString(raw),
 			"byte_size":      len(raw),
-			"path":           location,
 		})
 	}
 }

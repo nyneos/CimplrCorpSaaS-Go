@@ -571,8 +571,13 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if pt := getColumnValue(row, colMap, "product_type"); pt != "" {
 				input.ProductType = &pt
 			}
-			input.MinimumAmount, _ = parseFloatPtr(get("minimum_amount"))
-			input.MaximumAmount, _ = parseFloatPtr(get("maximum_amount"))
+			var minAmtErr, maxAmtErr error
+			input.MinimumAmount, minAmtErr = parseFloatPtr(get("minimum_amount"))
+			input.MaximumAmount, maxAmtErr = parseFloatPtr(get("maximum_amount"))
+			if minAmtErr != nil || maxAmtErr != nil {
+				sendFail(i+2, "invalid minimum_amount or maximum_amount")
+				return
+			}
 			if input.MinimumAmount != nil && input.MaximumAmount != nil {
 				if *input.MinimumAmount > *input.MaximumAmount {
 					sendFail(i+2, "minimum_amount must be <= maximum_amount when both provided")

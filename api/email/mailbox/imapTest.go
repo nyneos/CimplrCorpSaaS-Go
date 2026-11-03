@@ -2,7 +2,9 @@ package emailmailbox
 
 import (
 	"CimplrCorpSaas/api/errtext"
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"strings"
 
@@ -52,6 +54,10 @@ func HandleIMAPTest(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			storedHost := strings.TrimSpace(stored.Host)
 			fields.Host = ""
+			if pw := strings.TrimSpace(fields.Password); pw == "" || pw == constants.RedactedPlaceholder {
+				fields.Port = 0
+				fields.Username = ""
+			}
 			merged, mergeErr := MergeIMAPFields(stored, fields, addr)
 			if mergeErr != nil {
 				emailcommon.RespondBadRequest(w, errtext.Detail(w, mergeErr))
@@ -72,6 +78,10 @@ func HandleIMAPTest(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		payload := fields.ToRuntimeIMAP()
+		if strings.TrimSpace(req.InboxID) == "" && !imapTestHostAllowed(r.Context(), payload.Host) {
+			emailcommon.RespondBadRequest(w, "imap host is not allowed")
+			return
+		}
 		if err := emailClient.VerifyIMAP(r.Context(), addr, payload); err != nil {
 			api.LogErrorForResponse(w, "email imap test failed: %v", err)
 			emailcommon.RespondFailPayload(w, constants.RouteIMAPTest, "request failed", map[string]interface{}{"ok": false})
@@ -92,4 +102,23 @@ func HandleIMAPTest(pool *pgxpool.Pool) http.HandlerFunc {
 			"message":  "IMAP connection successful",
 		})
 	}
+}
+
+func imapTestHostAllowed(ctx context.Context, host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return true
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(addrs) == 0 {
+		return false
+	}
+	for _, a := range addrs {
+		ip := a.IP
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+			ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+			return false
+		}
+	}
+	return true
 }

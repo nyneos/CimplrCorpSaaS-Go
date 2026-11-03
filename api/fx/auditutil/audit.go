@@ -146,6 +146,43 @@ func FetchRowSnapshotPGX(ctx context.Context, pool *pgxpool.Pool, tableName, par
 	return snapshot
 }
 
+func FetchRowSnapshotsPGX(ctx context.Context, pool *pgxpool.Pool, tableName, parentColumn string, parentIDs []string) map[string]map[string]interface{} {
+	out := make(map[string]map[string]interface{}, len(parentIDs))
+	if pool == nil || tableName == "" || parentColumn == "" || len(parentIDs) == 0 {
+		return out
+	}
+
+	query := fmt.Sprintf(`SELECT t.%s::text, row_to_json(t) FROM %s t WHERE t.%s = ANY($1)`, parentColumn, tableName, parentColumn)
+	rows, err := pool.Query(ctx, query, parentIDs)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+
+	byKey := make(map[string]map[string]interface{}, len(parentIDs))
+	for rows.Next() {
+		var id string
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil || len(raw) == 0 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(id))
+		if _, seen := byKey[key]; seen {
+			continue
+		}
+		var snapshot map[string]interface{}
+		if err := json.Unmarshal(raw, &snapshot); err == nil {
+			byKey[key] = snapshot
+		}
+	}
+	for _, id := range parentIDs {
+		if snapshot, ok := byKey[strings.ToLower(strings.TrimSpace(id))]; ok {
+			out[id] = snapshot
+		}
+	}
+	return out
+}
+
 // ActionParams groups the audit-action parameters to keep function signatures short.
 type ActionParams struct {
 	TableName      string

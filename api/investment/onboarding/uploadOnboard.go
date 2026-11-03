@@ -326,6 +326,9 @@ func validateDematRequired(i int, dm DematInput) string {
 	if !dm.Enriched && strings.TrimSpace(dm.DefaultSettlementAccount) == "" {
 		return fmt.Sprintf("Demat #%d '%s': default_settlement_account is required", i+1, dm.DematAccountNumber)
 	}
+	if !dm.Enriched && strings.TrimSpace(dm.Depository) == "" {
+		return fmt.Sprintf("Demat #%d '%s': depository is required", i+1, dm.DematAccountNumber)
+	}
 	return ""
 }
 

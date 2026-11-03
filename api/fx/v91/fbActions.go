@@ -127,10 +127,17 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			changes = append(changes, valueDateChange{
-				id:  p.ExposureHeaderID,
-				dt:  dt,
-				old: auditutil.FetchRowSnapshotPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", p.ExposureHeaderID),
+				id: p.ExposureHeaderID,
+				dt: dt,
 			})
+		}
+		changeIDs := make([]string, 0, len(changes))
+		for _, ch := range changes {
+			changeIDs = append(changeIDs, ch.id)
+		}
+		oldSnapshots := auditutil.FetchRowSnapshotsPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", changeIDs)
+		for i := range changes {
+			changes[i].old = oldSnapshots[changes[i].id]
 		}
 
 		tx, err := pool.Begin(ctx)
@@ -167,8 +174,9 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			respondV91DBError(w, err)
 			return
 		}
+		newSnapshots := auditutil.FetchRowSnapshotsPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", updated)
 		for i, ch := range changes {
-			newValues := auditutil.FetchRowSnapshotPGX(ctx, pool, constants.ExposureHeaders, "exposure_header_id", updated[i])
+			newValues := newSnapshots[updated[i]]
 			auditutil.RecordActionPGX(ctx, pool, auditutil.ActionParams{TableName: auditutil.TableExposure, ParentColumn: "exposure_header_id", ParentID: updated[i], ActionType: "EDIT", Status: constants.StatusPendingEditApproval, Reason: "", RequestedBy: requester, OldValues: ch.old, NewValues: newValues})
 		}
 		respondEnvelopeSuccess(w, "value_date updated successfully", map[string]interface{}{

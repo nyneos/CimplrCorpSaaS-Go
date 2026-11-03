@@ -648,9 +648,11 @@ func BulkDeleteForwardBookings(pool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				tID = matID
 			}
-			oldValuesByID[id] = auditutil.FetchRowSnapshotPGX(r.Context(), pool, "public.forward_bookings", "system_transaction_id", id)
 			policyEligible = append(policyEligible, id)
 			triggerMatrices[id] = tID
+		}
+		for id, snapshot := range auditutil.FetchRowSnapshotsPGX(r.Context(), pool, "public.forward_bookings", "system_transaction_id", policyEligible) {
+			oldValuesByID[id] = snapshot
 		}
 		eligibleIds = policyEligible
 		updateQuery := `
