@@ -633,15 +633,11 @@ func getExposureMaturitiesChecked(ctx context.Context, db *pgxpool.Pool, entitie
 
 	for rows.Next() {
 		var amount float64
-		var currency, valueDate, expID string
+		var currency, expID string
+		var maturityDate time.Time
 
-		if err := rows.Scan(&amount, &currency, &valueDate, &expID); err != nil {
+		if err := rows.Scan(&amount, &currency, &maturityDate, &expID); err != nil {
 			return nil, err
-		}
-
-		maturityDate, err := time.Parse(constants.DateFormat, valueDate)
-		if err != nil {
-			continue
 		}
 
 		usdAmount := convertToINR(math.Abs(amount), currency)
