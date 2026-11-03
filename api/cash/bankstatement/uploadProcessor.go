@@ -85,7 +85,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, pool *pgxpool.Pool, reque
 // dedup and KPI computation for structured input (no file I/O or header detection).
 // pool is used for ingestion and for the post-commit smart categorization trigger.
 func ProcessBankStatementFromStructuredInput(ctx context.Context, pool *pgxpool.Pool, input StructuredBankStatement, fileHash string, requestedIP string) (map[string]interface{}, error) {
-	entityID, _, accountName, err := lookupMasterBankAccountForUpload(ctx, pool, input.AccountNumber)
+	entityID, _, accountName, _, err := lookupMasterBankAccountForUpload(ctx, pool, input.AccountNumber)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("account %s not found in master data", input.AccountNumber)

@@ -2023,9 +2023,22 @@ func UploadBankStatementV2Handler(pgxPool *pgxpool.Pool) http.Handler {
 				ParsedRows:            parsedRows,
 				ParsedCSV:             parsedCSV,
 				RowsReady:             parsedOK,
+				FileBytes:             fileBytes,
 			},
 		)
 		if err != nil {
+			if errors.Is(err, ErrFileAlreadyUploaded) || errors.Is(err, ErrStatementPeriodExists) ||
+				errors.Is(err, ErrAllTransactionsDuplicate) ||
+				errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				logger.LogError("[BANK-UPLOAD-DEBUG] V2 failed (%v); not retrying via multi handler", err)
+				status := http.StatusInternalServerError
+				if errors.Is(err, ErrFileAlreadyUploaded) || errors.Is(err, ErrStatementPeriodExists) ||
+					errors.Is(err, ErrAllTransactionsDuplicate) {
+					status = http.StatusConflict
+				}
+				apictx.RespondEnvelopeError(w, status, userFriendlyUploadError(err), "")
+				return
+			}
 			// V2 failed — try multi as a last-resort fallback (e.g. multi-account sheet)
 			logger.LogError("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
 			multiRec := httptest.NewRecorder()
@@ -2479,6 +2492,7 @@ func UploadZippedBankStatementsHandler(pool *pgxpool.Pool) http.Handler {
 					ParsedRows:            parsedRows,
 					ParsedCSV:             parsedCSV,
 					RowsReady:             parsedOK,
+					FileBytes:             ze.data,
 				},
 			)
 			if err != nil {

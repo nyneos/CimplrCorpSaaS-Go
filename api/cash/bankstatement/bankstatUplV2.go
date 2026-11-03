@@ -228,9 +228,11 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 	}
 
 	// 2. Parse Excel, XLS, or CSV file
-	tmpFile, err := io.ReadAll(file)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+	tmpFile := opts.FileBytes
+	if tmpFile == nil {
+		if tmpFile, err = io.ReadAll(file); err != nil {
+			return nil, fmt.Errorf("failed to read file: %w", err)
+		}
 	}
 	contentType := s3storage.DetectContentType(tmpFile)
 
@@ -517,9 +519,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 
 	// Lookup entity_id and bank_name from masterbankaccount/masterbank
 	// (account_number + scoped entity_id — same dual key as AUD-294 list joins)
-	var bankName string
+	var bankName, acctCurrencyCode string
 	logger.LogInfo("[BANK-UPLOAD-DEBUG] Looking up account in masterbankaccount for accountNumber=%q", accountNumber)
-	entityID, bankName, accountName, err = lookupMasterBankAccountForUpload(ctx, pool, accountNumber)
+	entityID, bankName, accountName, acctCurrencyCode, err = lookupMasterBankAccountForUpload(ctx, pool, accountNumber)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 			// Primary candidate not found.
@@ -646,6 +648,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 						entityID = ar.eID
 						bankName = ar.bName
 						accountName = ar.aName
+						acctCurrencyCode = ar.cur
 						matched = true
 						logger.LogInfo("[BANK-UPLOAD-DEBUG] Candidate matched accountNumber=%q", cand)
 						break
@@ -689,11 +692,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, pool *pgxpool.
 	// Currency enforcement (entity -> bank -> account -> currency)
 	var acctCurrency sql.NullString
 	if curCodes := ctxApprovedCurrencies(ctx); len(curCodes) > 0 {
-		_ = pool.QueryRow(ctx, `
-			SELECT mba.currency FROM public.masterbankaccount mba
-			WHERE mba.account_number = $1 AND mba.entity_id::text = $2
-			  AND COALESCE(mba.is_deleted, false) = false
-			LIMIT 1`, accountNumber, entityID).Scan(&acctCurrency)
+		acctCurrency = sql.NullString{String: acctCurrencyCode, Valid: acctCurrencyCode != ""}
 		if acctCurrency.Valid && strings.TrimSpace(acctCurrency.String) != "" {
 			if !ctxutil.FromContext(ctx).HasApprovedCurrency(acctCurrency.String) {
 				return nil, errors.New(constants.ErrCurrencyNotAllowed)

@@ -56,6 +56,7 @@ type UploadOpts struct {
 	ParsedRows [][]string
 	ParsedCSV  bool
 	RowsReady  bool
+	FileBytes  []byte
 }
 
 // RecalculateInput matches the user's bank statement format

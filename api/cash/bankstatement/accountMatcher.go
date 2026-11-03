@@ -15,11 +15,11 @@ import (
 
 // lookupMasterBankAccountForUpload resolves masterbankaccount by account_number
 // and, when the request has entity scope, entity_id as well (AUD-294 upload path).
-func lookupMasterBankAccountForUpload(ctx context.Context, pool *pgxpool.Pool, accountNumber string) (entityID, bankName, accountName string, err error) {
+func lookupMasterBankAccountForUpload(ctx context.Context, pool *pgxpool.Pool, accountNumber string) (entityID, bankName, accountName, currency string, err error) {
 	accountNumber = strings.TrimSpace(accountNumber)
 	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	q := `
-		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
+		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name), COALESCE(mba.currency, '')
 		FROM public.masterbankaccount mba
 		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 		WHERE mba.account_number = $1
@@ -32,20 +32,20 @@ func lookupMasterBankAccountForUpload(ctx context.Context, pool *pgxpool.Pool, a
 	}
 	q += `
 		LIMIT 1`
-	err = pool.QueryRow(ctx, q, args...).Scan(&entityID, &bankName, &accountName)
-	return entityID, bankName, accountName, err
+	err = pool.QueryRow(ctx, q, args...).Scan(&entityID, &bankName, &accountName, &currency)
+	return entityID, bankName, accountName, currency, err
 }
 
 // lookupMasterBankAccountsByCandidates batch-resolves account candidates, scoped
 // to the caller's entity set when present (same dual key as AUD-294 list joins).
-func lookupMasterBankAccountsByCandidates(ctx context.Context, pool *pgxpool.Pool, candidates []string) (map[string]struct{ eID, bName, aName string }, error) {
-	out := map[string]struct{ eID, bName, aName string }{}
+func lookupMasterBankAccountsByCandidates(ctx context.Context, pool *pgxpool.Pool, candidates []string) (map[string]struct{ eID, bName, aName, cur string }, error) {
+	out := map[string]struct{ eID, bName, aName, cur string }{}
 	if len(candidates) == 0 {
 		return out, nil
 	}
 	entityIDs := ctxutil.FromContext(ctx).EntityIDs
 	q := `
-		SELECT mba.account_number, mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
+		SELECT mba.account_number, mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name), COALESCE(mba.currency, '')
 		FROM public.masterbankaccount mba
 		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 		WHERE mba.account_number = ANY($1)
@@ -62,9 +62,9 @@ func lookupMasterBankAccountsByCandidates(ctx context.Context, pool *pgxpool.Poo
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var acNum, eID, bName, aName string
-		if sErr := rows.Scan(&acNum, &eID, &bName, &aName); sErr == nil {
-			out[acNum] = struct{ eID, bName, aName string }{eID, bName, aName}
+		var acNum, eID, bName, aName, cur string
+		if sErr := rows.Scan(&acNum, &eID, &bName, &aName, &cur); sErr == nil {
+			out[acNum] = struct{ eID, bName, aName, cur string }{eID, bName, aName, cur}
 		}
 	}
 	return out, rows.Err()

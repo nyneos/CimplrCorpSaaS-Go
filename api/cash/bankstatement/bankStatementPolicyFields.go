@@ -72,7 +72,7 @@ func lookupEntityIDForAccount(ctx context.Context, pool *pgxpool.Pool, accountNu
 	if accountNumber == "" || pool == nil {
 		return ""
 	}
-	entityID, _, _, err := lookupMasterBankAccountForUpload(ctx, pool, accountNumber)
+	entityID, _, _, _, err := lookupMasterBankAccountForUpload(ctx, pool, accountNumber)
 	if err != nil {
 		return ""
 	}

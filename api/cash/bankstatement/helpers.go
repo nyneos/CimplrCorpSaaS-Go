@@ -1026,14 +1026,7 @@ func isTransientPQProtocolError(err error) bool {
 
 // joinStrings is a helper for bulk insert value string joining
 func joinStrings(strs []string, sep string) string {
-	if len(strs) == 0 {
-		return ""
-	}
-	out := strs[0]
-	for _, s := range strs[1:] {
-		out += sep + s
-	}
-	return out
+	return strings.Join(strs, sep)
 }
 
 // generateBatchID returns a random 6-character uppercase alphanumeric string that acts as a

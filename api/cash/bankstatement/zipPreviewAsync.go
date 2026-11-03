@@ -286,6 +286,7 @@ func handleZipDirectIngest(pool *pgxpool.Pool, w http.ResponseWriter, r *http.Re
 				ParsedRows:            parsedRows,
 				ParsedCSV:             parsedCSV,
 				RowsReady:             parsedOK,
+				FileBytes:             ze.data,
 			},
 		)
 		if err != nil {
