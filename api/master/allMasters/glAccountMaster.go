@@ -739,33 +739,16 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(hideIds) > 0 {
-			getAllDescendants := func(start []string) []string {
-				all := map[string]bool{}
-				queue := append([]string{}, start...)
-				for _, id := range start {
-					all[id] = true
-				}
-				for len(queue) > 0 {
-					cur := queue[0]
-					queue = queue[1:]
-					for _, child := range parentMap[cur] {
-						if !all[child] {
-							all[child] = true
-							queue = append(queue, child)
-						}
-					}
-				}
-				res := []string{}
-				for id := range all {
-					res = append(res, id)
-				}
-				return res
-			}
-			start := []string{}
+			start := make([]string, 0, len(hideIds))
 			for id := range hideIds {
 				start = append(start, id)
 			}
-			toHide := getAllDescendants(start)
+			// Descendants via recursive CTE (roots only — no in-memory BFS over full graph).
+			toHide, derr := glAccountDescendantIDs(ctx, pgxPool, start)
+			if derr != nil {
+				api.RespondWithResult(w, false, errtext.Detail(w, derr))
+				return
+			}
 			for _, id := range toHide {
 				delete(entityMap, id)
 			}
@@ -1291,44 +1274,12 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_gl_account_id, child_gl_account_id FROM glaccountrelationships`)
+		// Descendants via recursive CTE (same pattern as delete — no full-table load).
+		allToReject, err := glAccountDescendantIDs(ctx, pgxPool, req.GLAccountIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		for relRows.Next() {
-			var parentID, childID string
-			if err := relRows.Scan(&parentID, &childID); err == nil {
-				parentMap[parentID] = append(parentMap[parentID], childID)
-			}
-		}
-
-		getAllDescendants := func(ids []string) []string {
-			all := map[string]bool{}
-			queue := append([]string{}, ids...)
-			for _, id := range ids {
-				all[id] = true
-			}
-			for len(queue) > 0 {
-				current := queue[0]
-				queue = queue[1:]
-				for _, child := range parentMap[current] {
-					if !all[child] {
-						all[child] = true
-						queue = append(queue, child)
-					}
-				}
-			}
-			res := []string{}
-			for id := range all {
-				res = append(res, id)
-			}
-			return res
-		}
-
-		allToReject := getAllDescendants(req.GLAccountIDs)
 		if len(allToReject) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "No GL accounts found to reject")
 			return

@@ -23,8 +23,12 @@ type Client struct {
 }
 
 func NewFromEnv() *Client {
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("DOCUMENT_SERVICE_URL")), "/")
+	if base == "" {
+		log.Printf("docsvc: DOCUMENT_SERVICE_URL is empty — calls will fail closed")
+	}
 	c := &Client{
-		base:  strings.TrimRight(materializeRelayWire(), "/"),
+		base:  base,
 		token: strings.TrimSpace(os.Getenv("DOCUMENT_SERVICE_KEY")),
 		http:  &http.Client{Timeout: 30 * time.Second},
 	}

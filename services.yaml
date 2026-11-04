@@ -15,6 +15,20 @@ services:
       port: 8081
       load_balancer: round_robin
       vip_failover: true
+      # Browser Origin allowlist (UI hosts that may call this gateway).
+      # Also set CORS_ALLOWED_ORIGINS=comma,separated in .env (merged).
+      # Empty / omitted = legacy Access-Control-Allow-Origin: * (dev only).
+      # CSM: give these UI URLs to infra; frontend VITE/API base must be the gateway URL(s) below.
+      cors_allowed_origins:
+        - http://localhost:5173
+        - http://localhost:5174
+        - http://localhost:4173
+        # - https://uat-app.example.com
+        # - https://prod-app.example.com
+      # Public gateway base URLs this backend serves (for CSM / UI env whitelist — not CORS):
+      # public_api_base_urls:
+      #   - https://uat-api.example.com/cimplrapigateway
+      #   - https://prod-api.example.com/cimplrapigateway
   - name: auth
     start_order: 4
     config:

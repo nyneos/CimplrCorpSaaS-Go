@@ -107,6 +107,11 @@ func BindUserID(r *http.Request, body []byte, userID string) []byte {
 			r.MultipartForm.Value[constants.KeyUserID] = []string{userID}
 		}
 	}
+	// Empty / non-JSON body (common for nos.post(url) with no payload): still
+	// inject {"user_id":...} so downstream handlers that Decode user_id work.
+	if len(bytes.TrimSpace(body)) == 0 {
+		body = []byte("{}")
+	}
 	if !looksJSON(body) {
 		return body
 	}
@@ -125,6 +130,9 @@ func BindUserID(r *http.Request, body []byte, userID string) []byte {
 	}
 	r.ContentLength = int64(len(out))
 	r.Header.Set("Content-Length", fmt.Sprint(len(out)))
+	if ct := strings.TrimSpace(r.Header.Get(constants.ContentTypeText)); ct == "" {
+		r.Header.Set(constants.ContentTypeText, "application/json")
+	}
 	return out
 }
 

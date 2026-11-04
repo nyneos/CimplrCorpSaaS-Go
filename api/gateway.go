@@ -117,9 +117,7 @@ func SystemIfBlank(value string) string {
 
 func withCORS(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
-		w.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
-		w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
+		applyCORSHeaders(w, r)
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -202,16 +200,23 @@ func withSessionIdentity(h http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		ct := strings.ToLower(r.Header.Get(headerContentType))
-		if r.Body != nil && r.Body != http.NoBody && !strings.Contains(ct, constants.ContentTypeMultipart) {
-			body, err := io.ReadAll(r.Body)
-			if err != nil {
-				writeJSONError(w, http.StatusBadRequest, "Failed to read request body")
-				return
+		if strings.Contains(ct, constants.ContentTypeMultipart) {
+			usersession.BindUserID(r, nil, s.UserID)
+		} else {
+			var body []byte
+			if r.Body != nil && r.Body != http.NoBody {
+				var err error
+				body, err = io.ReadAll(r.Body)
+				if err != nil {
+					writeJSONError(w, http.StatusBadRequest, "Failed to read request body")
+					return
+				}
 			}
+			// Always rewrite body so empty POSTs (e.g. /uam/permissions/sidebar)
+			// get {"user_id":...} from the in-memory session.
 			body = usersession.BindUserID(r, body, s.UserID)
 			r.Body = io.NopCloser(bytes.NewReader(body))
-		} else {
-			usersession.BindUserID(r, nil, s.UserID)
+			r.ContentLength = int64(len(body))
 		}
 		h(w, r)
 	}
@@ -344,9 +349,7 @@ func createReverseProxy(target string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Handle preflight OPTIONS at the gateway
 		if r.Method == "OPTIONS" {
-			w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
-			w.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
-			w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
+			applyCORSHeaders(w, r)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -360,7 +363,18 @@ func createReverseProxy(target string) http.HandlerFunc {
 
 		// Set CORS headers ONLY in ModifyResponse for proxied requests
 		proxy.ModifyResponse = func(resp *http.Response) error {
-			resp.Header.Set(headerAccessControlAllowOrigin, allowOriginAll)
+			req := r
+			if resp.Request != nil {
+				req = resp.Request
+			}
+			origin := corsAllowOriginForRequest(req)
+			if origin != "" {
+				resp.Header.Set(headerAccessControlAllowOrigin, origin)
+				if origin != allowOriginAll {
+					resp.Header.Set("Vary", "Origin")
+					resp.Header.Set("Access-Control-Allow-Credentials", "true")
+				}
+			}
 			resp.Header.Set(headerAccessControlAllowMethods, allowMethodsAll)
 			resp.Header.Set(headerAccessControlAllowHeaders, allowHeadersAll)
 			// Let browsers read policy pass summary set by runtime.Enforce.
@@ -375,9 +389,7 @@ func createReverseProxy(target string) http.HandlerFunc {
 
 		proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
 			logger.LogError("[Gateway] proxy error for %s %s -> %s: %v", req.Method, req.URL.Path, target, err)
-			rw.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
-			rw.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
-			rw.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
+			applyCORSHeaders(rw, req)
 			rw.Header().Set(headerContentType, contentTypeJSON)
 			rw.WriteHeader(http.StatusBadGateway)
 			rw.Write([]byte(`{"success":false,"error":"upstream service unavailable"}`))
@@ -576,9 +588,7 @@ func encryptResponse(next http.Handler) http.Handler {
 		// Remove stale length/encoding headers because the body is now rewritten
 		w.Header().Del("Content-Length")
 		w.Header().Del("Content-Encoding")
-		w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
-		w.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
-		w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
+		applyCORSHeaders(w, r)
 		w.Header().Set(headerContentType, contentTypeJSON)
 		w.WriteHeader(status)
 		// NOT migrated to the envelope: this is the wire contract for every
@@ -615,7 +625,17 @@ func encryptBytes(plain []byte, key []byte) (string, error) {
 // writeJSONError sends the CLAUDE.md standard error envelope with the given
 // HTTP status (previously always returned 200 regardless of failure).
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
-	w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
+	// No request here — use configured default / *.
+	corsOriginsMu.RLock()
+	list := corsOriginsList
+	corsOriginsMu.RUnlock()
+	origin := allowOriginAll
+	if len(list) > 0 {
+		origin = list[0]
+		w.Header().Set("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	}
+	w.Header().Set(headerAccessControlAllowOrigin, origin)
 	w.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
 	w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
 	LogErrorForResponse(w, "[GATEWAY] %s", msg)

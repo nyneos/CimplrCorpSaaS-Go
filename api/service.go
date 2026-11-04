@@ -50,6 +50,24 @@ func (s *GatewayService) Start() error {
 		}
 	}
 
+	// CORS UI allowlist: services.yaml cors_allowed_origins + CORS_ALLOWED_ORIGINS env.
+	origins := LoadCORSOriginsFromEnv()
+	if s.config != nil {
+		if v, ok := s.config["cors_allowed_origins"]; ok {
+			switch t := v.(type) {
+			case []interface{}:
+				for _, item := range t {
+					if s, ok := item.(string); ok {
+						origins = append(origins, s)
+					}
+				}
+			case []string:
+				origins = append(origins, t...)
+			}
+		}
+	}
+	ConfigureCORSOrigins(origins)
+
 	server, cert, key := NewGatewayServer(port, pathPrefix)
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {

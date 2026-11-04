@@ -869,33 +869,21 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(hideIds) > 0 {
-			getAllDescendants := func(start []string) []string {
-				all := map[string]bool{}
-				queue := append([]string{}, start...)
-				for _, id := range start {
-					all[id] = true
-				}
-				for len(queue) > 0 {
-					cur := queue[0]
-					queue = queue[1:]
-					for _, child := range parentMap[cur] {
-						if !all[child] {
-							all[child] = true
-							queue = append(queue, child)
-						}
-					}
-				}
-				res := []string{}
-				for id := range all {
-					res = append(res, id)
-				}
-				return res
-			}
-			start := []string{}
+			start := make([]string, 0, len(hideIds))
 			for id := range hideIds {
 				start = append(start, id)
 			}
-			toHide := getAllDescendants(start)
+			// Descendants via recursive CTE (roots only — no in-memory BFS over full graph).
+			toHide, derr := cashFlowCategoryDescendantIDs(ctx, pgxPool, start)
+			if derr != nil {
+				errMsg, statusCode := getUserFriendlyCashFlowCategoryError(derr, "Failed to resolve category hierarchy")
+				if statusCode == http.StatusOK {
+					api.RespondEnvelopeError(w, statusCode, errMsg, "")
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
+				return
+			}
 			for _, id := range toHide {
 				delete(entityMap, id)
 			}
@@ -1498,8 +1486,8 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		checkerBy := session.Name
 
-		nameToID, _ := buildCategoryNameToIDMap(ctx, pgxPool)
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_category_name, child_category_name FROM cashflowcategoryrelationships`)
+		// Descendants via recursive CTE (same pattern as delete — no full-table load).
+		allToReject, err := cashFlowCategoryDescendantIDs(ctx, pgxPool, req.CategoryIDs)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, constants.ErrFailedToFetchCategoryRelationships)
 			if statusCode == http.StatusOK {
@@ -1509,42 +1497,6 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		for relRows.Next() {
-			var parentName, childName string
-			if err := relRows.Scan(&parentName, &childName); err == nil {
-				pid := nameToID[strings.ToLower(strings.TrimSpace(parentName))]
-				cid := nameToID[strings.ToLower(strings.TrimSpace(childName))]
-				if pid != "" && cid != "" {
-					parentMap[pid] = append(parentMap[pid], cid)
-				}
-			}
-		}
-		getAllDescendants := func(ids []string) []string {
-			all := map[string]bool{}
-			queue := append([]string{}, ids...)
-			for _, id := range ids {
-				all[id] = true
-			}
-			for len(queue) > 0 {
-				current := queue[0]
-				queue = queue[1:]
-				for _, child := range parentMap[current] {
-					if !all[child] {
-						all[child] = true
-						queue = append(queue, child)
-					}
-				}
-			}
-			res := []string{}
-			for id := range all {
-				res = append(res, id)
-			}
-			return res
-		}
-
-		allToReject := getAllDescendants(req.CategoryIDs)
 		if len(allToReject) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "No categories found to reject")
 			return

@@ -99,7 +99,9 @@ func RegisterCashRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool
 	mux.Handle("/cash/smart-cat/bulk-correct", cashChain(bankstatement.BulkCorrectHandler(pgxPool)))
 	// V2 Bank Statement APIs
 	mux.Handle("/cash/bank-statements/v2/get", cashChain(bankstatement.GetAllBankStatementsHandler(pgxPool)))
+	mux.Handle("/cash/bank-statements/v2/list", cashChain(bankstatement.ListBankStatementsHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/transactions", cashChain(bankstatement.GetBankStatementTransactionsHandler(pgxPool)))
+	mux.Handle("/cash/bank-statements/v2/transactions/list", cashChain(bankstatement.ListBankStatementTransactionsHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/download", cashChain(bankstatement.GetBankStatementDownloadURLHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/download-bulk", cashChain(bankstatement.GetBankStatementBulkDownloadURLHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/package-zip", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DownloadBankStatementPackageZipHandler(pgxPool)))
@@ -161,6 +163,8 @@ func RegisterCashRoutes(mux *http.ServeMux, serviceName string, pgxPool *pgxpool
 	mux.Handle("/cash/transactions/receivables/additional-files/audit", cashChain(payablerecievable.AuditReceivableAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/transactions/audit", cashChain(payablerecievable.GetTransactionAuditHandler(pgxPool)))
 	mux.Handle("/cash/transactions/all", cashChain(payablerecievable.GetAllPayableReceivable(pgxPool)))
+	mux.Handle("/cash/transactions/payables/list", cashChain(payablerecievable.ListPayables(pgxPool)))
+	mux.Handle("/cash/transactions/receivables/list", cashChain(payablerecievable.ListReceivables(pgxPool)))
 
 	//fundplanning
 	mux.Handle("/cash/fund-planning", cashChain(fundplanning.GetFundPlanningEnhanced(pgxPool)))

@@ -1952,69 +1952,42 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		checkerBy := session.Name
-		// Fetch relationships and compute descendants, then update audit rows by centre_id
 		ctx := r.Context()
 
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
+		// Descendants via recursive CTE (same pattern as delete — no full-table load).
+		descRows, err := pgxPool.Query(ctx, `
+			WITH RECURSIVE descendants AS (
+				SELECT centre_id::text AS centre_id, centre_code
+				FROM mastercostprofitcenter
+				WHERE centre_id::text = ANY($1::text[])
+				UNION
+				SELECT child.centre_id::text, child.centre_code
+				FROM descendants d
+				JOIN costprofitcenterrelationships rel ON rel.parent_centre_code = d.centre_code
+				JOIN mastercostprofitcenter child ON child.centre_code = rel.child_centre_code
+				WHERE COALESCE(child.is_deleted, false) = false
+			)
+			SELECT DISTINCT centre_id FROM descendants`, req.CentreIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
 			return
 		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		codeToIDMap := map[string]string{}
-
-		// Get centre_code to centre_id mappings
-		codeRows, err := pgxPool.Query(ctx, `SELECT centre_id, centre_code FROM mastercostprofitcenter`)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
-			return
+		allToReject := make([]string, 0, len(req.CentreIDs))
+		seenReject := map[string]bool{}
+		for descRows.Next() {
+			var id string
+			if err := descRows.Scan(&id); err != nil {
+				descRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, errtext.Detail(w, err))
+				return
+			}
+			if id == "" || seenReject[id] {
+				continue
+			}
+			seenReject[id] = true
+			allToReject = append(allToReject, id)
 		}
-		defer codeRows.Close()
-		for codeRows.Next() {
-			var id, code string
-			if err := codeRows.Scan(&id, &code); err == nil {
-				codeToIDMap[code] = id
-			}
-		}
-
-		// Build parent map using centre IDs
-		for relRows.Next() {
-			var parentCode, childCode string
-			if err := relRows.Scan(&parentCode, &childCode); err == nil {
-				if parentID, ok := codeToIDMap[parentCode]; ok {
-					if childID, ok := codeToIDMap[childCode]; ok {
-						parentMap[parentID] = append(parentMap[parentID], childID)
-					}
-				}
-			}
-		}
-
-		// traverse descendants
-		getAllDescendants := func(ids []string) []string {
-			all := map[string]bool{}
-			queue := append([]string{}, ids...)
-			for _, id := range ids {
-				all[id] = true
-			}
-			for len(queue) > 0 {
-				current := queue[0]
-				queue = queue[1:]
-				for _, child := range parentMap[current] {
-					if !all[child] {
-						all[child] = true
-						queue = append(queue, child)
-					}
-				}
-			}
-			res := []string{}
-			for id := range all {
-				res = append(res, id)
-			}
-			return res
-		}
-
-		allToReject := getAllDescendants(req.CentreIDs)
+		descRows.Close()
 		if len(allToReject) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "No centres found to reject")
 			return

@@ -30,8 +30,12 @@ type Client struct {
 }
 
 func NewFromEnv() *Client {
+	root := strings.TrimRight(strings.TrimSpace(os.Getenv("POLICY_SERVICE_URL")), "/")
+	if root == "" {
+		log.Printf("policysvc: POLICY_SERVICE_URL is empty — evaluate/test/health will fail closed")
+	}
 	c := &Client{
-		wireRoot: strings.TrimRight(materializeRelayWire(), "/"),
+		wireRoot: root,
 		token:    strings.TrimSpace(os.Getenv("POLICY_SERVICE_KEY")),
 		http:     &http.Client{Timeout: 30 * time.Second},
 	}

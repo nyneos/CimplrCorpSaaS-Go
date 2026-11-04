@@ -12,6 +12,7 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -30,8 +31,8 @@ type convertSvcResponse struct {
 	Error            string `json:"error"`
 }
 
-// r0 returns the obfuscated base address of the conversion service.
-// Intentionally fixed at compile time (no runtime env override).
+// r0 returns the obfuscated default base address of the conversion service,
+// used only when CONVERT_SVC_ADDR is unset. See convertSvcBase.
 func r0() string {
 	x := []uint16{
 		105, 117, 117, 113, 116, 59, 48, 48,
@@ -59,8 +60,15 @@ func callConvertXLSX(ctx context.Context, docBytes []byte, filename, password st
 
 var errConverterKeyMissing = errors.New("statement converter is not configured (CONVERT_SVC_KEY)")
 
+func convertSvcBase() string {
+	if v := strings.TrimSpace(os.Getenv("CONVERT_SVC_ADDR")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return r0()
+}
+
 func callConvertEndpoint(ctx context.Context, docBytes []byte, filename, password, path string) ([]byte, error) {
-	target := r0() + path
+	target := convertSvcBase() + path
 
 	tok := strings.TrimSpace(bindref.BrE1())
 	if tok == "" {

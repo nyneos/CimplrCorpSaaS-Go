@@ -127,66 +127,6 @@ type cashEntityQuery interface {
 	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
 }
 
-func cashEntityNameDescendants(parentMap map[string][]string, startName string) []string {
-	visited := make(map[string]bool)
-	queue := []string{startName}
-	visited[startName] = true
-
-	for len(queue) > 0 {
-		curr := queue[0]
-		queue = queue[1:]
-		for _, child := range parentMap[curr] {
-			if !visited[child] {
-				visited[child] = true
-				queue = append(queue, child)
-			}
-		}
-	}
-
-	result := make([]string, 0, len(visited))
-	for name := range visited {
-		result = append(result, name)
-	}
-	return result
-}
-
-func cashEntityIDsWithDescendants(ctx context.Context, q cashEntityQuery, parentMap map[string][]string, rootEntityIDs []string) ([]string, error) {
-	nameSet := make(map[string]bool)
-	for _, eid := range rootEntityIDs {
-		var name string
-		if err := q.QueryRow(ctx, `SELECT entity_name FROM masterentitycash WHERE entity_id = $1`, eid).Scan(&name); err != nil {
-			if err == pgx.ErrNoRows {
-				continue
-			}
-			return nil, err
-		}
-		for _, n := range cashEntityNameDescendants(parentMap, name) {
-			nameSet[n] = true
-		}
-	}
-	if len(nameSet) == 0 {
-		return rootEntityIDs, nil
-	}
-	names := make([]string, 0, len(nameSet))
-	for n := range nameSet {
-		names = append(names, n)
-	}
-	rows, err := q.Query(ctx, `SELECT entity_id FROM masterentitycash WHERE entity_name = ANY($1)`, names)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	ids := make([]string, 0, len(names))
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
 func cashEntityDescendantNames(ctx context.Context, q cashEntityQuery, rootNames []string) ([]string, error) {
 	rows, err := q.Query(ctx, `
 		WITH RECURSIVE descendants AS (
@@ -985,37 +925,20 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			cnt++
 		}
 
-		// === 4️⃣ Remove deleted + descendants
-		getDescendants := func(ids []string) []string {
-			all := map[string]bool{}
-			queue := append([]string{}, ids...)
-			for _, id := range ids {
-				all[id] = true
-			}
-			for len(queue) > 0 {
-				curr := queue[0]
-				queue = queue[1:]
-				for _, c := range parentMap[curr] {
-					if !all[c] {
-						all[c] = true
-						queue = append(queue, c)
-					}
-				}
-			}
-			out := []string{}
-			for k := range all {
-				out = append(out, k)
-			}
-			return out
-		}
-
-		deletedList := []string{}
+		// === 4️⃣ Remove deleted + descendants (recursive CTE from hide roots only)
+		deletedList := make([]string, 0, len(hideIDs))
 		for id := range hideIDs {
 			deletedList = append(deletedList, id)
 		}
-
-		for _, d := range getDescendants(deletedList) {
-			delete(entityMap, d)
+		if len(deletedList) > 0 {
+			toHide, derr := cashEntityDescendantIDs(ctx, pgxPool, deletedList)
+			if derr != nil {
+				http.Error(w, errtext.Detail(w, derr), 500)
+				return
+			}
+			for _, d := range toHide {
+				delete(entityMap, d)
+			}
 		}
 
 		// === 5️⃣ Build tree
@@ -1861,26 +1784,8 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
-		// Fetch all relationships
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_entity_name, child_entity_name FROM cashentityrelationships`)
-		if err != nil {
-			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity relationships for bulk reject")
-			if statusCode == http.StatusOK {
-				api.RespondEnvelopeError(w, http.StatusOK, errMsg, "")
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
-		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		for relRows.Next() {
-			var parent, child string
-			if err := relRows.Scan(&parent, &child); err == nil {
-				parentMap[parent] = append(parentMap[parent], child)
-			}
-		}
-		allToReject, err := cashEntityIDsWithDescendants(ctx, pgxPool, parentMap, req.EntityIDs)
+		// Descendants via recursive CTE (same pattern as delete — no full-table load).
+		allToReject, err := cashEntityDescendantIDs(ctx, pgxPool, req.EntityIDs)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to resolve entity hierarchy for bulk reject")
 			if statusCode == http.StatusOK {
